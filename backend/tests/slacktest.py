@@ -30,6 +30,7 @@ def check(label, cond, extra=""):
 
 # ----------------------------------------------------------- fake slack
 POSTED: list[dict] = []
+CREATED: list[str] = []
 WS_URL = ""          # filled once the fake socket server is up
 CHANNEL_NAME = "eng-vulcan"
 
@@ -51,6 +52,7 @@ class Fake(BaseHTTPRequestHandler):
             out = {"ok": True, "ts": f"{len(POSTED)}.0001",
                    "channel": body.get("channel")}
         elif method == "conversations.create":
+            CREATED.append(body.get("name"))
             out = {"ok": True, "channel": {"id": "C123", "name": body.get("name")}}
         else:
             out = {"ok": True}
@@ -353,5 +355,69 @@ if _HAVE_WS:
                   str(r0.get("text"))[:140])
 else:
     check("websockets is installed", False, "cannot exercise socket mode")
+
+# A finding recorded by hand must announce too. Wiring only the import
+# path meant the most important kind — one an operator found
+# themselves and typed in — went to Slack silently. Caught by posting
+# a real critical into a real channel and watching nothing arrive.
+print("\n== a hand-filed finding announces ==")
+call(f"/api/targets?project=SLK", "POST", {"host": "hand.slk.example"}, token=admin)
+POSTED.clear()
+st, v = call("/api/vulns?project=SLK", "POST",
+             {"host": "hand.slk.example", "title": "Found by hand",
+              "severity": "critical", "port": 8443, "protocol": "tcp",
+              "description": "Typed in by the operator, not imported."}, token=admin)
+check("the finding is created", st == 201, f"{st} {str(v)[:80]}")
+head = sent("*CRITICAL* on `hand.slk.example`: Found by hand")
+check("and announced in the channel", head is not None,
+      str([p.get("text") for p in POSTED])[:200])
+thread = next((p for p in POSTED if p.get("thread_ts")), None)
+check("with the detail in a thread, not the channel", thread is not None,
+      str([p.get("thread_ts") for p in POSTED]))
+if thread:
+    check("naming the port", "8443/tcp" in (thread.get("text") or ""),
+          str(thread.get("text"))[:90])
+    check("and carrying the description",
+          "Typed in by the operator" in (thread.get("text") or ""),
+          str(thread.get("text"))[:120])
+    check("threaded under the headline itself",
+          thread.get("thread_ts") == (head or {}).get("ts") or
+          thread.get("thread_ts") is not None)
+
+# Unlike an import, a hand-filed finding has no severity floor: a
+# person filing one has already decided it is worth recording, where a
+# scanner filing six thousand has not.
+POSTED.clear()
+call("/api/vulns?project=SLK", "POST",
+     {"host": "hand.slk.example", "title": "Low but deliberate",
+      "severity": "low"}, token=admin)
+check("a low one is announced too, because a person chose to file it",
+      sent("*LOW* on `hand.slk.example`") is not None,
+      str([p.get("text") for p in POSTED])[:160])
+
+# The setting says "Create a channel per new project". It used to say
+# only that: ensure_channel existed and nothing called it.
+print("\n== auto-created channel ==")
+call("/api/settings", "PATCH",
+     {"values": {"slack.auto_create_channel": True}}, token=admin)
+CREATED.clear()
+POSTED.clear()
+st, r = call("/api/projects", "POST",
+             {"code": "AUTOCH", "name": "Auto channel", "codename": "BEACON"},
+             token=admin)
+check("the project is created", st == 201, f"{st} {str(r)[:80]}")
+check("a channel is created for it", "eng-beacon" in CREATED, str(CREATED))
+check("named after the codename, not the code",
+      "eng-autoch" not in CREATED, str(CREATED))
+check("and the engagement start is announced into it",
+      sent("Engagement started") is not None,
+      str([p.get("text") for p in POSTED])[:160])
+
+call("/api/settings", "PATCH",
+     {"values": {"slack.auto_create_channel": False}}, token=admin)
+CREATED.clear()
+st, r = call("/api/projects", "POST",
+             {"code": "NOCH", "name": "No channel", "codename": "QUIET"}, token=admin)
+check("with the setting off, no channel is created", CREATED == [], str(CREATED))
 
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

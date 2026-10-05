@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_session
 from ..events import broker
 from ..hosts import normalise_host
+from .. import slack
 from ..models import Poc, Project, Target, User, Vuln
 from ..query import apply_search, apply_sort, paginate
 from ..schemas import Page, PocCreate, PocOut, VulnCreate, VulnOut
@@ -165,13 +166,27 @@ async def get_vuln(vuln_id: int,
 
 @router.post("/vulns", response_model=VulnOut, status_code=201)
 async def create_vuln(body: VulnCreate, project: str = Query(...),
-                      _: Project = Depends(require_project("user")),
+                      pr: Project = Depends(require_project("user")),
                       session: AsyncSession = Depends(get_session)):
     t = await _target_for(session, project, body.host)
     v = Vuln(target_id=t.id, **body.model_dump(exclude={"host"}))
     session.add(v)
     await session.commit()
     await broker.publish("vulns", action="create", host=t.host, project=project)
+
+    # Announced here as well as on import. Wiring only the import path
+    # meant a finding an operator recorded by hand — which is how you
+    # log something you found yourself, and usually the most important
+    # kind — went to Slack silently. Caught by posting a real critical
+    # into a real channel and watching nothing arrive.
+    #
+    # No severity floor, unlike an import: a person filing one finding
+    # has already decided it is worth recording, where a scanner
+    # filing six thousand has not.
+    await slack.announce_finding(
+        session, pr, severity=v.severity, host=t.host, title=v.title,
+        port=v.port, protocol=v.protocol, detail=v.description)
+
     return _vuln_out((await session.execute(_base(Vuln).where(Vuln.id == v.id))).first())
 
 

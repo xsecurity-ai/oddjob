@@ -1,6 +1,8 @@
 """Projects. Every target belongs to exactly one."""
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -20,6 +22,8 @@ from ..schemas import (AgentOverride, AclOut, ContactIn, ContactOut, Page, Proje
                        ProjectUpdate, ScopeEntryOut)
 from ..security import (get_current_user, require_project,
                         visible_project_ids)
+
+log = logging.getLogger("oddjob.projects")
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -195,6 +199,27 @@ async def create_project(body: ProjectCreateFull,
 
     await session.commit()
     await broker.publish("projects", action="create", project=pr.code)
+
+    # The setting says "Create a channel per new project". Until now it
+    # said only that: `ensure_channel` existed and nothing called it, so
+    # the switch was a control that did nothing. A toggle that lies is
+    # worse than no toggle, because you stop checking.
+    #
+    # After the commit, and never fatal: a project that exists without
+    # its channel is recoverable; a project refused because Slack was
+    # down is not.
+    if bool(cfg.get("slack.auto_create_channel", False)) and pr.slack_channel:
+        token = str(cfg.get("slack.bot_token") or "").strip()
+        if (pr.slack_delivery or "site") != "site" and pr.slack_token:
+            token = pr.slack_token
+        if token:
+            made = await slack.ensure_channel(token, pr.slack_channel, bool(sp))
+            if made.ok:
+                await slack.announce(
+                    session, pr,
+                    slack.engagement_started(pr.codename or pr.code))
+            else:
+                log.warning("could not create #%s: %s", pr.slack_channel, made.error)
 
     row = (await session.execute(_counts_query().where(Project.id == pr.id))).first()
     scope_rows = (await session.execute(
