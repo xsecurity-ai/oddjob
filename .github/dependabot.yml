@@ -29,12 +29,22 @@ updates:
       day: monday
     open-pull-requests-limit: 5
     groups:
-      frontend-minor-and-patch:
-        update-types: [minor, patch]
-      # MUI ships its packages in lockstep; splitting them across pull
-      # requests produces a build that cannot resolve peer versions.
+      # MUI first: a dependency goes to the FIRST group it matches, and
+      # the catch-all below would otherwise claim it. Its packages ship
+      # in lockstep, and splitting them across pull requests produces a
+      # build that cannot resolve peer versions — which is exactly what
+      # happened on the first run, with @mui/material and
+      # @mui/x-data-grid arriving as separate majors.
       mui:
         patterns: ["@mui/*"]
+        update-types: [major, minor, patch]
+      # Vite and its React plugin have to move together too; the plugin
+      # pins a vite peer range.
+      vite:
+        patterns: ["vite", "@vitejs/*"]
+        update-types: [major, minor, patch]
+      frontend-minor-and-patch:
+        update-types: [minor, patch]
     labels: [dependencies, frontend]
     commit-message:
       prefix: "deps(frontend)"
