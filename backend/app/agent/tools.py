@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..domains import registrable
@@ -246,6 +246,32 @@ def build(session: AsyncSession, project: Project, user: User,
                 "candidates": [{"name": c.name, "source": c.source,
                                 "score": c.score, "why": c.reason} for c in out]}
 
+    async def port_summary(top: int = 20, protocol: str | None = None) -> dict:
+        """Counts per port, computed in SQL over the whole project.
+
+        Without this the only way to answer "most common ports" was
+        `list_services`, which caps at 200 rows. Asked for the top
+        three, the model dutifully counted the sample it was given and
+        reported 80/53/25 — the real answer is 443 (2,014), 80 (1,457),
+        8443 (90). It even said the data was truncated and then did the
+        arithmetic anyway, which is the failure mode worth designing
+        out rather than warning about.
+        """
+        q = (select(Service.port, Service.protocol,
+                    func.count().label("services"),
+                    func.count(distinct(Service.target_id)).label("hosts"))
+             .join(Target, Target.id == Service.target_id)
+             .where(Target.project_id == pid))
+        if protocol:
+            q = q.where(Service.protocol == protocol.strip().lower())
+        q = (q.group_by(Service.port, Service.protocol)
+              .order_by(func.count().desc())
+              .limit(max(1, min(int(top or 20), 200))))
+        rows = (await session.execute(q)).all()
+        return {"ports": [{"port": p, "protocol": pr, "services": n, "hosts": h}
+                          for p, pr, n, h in rows],
+                "note": "counted across the whole project, not a sample"}
+
     reads = [
         Tool("project_overview", "Counts across the whole engagement: targets, "
              "services, findings by severity, web addresses, C2 implants. Start here.",
@@ -269,6 +295,12 @@ def build(session: AsyncSession, project: Project, user: User,
              _obj({"port": {"type": "integer"}, "service": {"type": "string"},
                    "only_unknown": {"type": "boolean"}, "limit": {"type": "integer"}}),
              list_services),
+        Tool("port_summary", "How many services on each port, across the WHOLE "
+             "project. Use this for 'most common ports' and any other counting "
+             "question — list_services returns at most 200 rows, and counting "
+             "those gives a wrong answer for the project.",
+             _obj({"top": {"type": "integer"},
+                   "protocol": {"type": "string"}}), port_summary),
         Tool("list_web_addresses", "Search URLs found on http(s) services.",
              _obj({"search": {"type": "string"}, "status_code": {"type": "integer"},
                    "limit": {"type": "integer"}}), list_web),

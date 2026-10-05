@@ -20,6 +20,10 @@ import urllib.error
 import urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
+#: How long one suite may take before it is called hung. Generous, so
+#: a slow runner is not mistaken for a deadlock.
+SUITE_TIMEOUT = int(__import__("os").environ.get("ODDJOB_SUITE_TIMEOUT", 420))
+
 TMP = pathlib.Path("/tmp")   # magictest reaches into /tmp/ms-m.db by name
 
 # The suites take their base URL from ODDJOB_TEST_BASE, so the port is
@@ -104,8 +108,21 @@ def run(suite: str, db: pathlib.Path) -> tuple[int, int, str]:
             if srv.poll() is not None and srv.stdout:
                 out = srv.stdout.read()[-1500:]
             return 0, 1, f"server for {suite} never came up\n{out}"
-        r = subprocess.run([sys.executable, suite], cwd=HERE, env=env,
-                           capture_output=True, text=True, timeout=600)
+        try:
+            r = subprocess.run([sys.executable, suite], cwd=HERE, env=env,
+                               capture_output=True, text=True, timeout=SUITE_TIMEOUT)
+        except subprocess.TimeoutExpired as e:
+            # A hung suite used to take the whole runner down: this
+            # exception propagated, every other suite's result was lost,
+            # and CI showed a 15-minute red job with nothing in it to
+            # read. One suite hanging is one suite failing, and its
+            # partial output is the only clue to why.
+            partial = ((e.stdout or "") if isinstance(e.stdout, str)
+                       else (e.stdout or b"").decode("utf-8", "replace"))
+            tail = partial.strip().splitlines()[-25:]
+            return 0, 1, (f"{suite} produced no result within "
+                          f"{SUITE_TIMEOUT}s — treated as hung.\n"
+                          + "\n".join(tail))
     finally:
         srv.send_signal(signal.SIGINT)
         try:
@@ -151,10 +168,13 @@ def main() -> int:
         name = suite.rsplit("/", 1)[-1]
         if only and name not in only and name.removesuffix(".py") not in only:
             continue
+        import time as _t
+        _t0 = _t.time()
         p, f, detail = run(suite, db)
+        _el = _t.time() - _t0
         tp += p; tf += f
         mark = "ok  " if f == 0 else "FAIL"
-        print(f"  {mark} {name:<16} {p:>3} passed, {f} failed")
+        print(f"  {mark} {name:<16} {p:>3} passed, {f} failed  ({_el:.0f}s)")
         if f and detail:
             bad.append(f"--- {name} ---\n{detail}")
     for b in bad:
