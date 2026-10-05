@@ -1,0 +1,939 @@
+"""Oddjob data model.
+
+    Project 1---* Target 1---* Service
+                         1---* Vuln
+                         1---* Poc
+
+Identity rules the whole app leans on:
+
+  Project  keyed by `code`, a short slug (FALCON-1). Every target belongs to
+           exactly one; there is no such thing as a loose target.
+
+  Target   keyed by (project_id, host). Host is an FQDN or a bare IP.
+           Uniqueness is PER PROJECT, not global: the same asset legitimately
+           recurs across consecutive engagements, and a global unique index
+           would make importing a second project impossible. It is deliberately
+           not keyed by IP -- one IP serves many vhosts, and a hostname moves
+           between addresses mid-engagement.
+
+  Service  keyed by (target_id, port, protocol). A "port" and a "service" are
+           one physical fact -- nmap emits port, protocol, state, name and
+           banner as a single row -- so they share one table. The Ports view is
+           this table filtered to state='open'; the Services view is the same
+           rows with the name shown.
+
+Children hang off target_id, not the host string, because host is only unique
+within a project. The API still speaks `host` for convenience and resolves it
+to a target within the active project.
+
+Vuln and Poc exist because the Targets grid shows live counts of them. Those
+counts are aggregated at query time, never stored on Target, so they cannot
+drift.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import (Boolean, CheckConstraint, Column, DateTime, ForeignKey,
+                        Index, Integer, String, Table, Text, UniqueConstraint)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class TimestampMixin:
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+SEVERITIES = ("critical", "high", "medium", "low", "info")
+PROJECT_STATUSES = ("active", "paused", "complete", "archived")
+
+
+class Project(Base, TimestampMixin):
+    __tablename__ = "projects"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    #: The operation's name, as people actually refer to it — ACME is
+    #: FALCON, GLOBEX is KESTREL. Kept separate from `code` because the code
+    #: is the client and appears in their deliverables, while the
+    #: codename is internal and is what the scan directories, the Slack
+    #: channels and the operators are all named after.
+    codename: Mapped[str | None] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    client: Mapped[str | None] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    # Per-project Slack override. When set, this engagement's notifications go
+    # here instead of the site-wide token — engagements frequently run in the
+    # customer's own workspace. Write-only over the API, like every secret.
+    slack_token: Mapped[str | None] = mapped_column(Text)
+    slack_channel: Mapped[str | None] = mapped_column(String(128))
+    # site | override | both. Only meaningful once an override token exists;
+    # "both" is for an engagement that must be visible in the customer's
+    # workspace AND stay on the internal record.
+    slack_delivery: Mapped[str] = mapped_column(String(16), default="site")
+    # Per-project agent credentials. NULL means "use the site setting",
+    # which is what makes one customer's engagement able to run on their
+    # own account without every other project moving with it.
+    agent_provider: Mapped[str | None] = mapped_column(String(16))
+    agent_anthropic_token: Mapped[str | None] = mapped_column(Text)
+    agent_openai_token: Mapped[str | None] = mapped_column(Text)
+    agent_model: Mapped[str | None] = mapped_column(String(128))
+    # NULL inherits the site default rather than hard-coding one here, so
+    # changing the site policy moves every project that never chose.
+    slack_private: Mapped[bool | None] = mapped_column(Boolean, default=None)
+
+    targets: Mapped[list["Target"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
+    )
+    acls: Mapped[list["ProjectACL"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
+    )
+    scope: Mapped[list["ProjectScope"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
+    )
+    contacts: Mapped[list["ProjectContact"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class Target(Base, TimestampMixin):
+    __tablename__ = "targets"
+    __table_args__ = (
+        UniqueConstraint("project_id", "host", name="uq_target_project_host"),
+        Index("ix_targets_project_host", "project_id", "host"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    host: Mapped[str] = mapped_column(String(255), index=True)
+    #: What kind of asset this is.
+    #:
+    #:   host    a machine reachable at an address
+    #:   mobile  an application, named by its bundle or package id,
+    #:           with no IP of its own
+    #:   cloud   a managed resource — a bucket, a function, a tenant,
+    #:           an account — named by whatever identifies it with the
+    #:           provider
+    #:
+    #: The distinction is not cosmetic. A mobile app has no address to
+    #: scan, so a blank `ip_address` on one is a fact, not a gap in
+    #: coverage, and liveness means nothing for it. A cloud resource is
+    #: different again: it often DOES resolve, so its address is kept,
+    #: but "no open ports" on a storage bucket is not the finding that
+    #: the same result on a server would be.
+    kind: Mapped[str] = mapped_column(
+        String(16), default="host", server_default="host", index=True)
+    #: Which cloud, for `kind="cloud"`. Free text rather than an enum
+    #: because the list does not end at the big three — Oracle,
+    #: DigitalOcean, Cloudflare and a dozen others turn up in scope —
+    #: and an unrecognised provider must be recordable, not rejected.
+    provider: Mapped[str | None] = mapped_column(String(32), index=True)
+    ip_address: Mapped[str | None] = mapped_column(String(45), index=True)
+    # Three-state on purpose. NULL means "not probed yet", which is not the
+    # same claim as "did not respond" -- collapsing the two would record a gap
+    # in our coverage as a fact about the asset.
+    alive: Mapped[bool | None] = mapped_column(Boolean, default=None, index=True)
+    hacked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    os: Mapped[str | None] = mapped_column(String(255))
+    # How confident the OS guess is, and what it was derived from. An nmap
+    # fingerprint at 87% and one at 100% are different claims, and a report
+    # that prints only the name turns the first into the second.
+    os_accuracy: Mapped[int | None] = mapped_column(Integer)
+    mac_address: Mapped[str | None] = mapped_column(String(32))
+    mac_vendor: Mapped[str | None] = mapped_column(String(128))
+    hostnames: Mapped[str | None] = mapped_column(Text)      # JSON list
+    # Everything a scanner reported that has no column of its own: OS class
+    # rows, uptime, TCP sequence analysis, traceroute, host-level NSE output.
+    # Kept whole because discarding it to fit a schema is how you find out
+    # six weeks later that the one field you needed was thrown away.
+    extra: Mapped[str | None] = mapped_column(Text)          # JSON object
+
+    notes: Mapped[str | None] = mapped_column(Text)
+    tags: Mapped[str | None] = mapped_column(Text)
+
+    project: Mapped[Project] = relationship(back_populates="targets")
+    events: Mapped[list["Event"]] = relationship(
+        back_populates="target", cascade="all, delete-orphan", passive_deletes=True,
+        order_by="Event.at.desc()",
+    )
+    implants: Mapped[list["Implant"]] = relationship(
+        back_populates="target", cascade="all, delete-orphan", passive_deletes=True,
+    )
+    web_addresses: Mapped[list["WebAddress"]] = relationship(
+        back_populates="target", cascade="all, delete-orphan", passive_deletes=True,
+    )
+    services: Mapped[list["Service"]] = relationship(
+        back_populates="target", cascade="all, delete-orphan", passive_deletes=True
+    )
+    vulns: Mapped[list["Vuln"]] = relationship(
+        back_populates="target", cascade="all, delete-orphan", passive_deletes=True
+    )
+    pocs: Mapped[list["Poc"]] = relationship(
+        back_populates="target", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class Service(Base, TimestampMixin):
+    __tablename__ = "services"
+    __table_args__ = (
+        UniqueConstraint("target_id", "port", "protocol", name="uq_service_target_port_proto"),
+        Index("ix_services_state", "state"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), index=True
+    )
+    port: Mapped[int] = mapped_column(Integer)
+    protocol: Mapped[str] = mapped_column(String(8), default="tcp")
+    state: Mapped[str] = mapped_column(String(16), default="open")
+    # Never NULL once a scanner has looked: a port whose service could not be
+    # identified is recorded as UNKNOWN, which is a finding. An empty cell
+    # reads as "nobody checked" and the two get confused in exactly the
+    # situation where it matters.
+    name: Mapped[str | None] = mapped_column(String(128))
+    product: Mapped[str | None] = mapped_column(String(255))
+    version: Mapped[str | None] = mapped_column(String(128))
+    extrainfo: Mapped[str | None] = mapped_column(String(255))
+    tunnel: Mapped[str | None] = mapped_column(String(32))       # "ssl"
+    # nmap's own confidence in the -sV match, and how it got there.
+    method: Mapped[str | None] = mapped_column(String(32))       # table | probed
+    confidence: Mapped[int | None] = mapped_column(Integer)
+    cpe: Mapped[str | None] = mapped_column(Text)                # JSON list
+    reason: Mapped[str | None] = mapped_column(String(64))       # syn-ack, reset…
+    # Port-level NSE output, {script-id: output}. This is where ssl-cert,
+    # http-title, smb-os-discovery and friends land.
+    scripts: Mapped[str | None] = mapped_column(Text)            # JSON object
+    # What the service said about itself: "Apache 2.4.52", "OpenSSH_9.6p1".
+    # NOT a place for commentary — see `notes`.
+    banner: Mapped[str | None] = mapped_column(Text)
+    # What a person recorded about it. Kept apart from the banner because
+    # the two answer different questions, and conflating them put
+    # "coverage gap" and "Created by DEADEYE for T138 residue" in a column
+    # whose whole job is to say what software is listening.
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    target: Mapped[Target] = relationship(back_populates="services")
+
+
+class Vuln(Base, TimestampMixin):
+    __tablename__ = "vulns"
+    __table_args__ = (Index("ix_vulns_target_sev", "target_id", "severity"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(1000))
+    severity: Mapped[str] = mapped_column(String(16), default="info", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="open")
+    port: Mapped[int | None] = mapped_column(Integer)
+    protocol: Mapped[str | None] = mapped_column(String(8))
+    description: Mapped[str | None] = mapped_column(Text)
+    # Kept apart from the description because a report needs them in
+    # different columns. Scanners supply it (Nessus `solution`, Faraday
+    # `resolution`); folding it into the description, as the first version
+    # of the Nessus importer did, means it can never be pulled back out.
+    remediation: Mapped[str | None] = mapped_column(Text)
+    # scanner | agent | manual. A client reading a report is entitled to
+    # know which advice came from a tool, which from a person, and which
+    # was written by a model — they do not carry the same weight.
+    remediation_source: Mapped[str | None] = mapped_column(String(16), index=True)
+    #: How many times the agent has tried and failed. Capped, so one
+    #: finding that always errors cannot occupy the queue forever.
+    #:
+    #: server_default, not just default=0: a Python-side default produces
+    #: `ADD COLUMN ... NOT NULL` with no DDL default, which neither SQLite
+    #: nor Postgres will accept against a table that already has rows.
+    remediation_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0", default=0)
+    remediation_error: Mapped[str | None] = mapped_column(String(500))
+    # Stable id from the source system, so a re-import updates in place rather
+    # than forking a duplicate. Unique per project, not globally.
+    external_id: Mapped[str | None] = mapped_column(String(128), index=True)
+
+    target: Mapped[Target] = relationship(back_populates="vulns")
+
+
+class Poc(Base, TimestampMixin):
+    __tablename__ = "pocs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(32), default="unconfirmed", index=True)
+    path: Mapped[str | None] = mapped_column(String(1000))
+    # 0 reproduced | 1 not reproduced | 2 could not test
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    target: Mapped[Target] = relationship(back_populates="pocs")
+
+
+# ===================================================================== auth
+# Roles are ordered: readonly < user < admin. An endpoint declares the minimum
+# it needs and the check compares ordinals, so adding a role later means
+# adding one entry here rather than auditing every route.
+ROLES = ("readonly", "user", "admin")
+# Site-wide authority is group membership, not a per-user flag -- one
+# mechanism instead of two. Membership of this reserved group bypasses every
+# per-project ACL. The group cannot be deleted and cannot be emptied, because
+# either would permanently lock everyone out of user administration.
+SITE_ADMIN_GROUP = "site-admins"
+ROLE_ORDER = {r: i for i, r in enumerate(ROLES)}
+
+user_groups = Table(
+    "user_groups",
+    Base.metadata,
+    Column("user_id", ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("group_id", ForeignKey("groups.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
+class User(Base, TimestampMixin):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    email: Mapped[str | None] = mapped_column(String(255))
+    full_name: Mapped[str | None] = mapped_column(String(255))
+    # Nullable: a Google-registered account has no local password, and
+    # storing an unusable placeholder hash would make "can this user sign in
+    # with a password" un-answerable.
+    password_hash: Mapped[str | None] = mapped_column(String(255))
+    google_sub: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    avatar_url: Mapped[str | None] = mapped_column(String(512))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+    groups: Mapped[list["Group"]] = relationship(
+        secondary=user_groups, back_populates="users", lazy="selectin")
+    acls: Mapped[list["ProjectACL"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
+
+    @property
+    def has_password(self) -> bool:
+        return bool(self.password_hash)
+
+    @property
+    def has_google(self) -> bool:
+        return bool(self.google_sub)
+
+    @property
+    def is_site_admin(self) -> bool:
+        """Site authority is "member of site-admins", nothing else."""
+        return any(g.name == SITE_ADMIN_GROUP for g in self.groups)
+
+
+class Group(Base, TimestampMixin):
+    __tablename__ = "groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    description: Mapped[str | None] = mapped_column(Text)
+
+    users: Mapped[list[User]] = relationship(
+        secondary=user_groups, back_populates="groups", lazy="selectin")
+    acls: Mapped[list["ProjectACL"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan", passive_deletes=True)
+
+
+class ProjectACL(Base, TimestampMixin):
+    """One grant: a role on a project, to EITHER a user or a group.
+
+    Both subject columns are nullable with exactly one set — enforced by a
+    CHECK constraint rather than convention, because an ACL row that grants to
+    nobody (or to both) is a silent authorisation hole.
+    """
+    __tablename__ = "project_acls"
+    __table_args__ = (
+        CheckConstraint(
+            "(user_id IS NOT NULL AND group_id IS NULL) OR "
+            "(user_id IS NULL AND group_id IS NOT NULL)",
+            name="ck_acl_exactly_one_subject"),
+        UniqueConstraint("project_id", "user_id", name="uq_acl_project_user"),
+        UniqueConstraint("project_id", "group_id", name="uq_acl_project_group"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(16), default="readonly")
+
+    project: Mapped["Project"] = relationship(back_populates="acls")
+    user: Mapped[User | None] = relationship(back_populates="acls")
+    group: Mapped[Group | None] = relationship(back_populates="acls")
+
+
+class ApiKey(Base, TimestampMixin):
+    """Long-lived credential for scripts and the MCP server.
+
+    Only a hash is stored; the plaintext is shown once at creation. A prefix is
+    kept so a key can be identified in a list without revealing it.
+    """
+    __tablename__ = "api_keys"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    prefix: Mapped[str] = mapped_column(String(12), index=True)
+    key_hash: Mapped[str] = mapped_column(String(255))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+
+# =================================================================== actions
+# Statuses. `unavailable` is deliberately distinct from `failed`: "no probe
+# backend is configured" is a fact about this deployment, not about the
+# target, and collapsing the two would read as though the host refused us.
+ACTION_STATUSES = ("pending", "running", "done", "failed", "unavailable")
+
+
+#: Service states that are evidence the host answered. `open` means
+#: something replied on that port, which is proof of life regardless of
+#: whether anything pinged it. `filtered` and `open|filtered` are the
+#: absence of a reply and prove nothing; `closed` is ambiguous in imported
+#: data, where it is often an operator's note about a port learned from a
+#: config rather than a probe result, so it is deliberately excluded.
+ALIVE_STATES = frozenset({"open"})
+
+
+def implies_alive(state: str | None) -> bool:
+    return (state or "").strip().lower() in ALIVE_STATES
+
+
+#: Timeline entry kinds. `note` is the only one a human writes directly;
+#: everything else is recorded by the code that performed the change.
+EVENT_KINDS = (
+    "discovered",   # the target first appeared, and from where
+    "note",         # written by a person
+    "scan",         # a tool ran against it (nmap, dirb, a banner grab)
+    "service",      # a port/service appeared, changed or closed
+    "vuln",         # a finding was raised, amended or resolved
+    "poc",          # a proof-of-concept was attached or its result changed
+    "credential",   # a credential for this host was recorded
+    "implant",      # a C2 agent checked in from this host
+    "web",          # URLs discovered on an http(s) service
+    "change",       # a field on the target itself was edited
+    "status",       # alive/hacked flipped — the two that change how it is read
+)
+
+
+class Event(Base):
+    """One thing that happened to a target, in order.
+
+    Separate from an audit log: this is the engagement narrative for a single
+    asset — when it was discovered, what answered on it, what was tried, what
+    was found, and every note anyone wrote. The question it exists to answer
+    is "what do we know about this host and how did we come to know it",
+    which the current-state tables cannot answer because they only hold the
+    latest value.
+
+    Append-only by convention. Entries are never rewritten when the
+    underlying row changes; a correction is another entry.
+    """
+    __tablename__ = "events"
+    __table_args__ = (
+        Index("ix_events_target_at", "target_id", "at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), index=True)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    kind: Mapped[str] = mapped_column(String(16), index=True)
+    # One line, written to be read in a list without expanding anything.
+    summary: Mapped[str] = mapped_column(Text)
+    # Optional long form: the NSE output, the diff, the note body.
+    detail: Mapped[str | None] = mapped_column(Text)
+    # Who or what did it. A username, or a tool name like "nmap" — the
+    # distinction matters when reconstructing who to ask about an entry.
+    actor: Mapped[str | None] = mapped_column(String(128))
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
+    # Free-form provenance: a scan id, a file name, an action id.
+    source: Mapped[str | None] = mapped_column(String(255))
+
+    target: Mapped[Target] = relationship(back_populates="events")
+
+
+class WebAddress(Base, TimestampMixin):
+    """One URL seen on an http(s) service.
+
+    Separate from Service because a web server is not one thing: a single
+    :443 can carry a login page, an admin console, an API and a forgotten
+    status endpoint, and the engagement question is almost always "what is
+    reachable" rather than "what port is open". Flattening those into the
+    service's banner loses the only list anyone actually wants.
+
+    Keyed on `(target_id, url)`. The URL is stored normalised — scheme and
+    host lowercased, the default port dropped — so the same page found by
+    httpx, Burp and nuclei is one row with three sources rather than three
+    rows, which is what makes "everything we have seen on this host" a
+    question the table can answer.
+    """
+    __tablename__ = "web_addresses"
+    # Keyed on (target, METHOD, url). The method is part of the identity
+    # because `GET /login` and `POST /login` are different things and a
+    # tester needs both; keying on the URL alone silently kept whichever
+    # the importer happened to see last.
+    #
+    # Never NULL — it is a unique key column, and SQL treats NULLs as
+    # distinct from each other, so a nullable method would defeat the
+    # deduplication it is part of. Unknown is "", not NULL.
+    __table_args__ = (
+        UniqueConstraint("target_id", "exchange_hash",
+                         name="uq_weburl_target_method_url"),
+        Index("ix_weburl_target_status", "target_id", "status_code"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), index=True)
+    #: Indexed because it is a foreign key that rows get deleted
+    #: through. Without it, deleting one service makes Postgres scan
+    #: every web address to check the constraint — clearing 46,811
+    #: services against 294,251 addresses did not finish in ten
+    #: minutes. An unindexed FK is a landmine, not a missing nicety.
+    service_id: Mapped[int | None] = mapped_column(
+        ForeignKey("services.id", ondelete="SET NULL"), index=True)
+    #: Unbounded: a real URL in a proxy history reached 8,221 characters,
+    #: and SQLite stored it happily because it ignores VARCHAR limits.
+    #: Postgres does not, so the declared 2048 was a lie that only
+    #: surfaced on the first import against a real database.
+    url: Mapped[str] = mapped_column(Text)
+    #: sha256 of `url`, which is what the uniqueness and the upsert
+    #: lookup are actually keyed on. Postgres btree entries are capped
+    #: near 2.7 KB, so a long URL cannot be indexed directly at all —
+    #: and comparing a 64-character digest beats comparing kestrelbytes of
+    #: query string on every row of an import.
+    url_hash: Mapped[str] = mapped_column(String(64), index=True)
+    #: sha256 of (method, url, request, response) — what makes one
+    #: captured exchange distinct from another.
+    #:
+    #: Identity used to be (target, method, url), which collapsed every
+    #: hit of a URL into one row and kept only the last response. For a
+    #: proxy history that is the wrong unit: the same endpoint probed
+    #: ten ways is ten pieces of evidence, and the differences between
+    #: the responses are usually the finding. The URL is still indexed,
+    #: so the UI can group the hits back together under it.
+    exchange_hash: Mapped[str] = mapped_column(String(64), index=True)
+    scheme: Mapped[str] = mapped_column(String(8), default="http")
+    port: Mapped[int | None] = mapped_column(Integer, index=True)
+    path: Mapped[str] = mapped_column(String(1024), default="/", index=True)
+    method: Mapped[str] = mapped_column(
+        String(12), nullable=False, server_default="", default="", index=True)
+    status_code: Mapped[int | None] = mapped_column(Integer, index=True)
+    title: Mapped[str | None] = mapped_column(String(512))
+    content_type: Mapped[str | None] = mapped_column(String(128))
+    content_length: Mapped[int | None] = mapped_column(Integer)
+    webserver: Mapped[str | None] = mapped_column(String(255))
+    tech: Mapped[str | None] = mapped_column(Text)          # JSON list
+    # Which tools have reported this URL, comma separated. A URL both httpx
+    # and Burp saw is better evidence than one only a wordlist guessed at.
+    sources: Mapped[str | None] = mapped_column(String(255))
+    #: True once something actually fetched it, as opposed to merely
+    #: referencing it. A link harvested from a page is not a visited page.
+    crawled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    # The exchange itself, where the source had it. Capped on the way in —
+    # see app/importers/burphistory.py. These are deliberately NOT returned
+    # by the list endpoint: a 5,000-row page would be hundreds of
+    # megabytes, and they are only wanted one at a time.
+    #
+    # They routinely contain session cookies, bearer tokens and
+    # credentials. The database is already secret material (see
+    # Credential) but this raises the stakes, and the packet view says so.
+    request: Mapped[str | None] = mapped_column(Text)
+    response: Mapped[str | None] = mapped_column(Text)
+    #: Whether either side was cut short, so the viewer does not present a
+    #: truncated body as the whole exchange.
+    #:
+    #: server_default again: a Python-side default emits `ADD COLUMN ...
+    #: NOT NULL` with no DDL default, which no database accepts against a
+    #: populated table. Second time this has bitten; it is in the README.
+    truncated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0", default=False)
+
+    target: Mapped[Target] = relationship(back_populates="web_addresses")
+
+
+# ======================================================= domain discovery
+#: How a candidate hostname was arrived at. Recorded because the reader's
+#: first question about a suggested name is always "why do you think so".
+CANDIDATE_SOURCES = (
+    "sibling",      # another name under the same registrable domain
+    "label",        # a first label seen elsewhere in the estate, applied here
+    "sequence",     # web01 -> web02
+    "environment",  # prod -> uat/dev/staging
+    "certificate",  # a SAN from a TLS certificate we already captured
+    "reference",    # a hostname appearing in captured content or a CNAME
+)
+
+CANDIDATE_STATES = ("new", "accepted", "rejected", "exists")
+
+
+class DomainSearch(Base, TimestampMixin):
+    """A root domain that has been put through candidate generation.
+
+    Exists so the same domain is not ground through repeatedly: the record
+    of what was asked, when, and how much it produced is what lets the next
+    run skip it and say why.
+    """
+    __tablename__ = "domain_searches"
+    __table_args__ = (
+        UniqueConstraint("project_id", "domain", name="uq_domsearch_project_domain"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    domain: Mapped[str] = mapped_column(String(255), index=True)
+    runs: Mapped[int] = mapped_column(Integer, default=0)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    candidates_found: Mapped[int] = mapped_column(Integer, default=0)
+    #: Names already known at the time of the last run, so a later run can
+    #: report what is genuinely new rather than re-listing the estate.
+    known_at_last_run: Mapped[int] = mapped_column(Integer, default=0)
+    requested_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
+    note: Mapped[str | None] = mapped_column(Text)
+
+
+class DomainCandidate(Base, TimestampMixin):
+    """A hostname worth trying, and why.
+
+    Generated offline from what the project already holds — no lookups, no
+    packets. Promotion to a real Target is a deliberate act, because a
+    guessed name is a hypothesis and an inventory row is a claim.
+    """
+    __tablename__ = "domain_candidates"
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_domcand_project_name"),
+        Index("ix_domcand_project_state", "project_id", "state"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    root_domain: Mapped[str] = mapped_column(String(255), index=True)
+    source: Mapped[str] = mapped_column(String(16), index=True)
+    #: 0-100. A ranking hint only — it is derived from how the name was
+    #: reached and how often the pattern recurs, not from any evidence the
+    #: host exists.
+    score: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    reason: Mapped[str | None] = mapped_column(String(500))
+    state: Mapped[str] = mapped_column(String(16), default="new", index=True)
+    #: How many separate generation runs proposed it. A name three different
+    #: patterns agree on is a better bet than one only a sequence produced.
+    times_seen: Mapped[int] = mapped_column(Integer, default=1)
+    decided_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+#: queued -> running -> ready | failed. Nothing moves backwards.
+REPORT_STATUSES = ("queued", "running", "ready", "failed")
+REPORT_KINDS = ("executive", "findings", "full")
+
+
+class Report(Base, TimestampMixin):
+    """A generated report, and the record of generating it.
+
+    The artifact is stored in the row rather than on disk. It is tens of
+    kestrelbytes of HTML, it has to survive the same backup as the findings it
+    describes, and a file path in a database is a promise about a
+    filesystem that a container restart does not keep.
+
+    The row exists from the moment it is requested, in `queued`, so the
+    table can show the work in progress. A request that dies mid-generation
+    leaves a `running` row rather than silently nothing — which is the
+    point: an absent report and a failed one look identical otherwise.
+    """
+    __tablename__ = "reports"
+    __table_args__ = (Index("ix_reports_project_status", "project_id", "status"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(16), index=True)
+    fmt: Mapped[str] = mapped_column(String(8), default="html")
+    title: Mapped[str] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    requested_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(Text)
+    content: Mapped[str | None] = mapped_column(Text)
+    size_bytes: Mapped[int | None] = mapped_column(Integer)
+    #: What went into it, so a reader six months later knows whether the
+    #: numbers in it still mean anything.
+    summary: Mapped[str | None] = mapped_column(Text)      # JSON
+    #: Whether the requester was told it was ready, and why not if not.
+    emailed_to: Mapped[str | None] = mapped_column(String(255))
+    email_error: Mapped[str | None] = mapped_column(String(500))
+
+
+class Implant(Base, TimestampMixin):
+    """A C2 callback: an agent running on a host we control.
+
+    Framework-neutral on purpose. Cobalt Strike calls it a beacon, Mythic a
+    callback, Merlin and Sliver an agent or session, Havoc a demon. The
+    fields an engagement record needs — which box, as whom, at what
+    integrity, last seen when — are the same across all of them, and
+    normalising is what makes a mixed-framework operation reportable.
+
+    Keyed `(target_id, framework, implant_id)` so re-importing the operator's
+    session list updates the rows instead of growing a new one per export.
+    A callback with no id from its framework falls back to the process and
+    pid, which is the next most stable thing about it.
+    """
+    __tablename__ = "implants"
+    __table_args__ = (
+        UniqueConstraint("target_id", "framework", "implant_id",
+                         name="uq_implant_target_fw_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), index=True)
+    framework: Mapped[str] = mapped_column(String(32), index=True)
+    implant_id: Mapped[str] = mapped_column(String(128))
+    listener: Mapped[str | None] = mapped_column(String(255))
+    user: Mapped[str | None] = mapped_column(String(255))
+    domain: Mapped[str | None] = mapped_column(String(255))
+    process: Mapped[str | None] = mapped_column(String(255))
+    pid: Mapped[int | None] = mapped_column(Integer)
+    arch: Mapped[str | None] = mapped_column(String(32))
+    # unknown | low | medium | high | system — normalised from whatever the
+    # framework reports, because "elevated" and "integrity_level: 3" are the
+    # same claim written two ways.
+    integrity: Mapped[str | None] = mapped_column(String(16))
+    internal_ip: Mapped[str | None] = mapped_column(String(45))
+    external_ip: Mapped[str | None] = mapped_column(String(45))
+    os: Mapped[str | None] = mapped_column(String(255))
+    first_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    active: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    note: Mapped[str | None] = mapped_column(Text)
+    #: Fields the importer did not recognise, kept verbatim rather than dropped.
+    extra: Mapped[str | None] = mapped_column(Text)
+
+    target: Mapped[Target] = relationship(back_populates="implants")
+
+
+class Action(Base, TimestampMixin):
+    """One requested operation against a service, and its outcome.
+
+    Modelled as a job rather than a synchronous call because the real
+    implementations (nmap, a TLS handshake, an HTTP fetch) take seconds to
+    minutes. Doing it synchronously now would mean rewriting the endpoint and
+    the UI the moment nmap lands.
+
+    It is also the audit trail: who asked for an active probe against which
+    asset, and when.
+    """
+    __tablename__ = "actions"
+    __table_args__ = (Index("ix_actions_service_status", "service_id", "status"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    service_id: Mapped[int] = mapped_column(
+        ForeignKey("services.id", ondelete="CASCADE"), index=True)
+    requested_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    result: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# =============================================================== credentials
+CREDENTIAL_KINDS = ("password", "hash", "key", "token", "cookie", "other")
+
+
+class Credential(Base, TimestampMixin):
+    """A credential obtained during an engagement.
+
+    STORED IN PLAINTEXT. There is no encryption at rest: doing it properly
+    needs a key that does not live beside the database, and a half-built
+    scheme would be worse than an honest one because it reads as protection.
+    Treat oddjob.db as secret material — file permissions, full-disk
+    encryption, and do not copy it around.
+
+    `host` is a free-text reference rather than a FK to Target: credentials
+    are routinely found for a system that is not yet an inventory row, and a
+    hard FK would mean discarding the find or inventing a target to hang it on.
+    """
+    __tablename__ = "credentials"
+    __table_args__ = (Index("ix_credentials_project_user", "project_id", "username"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    host: Mapped[str | None] = mapped_column(String(255), index=True)
+    service: Mapped[str | None] = mapped_column(String(128))
+    port: Mapped[int | None] = mapped_column(Integer)
+    username: Mapped[str | None] = mapped_column(String(255))
+    secret: Mapped[str | None] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(String(16), default="password", index=True)
+    source: Mapped[str | None] = mapped_column(String(500))
+    # none | works | failed — whether it has actually been tried.
+    validated: Mapped[str] = mapped_column(String(16), default="none", index=True)
+    notes: Mapped[str | None] = mapped_column(Text)
+
+
+# ================================================================ settings
+class Setting(Base, TimestampMixin):
+    """Site-wide configuration, one row per key.
+
+    Key/value rather than a wide table: the set of settings changes far more
+    often than the schema should, and a column per toggle means a migration
+    for every new switch.
+
+    Secret values (SMTP password, Slack token) are stored here in plaintext —
+    the same honest caveat as Credential. They are never returned by the API;
+    see SECRET_KEYS in settings.py.
+    """
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str | None] = mapped_column(Text)
+    updated_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class MagicLink(Base, TimestampMixin):
+    """A single-use, short-lived sign-in token sent by email.
+
+    Only a HASH is stored. The plaintext exists in the email and nowhere
+    else, so a dump of this table does not let anyone sign in as anybody —
+    which matters precisely because these are bearer tokens that skip the
+    password entirely.
+
+    Rows are kept after use rather than deleted: `used_at` is what makes the
+    link single-use, and keeping it is also the audit trail of who was sent
+    one and whether it was redeemed.
+    """
+    __tablename__ = "magic_links"
+    __table_args__ = (Index("ix_magic_user_exp", "user_id", "expires_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(255), index=True)
+    # "login" or "invite" — only affects the wording of the email.
+    purpose: Mapped[str] = mapped_column(String(16), default="login")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# ====================================================== scope and contacts
+SCOPE_KINDS = ("cidr", "ipv4", "ipv6", "fqdn")
+
+
+class ProjectScope(Base, TimestampMixin):
+    """One scope entry: a CIDR, an address, or a name.
+
+    `kind` is DERIVED from the value, not chosen by the person typing it —
+    asking someone to classify 400 pasted lines by hand is how a /24 ends up
+    filed as an FQDN. See scope.classify().
+
+    `included` carries exclusions in the same table. A scope document is
+    almost always "this range, except these hosts", and keeping exclusions
+    somewhere else is how they get missed.
+    """
+    __tablename__ = "project_scope"
+    __table_args__ = (
+        UniqueConstraint("project_id", "value", name="uq_scope_project_value"),
+        Index("ix_scope_project_kind", "project_id", "kind"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(8))
+    value: Mapped[str] = mapped_column(String(255))
+    included: Mapped[bool] = mapped_column(Boolean, default=True)
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    project: Mapped["Project"] = relationship(back_populates="scope")
+
+
+class ProjectContact(Base, TimestampMixin):
+    """A point of contact on the customer side."""
+    __tablename__ = "project_contacts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    email: Mapped[str | None] = mapped_column(String(255))
+    phone: Mapped[str | None] = mapped_column(String(64))
+    title: Mapped[str | None] = mapped_column(String(255))
+    # Who to wake at 3am vs who to cc on the report.
+    primary_contact: Mapped[bool] = mapped_column(Boolean, default=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    project: Mapped["Project"] = relationship(back_populates="contacts")
+
+
+class ImportJob(Base, TimestampMixin):
+    """A background import, and the record of running it.
+
+    An import of a large proxy history takes minutes to an hour. Held
+    open as one HTTP request it is hostage to the tab: navigating away
+    aborts the upload, and there is nowhere to look afterwards to find
+    out what happened. The row is what makes it survivable — it exists
+    from the moment the work is queued, so the UI can show progress,
+    and it outlives the page that started it.
+
+    The file itself is NOT stored here. It is the spooled upload the
+    server is already holding; this row names it while the work runs.
+    """
+    __tablename__ = "import_jobs"
+    __table_args__ = (Index("ix_import_jobs_project_status", "project_id", "status"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    requested_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
+    filename: Mapped[str] = mapped_column(String(300), default="upload")
+    fmt: Mapped[str] = mapped_column(String(32), default="auto")
+    mode: Mapped[str] = mapped_column(String(8), default="strict")
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    #: Rows written so far and, where the format can say, the total
+    #: expected. A proxy history knows its item count from the cheap
+    #: host pass, so the bar is real rather than a spinner with a label.
+    rows_done: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    rows_total: Mapped[int | None] = mapped_column(Integer)
+    hosts_seen: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(Text)
+    #: The ImportResult, as JSON, once it finishes.
+    result: Mapped[str | None] = mapped_column(Text)

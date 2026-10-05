@@ -1,0 +1,192 @@
+/* Backdrop. The grid and scanlines are Synthwave '84's own treatment and
+   are drawn only under html[data-decor="synthwave"] — over Solarized Light
+   they read as a rendering fault rather than a style.
+
+   Colours come from --c-* , which applyPalette() writes on <html> for every
+   theme. The --neon-* names below are the fallbacks used before the first
+   paint.
+
+   All of it is fixed, pointer-events:none and behind the app, so it never
+   interferes with scrolling a 5,000-row grid. The grid is a static CSS
+   gradient rather than an animation -- a perpetually moving background behind
+   a data table is nauseating to read against. */
+
+:root {
+  --neon-bg: var(--c-bg, #241b2f);
+  --neon-bg-deep: var(--c-bgDeep, #1a1526);
+  --neon-pink: var(--c-pink, #ff7edb);
+  --neon-cyan: var(--c-cyan, #36f9f6);
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background-color: var(--neon-bg-deep);
+  color: var(--c-text, #f4f4f8);
+  overflow: hidden; /* the grid viewport scrolls, not the page */
+}
+
+/* Horizon glow + grid */
+html[data-decor="synthwave"] body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 120% 70% at 50% 108%,
+      rgba(255, 126, 219, 0.30) 0%,
+      rgba(119, 61, 190, 0.16) 38%,
+      rgba(0, 0, 0, 0) 72%),
+    radial-gradient(ellipse 90% 60% at 50% -15%,
+      rgba(54, 249, 246, 0.12) 0%,
+      rgba(0, 0, 0, 0) 70%),
+    linear-gradient(180deg, #1a1526 0%, #241b2f 55%, #2b1b3d 100%);
+}
+
+/* Perspective floor grid, bottom third only */
+html[data-decor="synthwave"] body::after {
+  content: '';
+  position: fixed;
+  left: -50%;
+  right: -50%;
+  bottom: 0;
+  height: 42vh;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.5;
+  background-image:
+    linear-gradient(to right, rgba(255, 126, 219, 0.5) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(54, 249, 246, 0.35) 1px, transparent 1px);
+  background-size: 64px 64px;
+  transform: perspective(38vh) rotateX(72deg);
+  transform-origin: bottom center;
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 55%, #000 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 55%, #000 100%);
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Scanlines, for the CRT-era schemes only. The class is on the app root
+   for every theme; the gate is here, because over a flat light scheme the
+   overlay reads as a dirty screen rather than a style. */
+html[data-scanlines="on"] .scanlines::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.22) 0px,
+    rgba(0, 0, 0, 0.22) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  opacity: 0.30;
+  mix-blend-mode: multiply;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* The live-pulse used by the SSE indicator. */
+@keyframes neonPulse {
+  0%   { opacity: 1;    box-shadow: 0 0 0 0 rgba(114, 241, 184, 0.7); }
+  70%  { opacity: 0.75; box-shadow: 0 0 0 7px rgba(114, 241, 184, 0); }
+  100% { opacity: 1;    box-shadow: 0 0 0 0 rgba(114, 241, 184, 0); }
+}
+
+/* ===========================================================================
+   NEON DREAMS
+   The Synthwave '84 bloom, opt-in exactly as it is in the editor theme.
+
+   It works off currentColor, so every element blooms in its own colour —
+   pink hosts bloom pink, cyan ports bloom cyan, white body text gets only a
+   faint halo. That is what makes it read as lit tubes rather than a blur
+   filter laid over the top.
+
+   Readability is the constraint. Cell text gets ONE tight shadow; the big
+   multi-layer bloom is reserved for chrome, headings and saturated accents,
+   because 6,000 rows of glowing data is unreadable within about ten seconds.
+   =========================================================================== */
+
+body.neon-dreams {
+  --bloom-tight: 0 0 1px currentColor;
+  --bloom-soft: 0 0 2px currentColor, 0 0 9px currentColor;
+  --bloom-hard: 0 0 2px currentColor, 0 0 11px currentColor, 0 0 26px currentColor;
+}
+
+/* Chrome and headings: full bloom. */
+body.neon-dreams .MuiDataGrid-columnHeaderTitle,
+body.neon-dreams .MuiTab-root.Mui-selected,
+body.neon-dreams .MuiListItemText-primary,
+body.neon-dreams h1, body.neon-dreams h2, body.neon-dreams h3,
+body.neon-dreams h4, body.neon-dreams h5, body.neon-dreams h6 {
+  text-shadow: var(--bloom-hard);
+}
+
+/* Data: one tight shadow only — enough to look lit, still crisp at 12px. */
+body.neon-dreams .MuiDataGrid-cell,
+body.neon-dreams .MuiChip-label,
+body.neon-dreams .MuiTypography-root,
+body.neon-dreams .MuiButton-root,
+body.neon-dreams .MuiTableCell-root,
+body.neon-dreams input,
+body.neon-dreams .MuiInputBase-input {
+  text-shadow: var(--bloom-tight);
+}
+
+/* Anything already carrying an inline glow gets pushed further. */
+body.neon-dreams .MuiDataGrid-row:hover .MuiDataGrid-cell {
+  text-shadow: var(--bloom-soft);
+}
+
+/* Surfaces: outer bloom plus an inner rim, which is what gives panels the
+   "lit from behind" look rather than just a drop shadow. */
+body.neon-dreams .MuiPaper-root {
+  box-shadow:
+    0 0 22px rgba(255, 126, 219, 0.22),
+    0 0 60px rgba(119, 61, 190, 0.18),
+    inset 0 0 40px rgba(255, 126, 219, 0.06) !important;
+}
+body.neon-dreams .MuiAppBar-root {
+  box-shadow: 0 1px 26px rgba(255, 126, 219, 0.45) !important;
+}
+body.neon-dreams .MuiChip-root,
+body.neon-dreams .MuiOutlinedInput-root {
+  box-shadow: 0 0 10px rgba(255, 126, 219, 0.16);
+}
+body.neon-dreams .MuiDataGrid-columnHeaders {
+  box-shadow: 0 1px 14px rgba(54, 249, 246, 0.3);
+}
+
+/* Brighter floor grid and horizon — the bloom should reach the backdrop too,
+   or the chrome looks lit and the room behind it does not. */
+body.neon-dreams::after {
+  opacity: 0.85;
+  filter: drop-shadow(0 0 6px rgba(255, 126, 219, 0.55));
+}
+body.neon-dreams::before {
+  filter: saturate(1.25) brightness(1.1);
+}
+
+/* Scanlines sit a touch heavier so the bloom has something to beat against. */
+html[data-scanlines="on"] body.neon-dreams .scanlines::before { opacity: 0.42; }
+
+@media (prefers-reduced-motion: reduce) {
+  body.neon-dreams * { transition: none !important; }
+}

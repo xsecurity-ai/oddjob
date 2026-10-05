@@ -1,0 +1,54 @@
+# Engagement data and secrets. This repository is PUBLIC; everything in
+# this first block would be a breach, not an inconvenience.
+#
+# The SQLite database holds real findings, credentials and captured
+# HTTP exchanges — session cookies included — for live engagements.
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# The JWT signing key. Anyone holding it can mint a session for any user.
+.secret
+
+# Connection strings, tokens, anything sourced into a shell.
+pg.env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!**/testdata/*.key
+id_rsa*
+
+# Scanner output and evidence. Not ours to publish.
+*.nessus
+*.gnmap
+*.nmap
+evidence/
+loot/
+scans/
+recon/
+
+# Reports, which are client deliverables.
+*.docx
+!docs/**/*.docx
+
+# ---------------------------------------------------------------- build
+node_modules/
+dist/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.tsbuildinfo
+
+# ------------------------------------------------------------- editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
