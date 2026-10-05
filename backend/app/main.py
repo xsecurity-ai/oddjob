@@ -1,0 +1,202 @@
+"""Oddjob API."""
+from __future__ import annotations
+
+import os
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import (FileResponse, HTMLResponse,
+                               RedirectResponse)
+from fastapi.staticfiles import StaticFiles
+
+from .db import DB_PATH, init_db
+from .gatekeeper import (FORBIDDEN_HTML, Gatekeeper, NOT_FOUND_HTML,
+                         wants_html)
+from .routers import (actions, agent, auth, bulk, credentials, domains, explore,
+                      index as api_index, rest,
+                      findings, google, magic, meta, projects, reports, scans,
+                      services, settings, targets, web)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    # A report left mid-flight by a restart would otherwise spin forever.
+    from .reports.runner import reap_stale
+    if (n := await reap_stale()):
+        print(f"marked {n} interrupted report(s) as failed")
+    # Same for an import: a `running` row nothing will ever finish is
+    # worse than an honest failure, because the UI cannot tell them
+    # apart and the operator waits forever.
+    from .importers.jobs import reap_stale as reap_imports
+    if (n := await reap_imports()):
+        print(f"marked {n} interrupted import(s) as failed")
+    # Security headers depend on site.base_url, which lives in the
+    # database, so they cannot be computed until it is open.
+    from .db import SessionLocal
+    async with SessionLocal() as s:
+        await _headers.refresh(s)
+
+    # A killed process never runs the `finally` that removes a spooled
+    # upload, and a held one outlives its request on purpose. Nothing is
+    # held yet at startup, so anything on disk is an orphan.
+    from .routers.scans import sweep_orphan_uploads
+    if (n := sweep_orphan_uploads()):
+        print(f"removed {n} orphaned upload file(s)")
+
+    # One worker, started once. It is inert until an agent is configured.
+    from .agent.remediate import worker
+    worker.start()
+
+    # The inbound half of Slack. Socket Mode, so it needs no public
+    # endpoint: inert until an app-level token exists and answering is
+    # switched on.
+    from .slack_socket import worker as slack_worker
+    slack_worker.start()
+    # display_url(), not DB_PATH: DB_PATH is the SQLite file path and is
+    # computed whether or not SQLite is in use, so this line claimed the
+    # app was on SQLite while it was actually talking to Postgres. The
+    # masked DSN is the honest answer and never shows the password.
+    from .db import display_url
+    print(f"Oddjob API ready — db: {display_url()}")
+    yield
+    await worker.stop()
+    await slack_worker.stop()
+
+
+app = FastAPI(
+    title="Oddjob API",
+    version="0.1.0",
+    description=(
+        "Engagement data store: targets, ports/services, vulns, PoCs.\n\n"
+        "Every list endpoint takes `q` (full search), `sort`, `order`, `limit`, "
+        "`offset` and returns `{items, total, limit, offset}`.\n\n"
+        "`POST /api/bulk` upserts any mix of entities in one transaction. "
+        "`GET /api/events` is an SSE stream that fires whenever data changes."
+    ),
+    lifespan=lifespan,
+)
+
+from . import headers as _headers      # noqa: E402
+
+# ORDER. `add_middleware` prepends, so the LAST one added is the
+# outermost and therefore the last to touch a response on the way out.
+# Desired, outside in:
+#
+#   SecurityHeaders   stamps everything, including responses the layers
+#                     below short-circuit — a gate refusal needs the same
+#                     headers as a 200, and an earlier arrangement had it
+#                     innermost, so the 401 went out bare.
+#   CORS              a refusal still needs CORS headers, or the browser
+#                     reports an opaque network error instead of the 401
+#                     the SPA is waiting for.
+#   Gatekeeper        authentication.
+#
+# So they are added in the reverse of that.
+app.add_middleware(Gatekeeper)
+
+# The Vite dev server runs on another origin; in production the built SPA is
+# served from this same app and CORS is irrelevant.
+# Same-origin in production — the SPA is served from this app, so CORS is
+# not involved at all. The list exists for the Vite dev server on another
+# port, plus whatever `site.extra_origins` names. allow_credentials means
+# every entry here can make authenticated requests, so it stays short.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o for o in os.environ.get(
+        "ODDJOB_CORS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if o],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Added last, so it is outermost and nothing escapes without it.
+app.add_middleware(_headers.SecurityHeaders)
+
+for r in (auth.router, google.router, magic.router, projects.router, targets.router,
+          services.router, findings.router, credentials.router,
+          explore.router, actions.router, settings.router, bulk.router,
+          scans.router, web.router, domains.router, agent.router,
+          rest.router, api_index.router,
+          reports.router,
+          meta.router):
+    app.include_router(r)
+
+# Serve the built SPA when it exists, so one process runs the whole app.
+_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+if _DIST.is_dir():
+    app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
+
+    #: `_DIST` with every symlink resolved, so containment can be tested
+    #: against a canonical path rather than the string that was typed.
+    _DIST_REAL = _DIST.resolve()
+
+    def dist_file(full_path: str) -> Path | None:
+        """A real file inside the built SPA, or None.
+
+        `_DIST / full_path` is NOT safe by itself, which is how this was
+        written first. Two ways out of the directory:
+
+          "/etc/passwd"        an absolute right-hand side replaces the
+                               base entirely — pathlib documents this
+          "../../backend/..."  climbs out a segment at a time
+
+        Browsers collapse `..` before sending, so this never shows up in
+        normal use; `curl --path-as-is` and anything speaking raw HTTP do
+        not. Verified reachable as a signed-in user: it returned
+        app/main.py and the whole 91 MB SQLite database, which holds the
+        password hashes, stored credentials and API keys. Resolve first,
+        then require the result to still be under the dist directory.
+        """
+        if not full_path:
+            return None
+        candidate = (_DIST / full_path).resolve()
+        if candidate != _DIST_REAL and _DIST_REAL not in candidate.parents:
+            return None
+        return candidate if candidate.is_file() else None
+
+    #: Paths the single-page app owns. A browser asking for one gets the
+    #: app; anything else gets redirected to the JSON underneath it, so the
+    #: same URL works whether you paste it into a tab or into curl.
+    SPA_ROUTES = ("projects", "targets", "services", "web", "vulns",
+                  "credentials", "reports", "import", "config", "users",
+                  "profile")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa(request: Request, full_path: str):
+        # An unknown /api/... path must answer as JSON, not fall through to
+        # index.html — a client getting HTML back from a typo'd endpoint is a
+        # genuinely confusing way to debug.
+        if full_path.startswith("api/"):
+            raise HTTPException(404, f"no such endpoint: /{full_path}")
+        if (asset := dist_file(full_path)) is not None:
+            return FileResponse(asset)
+        head = full_path.strip("/").split("/", 1)[0]
+        if head in SPA_ROUTES:
+            # One URL, two readers. A browser gets the app, which routes
+            # on the same path; a program gets the resource it named.
+            if wants_html(request):
+                return FileResponse(_DIST / "index.html")
+            target = "/api/" + full_path.strip("/")
+            if request.url.query:
+                target += f"?{request.url.query}"
+            return RedirectResponse(target, status_code=307)
+
+        # Reaching here means the gate let it through, so the caller is
+        # authenticated and an honest 404 costs nothing — there is no
+        # longer anything to withhold by pretending every path is
+        # forbidden. An unauthenticated caller never gets this far; the
+        # gate redirects them to sign in.
+        if full_path:
+            if wants_html(request):
+                return HTMLResponse(NOT_FOUND_HTML, status_code=404)
+            raise HTTPException(404, f"no such path: /{full_path}")
+
+        # The root. A browser gets the app, which routes "/" to the
+        # project list; a program gets the API index, for the same reason
+        # the nested paths redirect — one URL, two readers.
+        if not wants_html(request):
+            return RedirectResponse("/api", status_code=307)
+        return FileResponse(_DIST / "index.html")

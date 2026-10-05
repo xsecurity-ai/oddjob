@@ -1,0 +1,4 @@
+# Every change needs a review from the owner.
+# GitHub matches the LAST applicable rule, so the catch-all goes first
+# and anything more specific added below it still wins.
+*       @cr0n1c
