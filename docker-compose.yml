@@ -1,0 +1,68 @@
+# Oddjob and its database.
+#
+#   cp .env.example .env     # then edit the two passwords
+#   docker compose up -d
+#   open http://127.0.0.1:8000
+#
+# The first page asks you to create the admin account. Everything after
+# that needs a session.
+
+name: oddjob
+
+services:
+  db:
+    # The official image, pinned to a major version: Postgres will not
+    # start against a data directory written by a different major, so
+    # an unpinned tag turns a routine `pull` into a stopped database.
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-oddjob}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-oddjob}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Bound to loopback, not published to the network. This database
+    # holds findings, credentials and captured traffic; it has no
+    # business being reachable from off the host. Comment the whole
+    # block out if you do not need a psql client on the host at all.
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-oddjob} -d ${POSTGRES_DB:-oddjob}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # Stock image, stock settings. If a large import crawls, the knobs
+    # worth turning first are shared_buffers, work_mem and
+    # synchronous_commit — add them as `command: [postgres, -c, ...]`.
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ODDJOB_DATABASE_URL: >-
+        postgresql://${POSTGRES_USER:-oddjob}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-oddjob}
+      # Leave unset to have one generated into the `secret` volume on
+      # first boot. Set it to share one key across replicas.
+      ODDJOB_SECRET: ${ODDJOB_SECRET:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      # The session-signing key, so a restart does not log everyone out.
+      - secret:/app/backend/data
+    # Loopback by default. There is no rate limiting, no brute-force
+    # lockout and no WAF in front of this; put it behind a VPN or a
+    # reverse proxy that does authentication before you change the bind
+    # address. See SECURITY.md.
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8000}:8000"
+
+volumes:
+  pgdata:
+  secret:

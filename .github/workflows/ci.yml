@@ -175,6 +175,49 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+  docker:
+    name: image builds and the stack comes up
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      # Building is not the claim worth testing — starting is. The
+      # interesting failures are the entrypoint, the migrations against
+      # a real database, and whether the API actually serves the built
+      # UI out of the image.
+      - name: Bring the stack up
+        run: |
+          set -euo pipefail
+          printf 'POSTGRES_PASSWORD=ci-not-a-real-secret\nAPP_PORT=8000\n' > .env
+          docker compose up -d --build
+          for i in $(seq 1 60); do
+            state=$(docker inspect --format '{{.State.Health.Status}}' oddjob-app-1 2>/dev/null || echo starting)
+            [ "$state" = "healthy" ] && break
+            [ "$i" = "60" ] && { docker compose logs; exit 1; }
+            sleep 5
+          done
+
+      - name: It serves the API and the built UI
+        run: |
+          set -euo pipefail
+          curl -fsS http://127.0.0.1:8000/api/auth/setup-required | grep -q setup_required
+          curl -fsS -H 'Accept: text/html' http://127.0.0.1:8000/ | grep -qE 'assets/index-[^"]+\.js'
+          curl -fsS -o /dev/null http://127.0.0.1:8000/favicon.svg
+
+      - name: Migrations ran, and against Postgres
+        run: |
+          set -euo pipefail
+          docker compose exec -T app alembic current | grep -q '(head)'
+          docker compose logs app | grep -q 'db: postgresql'
+
+      - name: It does not run as root
+        run: test "$(docker compose exec -T app id -u | tr -d '\r')" != "0"
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
   secrets:
     name: no secrets or client data
     runs-on: ubuntu-latest

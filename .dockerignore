@@ -1,0 +1,24 @@
+# Keep the build context small and, more importantly, keep secrets and
+# engagement data out of the image entirely.
+**/.git
+**/.venv
+**/node_modules
+**/dist
+**/__pycache__
+**/*.py[cod]
+
+# Never. These are the database, the session key and the DSN.
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.sqlite*
+**/.secret
+**/pg.env
+**/.env
+**/*.pem
+**/*.key
+
+docs/
+.github/
+**/*.md
+!README.md

@@ -8,6 +8,14 @@ FastAPI + SQLAlchemy behind a React/MUI UI. SQLite by default, PostgreSQL
 when you need concurrent writers.
 
 ```bash
+cp .env.example .env          # set POSTGRES_PASSWORD
+docker compose up -d          # app + PostgreSQL, migrations applied on boot
+open http://127.0.0.1:8000
+```
+
+Or run it directly:
+
+```bash
 # API, which also serves the built UI
 cd backend && uv run uvicorn app.main:app --reload
 
@@ -17,6 +25,10 @@ cd frontend && npm install && npm run dev
 
 First run creates the admin account; every route after that needs a
 session.
+
+Both ports bind to loopback. There is no rate limiting and no
+brute-force lockout — put this behind a VPN or an authenticating proxy
+before changing that. See [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -72,7 +84,8 @@ Two rules worth knowing:
 ## Running on PostgreSQL
 
 SQLite takes one writer at a time, which a long import and a background
-worker will fight over. For concurrent use:
+worker will fight over. `docker compose up` gives you PostgreSQL
+already wired in; to point an existing checkout at one yourself:
 
 ```bash
 docker run -d --name oddjob-pg -e POSTGRES_USER=oddjob \
@@ -130,6 +143,8 @@ backend/tests/        one suite per area
 backend/alembic/      migrations
 frontend/src/         React UI
 frontend/test/        typecheck helpers and logic tests
+Dockerfile            multi-stage: UI build, deps, slim runtime
+docker-compose.yml    the app and its database
 docs/reference.md     the long version of all of this
 CLAUDE.md             notes for working on this, and the traps
 ```
