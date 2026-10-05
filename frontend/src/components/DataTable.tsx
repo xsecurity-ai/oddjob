@@ -8,7 +8,8 @@ import DeleteIcon from '@mui/icons-material/DeleteOutline'
 import EditIcon from '@mui/icons-material/EditOutlined'
 import RestartAltIcon from '@mui/icons-material/RestartAlt'
 import {
-  DataGrid, type GridColDef, type GridRowSelectionModel, type GridRowsProp,
+  DataGrid, type GridColDef, type GridRowIdGetter,
+  type GridRowSelectionModel, type GridRowsProp,
 } from '@mui/x-data-grid'
 import { useQueryClient } from '@tanstack/react-query'
 import { api, type EntityKind } from '../lib/api'
@@ -39,7 +40,7 @@ function selectedIds(model: GridRowSelectionModel | undefined, rows: GridRowsPro
 
 export function DataTable({
   rows, columns, loading, error, initialSort, hiddenColumns, note,
-  kind, project, canWrite = false, extraActions, tableId, server,
+  kind, project, canWrite = false, extraActions, tableId, server, getRowId,
 }: {
   rows: GridRowsProp
   columns: GridColDef[]
@@ -56,6 +57,11 @@ export function DataTable({
   /** Identity for remembering sort/filter/columns. Defaults to `kind`;
    *  a view without a kind (Web, Projects) must pass its own. */
   tableId?: string
+  /** How to key a row, when `id` is not unique across the rows given.
+   *  The Web table shows a URL group and then its exchanges beneath it;
+   *  the group's id IS one of those exchanges, so without this the grid
+   *  sees a duplicate key and the parent row disappears. */
+  getRowId?: GridRowIdGetter
   /** Supplied when the database does the paging, sorting and searching.
    *  `rows` is then ONE PAGE, not the whole table. Needed for Web,
    *  where one engagement holds 211,012 rows: loading them to filter in
@@ -220,6 +226,7 @@ export function DataTable({
       <Box sx={{ flex: 1, minHeight: 0 }}>
         <DataGrid
           rows={shown.rows} columns={gridColumns} showToolbar
+          getRowId={getRowId}
           disableRowSelectionOnClick
           key={gen}
           checkboxSelection={editable}

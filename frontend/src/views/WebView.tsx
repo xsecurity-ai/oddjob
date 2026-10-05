@@ -312,6 +312,15 @@ export function WebView({ project }: { project: string | null }) {
       initialSort={{ field: 'url', sort: 'asc' }}
       hiddenColumns={project ? { project_code: false } : undefined}
       server={table}
+      // A group row and the exchange it stands for share an id — the
+      // group IS that exchange. The grid keys rows by id, so without a
+      // distinct key the parent vanishes the moment it is expanded.
+      // Verified: expanding produced three indented rows and no parent,
+      // with a duplicate key in the DOM.
+      getRowId={(r) => {
+        const w = r as unknown as WebRow
+        return w.__child ? `c${w.id}` : `g${rowKey(w)}`
+      }}
       extraActions={
         <Stack direction="row" spacing={1} alignItems="center">
           <ToggleButtonGroup size="small" exclusive value={filter}
