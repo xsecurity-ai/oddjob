@@ -1,0 +1,53 @@
+# Dependency updates.
+#
+# Grouped, because this repository has three ecosystems and ungrouped
+# updates produce a dozen pull requests a week that nobody reads — which
+# is worse than none, since the security ones get lost among them.
+#
+# Security updates are NOT grouped: they arrive separately and
+# immediately, whatever the schedule below says.
+version: 2
+
+updates:
+  - package-ecosystem: uv
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      backend-minor-and-patch:
+        update-types: [minor, patch]
+    labels: [dependencies, backend]
+    commit-message:
+      prefix: "deps(backend)"
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      frontend-minor-and-patch:
+        update-types: [minor, patch]
+      # MUI ships its packages in lockstep; splitting them across pull
+      # requests produces a build that cannot resolve peer versions.
+      mui:
+        patterns: ["@mui/*"]
+    labels: [dependencies, frontend]
+    commit-message:
+      prefix: "deps(frontend)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: "deps(ci)"
