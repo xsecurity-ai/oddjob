@@ -109,9 +109,13 @@ cd backend && uv run python runtests.py webtest  # one
 cd frontend && npx tsc --noEmit && node test/hooks.check.mjs
 ```
 
-Each backend suite gets its own server and its own database. They refuse
-to run against `ODDJOB_DATABASE_URL`, so a shell with the production DSN
-exported cannot point them at real data.
+Suites live in `backend/tests/`; `runtests.py` stays at the backend root
+because it is the command you type. Each gets its own server, port and
+database, and they refuse to run against `ODDJOB_DATABASE_URL`, so a
+shell with the production DSN exported cannot point them at real data.
+
+The backend suite needs `frontend/dist` to exist — it checks that the
+API serves the built UI.
 
 ## Layout
 
@@ -122,9 +126,12 @@ backend/app/          FastAPI application
   reports/            templates, rendering, background runner
   slack.py            outbound notifications
   slack_socket.py     inbound, over Socket Mode
+backend/tests/        one suite per area
 backend/alembic/      migrations
 frontend/src/         React UI
+frontend/test/        typecheck helpers and logic tests
 docs/reference.md     the long version of all of this
+CLAUDE.md             notes for working on this, and the traps
 ```
 
 ## Documentation

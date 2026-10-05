@@ -9,6 +9,10 @@ until an engagement runs without a single message.
 So this stands up a fake Slack on localhost, points the site token at
 it, drives the real endpoints, and asserts on what arrived.
 """
+
+# Run from anywhere: the suites import `app`, which lives one level up.
+import pathlib as _pathlib, sys as _sys
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
 import json, os, threading, urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 

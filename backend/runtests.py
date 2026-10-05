@@ -27,17 +27,17 @@ TMP = pathlib.Path("/tmp")   # magictest reaches into /tmp/ms-m.db by name
 # already listening — a dev server, say — and the run then reports failures
 # that belong to a different database entirely.
 SUITES = [
-    ("apitest.py",      TMP / "ms-api.db"),
-    ("authtest.py",     TMP / "ms-auth.db"),
-    ("featuretest.py",  TMP / "ms-feat.db"),
-    ("settingstest.py", TMP / "ms-set.db"),
-    ("magictest.py",    TMP / "ms-m.db"),
-    ("projecttest.py",  TMP / "ms-proj.db"),
-    ("scantest.py",     TMP / "ms-scan.db"),
-    ("importtest.py",   TMP / "ms-imp.db"),
-    ("webtest.py",      TMP / "ms-web.db"),
-    ("reporttest.py",   TMP / "ms-rep.db"),
-    ("slacktest.py",    TMP / "ms-slack.db"),
+    ("tests/apitest.py",      TMP / "ms-api.db"),
+    ("tests/authtest.py",     TMP / "ms-auth.db"),
+    ("tests/featuretest.py",  TMP / "ms-feat.db"),
+    ("tests/settingstest.py", TMP / "ms-set.db"),
+    ("tests/magictest.py",    TMP / "ms-m.db"),
+    ("tests/projecttest.py",  TMP / "ms-proj.db"),
+    ("tests/scantest.py",     TMP / "ms-scan.db"),
+    ("tests/importtest.py",   TMP / "ms-imp.db"),
+    ("tests/webtest.py",      TMP / "ms-web.db"),
+    ("tests/reporttest.py",   TMP / "ms-rep.db"),
+    ("tests/slacktest.py",    TMP / "ms-slack.db"),
 ]
 
 
@@ -136,7 +136,7 @@ def main() -> int:
         # file comes back empty.
         mig_env = {k: v for k, v in os.environ.items()
                    if k != "ODDJOB_DATABASE_URL"}
-        r = subprocess.run([sys.executable, "migrationtest.py"], cwd=HERE,
+        r = subprocess.run([sys.executable, "tests/migrationtest.py"], cwd=HERE,
                            env=mig_env, capture_output=True, text=True, timeout=600)
         out = r.stdout + r.stderr
         m = re.findall(r"(\d+) passed, (\d+) failed", out)
@@ -148,14 +148,15 @@ def main() -> int:
             bad.append("--- migrationtest.py ---\n"
                        + "\n".join(l for l in out.splitlines() if "FAIL" in l))
     for suite, db in SUITES:
-        if only and suite not in only and suite.removesuffix(".py") not in only:
+        name = suite.rsplit("/", 1)[-1]
+        if only and name not in only and name.removesuffix(".py") not in only:
             continue
         p, f, detail = run(suite, db)
         tp += p; tf += f
         mark = "ok  " if f == 0 else "FAIL"
-        print(f"  {mark} {suite:<16} {p:>3} passed, {f} failed")
+        print(f"  {mark} {name:<16} {p:>3} passed, {f} failed")
         if f and detail:
-            bad.append(f"--- {suite} ---\n{detail}")
+            bad.append(f"--- {name} ---\n{detail}")
     for b in bad:
         print("\n" + b)
     print(f"\n{'='*56}\n  TOTAL {tp} passed, {tf} failed\n{'='*56}")

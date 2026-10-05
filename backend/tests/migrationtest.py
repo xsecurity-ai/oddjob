@@ -10,12 +10,21 @@ prevent.
 So: build a database from nothing but the migrations, and compare it to
 the models. No server, no fixtures, no dev database.
 """
+
+# Run from anywhere: the suites import `app`, which lives one level up.
+import pathlib as _pathlib, sys as _sys
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
 import os, subprocess, sys, tempfile
 from pathlib import Path
 
 from sqlalchemy import create_engine, inspect
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+#: The backend root: where alembic.ini is, and what every subprocess
+#: here has to run from. This file used to live there; it does not any
+#: more, and "cwd=the directory I am in" quietly became the wrong
+#: answer — alembic reported "No 'script_location' key".
+BACKEND = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BACKEND))
 from app.models import Base  # noqa: E402
 
 ok = fail = 0
@@ -33,7 +42,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     print("== a database built from the migrations alone ==")
     r = subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"],
-                       cwd=Path(__file__).parent, env=env,
+                       cwd=BACKEND, env=env,
                        capture_output=True, text=True, timeout=300)
     check("upgrade head succeeds", r.returncode == 0,
           (r.stderr or r.stdout)[-300:] if r.returncode else "")
@@ -80,19 +89,19 @@ with tempfile.TemporaryDirectory() as tmp:
     r = subprocess.run(
         [sys.executable, "-c",
          "import asyncio; from app.db import init_db; asyncio.run(init_db())"],
-        cwd=Path(__file__).parent, env=env, capture_output=True, text=True,
+        cwd=BACKEND, env=env, capture_output=True, text=True,
         timeout=300)
     check("the startup drift check passes against it", r.returncode == 0,
           (r.stderr or "")[-300:] if r.returncode else "")
 
     print("\n== downgrading the newest migration is reversible ==")
     r = subprocess.run([sys.executable, "-m", "alembic", "downgrade", "-1"],
-                       cwd=Path(__file__).parent, env=env,
+                       cwd=BACKEND, env=env,
                        capture_output=True, text=True, timeout=300)
     check("downgrade -1 succeeds", r.returncode == 0,
           (r.stderr or "")[-200:] if r.returncode else "")
     r = subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"],
-                       cwd=Path(__file__).parent, env=env,
+                       cwd=BACKEND, env=env,
                        capture_output=True, text=True, timeout=300)
     check("and upgrading again succeeds", r.returncode == 0,
           (r.stderr or "")[-200:] if r.returncode else "")

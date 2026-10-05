@@ -3,6 +3,10 @@
 Runs a throwaway SMTP server in-process so the full path is exercised —
 there is no point asserting that we *would* have sent an email.
 """
+
+# Run from anywhere: the suites import `app`, which lives one level up.
+import pathlib as _pathlib, sys as _sys
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
 import json, re, socket, threading, time, urllib.request, urllib.error, http.cookiejar
 
 import os

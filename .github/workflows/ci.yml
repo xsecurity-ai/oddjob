@@ -134,7 +134,7 @@ jobs:
               curl -sf "http://127.0.0.1:$port/api/auth/setup-required" >/dev/null && break
               sleep 1
             done
-            ODDJOB_TEST_BASE="http://127.0.0.1:$port" uv run python "$suite.py"
+            ODDJOB_TEST_BASE="http://127.0.0.1:$port" uv run python "tests/$suite.py"
             kill $srv 2>/dev/null || true
             wait $srv 2>/dev/null || true
             port=$((port + 1))

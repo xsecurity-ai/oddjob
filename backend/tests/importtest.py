@@ -2,6 +2,10 @@
 
 Fixtures are trimmed but structurally faithful to each tool's real output.
 """
+
+# Run from anywhere: the suites import `app`, which lives one level up.
+import pathlib as _pathlib, sys as _sys
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
 import json, os, urllib.request, urllib.error
 
 BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8015")

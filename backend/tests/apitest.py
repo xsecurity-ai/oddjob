@@ -1,4 +1,8 @@
 """End-to-end API check for Oddjob."""
+
+# Run from anywhere: the suites import `app`, which lives one level up.
+import pathlib as _pathlib, sys as _sys
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
 import json, time, urllib.request, urllib.error, threading
 
 import os
