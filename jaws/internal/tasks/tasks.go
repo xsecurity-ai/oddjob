@@ -565,10 +565,24 @@ func runReverseIP(ctx context.Context, args map[string]any, _ string) Result {
 	if len(ips) == 0 {
 		return failed("reverse_ip needs `targets` (or `ip`/`ips`)")
 	}
+	// Names the project already holds, for forward confirmation. DNS
+	// cannot be asked "what points here"; it can only be asked
+	// "where does this name point", so the only honest way to answer
+	// the first question with DNS alone is to try the names we know.
+	// Deliberately NOT subjects(): that folds in `targets`, which for
+	// this task kind IS the list of addresses. Resolving an address
+	// forward returns itself, and an address has dots in it, so every
+	// IP would have been confirmed as its own "domain".
+	candidates := append(list(args, "candidates"), list(args, "known_names")...)
+	// Resolved once for the whole batch, not once per address: the
+	// first cut did the latter and turned 1,500 names over 2,661
+	// addresses into four million queries.
+	index := recon.BuildNameIndex(ctx, candidates)
+
 	out := make([]*recon.ReverseIP, 0, len(ips))
 	total, partial := 0, false
 	for _, ip := range ips {
-		r := recon.ReverseIPLookup(ctx, ip)
+		r := recon.ReverseIPLookup(ctx, ip, index)
 		total += len(r.Domains)
 		partial = partial || r.Partial
 		out = append(out, r)

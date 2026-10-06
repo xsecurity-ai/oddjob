@@ -65,6 +65,12 @@ export function useAutoApplySingles(project: string | null,
   const qc = useQueryClient()
   const tried = useRef(new Set<string>())
   const [failed, setFailed] = useState<string | null>(null)
+  //: Set when the single answer could not be applied because another
+  //: target already carries that name. Kept structured rather than as
+  //: a sentence, so the offer to combine them has both ends to work
+  //: with.
+  const [collision, setCollision] = useState<
+    { source: string; into: string } | null>(null)
 
   useEffect(() => {
     if (!project) return
@@ -82,10 +88,16 @@ export function useAutoApplySingles(project: string | null,
           })
           wrote = true
         } catch (e) {
-          if (live) {
-            setFailed(`${r.subject} → ${r.options[0]}: `
-                      + (e instanceof Error ? e.message : String(e)))
+          if (!live) continue
+          const msg = e instanceof Error ? e.message : String(e)
+          if (/already has a target/.test(msg)) {
+            // Not a failure to report and move on from. The name
+            // existing is the evidence that this address and that
+            // target are one host, which is exactly when combining
+            // them is right.
+            setCollision({ source: r.target_host, into: r.options[0] })
           }
+          setFailed(`${r.subject} → ${r.options[0]}: ` + msg)
         }
       }
       if (wrote && live) await qc.invalidateQueries()
@@ -93,7 +105,7 @@ export function useAutoApplySingles(project: string | null,
     return () => { live = false }
   }, [project, rows, qc])
 
-  return failed
+  return { failed, collision, clear: () => { setFailed(null); setCollision(null) } }
 }
 
 function Row({ row, project, onBusy }: {
@@ -267,7 +279,7 @@ function MergeConfirm({ project, source, into, onClose }: {
   )
 }
 
-export function FqdnPickerDialog({ project, rows, loading, error, autoError,
+export function FqdnPickerDialog({ project, rows, loading, error, auto,
                                    onClose }: {
   project: string
   /** The pending list, owned by the view so the badge and the dialog
@@ -276,10 +288,20 @@ export function FqdnPickerDialog({ project, rows, loading, error, autoError,
   loading: boolean
   error: Error | null
   /** A single-answer lookup that could not be applied automatically. */
-  autoError: string | null
+  auto: {
+    failed: string | null
+    /** Both ends of a name clash, when the single answer could not be
+     *  applied because another target already carries it. */
+    collision: { source: string; into: string } | null
+    clear: () => void
+  }
   onClose: () => void
 }) {
   const [busy, setBusy] = useState(false)
+  //: A collision the auto-apply hit, once the operator asks to resolve
+  //: it by combining the two rows.
+  const [autoMerge, setAutoMerge] = useState<
+    { source: string; into: string } | null>(null)
   const open = useMemo(() => openChoices(rows), [rows])
   const empty = useMemo(() => emptyResults(rows), [rows])
 
@@ -297,10 +319,31 @@ export function FqdnPickerDialog({ project, rows, loading, error, autoError,
               {error.message}
             </Alert>
           )}
-          {autoError && (
-            <Alert severity="warning" variant="outlined" sx={{ fontSize: 12 }}>
-              A lookup with a single answer could not be applied: {autoError}
+          {auto.failed && (
+            <Alert severity="warning" variant="outlined" sx={{ fontSize: 12 }}
+              action={auto.collision ? (
+                <Button size="small" onClick={() => setAutoMerge(auto.collision)}
+                  sx={{ color: neon.pink, fontSize: 11 }}>
+                  Combine them
+                </Button>
+              ) : undefined}>
+              A lookup with a single answer could not be applied: {auto.failed}
+              {auto.collision && (
+                <Box sx={{ mt: 0.5, color: neon.muted }}>
+                  That usually means {auto.collision.source} and{' '}
+                  {auto.collision.into} are the same machine, found once by
+                  address and once by name.
+                </Box>
+              )}
             </Alert>
+          )}
+          {autoMerge && (
+            <MergeConfirm project={project} source={autoMerge.source}
+              into={autoMerge.into}
+              onClose={(done) => {
+                setAutoMerge(null)
+                if (done) auto.clear()
+              }} />
           )}
 
           <Alert severity="info" variant="outlined" sx={{ fontSize: 11.5 }}>

@@ -219,9 +219,14 @@ func cmdRDNS(argv []string) int {
 		fmt.Fprintln(os.Stderr, "usage: jaws rdns <ip> [...]")
 		return 2
 	}
+	// `jaws rdns` is the hand-run version and has no project behind
+	// it, so there are no known names to confirm forward against —
+	// PTR only. The empty index says "nothing was checked", which the
+	// output reports rather than implying none exist.
+	idx := recon.BuildNameIndex(context.Background(), nil)
 	out := make([]*recon.ReverseIP, 0, len(argv))
 	for _, ip := range argv {
-		out = append(out, recon.ReverseIPLookup(context.Background(), ip))
+		out = append(out, recon.ReverseIPLookup(context.Background(), ip, idx))
 	}
 	fmt.Println(recon.JSON(out))
 	return 0

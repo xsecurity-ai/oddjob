@@ -22,6 +22,7 @@ path that drifts.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import secrets
 import time
@@ -40,7 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
 from ..events import broker
-from ..models import Agent, AgentTask, Project, Setting, User
+from ..models import Agent, AgentTask, Project, Setting, Target, User
 from ..scopegate import check_task_targets, index_for, refuse
 from ..security import (get_current_user, new_agent_key, require_project,
                         verify_key)
@@ -344,6 +345,47 @@ async def _assert_task_in_scope(session: AsyncSession, pr: Project,
     ruling = check_task_targets(idx, args)
     if ruling is not None:
         raise refuse(ruling, f"a {kind} task on {pr.code}")
+
+
+#: How many known names to hand a reverse lookup. Each one costs the
+#: agent a forward DNS query per address, so a project with thousands
+#: of names and thousands of addresses would multiply into something
+#: nobody asked for. The cap is on the names; the operator chooses the
+#: addresses.
+MAX_REVERSE_CANDIDATES = 1500
+
+
+async def _enrich(session: AsyncSession, pr: Project, kind: str,
+                  args: dict) -> dict:
+    """Fill in arguments the caller should not have to assemble.
+
+    `reverse_ip` is the one that needs it. DNS cannot be asked which
+    names point at an address — only where a given name points — so
+    the only way to answer the real question without handing the
+    client's addresses to a third party is to resolve names we already
+    know and keep the ones that land there. The project is where those
+    names live, so the server supplies them rather than every caller
+    building the same list.
+    """
+    if kind != "reverse_ip" or args.get("candidates"):
+        return args
+    rows = (await session.execute(
+        select(Target.host).where(Target.project_id == pr.id)
+        .limit(MAX_REVERSE_CANDIDATES * 2))).scalars().all()
+    names = [h for h in rows if h and not _looks_like_ip(h)]
+    if names:
+        out = dict(args)
+        out["candidates"] = sorted(set(names))[:MAX_REVERSE_CANDIDATES]
+        return out
+    return args
+
+
+def _looks_like_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address((value or "").split("%", 1)[0])
+        return True
+    except ValueError:
+        return False
 
 
 # ---------------------------------------------------------- dispatching
@@ -939,7 +981,9 @@ async def create_task(agent_id: int, body: TaskIn,
     await _assert_task_in_scope(session, pr, body.kind, body.args)
 
     t = AgentTask(agent_id=a.id, project_id=pr.id, requested_by=user.id,
-                  kind=body.kind, args=json.dumps(body.args or {}),
+                  kind=body.kind,
+                  args=json.dumps(await _enrich(session, pr, body.kind,
+                                                body.args or {})),
                   region=(body.region or "").strip().lower() or None,
                   import_as=body.import_as or TASK_KINDS.get(body.kind),
                   status="queued")
@@ -1012,7 +1056,9 @@ async def create_pooled_task(body: TaskIn,
     await _assert_task_in_scope(session, pr, body.kind, body.args)
 
     t = AgentTask(agent_id=None, project_id=pr.id, requested_by=user.id,
-                  kind=body.kind, args=json.dumps(body.args or {}),
+                  kind=body.kind,
+                  args=json.dumps(await _enrich(session, pr, body.kind,
+                                                body.args or {})),
                   region=(body.region or "").strip().lower() or None,
                   import_as=body.import_as or TASK_KINDS.get(body.kind),
                   status="queued")

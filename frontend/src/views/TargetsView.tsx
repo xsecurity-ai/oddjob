@@ -117,7 +117,7 @@ export function TargetsView({ project }: { project: string | null }) {
     queryFn: () => api.enumeratePending(project as string),
     enabled: !!project && writable,
   })
-  const autoError = useAutoApplySingles(writable ? project : null, pending.data)
+  const auto = useAutoApplySingles(writable ? project : null, pending.data)
   const choices = useMemo(() => openChoices(pending.data), [pending.data])
 
   const rows = useMemo(() => data?.items ?? [], [data])
@@ -365,7 +365,7 @@ export function TargetsView({ project }: { project: string | null }) {
       {picking && project && (
         <FqdnPickerDialog project={project} rows={pending.data}
           loading={pending.isLoading} error={pending.error as Error | null}
-          autoError={autoError} onClose={() => setPicking(false)} />
+          auto={auto} onClose={() => setPicking(false)} />
       )}
       <DataTable
         rows={rows}
@@ -390,15 +390,15 @@ export function TargetsView({ project }: { project: string | null }) {
                 lookup that found nothing, and one whose single answer
                 could not be applied, both need saying. The badge counts
                 only the decisions. */}
-            {(!!pending.data?.length || autoError) && (
+            {(!!pending.data?.length || auto.failed) && (
               <Tooltip title={choices.length
                 ? 'A reverse lookup returned more than one name for the same '
                   + 'address. Only a person can say which is the right one.'
                 : 'Finished lookups, including ones that came back empty.'}>
                 <Badge badgeContent={choices.length} color="warning">
                   <Button size="small" variant="outlined" onClick={() => setPicking(true)}
-                    sx={{ color: choices.length || autoError ? neon.yellow : neon.muted,
-                          borderColor: alpha(choices.length || autoError
+                    sx={{ color: choices.length || auto.failed ? neon.yellow : neon.muted,
+                          borderColor: alpha(choices.length || auto.failed
                             ? neon.yellow : neon.muted, 0.5),
                           fontSize: 11, py: 0.3 }}>
                     Lookup results
