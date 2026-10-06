@@ -66,19 +66,36 @@ def _counts_query():
 #: new column therefore defaulted to being dropped in silence —
 #: `codename` was added, stored correctly, and never appeared in a
 #: single response. The same mistake cost `remediation` in bulk.py.
-_EXPLICIT = {"slack_token_set", "slack_delivery", "slack_private",
-             "slack_private_effective", "total_targets", "total_services",
-             "total_vulns", "total_pocs"}
+_EXPLICIT = {"slack_token_set", "slack_active", "slack_delivery",
+             "slack_private", "slack_private_effective", "total_targets",
+             "total_services", "total_vulns", "total_pocs"}
 _COPY = tuple(k for k in ProjectOut.model_fields
               if k not in _EXPLICIT and hasattr(Project, k))
 
 
-def _out(row, site_private: bool = True) -> ProjectOut:
+def _out(row, cfg: dict | None = None) -> ProjectOut:
+    """One project row, as the API returns it.
+
+    Takes the whole settings dict rather than a single flag: two of the
+    derived fields need site settings, and passing the dict means the
+    third one does not come with another signature change.
+    """
+    cfg = cfg or {}
     p = row[0]
+    site_private = bool(cfg.get("slack.default_private", True))
+    site_token = bool(str(cfg.get("slack.bot_token") or "").strip())
+    delivery = (p.slack_delivery or "site").lower()
+    own = bool((p.slack_token or "").strip())
     return ProjectOut(
         **{k: getattr(p, k) for k in _COPY},
-        slack_token_set=bool(p.slack_token),
-        slack_delivery=p.slack_delivery or "site",
+        slack_token_set=own,
+        # Whether a notification would actually arrive, which is not the
+        # same question as whether this project overrides the token. A
+        # project on the site-wide bot has no override and working
+        # Slack; the list used to show those two cases identically.
+        slack_active=((delivery in ("site", "both") and site_token)
+                      or (delivery in ("override", "both") and own)),
+        slack_delivery=delivery,
         slack_private=p.slack_private,
         slack_private_effective=(site_private if p.slack_private is None
                                  else bool(p.slack_private)),
@@ -122,8 +139,8 @@ async def list_projects(
         "status": Project.status, "updated_at": Project.updated_at,
     })
     rows, total = await paginate(session, stmt, limit, offset)
-    sp = bool((await load_all(session)).get("slack.default_private", True))
-    return Page[ProjectOut](items=[_out(r, sp) for r in rows], total=total,
+    cfg = await load_all(session)
+    return Page[ProjectOut](items=[_out(r, cfg) for r in rows], total=total,
                             limit=limit, offset=offset)
 
 
@@ -131,7 +148,7 @@ async def list_projects(
 async def get_project(project: str, pr: Project = Depends(require_project("readonly")),
                       session: AsyncSession = Depends(get_session)):
     row = (await session.execute(_counts_query().where(Project.id == pr.id))).first()
-    return _out(row, bool((await load_all(session)).get("slack.default_private", True)))
+    return _out(row, await load_all(session))
 
 
 @router.post("", response_model=ProjectCreated, status_code=201)
@@ -151,7 +168,6 @@ async def create_project(body: ProjectCreateFull,
         raise HTTPException(409, f"project {body.code!r} already exists")
 
     cfg = await load_all(session)
-    sp = bool(cfg.get("slack.default_private", True))
     # Selecting override/both without a token would silently post nowhere.
     delivery = body.slack_delivery
     if delivery != "site" and not body.slack_token:
@@ -217,7 +233,14 @@ async def create_project(body: ProjectCreateFull,
         if (pr.slack_delivery or "site") != "site" and pr.slack_token:
             token = pr.slack_token
         if token:
-            made = await slack.ensure_channel(token, pr.slack_channel, bool(sp))
+            # The project's own setting wins, falling back to the site
+            # default — the same resolution `slack_private_effective`
+            # reports. This used to read the site default alone, so an
+            # engagement created with slack_private=true got a public
+            # channel whenever the site default was public.
+            private = (bool(cfg.get("slack.default_private", True))
+                       if pr.slack_private is None else bool(pr.slack_private))
+            made = await slack.ensure_channel(token, pr.slack_channel, private)
             if made.ok:
                 await slack.announce(
                     session, pr,
@@ -238,7 +261,7 @@ async def create_project(body: ProjectCreateFull,
         acl_rows.append(AclOut(id=a.id, project_code=pr.code, role=a.role,
                                username=au.username if au else None, group=None))
     return ProjectCreated(
-        project=_out(row, sp),
+        project=_out(row, cfg),
         scope=[ScopeEntryOut.model_validate(x) for x in scope_rows],
         contacts=[ContactOut.model_validate(x) for x in contact_rows],
         members=acl_rows, scope_errors=scope_errors, member_errors=member_errors)
@@ -341,8 +364,7 @@ async def add_scope(project: str, body: ScopeAdd,
         select(ProjectScope).where(ProjectScope.project_id == pr.id)
         .order_by(ProjectScope.kind, ProjectScope.value))).scalars().all()
     row = (await session.execute(_counts_query().where(Project.id == pr.id))).first()
-    sp = bool((await load_all(session)).get("slack.default_private", True))
-    return ProjectCreated(project=_out(row, sp),
+    return ProjectCreated(project=_out(row, await load_all(session)),
                           scope=[ScopeEntryOut.model_validate(x) for x in rows],
                           contacts=[], members=[], scope_errors=errors, member_errors=[])
 
@@ -591,9 +613,8 @@ async def project_config(project: str,
                   ProjectScope.value))).scalars().all()
     idx = await index_for(session, pr.id)
     row = (await session.execute(_counts_query().where(Project.id == pr.id))).first()
-    sp = bool((await load_all(session)).get("slack.default_private", True))
     return ProjectConfigOut(
-        project=_out(row, sp),
+        project=_out(row, await load_all(session)),
         scope=[ScopeEntryOut.model_validate(x) for x in rows],
         scope_defined=idx.defined,
         allowlist_active=bool(idx.inc.has_hosts or idx.inc.countries))
@@ -657,7 +678,7 @@ async def update_project(project: str, body: ProjectUpdate,
             await slack.announce(session, pr, slack.engagement_stopped(label))
     await broker.publish("projects", action="update", project=pr.code)
     row = (await session.execute(_counts_query().where(Project.id == pr.id))).first()
-    return _out(row, bool((await load_all(session)).get("slack.default_private", True)))
+    return _out(row, await load_all(session))
 
 
 @router.delete("/{project}/slack-token", status_code=204)

@@ -294,7 +294,12 @@ export default function App() {
       const next: Route = { view: 'targets', project: c }
       push(next)
       setRoute(next)
-    }} />,
+    }}
+      onConfigure={(c) => {
+        const next: Route = { view: 'settings', project: c }
+        push(next)
+        setRoute(next)
+      }} />,
     targets: <TargetsView project={scope} />,
     services: <ServicesView project={scope} />,
     vulns: <VulnsView project={scope} />,

@@ -11,6 +11,12 @@ export interface Project {
   description: string | null; status: string
   /** The token itself is never returned — only whether an override exists. */
   slack_token_set: boolean
+  /** Whether a notification posted now would reach a channel. Distinct
+   *  from `slack_token_set`: a project on the site-wide bot has no
+   *  override of its own and working Slack. */
+  slack_active: boolean
+  /** site | override | both — which token(s) the project posts through. */
+  slack_delivery: string
   slack_channel: string | null
   total_targets: number; total_services: number; total_vulns: number; total_pocs: number
   created_at: string; updated_at: string

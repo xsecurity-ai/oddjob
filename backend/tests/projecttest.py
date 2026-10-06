@@ -331,4 +331,55 @@ check("a project admin can", st == 204, f"status={st}")
 st, _ = call("/api/projects/DOOMED", token=admin)
 check("and it is gone", st == 404, f"status={st}")
 
+print("\n== whether Slack is live, vs whether it is overridden ==")
+# These are different questions and the list column used to answer the
+# second while being labelled as the first: an engagement on the
+# site-wide bot showed as "no Slack" with Slack working.
+call("/api/settings", "PATCH", {"values": {"slack.bot_token": ""}}, token=admin)
+call("/api/projects", "POST", {"code": "SLK", "name": "Slack inherit"},
+     token=admin)
+call("/api/projects", "POST",
+     {"code": "SLKOWN", "name": "Slack own", "slack_token": "xoxb-own",
+      "slack_delivery": "override"}, token=admin)
+
+
+def proj(code, tok=admin):
+    st, p = call(f"/api/projects/{code}", token=tok)
+    return p or {}
+
+
+p = proj("SLK")
+check("with no site token, an inheriting project is not live",
+      p.get("slack_active") is False, str(p.get("slack_active")))
+check("and it has no override of its own",
+      p.get("slack_token_set") is False, str(p.get("slack_token_set")))
+
+p = proj("SLKOWN")
+check("a project with its own token is live without a site one",
+      p.get("slack_active") is True, str(p.get("slack_active")))
+
+call("/api/settings", "PATCH",
+     {"values": {"slack.bot_token": "xoxb-site"}}, token=admin)
+p = proj("SLK")
+check("once a site token exists, the inheriting project is live",
+      p.get("slack_active") is True, str(p.get("slack_active")))
+check("while still holding no token of its own — the two differ",
+      p.get("slack_token_set") is False, str(p.get("slack_token_set")))
+
+# The reverse: set to use its own workspace, with nothing set. A site
+# token being present must not make this one look live, because
+# delivery=override means the site bot is not used.
+call("/api/projects/SLK", "PATCH",
+     {"slack_delivery": "override", "slack_token": "xoxb-tmp"}, token=admin)
+st, _ = call("/api/projects/SLK/slack-token", "DELETE", token=admin)
+p = proj("SLK")
+check("clearing the token also returns delivery to the site bot",
+      p.get("slack_delivery") == "site" and p.get("slack_active") is True,
+      f"{p.get('slack_delivery')} active={p.get('slack_active')}")
+
+st, lst = call("/api/projects?limit=200", token=admin)
+row = next((x for x in (lst or {}).get("items", []) if x["code"] == "SLKOWN"), {})
+check("the list says the same as the detail route",
+      row.get("slack_active") is True, str(row.get("slack_active")))
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

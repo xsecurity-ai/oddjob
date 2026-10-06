@@ -122,6 +122,10 @@ class ProjectOut(ProjectBase):
     id: int
     # The token itself is never returned — only whether an override exists.
     slack_token_set: bool = False
+    # Whether a notification posted now would reach a channel. A project
+    # on the site-wide bot is active with no override of its own, so
+    # this and `slack_token_set` answer genuinely different questions.
+    slack_active: bool = False
     slack_channel: str | None = None
     slack_delivery: str = "site"
     # None means "inherit the site default"; the resolved value is also given
