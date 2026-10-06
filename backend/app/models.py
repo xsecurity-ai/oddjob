@@ -937,3 +937,102 @@ class ImportJob(Base, TimestampMixin):
     error: Mapped[str | None] = mapped_column(Text)
     #: The ImportResult, as JSON, once it finishes.
     result: Mapped[str | None] = mapped_column(Text)
+
+
+class Agent(Base, TimestampMixin):
+    """A Jaws instance: a scanner the server tasks and talks to.
+
+    Two keys, because the two directions are not the same trust. The
+    agent proves itself to the server with `callback_key` on every
+    outbound connection; the server proves itself to the agent with
+    `call_in_key` when it reaches in. Only the hashes live here — a
+    dump of this table must not let anyone impersonate either side, and
+    the plaintext is shown exactly once, when the agent is enrolled.
+
+    The agent dials out and holds the connection open, so it works from
+    behind NAT with nothing exposed. `call_in_url` is the optional
+    reverse path, set by the agent itself when it is reachable, and is
+    a convenience for waking it rather than the channel the system
+    depends on.
+    """
+    __tablename__ = "agents"
+    __table_args__ = (Index("ix_agents_project_status", "project_id", "status"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: An agent belongs to one engagement. Tasking is scoped to it, so
+    #: a scanner enrolled for one client cannot be pointed at another.
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(128), index=True)
+    callback_key_hash: Mapped[str] = mapped_column(String(128))
+    call_in_key_hash: Mapped[str | None] = mapped_column(String(128))
+    call_in_url: Mapped[str | None] = mapped_column(String(300))
+
+    #: What it reported about itself on registration.
+    platform: Mapped[str | None] = mapped_column(String(32))     # linux|darwin|windows
+    arch: Mapped[str | None] = mapped_column(String(16))
+    version: Mapped[str | None] = mapped_column(String(32))
+    hostname: Mapped[str | None] = mapped_column(String(255))
+    #: Whether it is running with the privileges that SYN scanning and
+    #: raw sockets need. Recorded rather than assumed: a task that
+    #: silently fell back to a connect scan is a different scan, and a
+    #: report that does not say so is wrong.
+    privileged: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false")
+    #: JSON: {tool: version} for what it actually has installed.
+    tools: Mapped[str | None] = mapped_column(Text)
+
+    #: offline | online | disabled. `disabled` is an operator decision
+    #: and survives reconnection; offline is merely an observation.
+    status: Mapped[str] = mapped_column(
+        String(16), default="offline", server_default="offline", index=True)
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_ip: Mapped[str | None] = mapped_column(String(45))
+    notes: Mapped[str | None] = mapped_column(Text)
+
+
+class AgentTask(Base, TimestampMixin):
+    """One unit of work handed to an agent.
+
+    `kind` names the runner on the agent side; `args` is its JSON
+    input. Output comes back as the tool's own native format —
+    nmap -oX, masscan -oX — and is handed to the importer that already
+    reads it, so a scan run remotely lands exactly as one run locally.
+
+    Status is a deliberate ladder: queued -> claimed -> running ->
+    done|failed|cancelled. `claimed` exists so two agents polling the
+    same queue cannot both take the same task.
+    """
+    __tablename__ = "agent_tasks"
+    __table_args__ = (Index("ix_agent_tasks_agent_status", "agent_id", "status"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    agent_id: Mapped[int] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    requested_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
+
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    args: Mapped[str | None] = mapped_column(Text)              # JSON
+    status: Mapped[str] = mapped_column(
+        String(16), default="queued", server_default="queued", index=True)
+
+    #: What the agent sent back. `output` is the raw tool output and is
+    #: what gets imported; `summary` is for the UI; `stderr` is kept
+    #: because a tool that printed a warning and still succeeded is a
+    #: different outcome from one that worked cleanly.
+    output: Mapped[str | None] = mapped_column(Text)
+    stderr: Mapped[str | None] = mapped_column(Text)
+    summary: Mapped[str | None] = mapped_column(Text)
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    error: Mapped[str | None] = mapped_column(Text)
+    #: The format the output should be imported as, when it should be.
+    import_as: Mapped[str | None] = mapped_column(String(32))
+    #: The ImportResult once the output has been ingested.
+    import_result: Mapped[str | None] = mapped_column(Text)
+
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

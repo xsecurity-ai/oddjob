@@ -1,0 +1,566 @@
+// Package tasks runs one unit of work and produces something Oddjob
+// can read.
+//
+// The guiding rule: scanners are asked for their NATIVE output format
+// — nmap -oX, masscan -oX, nuclei -jsonl — and that is shipped home
+// unchanged. Oddjob already has a parser for each. Reformatting here
+// would mean two parsers for one format, which drift, and the one that
+// drifts is the one nobody is testing.
+package tasks
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/xsecurity-ai/oddjob/jaws/internal/recon"
+	"github.com/xsecurity-ai/oddjob/jaws/internal/tools"
+)
+
+type Result struct {
+	Status   string // done | failed
+	Output   string
+	Stderr   string
+	Summary  string
+	ExitCode int
+	Error    string
+}
+
+func failed(format string, a ...any) Result {
+	return Result{Status: "failed", Error: fmt.Sprintf(format, a...), ExitCode: -1}
+}
+
+// Runner executes one task kind.
+type Runner func(ctx context.Context, args map[string]any, workDir string) Result
+
+var Runners = map[string]Runner{
+	"nmap":       runNmap,
+	"masscan":    runMasscan,
+	"amass":      runAmass,
+	"gobuster":   runGobuster,
+	"nuclei":     runNuclei,
+	"httpx":      runHTTPX,
+	"nslookup":   runNSLookup,
+	"reverse_ip": runReverseIP,
+	"install":    runInstall,
+}
+
+// ---------------------------------------------------------------- args
+// subjects gathers the thing a task is meant to act on.
+//
+// Each runner wraps a tool that names its input differently -- nmap has
+// targets, amass a domain, gobuster a url, nslookup a query -- and the
+// first cut of this file passed that straight through. The result was
+// that an operator who had learned the shape for nmap got a hard
+// failure from nslookup for saying `targets`, which is the same word
+// meaning the same thing. Every runner now takes its native name *and*
+// `targets`/`target`, so one habit works across the catalogue and the
+// tool-specific name stays available for anyone who prefers it.
+func subjects(args map[string]any, names ...string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, n := range append(names, "targets", "target") {
+		for _, v := range list(args, n) {
+			if v != "" && !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
+func str(args map[string]any, key string) string {
+	if v, ok := args[key]; ok {
+		if s, ok := v.(string); ok {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
+}
+
+func list(args map[string]any, key string) []string {
+	v, ok := args[key]
+	if !ok {
+		return nil
+	}
+	switch t := v.(type) {
+	case []any:
+		var out []string
+		for _, x := range t {
+			if s, ok := x.(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, strings.TrimSpace(s))
+			}
+		}
+		return out
+	case string:
+		return strings.Fields(t)
+	}
+	return nil
+}
+
+// extraArgs are operator-supplied flags. They are split on whitespace
+// and passed as separate argv entries — never through a shell. There
+// is no shell in this process, so `; rm -rf /` in a target name is an
+// odd-looking hostname and nothing more.
+func extraArgs(args map[string]any) []string {
+	return strings.Fields(str(args, "extra"))
+}
+
+func targets(args map[string]any) []string { return subjects(args) }
+
+// ------------------------------------------------------------- running
+type execResult struct {
+	stdout, stderr string
+	code           int
+	err            error
+}
+
+func runCmd(ctx context.Context, limit time.Duration, name string,
+	argv ...string) execResult {
+
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, argv...)
+	var out, errb strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	err := cmd.Run()
+
+	r := execResult{stdout: out.String(), stderr: errb.String(), err: err}
+	if ee, ok := err.(*exec.ExitError); ok {
+		r.code = ee.ExitCode()
+	} else if err != nil {
+		r.code = -1
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		r.err = fmt.Errorf("timed out after %s", limit)
+	}
+	return r
+}
+
+func timeout(args map[string]any, def time.Duration) time.Duration {
+	if v, ok := args["timeout_seconds"]; ok {
+		if f, ok := v.(float64); ok && f > 0 {
+			return time.Duration(f) * time.Second
+		}
+	}
+	return def
+}
+
+// outFile stages a tool's -o output. Tools that write XML to a file
+// produce cleaner output than the same tool told to write to stdout,
+// which interleaves progress chatter on some versions.
+func outFile(workDir, kind, ext string) (string, func(), error) {
+	if err := os.MkdirAll(workDir, 0o700); err != nil {
+		return "", func() {}, err
+	}
+	f, err := os.CreateTemp(workDir, fmt.Sprintf("%s-*.%s", kind, ext))
+	if err != nil {
+		return "", func() {}, err
+	}
+	p := f.Name()
+	_ = f.Close()
+	return p, func() { _ = os.Remove(p) }, nil
+}
+
+func readOut(path string) string {
+	b, err := os.ReadFile(path) // #nosec G304 — path is ours, from CreateTemp
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// nmapArgv builds the command line. Split out from runNmap because the
+// flags have combinations nmap rejects outright, and the only way to
+// know we have not reintroduced one is to assert on the argv without
+// needing nmap, a network or root.
+func nmapArgv(args map[string]any, outPath string, tg []string, rawSockets bool) []string {
+	argv := []string{"-oX", outPath}
+	ports := str(args, "ports")
+	if ports != "" {
+		argv = append(argv, "-p", ports)
+	}
+	if str(args, "profile") == "quick" {
+		argv = append(argv, "-T4")
+		// -F and -p are mutually exclusive: nmap refuses the pair
+		// rather than preferring one, exits 1, and writes an XML file
+		// containing a successful-looking run of zero hosts. Only ask
+		// for the fast list when no explicit ports were given.
+		if ports == "" {
+			argv = append(argv, "-F")
+		}
+	} else {
+		argv = append(argv, "-sV")
+	}
+	// SYN only when we can actually do it. Asking for -sS without raw
+	// sockets makes nmap fall back to a connect scan silently: a
+	// different scan, louder on the wire, still labelled -sS in the
+	// report.
+	if rawSockets {
+		argv = append(argv, "-sS")
+	}
+	argv = append(argv, extraArgs(args)...)
+	return append(argv, tg...)
+}
+
+// --------------------------------------------------------------- nmap
+func runNmap(ctx context.Context, args map[string]any, workDir string) Result {
+	tg := targets(args)
+	if len(tg) == 0 {
+		return failed("nmap needs `targets`")
+	}
+	if tools.Path("nmap") == "" {
+		return failed("nmap is not installed on this agent")
+	}
+	path, cleanup, err := outFile(workDir, "nmap", "xml")
+	if err != nil {
+		return failed("staging output: %v", err)
+	}
+	defer cleanup()
+
+	raw, _ := tools.RawSocketCapable()
+	argv := nmapArgv(args, path, tg, raw)
+
+	r := runCmd(ctx, timeout(args, 2*time.Hour), "nmap", argv...)
+	xml := readOut(path)
+
+	// nmap exits 0 for a scan that ran, even when nothing was up.
+	// Non-zero means it did not run — a bad flag, a refused target, a
+	// permission problem. Reporting that as `done` turns "we never
+	// looked" into "we looked and found nothing", which is the one
+	// mistake that makes a coverage report actively misleading.
+	if r.code != 0 || r.err != nil {
+		detail := firstLine(r.stderr)
+		if detail == "" && r.err != nil {
+			detail = r.err.Error()
+		}
+		return Result{Status: "failed", Output: xml, Stderr: tail(r.stderr, 4000),
+			ExitCode: r.code,
+			Error:    fmt.Sprintf("nmap did not complete: %s", detail)}
+	}
+	priv, advice := tools.RawSocketCapable()
+	sum := fmt.Sprintf("nmap over %d target(s)", len(tg))
+	if !priv {
+		sum += " — unprivileged, connect scan: " + advice
+	}
+	return Result{Status: "done", Output: xml, Stderr: tail(r.stderr, 4000),
+		Summary: sum, ExitCode: r.code}
+}
+
+// ------------------------------------------------------------ masscan
+func runMasscan(ctx context.Context, args map[string]any, workDir string) Result {
+	tg := targets(args)
+	if len(tg) == 0 {
+		return failed("masscan needs `targets`")
+	}
+	if tools.Path("masscan") == "" {
+		return failed("masscan is not installed on this agent")
+	}
+	if ok, advice := tools.RawSocketCapable(); !ok {
+		// masscan does not degrade; it builds its own packets or it
+		// does nothing. Refusing beats a confusing crash.
+		return failed("masscan needs raw sockets: %s", advice)
+	}
+	path, cleanup, err := outFile(workDir, "masscan", "xml")
+	if err != nil {
+		return failed("staging output: %v", err)
+	}
+	defer cleanup()
+
+	ports := str(args, "ports")
+	if ports == "" {
+		ports = "80,443,8080,8443"
+	}
+	rate := str(args, "rate")
+	if rate == "" {
+		rate = "1000"
+	}
+	argv := []string{"-oX", path, "-p", ports, "--rate", rate}
+	argv = append(argv, extraArgs(args)...)
+	argv = append(argv, tg...)
+
+	r := runCmd(ctx, timeout(args, 4*time.Hour), "masscan", argv...)
+	xml := readOut(path)
+	// Same reasoning as nmap: a scan that did not run is not a scan
+	// that found nothing.
+	if r.code != 0 || r.err != nil {
+		detail := firstLine(r.stderr)
+		if detail == "" && r.err != nil {
+			detail = r.err.Error()
+		}
+		return Result{Status: "failed", Output: xml, Stderr: tail(r.stderr, 4000),
+			ExitCode: r.code,
+			Error:    fmt.Sprintf("masscan did not complete: %s", detail)}
+	}
+	return Result{Status: "done", Output: xml, Stderr: tail(r.stderr, 4000),
+		Summary: fmt.Sprintf("masscan %s at %s/s over %d range(s)",
+			ports, rate, len(tg)), ExitCode: r.code}
+}
+
+// -------------------------------------------------------------- amass
+func runAmass(ctx context.Context, args map[string]any, workDir string) Result {
+	// amass enumerates one zone at a time, so only the first is used --
+	// said plainly rather than silently dropping the rest.
+	ds := subjects(args, "domain", "domains")
+	if len(ds) == 0 {
+		return failed("amass needs `targets` (or `domain`)")
+	}
+	if len(ds) > 1 {
+		return failed(
+			"amass takes one domain per task; got %d (%s) — queue one task each",
+			len(ds), strings.Join(ds, ", "))
+	}
+	domain := ds[0]
+	if tools.Path("amass") == "" {
+		return failed("amass is not installed on this agent")
+	}
+	// Passive by default. Active enumeration sends traffic to the
+	// target's infrastructure, which is a scope decision, so it has to
+	// be asked for rather than assumed.
+	argv := []string{"enum", "-d", domain, "-nocolor"}
+	if str(args, "mode") != "active" {
+		argv = append(argv, "-passive")
+	}
+	argv = append(argv, extraArgs(args)...)
+
+	r := runCmd(ctx, timeout(args, 45*time.Minute), "amass", argv...)
+	names := uniqueLines(r.stdout)
+	return Result{
+		Status:   "done",
+		Output:   recon.JSON(map[string]any{"domain": domain, "names": names}),
+		Stderr:   tail(r.stderr, 4000),
+		Summary:  fmt.Sprintf("amass found %d name(s) under %s", len(names), domain),
+		ExitCode: r.code,
+	}
+}
+
+// ----------------------------------------------------------- gobuster
+func runGobuster(ctx context.Context, args map[string]any, workDir string) Result {
+	us := subjects(args, "url", "urls")
+	if len(us) == 0 {
+		return failed("gobuster needs `targets` (or `url`)")
+	}
+	if len(us) > 1 {
+		return failed(
+			"gobuster takes one url per task; got %d — queue one task each",
+			len(us))
+	}
+	url := us[0]
+	if tools.Path("gobuster") == "" {
+		return failed("gobuster is not installed on this agent")
+	}
+	wordlist := str(args, "wordlist")
+	if wordlist == "" {
+		wordlist = firstExisting(
+			"/usr/share/dirb/wordlists/common.txt",
+			"/usr/share/wordlists/dirb/common.txt",
+			"/usr/share/seclists/Discovery/Web-Content/common.txt",
+			"/opt/homebrew/share/dirb/wordlists/common.txt",
+		)
+	}
+	if wordlist == "" {
+		return failed("no wordlist: pass `wordlist`, or install one " +
+			"(dirb/seclists) on the agent")
+	}
+	if _, err := os.Stat(wordlist); err != nil {
+		return failed("wordlist %s: %v", wordlist, err)
+	}
+	argv := []string{"dir", "-u", url, "-w", wordlist, "-q", "--no-color"}
+	argv = append(argv, extraArgs(args)...)
+
+	r := runCmd(ctx, timeout(args, 60*time.Minute), "gobuster", argv...)
+	found := uniqueLines(r.stdout)
+	return Result{
+		Status: "done",
+		Output: recon.JSON(map[string]any{
+			"url": url, "wordlist": wordlist, "found": found}),
+		Stderr:   tail(r.stderr, 4000),
+		Summary:  fmt.Sprintf("gobuster: %d path(s) on %s", len(found), url),
+		ExitCode: r.code,
+	}
+}
+
+// ------------------------------------------------------ nuclei, httpx
+func runNuclei(ctx context.Context, args map[string]any, workDir string) Result {
+	tg := targets(args)
+	if len(tg) == 0 {
+		return failed("nuclei needs `targets`")
+	}
+	if tools.Path("nuclei") == "" {
+		return failed("nuclei is not installed on this agent")
+	}
+	path, cleanup, err := outFile(workDir, "nuclei", "jsonl")
+	if err != nil {
+		return failed("staging output: %v", err)
+	}
+	defer cleanup()
+	argv := []string{"-jsonl", "-o", path, "-silent", "-duc"}
+	for _, t := range tg {
+		argv = append(argv, "-u", t)
+	}
+	argv = append(argv, extraArgs(args)...)
+	r := runCmd(ctx, timeout(args, 2*time.Hour), "nuclei", argv...)
+	out := readOut(path)
+	return Result{Status: "done", Output: out, Stderr: tail(r.stderr, 4000),
+		Summary:  fmt.Sprintf("nuclei over %d target(s), %d finding(s)", len(tg), countLines(out)),
+		ExitCode: r.code}
+}
+
+func runHTTPX(ctx context.Context, args map[string]any, workDir string) Result {
+	tg := targets(args)
+	if len(tg) == 0 {
+		return failed("httpx needs `targets`")
+	}
+	if tools.Path("httpx") == "" {
+		return failed("httpx is not installed on this agent")
+	}
+	path, cleanup, err := outFile(workDir, "httpx", "jsonl")
+	if err != nil {
+		return failed("staging output: %v", err)
+	}
+	defer cleanup()
+	argv := []string{"-json", "-o", path, "-silent", "-duc"}
+	for _, t := range tg {
+		argv = append(argv, "-u", t)
+	}
+	argv = append(argv, extraArgs(args)...)
+	r := runCmd(ctx, timeout(args, 60*time.Minute), "httpx", argv...)
+	out := readOut(path)
+	return Result{Status: "done", Output: out, Stderr: tail(r.stderr, 4000),
+		Summary:  fmt.Sprintf("httpx over %d target(s), %d alive", len(tg), countLines(out)),
+		ExitCode: r.code}
+}
+
+// ------------------------------------------------------------- lookups
+func runNSLookup(ctx context.Context, args map[string]any, _ string) Result {
+	qs := subjects(args, "queries", "query", "names", "name")
+	if len(qs) == 0 {
+		return failed("nslookup needs `targets` (or `query`/`queries`)")
+	}
+	out := make([]*recon.Lookup, 0, len(qs))
+	resolved := 0
+	for _, q := range qs {
+		l := recon.NSLookup(ctx, q)
+		if l.Error == "" {
+			resolved++
+		}
+		out = append(out, l)
+	}
+	return Result{Status: "done", Output: recon.JSON(out),
+		Summary: fmt.Sprintf("resolved %d of %d", resolved, len(qs))}
+}
+
+func runReverseIP(ctx context.Context, args map[string]any, _ string) Result {
+	ips := subjects(args, "ips", "ip", "addresses", "address")
+	if len(ips) == 0 {
+		return failed("reverse_ip needs `targets` (or `ip`/`ips`)")
+	}
+	out := make([]*recon.ReverseIP, 0, len(ips))
+	total, partial := 0, false
+	for _, ip := range ips {
+		r := recon.ReverseIPLookup(ctx, ip)
+		total += len(r.Domains)
+		partial = partial || r.Partial
+		out = append(out, r)
+	}
+	sum := fmt.Sprintf("%d domain(s) across %d address(es)", total, len(ips))
+	if partial {
+		sum += " — at least one source did not answer, so this is a floor"
+	}
+	return Result{Status: "done", Output: recon.JSON(out), Summary: sum}
+}
+
+// ------------------------------------------------------------ install
+func runInstall(ctx context.Context, args map[string]any, _ string) Result {
+	want := list(args, "tools")
+	if len(want) == 0 {
+		return failed("install needs a `tools` list")
+	}
+	reports := tools.Ensure(ctx, want, tools.Privileged())
+	ok, bad := 0, 0
+	for _, r := range reports {
+		if r.Action == "failed" || r.Action == "unavailable" {
+			bad++
+		} else {
+			ok++
+		}
+	}
+	status := "done"
+	if ok == 0 {
+		status = "failed"
+	}
+	return Result{
+		Status:  status,
+		Output:  recon.JSON(reports),
+		Summary: fmt.Sprintf("%d ready, %d could not be installed", ok, bad),
+	}
+}
+
+// --------------------------------------------------------------- util
+func uniqueLines(s string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || seen[line] {
+			continue
+		}
+		seen[line] = true
+		out = append(out, line)
+	}
+	return out
+}
+
+func countLines(s string) int {
+	n := 0
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// firstLine is what a person needs: tools put the actual reason on
+// line one and a paragraph of usage after it.
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i > 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
+}
+
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "…" + s[len(s)-n:]
+}
+
+func firstExisting(paths ...string) string {
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// Decode turns the server's JSON args into a map.
+func Decode(raw json.RawMessage) map[string]any {
+	m := map[string]any{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &m)
+	}
+	return m
+}
+
+var _ = filepath.Join

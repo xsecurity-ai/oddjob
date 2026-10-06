@@ -225,3 +225,34 @@ async def assert_role_for_target(session: AsyncSession, user: User,
         raise HTTPException(404, "not found")
     if ROLE_ORDER[role] < ROLE_ORDER[minimum]:
         raise HTTPException(403, f"{minimum} required; you have {role}")
+
+
+# ------------------------------------------------------------ agent keys
+#: Jaws keys are 256 bits of randomness that we generate, not passwords
+#: a person chose, and they are checked on every heartbeat.
+#:
+#: So SHA-256 and not argon2. Argon2 is deliberately slow to make
+#: guessing a low-entropy secret expensive; against a key with 256 bits
+#: of entropy there is nothing to guess, and the slowness would instead
+#: be paid on every poll by every agent. The comparison is still
+#: constant-time, because the hash is the thing an attacker would try
+#: to match.
+AGENT_KEY_PREFIX = "jaws_"
+
+
+def new_agent_key() -> tuple[str, str]:
+    """-> (plaintext, hash). The plaintext is shown once and never stored."""
+    raw = AGENT_KEY_PREFIX + secrets.token_urlsafe(32)
+    return raw, _hash_key(raw)
+
+
+def _hash_key(raw: str) -> str:
+    import hashlib
+    return hashlib.sha256((raw or "").encode()).hexdigest()
+
+
+def verify_key(raw: str | None, hashed: str | None) -> bool:
+    """Constant-time check of a key against its stored hash."""
+    if not raw or not hashed:
+        return False
+    return secrets.compare_digest(_hash_key(raw), hashed)

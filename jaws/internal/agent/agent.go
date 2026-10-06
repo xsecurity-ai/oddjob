@@ -1,0 +1,216 @@
+// Package agent is the loop: register, heartbeat, run, report.
+package agent
+
+import (
+	"context"
+	"log"
+	"runtime"
+	"sync"
+	"time"
+
+	"github.com/xsecurity-ai/oddjob/jaws/internal/client"
+	"github.com/xsecurity-ai/oddjob/jaws/internal/config"
+	"github.com/xsecurity-ai/oddjob/jaws/internal/tasks"
+	"github.com/xsecurity-ai/oddjob/jaws/internal/tools"
+)
+
+type Agent struct {
+	cfg *config.Config
+	cli *client.Client
+
+	mu      sync.Mutex
+	busy    bool
+	current int
+	wake    chan struct{}
+}
+
+func New(cfg *config.Config) *Agent {
+	return &Agent{
+		cfg: cfg,
+		cli: client.New(cfg.Server, cfg.CallbackKey, cfg.Insecure),
+		// Buffered depth 1: a wake that arrives while one is already
+		// pending is the same wake. Blocking the caller — which is an
+		// inbound HTTP handler — would be worse.
+		wake: make(chan struct{}, 1),
+	}
+}
+
+// Wake asks the loop to poll now instead of at the next heartbeat.
+// Safe to call from the inbound API.
+func (a *Agent) Wake() {
+	select {
+	case a.wake <- struct{}{}:
+	default:
+	}
+}
+
+// Status is what the inbound API reports.
+func (a *Agent) Status() map[string]any {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	priv, advice := tools.RawSocketCapable()
+	return map[string]any{
+		"name":        a.cfg.Name,
+		"version":     config.Version,
+		"platform":    runtime.GOOS,
+		"arch":        runtime.GOARCH,
+		"privileged":  priv,
+		"privilege":   advice,
+		"busy":        a.busy,
+		"current_task": a.current,
+		"server":      a.cfg.Server,
+	}
+}
+
+// Register announces the agent, installing the baseline tools first so
+// the inventory it reports is the one it will actually have.
+func (a *Agent) Register(ctx context.Context) error {
+	priv, advice := tools.RawSocketCapable()
+	log.Printf("privilege: %s", advice)
+
+	log.Printf("ensuring baseline tools: %v", tools.Baseline)
+	for _, r := range tools.Ensure(ctx, tools.Baseline, tools.Privileged()) {
+		switch r.Action {
+		case "installed":
+			log.Printf("  installed %s %s", r.Tool, r.Version)
+		case "present":
+			log.Printf("  %s already present (%s)", r.Tool, r.Version)
+		default:
+			// Not fatal. An agent with three of four tools can still do
+			// three of four jobs, and the server is told what it has.
+			log.Printf("  %s: %s — %s", r.Tool, r.Action, r.Detail)
+		}
+	}
+
+	host, _ := hostname()
+	resp, err := a.cli.Register(ctx, client.RegisterReq{
+		Platform:   runtime.GOOS,
+		Arch:       runtime.GOARCH,
+		Version:    config.Version,
+		Hostname:   host,
+		Privileged: priv,
+		Tools:      tools.Installed(ctx),
+		CallInURL:  a.cfg.Advertise,
+	})
+	if err != nil {
+		return err
+	}
+	log.Printf("registered as agent %d on project %s (%s)",
+		resp.AgentID, resp.Project, resp.Note)
+	return nil
+}
+
+// Run is the main loop. It returns only when ctx is cancelled.
+func (a *Agent) Run(ctx context.Context) error {
+	if err := a.registerWithRetry(ctx); err != nil {
+		return err
+	}
+
+	tick := time.NewTicker(a.cfg.Heartbeat)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("shutting down")
+			return nil
+		case <-tick.C:
+		case <-a.wake:
+		}
+
+		resp, err := a.cli.Heartbeat(ctx)
+		if err != nil {
+			// Keep beating. A server restart or a brief network outage
+			// must not end the agent — it is typically on a host nobody
+			// will log back into for days.
+			log.Printf("heartbeat: %v", err)
+			continue
+		}
+		if resp.Task == nil {
+			continue
+		}
+		a.execute(ctx, resp.Task)
+	}
+}
+
+func (a *Agent) registerWithRetry(ctx context.Context) error {
+	delay := 2 * time.Second
+	for {
+		err := a.Register(ctx)
+		if err == nil {
+			return nil
+		}
+		log.Printf("register: %v (retrying in %s)", err, delay)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		if delay < 2*time.Minute {
+			delay *= 2
+		}
+	}
+}
+
+func (a *Agent) execute(ctx context.Context, t *client.Task) {
+	a.mu.Lock()
+	a.busy, a.current = true, t.ID
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		a.busy, a.current = false, 0
+		a.mu.Unlock()
+	}()
+
+	log.Printf("task %d: %s", t.ID, t.Kind)
+	if err := a.cli.StartTask(ctx, t.ID); err != nil {
+		log.Printf("task %d: could not mark running: %v", t.ID, err)
+	}
+
+	runner, ok := tasks.Runners[t.Kind]
+	if !ok {
+		a.report(ctx, t.ID, client.Result{Status: "failed", ExitCode: -1,
+			Error: "this agent has no runner for kind " + t.Kind +
+				" — it may be older than the server"})
+		return
+	}
+
+	start := time.Now()
+	// Recovered rather than allowed to crash: one malformed task must
+	// not take down an agent that is the only way onto that network.
+	res := func() (r tasks.Result) {
+		defer func() {
+			if p := recover(); p != nil {
+				r = tasks.Result{Status: "failed", ExitCode: -1,
+					Error: "panic in runner: " + toString(p)}
+			}
+		}()
+		return runner(ctx, tasks.Decode(t.Args), a.cfg.WorkDir)
+	}()
+
+	log.Printf("task %d: %s in %s — %s", t.ID, res.Status,
+		time.Since(start).Round(time.Second), res.Summary+res.Error)
+
+	a.report(ctx, t.ID, client.Result{
+		Status: res.Status, Output: res.Output, Stderr: res.Stderr,
+		Summary: res.Summary, ExitCode: res.ExitCode, Error: res.Error,
+	})
+}
+
+func (a *Agent) report(ctx context.Context, id int, r client.Result) {
+	if err := a.cli.SubmitResult(ctx, id, r); err != nil {
+		// The scan already ran against the client's estate. Saying so
+		// loudly is the least we can do; the operator can re-task.
+		log.Printf("task %d: RESULT LOST: %v", id, err)
+	}
+}
+
+func toString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	if e, ok := v.(error); ok {
+		return e.Error()
+	}
+	return "unknown"
+}

@@ -19,6 +19,8 @@ else, known or unknown, is refused.
 """
 from __future__ import annotations
 
+import re
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import (HTMLResponse, JSONResponse, RedirectResponse,
@@ -44,6 +46,9 @@ PUBLIC_EXACT = {
     "/api/auth/google/start",
     "/api/auth/google/callback",
     "/api/auth/google/status",
+    # See PUBLIC_PREFIX: these carry an agent key, not a session.
+    "/api/agents/register",
+    "/api/agents/heartbeat",
 }
 
 PUBLIC_PREFIX = (
@@ -51,9 +56,20 @@ PUBLIC_PREFIX = (
     "/api/auth/magic/",    # redeeming a link arrives with no session yet
 )
 
+# Jaws agents. NOT unauthenticated — they authenticate with an agent key,
+# which this middleware knows nothing about, so the route's own dependency
+# has to be the thing that checks. Matched exactly rather than by a
+# "/api/agents/tasks/" prefix: under a prefix, every route later added
+# below it is public by default, and the one that gets added is an
+# operator-facing one. The two routes an agent actually calls are both
+# of the form /api/agents/tasks/{int}/{verb}, so say that.
+PUBLIC_AGENT_ROUTE = re.compile(r"^/api/agents/tasks/\d+/(start|result)$")
+
 
 def is_public(path: str) -> bool:
-    return path in PUBLIC_EXACT or path.startswith(PUBLIC_PREFIX)
+    return (path in PUBLIC_EXACT
+            or path.startswith(PUBLIC_PREFIX)
+            or PUBLIC_AGENT_ROUTE.match(path) is not None)
 
 
 def has_credential(request: Request) -> bool:
