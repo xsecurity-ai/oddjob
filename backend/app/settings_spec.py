@@ -55,7 +55,7 @@ SPEC = [
      "help": "Falls back to ODDJOB_GOOGLE_CLIENT_SECRET when never set."},
     {"key": "auth.google_domains", "group": "Identity",
      "label": "Allowed email domains", "type": "text", "default": "",
-     "help": "Comma separated, e.g. method.security. EMPTY MEANS ANY GOOGLE "
+     "help": "Comma separated, e.g. acme.example. EMPTY MEANS ANY GOOGLE "
              "ACCOUNT CAN REGISTER — they join no groups and see nothing, but "
              "they do get an account."},
     {"key": "auth.google_redirect_uri", "group": "Identity",

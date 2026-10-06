@@ -55,10 +55,10 @@ check("unknown provider has nothing to test", st==404, f"status={st}")
 print("\n== writing ==")
 st,r=call("/api/settings","PATCH",{"values":{
     "site.name":"Method Oddjob","slack.bot_token":"xoxb-demo",
-    "auth.google_domains":"method.security","auth.allow_self_registration":True}},token=admin)
+    "auth.google_domains":"acme.example","auth.allow_self_registration":True}},token=admin)
 check("patch ok", st==200, f"status={st}")
 check("values saved", r["values"]["site.name"]=="Method Oddjob")
-check("ungated keys need no test", r["values"]["auth.google_domains"]=="method.security")
+check("ungated keys need no test", r["values"]["auth.google_domains"]=="acme.example")
 check("bool round-trips", r["values"]["auth.allow_self_registration"] is True)
 check("secrets marked set", r["secrets_set"]["slack.bot_token"] is True)
 check("secret value never returned", "smtp.password" not in r["values"])
