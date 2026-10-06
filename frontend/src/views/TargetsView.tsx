@@ -8,6 +8,7 @@ import { useAuth } from '../lib/auth'
 import { DataTable } from '../components/DataTable'
 import { useHostModal } from '../components/HostModal'
 import { ImportScanDialog } from '../components/ImportScanDialog'
+import { MergeTargetsDialog } from '../components/MergeTargetsDialog'
 import { DetectDomainsDialog } from '../components/DetectDomainsDialog'
 import {
   EnumerateMenu, TargetRowActions, type EnumerateAction, type RowAction,
@@ -94,6 +95,8 @@ export function TargetsView({ project }: { project: string | null }) {
   const { open } = useHostModal()
   const writable = canWrite(project)
   const [importing, setImporting] = useState(false)
+  // The target that would be absorbed and removed.
+  const [merging, setMerging] = useState<Target | null>(null)
   const [detecting, setDetecting] = useState(false)
   const [picking, setPicking] = useState(false)
   const [scanningRanges, setScanningRanges] = useState(false)
@@ -145,7 +148,8 @@ export function TargetsView({ project }: { project: string | null }) {
   }
 
   const onRowAction = (t: Target, a: RowAction) => {
-    if (a === 'nmap') setNmapOn([t.host])
+    if (a === 'merge') setMerging(t)
+    else if (a === 'nmap') setNmapOn([t.host])
     else if (a === 'find-hostname') {
       setLookup({ kind: 'reverse_ip', subjects: [addressOf(t)] })
     } else {
@@ -339,6 +343,10 @@ export function TargetsView({ project }: { project: string | null }) {
     <>
       {importing && project && (
         <ImportScanDialog project={project} onClose={() => setImporting(false)} />
+      )}
+      {merging && project && (
+        <MergeTargetsDialog project={project} source={merging}
+          candidates={rows} onClose={() => setMerging(null)} />
       )}
       {detecting && project && (
         <DetectDomainsDialog project={project} onClose={() => setDetecting(false)} />

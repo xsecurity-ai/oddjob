@@ -15,10 +15,11 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Alert, Box, Button, Chip, DialogActions, DialogContent, LinearProgress,
-  MenuItem, Stack, TextField, Tooltip, Typography, alpha,
+  Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions,
+  DialogContent, DialogTitle, LinearProgress, MenuItem, Stack, TextField,
+  Tooltip, Typography, alpha,
 } from '@mui/material'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { neon } from '../theme'
 import { Caveat, EnumerateDialog, chipSx } from './EnumerateBits'
@@ -101,6 +102,9 @@ function Row({ row, project, onBusy }: {
   const qc = useQueryClient()
   const [pick, setPick] = useState(row.options[0] ?? '')
   const [err, setErr] = useState<string | null>(null)
+  //: The name we tried to apply, when it turned out to belong to a
+  //: target that already exists.
+  const [merge, setMerge] = useState<string | null>(null)
 
   const apply = useMutation({
     mutationFn: () => api.enumerateResolve(project, {
@@ -161,9 +165,105 @@ function Row({ row, project, onBusy }: {
           this target's names just because they share its address.
         </Caveat>
       )}
-      {err && <Alert severity="error" variant="outlined"
-                     sx={{ mt: 1, fontSize: 11.5 }}>{err}</Alert>}
+      {err && (
+        <Alert severity="error" variant="outlined"
+          sx={{ mt: 1, fontSize: 11.5 }}
+          // The collision is not a dead end, it is the answer. The
+          // name already exists because this address and that name
+          // are the same host, which is precisely when combining them
+          // is the right move — so the way forward is offered here
+          // rather than leaving the operator to find it on the row.
+          action={/already has a target/.test(err) ? (
+            <Button size="small" onClick={() => setMerge(pick)}
+              sx={{ color: neon.pink, fontSize: 11 }}>
+              Combine them
+            </Button>
+          ) : undefined}>
+          {err}
+          {/already has a target/.test(err) && (
+            <Box sx={{ mt: 0.5, color: neon.muted }}>
+              That is usually because they are the same machine, found
+              once by address and once by name.
+            </Box>
+          )}
+        </Alert>
+      )}
+      {merge && (
+        <MergeConfirm project={project} source={row.target_host} into={merge}
+          onClose={(done) => {
+            setMerge(null)
+            if (done) { setErr(null); void qc.invalidateQueries() }
+          }} />
+      )}
     </Box>
+  )
+}
+
+/** Merging straight out of a name collision.
+ *
+ *  Narrower than the full dialog on purpose: both ends are already
+ *  known — the target being renamed, and the one whose name it wanted
+ *  — so there is nothing to choose, only a plan to read and approve. */
+function MergeConfirm({ project, source, into, onClose }: {
+  project: string; source: string; into: string
+  onClose: (done: boolean) => void
+}) {
+  const plan = useQuery({
+    queryKey: ['merge-plan', project, source, into],
+    queryFn: () => api.mergePlan(project, source, into),
+  })
+  const run = useMutation({
+    mutationFn: () => api.mergeTargets(project, source, into),
+    onSuccess: () => onClose(true),
+  })
+  const p = plan.data
+  const moved = p ? (p.services_moved + p.vulns_moved + p.pocs_moved
+                     + p.web_moved + p.implants_moved) : 0
+  return (
+    <Dialog open onClose={() => onClose(false)} maxWidth="xs" fullWidth>
+      <DialogTitle sx={{ color: neon.pink, fontSize: 15 }}>
+        Combine {source} into {into}?
+      </DialogTitle>
+      <DialogContent>
+        {plan.isFetching && <CircularProgress size={16} />}
+        {p && (
+          <Box sx={{ fontSize: 12.5, color: neon.text }}>
+            <div>
+              {moved === 0
+                ? `${source} holds no records of its own.`
+                : `${moved} record(s) move to ${into}, and ${source} is removed.`}
+            </div>
+            {p.service_conflicts.length > 0 && (
+              <Box sx={{ mt: 0.8, color: neon.muted }}>
+                Ports on both ({p.service_conflicts.join(', ')}) have their
+                records combined — nothing a scan saw is dropped.
+              </Box>
+            )}
+            {p.web_duplicates > 0 && (
+              <Box sx={{ mt: 0.8, color: neon.muted }}>
+                {p.web_duplicates} identical web capture(s) dropped as
+                duplicates. That is the only thing removed.
+              </Box>
+            )}
+            {p.warnings.map((w: string) => (
+              <Alert key={w} severity="warning" sx={{ mt: 1, fontSize: 11.5 }}>
+                {w}
+              </Alert>
+            ))}
+          </Box>
+        )}
+        {run.error ? <Alert severity="error" sx={{ mt: 1, fontSize: 11.5 }}>
+          {String(run.error)}</Alert> : null}
+      </DialogContent>
+      <DialogActions>
+        <Button size="small" onClick={() => onClose(false)}
+          sx={{ color: neon.muted }}>Cancel</Button>
+        <Button size="small" disabled={!p || run.isPending}
+          onClick={() => run.mutate()} sx={{ color: neon.pink }}>
+          {run.isPending ? 'Combining…' : 'Combine'}
+        </Button>
+      </DialogActions>
+    </Dialog>
   )
 }
 

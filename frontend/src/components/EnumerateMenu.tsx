@@ -12,6 +12,7 @@ import {
   MenuItem, Tooltip, Typography, alpha,
 } from '@mui/material'
 import DnsIcon from '@mui/icons-material/DnsOutlined'
+import MergeIcon from '@mui/icons-material/MergeTypeOutlined'
 import LanIcon from '@mui/icons-material/LanOutlined'
 import MoreVertIcon from '@mui/icons-material/MoreVert'
 import RadarIcon from '@mui/icons-material/RadarOutlined'
@@ -115,7 +116,7 @@ export function EnumerateMenu({ onPick, selectedCount, unnamedCount,
   )
 }
 
-export type RowAction = 'find-hostname' | 'find-ip' | 'nmap'
+export type RowAction = 'find-hostname' | 'find-ip' | 'nmap' | 'merge'
 
 /**
  * Per-target actions.
@@ -198,6 +199,17 @@ export function TargetRowActions({ kind, hasIp, hasName, allowed, onPick }: {
           </ListItemIcon>
           <ListItemText primaryTypographyProps={{ fontSize: 13 }}
             primary="Enumerate with nmap" />
+        </MenuItem>
+
+        <Divider sx={{ borderColor: alpha(neon.purple, 0.2) }} />
+        <MenuItem onClick={() => choose('merge')}>
+          <ListItemIcon sx={{ minWidth: 30, color: neon.pink }}>
+            <MergeIcon fontSize="small" />
+          </ListItemIcon>
+          <ListItemText primaryTypographyProps={{ fontSize: 13 }}
+            primary="Combine with another target"
+            secondary="When an address and a name turn out to be one host"
+            secondaryTypographyProps={{ fontSize: 11, color: neon.muted }} />
         </MenuItem>
       </Menu>
     </>

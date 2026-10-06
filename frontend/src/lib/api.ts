@@ -989,6 +989,29 @@ export const api = {
     `/api/projects/${encodeURIComponent(project)}/slack`,
     { method: 'PUT', body: JSON.stringify(body) }),
 
+  /** What merging one target into another would do. Writes nothing —
+   *  fetched and shown before the operator is asked to confirm. */
+  mergePlan: (project: string, host: string, into: string) => req<{
+    source: string; destination: string
+    services_moved: number; vulns_moved: number; pocs_moved: number
+    web_moved: number; implants_moved: number; events_moved: number
+    /** Ports on both sides. The records are combined, not dropped. */
+    service_conflicts: string[]
+    implant_conflicts: string[]
+    /** Byte-identical captures already held. The only thing a merge
+     *  actually removes. */
+    web_duplicates: number
+    fields_filled: string[]
+    fields_differing: string[]
+    warnings: string[]
+  }>('/api/enumerate/merge-plan' + qs({ project, host, into })),
+
+  /** Fold one target into another. The destination survives. */
+  mergeTargets: (project: string, host: string, into: string) =>
+    req<{ ok: boolean; surviving: string; removed: string; summary: string }>(
+      '/api/enumerate/merge' + qs({ project, host }),
+      { method: 'POST', body: JSON.stringify({ into, confirm: true }) }),
+
   // --- project scope ---
   // The shapes are written inline rather than as exported interfaces so
   // this block stays one contiguous addition; ProjectConfigView derives
