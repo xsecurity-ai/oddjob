@@ -882,4 +882,28 @@ export const api = {
         // Content-Type honest rather than sending `null`.
         body: JSON.stringify(answer === 'decline' ? {} : answer),
       }),
+  // --- user invites ---
+  /**
+   * Create an account from an email address and invite its owner to it,
+   * granting the projects named in one step.
+   *
+   * `password` is only for a deployment with no SMTP, where no invitation
+   * can be sent. With mail configured, leave it out: the account is created
+   * with no password at all until its owner sets one through the link.
+   *
+   * Collisions are 409s, never merges — the server will not attach an
+   * invitation to an account that already exists. `invited: false` with a
+   * 201 means the account and grants were created but the email did not go
+   * out; `detail` says why and the per-row Invite button retries.
+   */
+  inviteUser: (b: {
+    email: string
+    full_name?: string
+    /** Omit to let the server derive it from the address. */
+    username?: string
+    password?: string
+    grants: Array<{ project: string; role: string }>
+  }) => req<{ user: User; invited: boolean; detail: string; grants: Acl[] }>(
+    '/api/users/invite', { method: 'POST', body: JSON.stringify(b) }),
+  // --- end user invites ---
 }

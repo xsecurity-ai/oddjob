@@ -207,6 +207,30 @@ class InviteResult(BaseModel):
     detail: str
 
 
+async def deliver_invite(session: AsyncSession, user: User, cfg: dict) -> InviteResult:
+    """Issue a single-use link for `user` and mail it to them.
+
+    Shared by the invite endpoint and by invitation-driven account creation
+    in `auth.py`, so both produce the same email, the same TTL and the same
+    honest report. Never raises: every caller here is already authenticated
+    and privileged, so a delivery failure is theirs to see and retry rather
+    than a 500.
+    """
+    if not user.email:
+        return InviteResult(ok=False, detail=f"{user.username} has no email address set")
+    if not cfg.get("smtp.host"):
+        return InviteResult(ok=False, detail="SMTP is not configured — see Site Config")
+
+    token = await _issue(session, user, "invite")
+    subject, text = _email_body(cfg, token, "invite")
+    try:
+        await send_mail(cfg, user.email, subject, text)
+    except Exception as e:
+        return InviteResult(ok=False, detail=f"{type(e).__name__}: {e}")
+    await broker.publish("users", action="invited")
+    return InviteResult(ok=True, detail=f"invitation sent to {user.email}")
+
+
 @router.post("/invite/{username}", response_model=InviteResult)
 async def invite(username: str, _: User = Depends(require_site_admin),
                  session: AsyncSession = Depends(get_session)):
@@ -220,18 +244,4 @@ async def invite(username: str, _: User = Depends(require_site_admin),
         select(User).where(User.username == username.lower()))).scalar_one_or_none()
     if not u:
         raise HTTPException(404, f"no user {username!r}")
-    if not u.email:
-        return InviteResult(ok=False, detail=f"{u.username} has no email address set")
-
-    cfg = await load_all(session)
-    if not cfg.get("smtp.host"):
-        return InviteResult(ok=False, detail="SMTP is not configured — see Site Config")
-
-    token = await _issue(session, u, "invite")
-    subject, text = _email_body(cfg, token, "invite")
-    try:
-        await send_mail(cfg, u.email, subject, text)
-    except Exception as e:
-        return InviteResult(ok=False, detail=f"{type(e).__name__}: {e}")
-    await broker.publish("users", action="invited")
-    return InviteResult(ok=True, detail=f"invitation sent to {u.email}")
+    return await deliver_invite(session, u, await load_all(session))
