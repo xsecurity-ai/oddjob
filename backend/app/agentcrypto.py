@@ -9,7 +9,7 @@ that is a weak claim.
 So each side holds a private key the other never sees:
 
 - Oddjob has one identity for the whole instance, made on first use.
-- Each agent makes its own at enrolment. The private half never leaves
+- Each agent makes its own at enrollment. The private half never leaves
   the host it was made on, and the server stores only the public half,
   so a dump of this database cannot impersonate any agent.
 
@@ -67,7 +67,7 @@ NONCE_HEADER = "X-Jaws-Nonce"
 # the box that is explicitly reading everything.
 #
 # So the payload is sealed under a key only the two endpoints hold,
-# derived from the X25519 halves they exchanged at enrolment, and TLS
+# derived from the X25519 halves they exchanged at enrollment, and TLS
 # is kept underneath for everything else it is good for. A middlebox
 # sees an opaque envelope to a URL it can read, which is the most we
 # can give away and still be reachable.

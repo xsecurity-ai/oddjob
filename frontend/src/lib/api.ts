@@ -296,14 +296,14 @@ export interface JawsAgent {
   enrolled_pending: boolean
   created_at: string | null
 }
-/** Shown once, at enrolment. None of it is recoverable afterwards. */
+/** Shown once, at enrollment. None of it is recoverable afterwards. */
 export interface AgentEnrolled {
   agent: JawsAgent
   callback_key: string
   call_in_key: string
   /** One-time. The agent trades it for a keypair it generates itself. */
-  enrol_token: string
-  enrol_expires_at: string
+  enroll_token: string
+  enroll_expires_at: string
   /** This Oddjob's public key. The agent pins it, so it will only ever
    *  take tasking from this instance. */
   server_public_key: string
@@ -788,7 +788,7 @@ export const api = {
   // enrolled into one project, tasked only from that project, and its
   // results import only there.
   agents: (project: string) => req<JawsAgent[]>('/api/agents' + qs({ project })),
-  enrolAgent: (project: string, body: {
+  enrollAgent: (project: string, body: {
     name: string; connection_mode?: string; target_os?: string; notes?: string
   }) =>
     req<AgentEnrolled>('/api/agents' + qs({ project }),

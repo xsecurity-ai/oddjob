@@ -1047,7 +1047,7 @@ class Agent(Base, TimestampMixin):
     call_in_url: Mapped[str | None] = mapped_column(String(300))
 
     #: The agent's Ed25519 public key, base64 raw. The private half is
-    #: made on the agent's own host at enrolment and never sent, so what
+    #: made on the agent's own host at enrollment and never sent, so what
     #: is stored here cannot impersonate it -- unlike the key hashes
     #: above, which authenticate a secret that existed in two places.
     #: Null for an agent enrolled before identities existed; those still
@@ -1065,13 +1065,13 @@ class Agent(Base, TimestampMixin):
     #: sealed under a key only the two endpoints hold.
     kex_public_key: Mapped[str | None] = mapped_column(String(64))
 
-    #: One-time enrolment. The token is what the operator pastes into
+    #: One-time enrollment. The token is what the operator pastes into
     #: the agent once; the agent exchanges it for an identity and it is
-    #: burned. Short-lived, because an unused enrolment token lying in
+    #: burned. Short-lived, because an unused enrollment token lying in
     #: a terminal history is a way onto the engagement.
-    enrol_token_hash: Mapped[str | None] = mapped_column(String(128))
-    enrol_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    enrol_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    enroll_token_hash: Mapped[str | None] = mapped_column(String(128))
+    enroll_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    enroll_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     #: callback | call_in. Which way the connection is made. Callback is
     #: the default and the one that works from inside a client network

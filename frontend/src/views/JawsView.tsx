@@ -18,7 +18,12 @@ import { DataTable } from '../components/DataTable'
 import { neon, glow } from '../theme'
 
 const STATUS_COLOUR: Record<string, string> = {
-  online: neon.green, offline: neon.muted, disabled: neon.red,
+  // `busy` is its own colour because it is not a degraded state: the
+  // agent is working. It stopped heartbeating only because it runs one
+  // task at a time, and showing it grey alongside genuinely dead
+  // agents was how a healthy long scan looked like a failure.
+  online: neon.green, busy: neon.cyan, offline: neon.muted,
+  disabled: neon.red,
 }
 
 const OS_LABEL: Record<string, string> = {
@@ -112,8 +117,8 @@ function DeployWizard({ project, onClose }:
   const [os, setOs] = useState<'linux' | 'darwin' | 'windows'>('linux')
   const [done, setDone] = useState<AgentEnrolled | null>(null)
 
-  const enrol = useMutation({
-    mutationFn: () => api.enrolAgent(project, {
+  const enroll = useMutation({
+    mutationFn: () => api.enrollAgent(project, {
       name: name.trim(), connection_mode: mode, target_os: os,
     }),
     onSuccess: (e) => {
@@ -128,7 +133,7 @@ function DeployWizard({ project, onClose }:
   const cmd = done ? [
     `${bin} run \\`,
     `  --server ${origin} \\`,
-    `  --enrol ${done.enrol_token} \\`,
+    `  --enroll ${done.enroll_token} \\`,
     ...(mode === 'call_in'
       ? [`  --listen 0.0.0.0:7777 \\`, `  --advertise https://this-host:7777 \\`]
       : []),
@@ -200,7 +205,7 @@ function DeployWizard({ project, onClose }:
             </Typography>
             <TextField size="small" label="Name" value={name} autoFocus
               onChange={(e) => setName(e.target.value)} sx={{ maxWidth: 320 }} />
-            {enrol.error ? <Alert severity="error">{String(enrol.error)}</Alert> : null}
+            {enroll.error ? <Alert severity="error">{String(enroll.error)}</Alert> : null}
           </Stack>
         )}
 
@@ -252,9 +257,9 @@ function DeployWizard({ project, onClose }:
           </Button>
         )}
         {step === 2 && (
-          <Button disabled={!name.trim() || enrol.isPending}
-            onClick={() => enrol.mutate()} sx={{ color: neon.green }}>
-            {enrol.isPending ? 'Enrolling…' : 'Enrol'}
+          <Button disabled={!name.trim() || enroll.isPending}
+            onClick={() => enroll.mutate()} sx={{ color: neon.green }}>
+            {enroll.isPending ? 'Enrolling…' : 'Enroll'}
           </Button>
         )}
         {step === 3 && (
@@ -443,8 +448,11 @@ export function JawsView({ project }: { project: string | null }) {
       valueGetter: (v) => v ?? '',
       renderCell: (p) => (
         <Tooltip title={p.value ? new Date(String(p.value)).toLocaleString() : ''}>
-          <Box sx={{ color: p.row.status === 'online' ? neon.green : neon.muted }}>
-            {ago(p.value ? String(p.value) : null)}
+          <Box sx={{ color: STATUS_COLOUR[p.row.status] ?? neon.muted }}>
+            {p.row.status === 'busy'
+              // The number would read as neglect; it is the opposite.
+              ? 'running a task'
+              : ago(p.value ? String(p.value) : null)}
           </Box>
         </Tooltip>
       ),
@@ -490,19 +498,19 @@ export function JawsView({ project }: { project: string | null }) {
       renderCell: (p) => {
         if (!p.row.has_identity) {
           return (
-            <Tooltip title="Enrolled before end-to-end encryption existed; it authenticates with a bearer key and its payload is protected only by TLS. Re-enrol to fix.">
+            <Tooltip title="Enrolled before end-to-end encryption existed; it authenticates with a bearer key and its payload is protected only by TLS. Re-enroll to fix.">
               <Chip size="small" label="legacy" sx={{ height: 18, fontSize: 10,
                 color: neon.red, bgcolor: alpha(neon.red, 0.12) }} />
             </Tooltip>
           )
         }
         return p.value ? (
-          <Tooltip title="Payload sealed end to end under keys exchanged at enrolment — unreadable even to a TLS-terminating proxy in between">
+          <Tooltip title="Payload sealed end to end under keys exchanged at enrollment — unreadable even to a TLS-terminating proxy in between">
             <Chip size="small" label="sealed" sx={{ height: 18, fontSize: 10,
               color: neon.green, bgcolor: alpha(neon.green, 0.12) }} />
           </Tooltip>
         ) : (
-          <Tooltip title="Signed but not sealed: results are protected only by whatever TLS is between this agent and Oddjob. Re-enrol to establish an encrypted channel.">
+          <Tooltip title="Signed but not sealed: results are protected only by whatever TLS is between this agent and Oddjob. Re-enroll to establish an encrypted channel.">
             <Chip size="small" label="TLS only" sx={{ height: 18, fontSize: 10,
               color: neon.yellow, bgcolor: alpha(neon.yellow, 0.14) }} />
           </Tooltip>

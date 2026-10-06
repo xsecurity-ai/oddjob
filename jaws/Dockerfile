@@ -27,8 +27,8 @@
 # capabilities is a smaller grant than a normal user account on the
 # host, and the container is the boundary that matters here.
 #
-# Identity and spool live on a volume. The enrolment token is one-time:
-# lose the identity and the agent cannot re-enrol, it has to be created
+# Identity and spool live on a volume. The enrollment token is one-time:
+# lose the identity and the agent cannot re-enroll, it has to be created
 # again in Oddjob. Lose the spool and you lose results for scans that
 # already ran against the client's estate. Neither belongs in a
 # container layer.
@@ -71,7 +71,7 @@ COPY --from=build /out/gospider /usr/local/bin/gospider
 # WorkDir holds identity.json (0600, the agent's private key) and the
 # spool of results not yet delivered. Declared as a volume so a
 # `docker run` that forgets `-v` still does not lose them on restart —
-# the enrolment token is one-time, so a lost identity means creating
+# the enrollment token is one-time, so a lost identity means creating
 # the agent again in Oddjob, and a lost spool means losing results for
 # scans that already ran against someone's estate.
 RUN mkdir -p /var/lib/jaws/work

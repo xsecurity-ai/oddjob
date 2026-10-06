@@ -89,14 +89,14 @@ type HeartbeatResp struct {
 	Reason   string `json:"reason"`
 }
 
-// EnrolReq trades a one-time token for an identity.
-type EnrolReq struct {
-	EnrolToken   string `json:"enrol_token"`
+// EnrollReq trades a one-time token for an identity.
+type EnrollReq struct {
+	EnrollToken  string `json:"enroll_token"`
 	PublicKey    string `json:"public_key"`
 	KexPublicKey string `json:"kex_public_key,omitempty"`
 }
 
-type EnrolResp struct {
+type EnrollResp struct {
 	OK                 bool   `json:"ok"`
 	AgentID            int    `json:"agent_id"`
 	Project            string `json:"project"`
@@ -109,14 +109,14 @@ type EnrolResp struct {
 	ConnectionMode string `json:"connection_mode"`
 }
 
-// Enrol runs before there is any identity, so it is the one call that
+// Enroll runs before there is any identity, so it is the one call that
 // carries no credential but the token itself.
-func (c *Client) Enrol(ctx context.Context, token, pub, kexPub string) (*EnrolResp, error) {
+func (c *Client) Enroll(ctx context.Context, token, pub, kexPub string) (*EnrollResp, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	var out EnrolResp
-	err := c.do(ctx, "POST", "/api/agents/enrol",
-		EnrolReq{EnrolToken: token, PublicKey: pub, KexPublicKey: kexPub}, &out)
+	var out EnrollResp
+	err := c.do(ctx, "POST", "/api/agents/enroll",
+		EnrollReq{EnrollToken: token, PublicKey: pub, KexPublicKey: kexPub}, &out)
 	return &out, err
 }
 

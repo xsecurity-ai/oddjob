@@ -23,7 +23,7 @@ import (
 // furniture. TLS alone means that box reads everything.
 //
 // So the body is sealed under a key derived from the X25519 halves
-// swapped at enrolment, and TLS stays underneath for what it is good
+// swapped at enrollment, and TLS stays underneath for what it is good
 // for. Standard primitives throughout: X25519, HKDF-SHA256,
 // ChaCha20-Poly1305. The construction must match the server's exactly
 // — see backend/app/agentcrypto.py, and the pinned vectors in the

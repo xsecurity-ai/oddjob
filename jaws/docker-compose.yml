@@ -6,8 +6,8 @@
 # nothing in common with the server but a route to it.
 #
 #   1. Create the agent in Oddjob (Jaws → Deploy a Jaws). Copy the
-#      one-time enrolment token.
-#   2. JAWS_SERVER=https://oddjob.example JAWS_ENROL_TOKEN=... \
+#      one-time enrollment token.
+#   2. JAWS_SERVER=https://oddjob.example JAWS_ENROLL_TOKEN=... \
 #        docker compose up -d
 #   3. The token is spent on first run. From then on the identity in
 #      the volume is what authenticates, and the variable can go.
@@ -51,7 +51,7 @@ services:
       # engagements ends up talking to the wrong client's server.
       JAWS_SERVER: ${JAWS_SERVER:?set JAWS_SERVER to the Oddjob URL}
       # One-time, from the deploy wizard. Unset after first run.
-      JAWS_ENROL_TOKEN: ${JAWS_ENROL_TOKEN:-}
+      JAWS_ENROLL_TOKEN: ${JAWS_ENROLL_TOKEN:-}
       JAWS_WORKDIR: /var/lib/jaws/work
 
     command:
@@ -63,7 +63,7 @@ services:
 
     volumes:
       # The agent's private key and any results it has not managed to
-      # deliver yet. The enrolment token is single-use, so losing this
+      # deliver yet. The enrollment token is single-use, so losing this
       # means creating the agent again in Oddjob; losing the spool
       # means losing results for scans that already ran against the
       # client's estate. A named volume, not a bind mount, so it is not

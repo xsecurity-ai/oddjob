@@ -50,7 +50,8 @@ PUBLIC_EXACT = {
     "/api/agents/register",
     "/api/agents/heartbeat",
     # The one-time token is the credential here; there is no identity yet.
-    "/api/agents/enrol",
+    "/api/agents/enroll",
+    "/api/agents/enrol",      # the old spelling, still answered
 }
 
 PUBLIC_PREFIX = (

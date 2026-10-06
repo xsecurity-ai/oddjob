@@ -69,3 +69,8 @@ __pycache__/
 # parallelised; committing them as gitlinks points at branches that do
 # not exist for anyone else.
 .claude/worktrees/
+
+# `make build` writes the host binary into the source tree. It is
+# 7 MB of build output and it got committed once by `git add -A`.
+/jaws/jaws
+/jaws/jaws.exe

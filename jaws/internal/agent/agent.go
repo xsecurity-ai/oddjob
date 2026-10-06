@@ -53,7 +53,7 @@ func New(cfg *config.Config) *Agent {
 }
 
 // VerifyServer checks an inbound call against the server this agent
-// pinned at enrolment.
+// pinned at enrollment.
 //
 // Lives on the Agent rather than being satisfied by *Identity
 // directly, for two reasons that both bit:
@@ -64,7 +64,7 @@ func New(cfg *config.Config) *Agent {
 // request — a crash reachable by anyone who could open the port.
 //
 // And the identity does not exist when the listener is built: it is
-// created during enrolment, which happens later. Capturing it at
+// created during enrollment, which happens later. Capturing it at
 // construction meant capturing nothing, permanently. Read here, under
 // the lock, it is whatever the agent currently has.
 func (a *Agent) VerifyServer(method, path string, body []byte,
@@ -164,7 +164,7 @@ func (a *Agent) Register(ctx context.Context) error {
 	return announce("ready")
 }
 
-// ensureIdentity loads this agent's keypair, or trades an enrolment
+// ensureIdentity loads this agent's keypair, or trades an enrollment
 // token for one.
 //
 // Done before anything else talks to the server, because from here on
@@ -178,7 +178,7 @@ func (a *Agent) ensureIdentity(ctx context.Context) error {
 		// so a silent replacement would just fail to authenticate
 		// with a confusing message.
 		return fmt.Errorf("%s exists but cannot be read (%w) — move it "+
-			"aside and enrol this agent again", path, err)
+			"aside and enroll this agent again", path, err)
 	}
 	if id != nil {
 		a.id = id
@@ -191,20 +191,20 @@ func (a *Agent) ensureIdentity(ctx context.Context) error {
 			// client's findings in the clear should be noisy about it.
 			log.Printf("WARNING: agent %d on %s has no key-agreement key — "+
 				"results travel unsealed, protected only by whatever TLS "+
-				"is between here and the server. Re-enrol to fix.",
+				"is between here and the server. Re-enroll to fix.",
 				id.AgentID, id.Project)
 		}
 		return nil
 	}
 
-	if a.cfg.EnrolToken == "" {
+	if a.cfg.EnrollToken == "" {
 		if a.cfg.CallbackKey != "" {
 			// An older agent, or one deliberately run on a key. It
 			// still works; it is simply not the stronger scheme.
 			log.Printf("no identity — authenticating with the callback key")
 			return nil
 		}
-		return fmt.Errorf("nothing to authenticate with: pass --enrol with " +
+		return fmt.Errorf("nothing to authenticate with: pass --enroll with " +
 			"the token Oddjob showed when this agent was created")
 	}
 
@@ -217,7 +217,7 @@ func (a *Agent) ensureIdentity(ctx context.Context) error {
 		return fmt.Errorf("generating a key-agreement pair: %w", err)
 	}
 	log.Printf("enrolling with a one-time token")
-	resp, err := a.cli.Enrol(ctx, a.cfg.EnrolToken, pub, kexPub)
+	resp, err := a.cli.Enroll(ctx, a.cfg.EnrollToken, pub, kexPub)
 	if err != nil {
 		return fmt.Errorf("enrolling: %w", err)
 	}
@@ -247,7 +247,7 @@ func (a *Agent) ensureIdentity(ctx context.Context) error {
 		// failure to persist means this agent cannot be recovered
 		// without enrolling again. Say exactly that.
 		return fmt.Errorf("enrolled as agent %d but could not save the "+
-			"identity to %s (%w) — the token is spent, so enrol again "+
+			"identity to %s (%w) — the token is spent, so enroll again "+
 			"once the path is writable", resp.AgentID, path, err)
 	}
 	a.id = id

@@ -728,6 +728,129 @@ async def clear_agent_token(project: str, which: str,
     await session.commit()
 
 
+# ----------------------------------------------------- slack for a project
+class SlackConfigOut(BaseModel):
+    """What this engagement will actually do with Slack, resolved.
+
+    Resolved rather than raw, because three of these are not stored on
+    the project and a page showing only the stored fields would be
+    misleading. A project with no channel still has one — derived from
+    the codename and the site prefix — and whether anything is sent at
+    all depends on tokens, not on the channel.
+    """
+    #: True when at least one destination resolves. This is the
+    #: question people actually mean by "is Slack on for this project".
+    active: bool
+    #: Where it posts, whether that was set here or derived.
+    channel: str
+    #: False when the name above came from the codename and the site
+    #: prefix rather than being chosen. Worth showing: it is a real
+    #: channel name that will be posted to either way.
+    channel_is_explicit: bool
+    delivery: str = Field(description="site | override | both")
+    #: Whether each side has a token. Never the tokens themselves.
+    site_token_set: bool
+    project_token_set: bool
+    private: bool
+    #: Why it is off, when it is. An empty string when it is on.
+    inactive_reason: str = ""
+
+
+class SlackConfigIn(BaseModel):
+    #: Omitted leaves it alone; empty string clears it back to derived.
+    channel: str | None = None
+    delivery: str | None = None
+    #: Set a workspace token for this engagement. Empty string is
+    #: "leave it", matching the site-settings rule; clearing is the
+    #: existing DELETE route.
+    token: str | None = None
+    private: bool | None = None
+    #: Create the channel in Slack if it is not there yet.
+    create: bool = False
+
+
+async def _slack_config(session: AsyncSession, pr: Project) -> SlackConfigOut:
+    cfg = await load_all(session)
+    site = str(cfg.get("slack.bot_token") or "").strip()
+    own = (pr.slack_token or "").strip()
+    delivery = (pr.slack_delivery or "site").lower()
+    explicit = (pr.slack_channel or "").strip()
+    channel = explicit or (
+        (str(cfg.get("slack.channel_prefix") or "eng-")
+         + (pr.codename or pr.code or "").lower()).strip("-"))
+    dests = await _slack_channels(session, pr)
+
+    why = ""
+    if not dests:
+        if delivery == "site" and not site:
+            why = ("no site-wide bot token is configured, and this project "
+                   "is set to use it")
+        elif delivery == "override" and not own:
+            why = ("this project is set to use its own workspace token, "
+                   "and none is set")
+        elif not site and not own:
+            why = "no bot token anywhere"
+        else:
+            why = "no destination resolves"
+    return SlackConfigOut(
+        active=bool(dests), channel=channel,
+        channel_is_explicit=bool(explicit), delivery=delivery,
+        site_token_set=bool(site), project_token_set=bool(own),
+        private=bool(pr.slack_private if pr.slack_private is not None
+                     else cfg.get("slack.default_private", False)),
+        inactive_reason=why)
+
+
+@router.get("/{project}/slack", response_model=SlackConfigOut)
+async def read_slack_config(pr: Project = Depends(require_project("readonly")),
+                            _: User = Depends(get_current_user),
+                            session: AsyncSession = Depends(get_session)):
+    return await _slack_config(session, pr)
+
+
+@router.put("/{project}/slack", response_model=SlackConfigOut)
+async def write_slack_config(body: SlackConfigIn,
+                             pr: Project = Depends(require_project("admin")),
+                             _: User = Depends(get_current_user),
+                             session: AsyncSession = Depends(get_session)):
+    """Set where this engagement posts, and optionally create it.
+
+    Admin, because a channel name decides who can read an engagement's
+    findings as they are filed.
+    """
+    if body.delivery is not None:
+        if body.delivery not in ("site", "override", "both"):
+            raise HTTPException(422, "delivery is site, override or both")
+        pr.slack_delivery = body.delivery
+    if body.channel is not None:
+        # Normalised the same way everywhere else does it, so the name
+        # stored is the name Slack will accept.
+        pr.slack_channel = normalise_channel(body.channel)
+    if body.token is not None and body.token.strip():
+        pr.slack_token = body.token.strip()
+    if body.private is not None:
+        pr.slack_private = body.private
+    await session.commit()
+    await session.refresh(pr)
+
+    out = await _slack_config(session, pr)
+    if body.create:
+        dests = await _slack_channels(session, pr)
+        if not dests:
+            raise HTTPException(
+                409, f"cannot create the channel: {out.inactive_reason}")
+        token = dests[0][0]
+        r = await slack.ensure_channel(token, out.channel, out.private)
+        if not r.ok:
+            # Surfaced rather than swallowed: a channel that was not
+            # created is one nothing will arrive in, and the settings
+            # above saved regardless.
+            raise HTTPException(
+                502, f"settings saved, but creating #{out.channel} failed: "
+                     f"{r.error}")
+    return out
+
+
 # ------------------------------------------------- slack membership
 class SlackMeOut(BaseModel):
     """Whether to ask this person for their Slack handle, and with what."""

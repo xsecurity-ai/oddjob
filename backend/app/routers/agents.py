@@ -1,4 +1,4 @@
-"""Jaws agents: enrolment, the task queue, and results coming home.
+"""Jaws agents: enrollment, the task queue, and results coming home.
 
 **The agent dials out.** Jaws opens a websocket to the server and keeps
 it open; the server never has to reach it. That is what makes it work
@@ -11,7 +11,7 @@ depends on.
 key on every connection. The server proves itself with a separate
 call-in key when it reaches in. Only hashes are stored: a dump of the
 agents table must not let anyone impersonate either side. Each
-plaintext is shown exactly once, at enrolment.
+plaintext is shown exactly once, at enrollment.
 
 **Results come back as the tool's own output.** An nmap task returns
 nmap XML, a masscan task returns masscan XML, and the server hands it
@@ -34,7 +34,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,10 +63,10 @@ INSTALLABLE = ("amass", "nmap", "masscan", "gobuster", "gospider", "nuclei",
                "httpx", "subfinder", "ffuf", "whatweb", "nikto", "dnsx",
                "naabu")
 
-#: How long an unused enrolment token stays good. Short, because a
+#: How long an unused enrollment token stays good. Short, because a
 #: token sitting in a terminal history or a chat message is a way onto
 #: the engagement, and the operator is normally pasting it immediately.
-ENROL_TTL = timedelta(hours=2)
+ENROLL_TTL = timedelta(hours=2)
 
 #: Task kinds the agent knows how to run, and the importer that reads
 #: each one's output. None means the result is not a scan import.
@@ -126,17 +126,17 @@ class AgentOut(BaseModel):
 
 
 class AgentEnrolled(BaseModel):
-    """Returned once, at enrolment. None of this is recoverable later."""
+    """Returned once, at enrollment. None of this is recoverable later."""
     agent: AgentOut
     callback_key: str = Field(description="Give this to Jaws. It authenticates "
                                           "the agent to the server.")
     call_in_key: str = Field(description="Jaws requires this on inbound calls, "
                                          "so the agent can tell the server from "
                                          "anyone else who finds the port.")
-    enrol_token: str = Field(
+    enroll_token: str = Field(
         description="One-time. The agent exchanges it for an identity on "
                     "first run and it is burned.")
-    enrol_expires_at: datetime = Field(
+    enroll_expires_at: datetime = Field(
         description="After this the token is refused and the agent must be "
                     "enrolled again.")
     server_public_key: str = Field(
@@ -144,7 +144,7 @@ class AgentEnrolled(BaseModel):
                     "it will only ever take tasking from this instance.")
 
 
-class EnrolIn(BaseModel):
+class EnrollIn(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     notes: str | None = None
     connection_mode: str = Field(
@@ -264,7 +264,7 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         sealed=bool(a.kex_public_key),
         # Enrolled, token still good, never connected. Distinct from
         # "offline", which means it connected once and then stopped.
-        enrolled_pending=bool(a.enrol_token_hash) and not a.public_key,
+        enrolled_pending=bool(a.enroll_token_hash) and not a.public_key,
         created_at=a.created_at)
 
 
@@ -283,13 +283,26 @@ def _task_out(t: AgentTask, code: str) -> TaskOut:
         started_at=t.started_at, finished_at=t.finished_at)
 
 
-def _stale(a: Agent) -> str:
-    """Offline is an observation, disabled is a decision."""
+def _stale(a: Agent, in_flight: int = 0) -> str:
+    """Offline is an observation, disabled is a decision, busy is neither.
+
+    `busy` exists because the agent runs one task at a time and does
+    not heartbeat while it is running one. A scan lasting longer than
+    OFFLINE_AFTER therefore made a perfectly healthy agent read as
+    offline — which is wrong on the screen and worse in `primary`
+    routing, where it looked like the primary had died and handed the
+    engagement to a standby in the middle of its scan.
+
+    A task claimed by this agent is itself evidence it is alive: it
+    asked for it, and nothing else could have.
+    """
     if a.status == "disabled":
         return "disabled"
     seen = _aware(a.last_seen)
     if seen and (datetime.now(timezone.utc) - seen) < OFFLINE_AFTER:
         return "online"
+    if in_flight > 0:
+        return "busy"
     return "offline"
 
 
@@ -334,17 +347,28 @@ def _regions_of(a: Agent) -> set[str]:
 
 
 async def _eligible_agents(session: AsyncSession, project_id: int) -> list[Agent]:
-    """Agents that could take work right now, best first.
+    """Agents that are present, best first.
 
-    Online and not disabled. Ordered by priority then id so the order
-    is total -- with ties broken arbitrarily, two agents could each
-    believe they are next.
+    Present, not idle. A busy agent is included on purpose: it is the
+    primary's turn whether or not it happens to be mid-scan, and
+    dropping it would hand the engagement to a standby every time a
+    scan ran longer than a heartbeat interval. Nothing is pushed at an
+    agent anyway -- work is only ever handed over when one asks -- so
+    counting a busy agent as present cannot give it work it cannot do.
+
+    Ordered by priority then id so the order is total; with ties broken
+    arbitrarily, two agents could each believe they are next.
     """
     rows = (await session.execute(
         select(Agent).where(Agent.project_id == project_id,
                             Agent.status != "disabled")
         .order_by(Agent.priority, Agent.id))).scalars().all()
-    return [a for a in rows if _stale(a) == "online"]
+    busy = {aid for (aid,) in (await session.execute(
+        select(AgentTask.agent_id).where(
+            AgentTask.project_id == project_id,
+            AgentTask.status.in_(("claimed", "running"))).distinct())).all()}
+    return [a for a in rows
+            if _stale(a, 1 if a.id in busy else 0) in ("online", "busy")]
 
 
 async def _may_claim(session: AsyncSession, project: Project, agent: Agent,
@@ -559,11 +583,11 @@ async def _project_code(session: AsyncSession, project_id: int) -> str:
 
 # ------------------------------------------------------ operator routes
 @router.post("", response_model=AgentEnrolled, status_code=201)
-async def enrol(body: EnrolIn, project: str = Query(...),
+async def enroll(body: EnrollIn, project: str = Query(...),
                 pr: Project = Depends(require_project("admin")),
                 user: User = Depends(get_current_user),
                 session: AsyncSession = Depends(get_session)):
-    """Enrol an agent and mint its two keys.
+    """Enroll an agent and mint its two keys.
 
     Admin on the project, because enrolling an agent creates something
     that can run privileged commands on a machine and send their output
@@ -579,19 +603,19 @@ async def enrol(body: EnrolIn, project: str = Query(...),
     cb_raw, cb_hash = new_agent_key()
     ci_raw, ci_hash = new_agent_key()
     tok_raw, tok_hash = new_agent_key()
-    expires = datetime.now(timezone.utc) + ENROL_TTL
+    expires = datetime.now(timezone.utc) + ENROLL_TTL
     a = Agent(project_id=pr.id, name=body.name.strip(),
               callback_key_hash=cb_hash, call_in_key_hash=ci_hash,
-              enrol_token_hash=tok_hash, enrol_expires_at=expires,
+              enroll_token_hash=tok_hash, enroll_expires_at=expires,
               connection_mode=body.connection_mode, target_os=body.target_os,
               notes=body.notes, status="offline")
     session.add(a)
     await session.commit()
     await session.refresh(a)
-    await broker.publish("agents", action="enrol", project=pr.code)
+    await broker.publish("agents", action="enroll", project=pr.code)
     return AgentEnrolled(agent=_agent_out(a, pr.code),
                          callback_key=cb_raw, call_in_key=ci_raw,
-                         enrol_token=tok_raw, enrol_expires_at=expires,
+                         enroll_token=tok_raw, enroll_expires_at=expires,
                          server_public_key=server_pub)
 
 
@@ -618,10 +642,10 @@ async def list_agents(project: str | None = Query(None),
 
     out = []
     for a in rows:
-        a.status = _stale(a)
         # Claimed counts as in flight: the agent has taken it and the
         # operator is waiting on it, which is what the column means.
         running = counts.get((a.id, "running"), 0) + counts.get((a.id, "claimed"), 0)
+        a.status = _stale(a, running)
         out.append(_agent_out(a, pr.code, counts.get((a.id, "queued"), 0), running))
     return out
 
@@ -751,7 +775,7 @@ async def reach_agent(agent_id: int,
     alive?" when the heartbeat is merely late.
 
     The request is signed with this instance's private key. The agent
-    pinned the matching public key at enrolment and checks it, so
+    pinned the matching public key at enrollment and checks it, so
     reaching an agent proves to *it* that the caller is the Oddjob it
     enrolled with -- not merely someone who found the port.
     """
@@ -1056,7 +1080,10 @@ async def import_task_result(agent_id: int, task_id: int,
 # --------------------------------------------------------- agent routes
 class IdentityIn(BaseModel):
     """What the agent presents once, to trade a token for an identity."""
-    enrol_token: str
+    #: `enrol_token` was the original spelling. Accepted as an alias so
+    #: an agent built before the rename can still redeem a token.
+    enroll_token: str = Field(validation_alias=AliasChoices(
+        "enroll_token", "enrol_token"))
     public_key: str = Field(description="Ed25519, base64 raw. The agent made "
                                         "this on its own host; the private "
                                         "half is not sent.")
@@ -1065,7 +1092,11 @@ class IdentityIn(BaseModel):
                           "which an agent older than this field will do.")
 
 
-@router.post("/enrol", response_model=dict)
+#: The British spelling this route shipped with. Kept as an alias
+#: because a deployed agent binary holding a fresh token should not be
+#: bricked by a spelling change, and the cost of keeping it is a line.
+@router.post("/enrol", response_model=dict, include_in_schema=False)
+@router.post("/enroll", response_model=dict)
 async def claim_identity(body: IdentityIn,
                          session: AsyncSession = Depends(get_session)):
     """Trade a one-time token for a mutual identity.
@@ -1081,10 +1112,10 @@ async def claim_identity(body: IdentityIn,
     and short-lived, so a burned-on-success token cannot be replayed to
     register a second key against the same agent.
     """
-    tok = (body.enrol_token or "").strip()
+    tok = (body.enroll_token or "").strip()
     key = (body.public_key or "").strip()
     if not tok or not key:
-        raise HTTPException(422, "both enrol_token and public_key are required")
+        raise HTTPException(422, "both enroll_token and public_key are required")
     try:
         if len(agentcrypto.unb64(key)) != 32:
             raise ValueError
@@ -1094,18 +1125,18 @@ async def claim_identity(body: IdentityIn,
     now = datetime.now(timezone.utc)
     match: Agent | None = None
     for a in (await session.execute(
-            select(Agent).where(Agent.enrol_token_hash.is_not(None)))).scalars():
-        if verify_key(tok, a.enrol_token_hash or ""):
+            select(Agent).where(Agent.enroll_token_hash.is_not(None)))).scalars():
+        if verify_key(tok, a.enroll_token_hash or ""):
             match = a
             break
     if match is None:
-        raise HTTPException(401, "unknown or already-used enrolment token")
-    if match.enrol_used_at is not None:
-        raise HTTPException(409, "this enrolment token has already been used")
-    expires = _aware(match.enrol_expires_at)
+        raise HTTPException(401, "unknown or already-used enrollment token")
+    if match.enroll_used_at is not None:
+        raise HTTPException(409, "this enrollment token has already been used")
+    expires = _aware(match.enroll_expires_at)
     if expires and expires < now:
         raise HTTPException(
-            401, "this enrolment token has expired — enrol the agent again")
+            401, "this enrollment token has expired — enroll the agent again")
 
     match.public_key = key
     kex = (body.kex_public_key or "").strip()
@@ -1116,9 +1147,9 @@ async def claim_identity(body: IdentityIn,
         except Exception:
             raise HTTPException(422, "kex_public_key must be a base64 X25519 key")
         match.kex_public_key = kex
-    match.enrol_used_at = now
+    match.enroll_used_at = now
     # Burned, so the same token cannot register a second key later.
-    match.enrol_token_hash = None
+    match.enroll_token_hash = None
     _, server_pub = await server_identity(session)
     _, server_kex_pub = await server_kex(session)
     code = await _project_code(session, match.project_id)

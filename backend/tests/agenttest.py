@@ -1,6 +1,6 @@
-"""Jaws agent enrolment, tasking, result delivery and adjudication.
+"""Jaws agent enrollment, tasking, result delivery and adjudication.
 
-The shape under test is the one an agent actually walks: enrol from the
+The shape under test is the one an agent actually walks: enroll from the
 UI, register with the key, heartbeat until a task is handed over, mark it
 running, post the tool output back, and then -- because a result arrives
 with no operator attached and is therefore imported in strict mode with
@@ -72,10 +72,10 @@ admin = call("/api/auth/setup", "POST",
              {"username": "root", "password": "root-password-1"})[1]["access_token"]
 call("/api/projects", "POST", {"code": "AGENT", "name": "Agent test"}, token=admin)
 
-print("== enrolment ==")
+print("== enrollment ==")
 st, en = call("/api/agents?project=AGENT", "POST",
               {"name": "test-agent"}, token=admin)
-check("enrol accepted", st == 201, f"status={st} {str(en)[:140]}")
+check("enroll accepted", st == 201, f"status={st} {str(en)[:140]}")
 KEY = (en or {}).get("callback_key")
 AID = ((en or {}).get("agent") or {}).get("id")
 check("a callback key is issued once, in the clear",
@@ -268,7 +268,7 @@ def raw(path, method="GET", body=None, headers=None):
 st, en2 = call("/api/agents?project=AGENT", "POST",
                {"name": "signed-agent", "connection_mode": "callback",
                 "target_os": "linux"}, token=admin)
-check("enrol returns a one-time token", st == 201 and bool(en2.get("enrol_token")),
+check("enroll returns a one-time token", st == 201 and bool(en2.get("enroll_token")),
       f"status={st}")
 check("and this instance's public key to pin",
       isinstance(en2.get("server_public_key"), str)
@@ -286,23 +286,23 @@ st, _ = call("/api/agents?project=AGENT", "POST",
 check("an unknown connection mode is refused", st == 422, f"status={st}")
 
 priv, pub = keypair()
-st, _ = raw("/api/agents/enrol", "POST",
-            {"enrol_token": "not-the-token", "public_key": pub})
-check("a wrong enrolment token is refused", st == 401, f"status={st}")
-st, _ = raw("/api/agents/enrol", "POST",
-            {"enrol_token": en2["enrol_token"], "public_key": "not-base64!!"})
+st, _ = raw("/api/agents/enroll", "POST",
+            {"enroll_token": "not-the-token", "public_key": pub})
+check("a wrong enrollment token is refused", st == 401, f"status={st}")
+st, _ = raw("/api/agents/enroll", "POST",
+            {"enroll_token": en2["enroll_token"], "public_key": "not-base64!!"})
 check("a malformed public key is refused", st == 422, f"status={st}")
 
-st, claimed = raw("/api/agents/enrol", "POST",
-                  {"enrol_token": en2["enrol_token"], "public_key": pub})
+st, claimed = raw("/api/agents/enroll", "POST",
+                  {"enroll_token": en2["enroll_token"], "public_key": pub})
 check("the token exchanges for an identity", st == 200, f"status={st} {str(claimed)[:120]}")
 check("and the agent learns which project it serves",
       (claimed or {}).get("project") == "AGENT", str(claimed)[:120])
 check("and gets the same server key to pin",
       (claimed or {}).get("server_public_key") == en2["server_public_key"])
 
-st, _ = raw("/api/agents/enrol", "POST",
-            {"enrol_token": en2["enrol_token"], "public_key": pub})
+st, _ = raw("/api/agents/enroll", "POST",
+            {"enroll_token": en2["enroll_token"], "public_key": pub})
 check("the token is burned and cannot be reused", st in (401, 409), f"status={st}")
 
 print("== signatures, and no downgrade ==")
@@ -381,8 +381,8 @@ for nm, prio, regions in (("tokyo", 50, "jp"), ("dublin", 10, "eu"),
                           ("virginia", 20, "us-east")):
     st, e = call("/api/agents?project=AGENT", "POST", {"name": nm}, token=admin)
     pv, pb = keypair()
-    raw("/api/agents/enrol", "POST",
-        {"enrol_token": e["enrol_token"], "public_key": pb})
+    raw("/api/agents/enroll", "POST",
+        {"enroll_token": e["enroll_token"], "public_key": pb})
     call(f"/api/agents/{e['agent']['id']}?project=AGENT", "PATCH",
          {"priority": prio, "regions": regions}, token=admin)
     fleet[nm] = {"id": e["agent"]["id"], "priv": pv}
@@ -581,10 +581,10 @@ st, en3 = call("/api/agents?project=AGENT", "POST", {"name": "sealed"}, token=ad
 A3 = en3["agent"]["id"]
 spriv3, spub3 = keypair()
 kpriv3, kpub3 = kexpair()
-st, claimed3 = raw("/api/agents/enrol", "POST",
-                   {"enrol_token": en3["enrol_token"], "public_key": spub3,
+st, claimed3 = raw("/api/agents/enroll", "POST",
+                   {"enroll_token": en3["enroll_token"], "public_key": spub3,
                     "kex_public_key": kpub3})
-check("enrolment accepts a key-agreement half", st == 200, f"status={st}")
+check("enrollment accepts a key-agreement half", st == 200, f"status={st}")
 check("and the server hands back its own", 
       len(_b64.b64decode((claimed3 or {}).get("server_kex_public_key") or "")) == 32,
       str(claimed3)[:120])
@@ -665,6 +665,64 @@ check("a sealed scan result arrives intact", row.get("status") == "done",
       str(row.get("status")))
 imp = row.get("import_result") or {}
 check("and is imported as usual", imp.get("hosts_seen") == 1, str(imp)[:100])
+
+
+print("== a busy agent is not a dead one ==")
+# The agent runs one task at a time and does not heartbeat while it is
+# running one. A scan lasting longer than OFFLINE_AFTER therefore made
+# a healthy agent read as offline — wrong on screen, and worse in
+# primary routing, where it looked like the primary had died and the
+# engagement was handed to a standby mid-scan.
+import asyncio as _asyncio
+import datetime as _dt
+from sqlalchemy import update as _update
+from app.db import SessionLocal as _SL
+from app.models import Agent as _Agent
+
+
+async def _age_heartbeat(agent_id, seconds):
+    """Push an agent's last_seen into the past, as a long scan would."""
+    async with _SL() as s:
+        await s.execute(_update(_Agent).where(_Agent.id == agent_id).values(
+            last_seen=_dt.datetime.now(_dt.timezone.utc)
+            - _dt.timedelta(seconds=seconds)))
+        await s.commit()
+
+
+st, enb = call("/api/agents?project=AGENT", "POST", {"name": "longscan"},
+               token=admin)
+AB = enb["agent"]["id"]
+KB = enb["callback_key"]
+call("/api/agents/register", "POST",
+     {"platform": "linux", "arch": "amd64", "privileged": True}, key=KB)
+
+st, tb = call(f"/api/agents/{AB}/tasks?project=AGENT", "POST",
+              {"kind": "nmap", "args": {"targets": ["slow.example"]}}, token=admin)
+call("/api/agents/heartbeat", "POST", {}, key=KB)          # claims it
+call(f"/api/agents/tasks/{tb['id']}/start", "POST", {}, key=KB)
+
+_asyncio.run(_age_heartbeat(AB, 600))                       # ten minutes
+
+st, rows = call("/api/agents?project=AGENT", token=admin)
+me = next((a for a in (rows or []) if a["id"] == AB), {})
+check("an agent mid-task reads as busy, not offline",
+      me.get("status") == "busy", str(me.get("status")))
+check("and its in-flight count says why", me.get("running_tasks") == 1,
+      str(me.get("running_tasks")))
+
+st, rt = call("/api/agents/routing?project=AGENT", token=admin)
+check("a busy agent still counts as present for routing",
+      (rt or {}).get("eligible", 0) >= 1, str(rt)[:110])
+
+# Now finish it: with nothing in flight and a stale heartbeat, offline
+# is the right answer and must still be reachable.
+call(f"/api/agents/tasks/{tb['id']}/result", "POST",
+     {"status": "done", "output": "", "exit_code": 0}, key=KB)
+_asyncio.run(_age_heartbeat(AB, 600))
+st, rows = call("/api/agents?project=AGENT", token=admin)
+me = next((a for a in (rows or []) if a["id"] == AB), {})
+check("once idle and stale, it is offline again",
+      me.get("status") == "offline", str(me.get("status")))
 
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

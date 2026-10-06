@@ -177,7 +177,7 @@ func TestIdentityFileIsPrivateAndSurvivesReload(t *testing.T) {
 
 func TestLoadingNothingIsNotAnError(t *testing.T) {
 	// A first run has no identity. That is ordinary, not a failure, and
-	// treating it as one would make the agent refuse to enrol.
+	// treating it as one would make the agent refuse to enroll.
 	id, err := Load(filepath.Join(t.TempDir(), "absent.json"))
 	if err != nil || id != nil {
 		t.Errorf("missing identity: got (%v, %v), want (nil, nil)", id, err)

@@ -54,7 +54,7 @@ export function useFleet(project: string | null): Fleet {
   let caution: string | null = null
   if (!loading && !list.length) {
     blocked = `No Jaws agent is enrolled on ${project}. Enumeration runs on `
-            + `an agent, not from this browser — enrol one on the Jaws page `
+            + `an agent, not from this browser — enroll one on the Jaws page `
             + `first. Queueing now would leave work nothing picks up, which `
             + `is indistinguishable from a scan in progress.`
   } else if (!loading && !live.length) {

@@ -139,7 +139,7 @@ func TestHealthNeedsNothing(t *testing.T) {
 	}
 }
 
-// identityFor builds an Identity the way enrolment does, without
+// identityFor builds an Identity the way enrollment does, without
 // touching the filesystem.
 func identityFor(agentPriv, serverPub string) (Verifier, error) {
 	return identity.FromParts(agentPriv, serverPub)

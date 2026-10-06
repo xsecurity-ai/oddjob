@@ -568,10 +568,10 @@ def build(session: AsyncSession, project: Project | None, user: User,
                 "unknown_hosts": [u.get("host") for u in
                                   (imp or {}).get("unknown_hosts", [])]}
 
-    async def enrol_jaws(name: str, target_os: str = "linux",
+    async def enroll_jaws(name: str, target_os: str = "linux",
                          connection_mode: str = "callback") -> dict:
         """Create an agent and return what the operator must run."""
-        from ..routers.agents import ENROL_TTL, server_identity
+        from ..routers.agents import ENROLL_TTL, server_identity
         from ..security import new_agent_key
         if pid is None or project is None:
             return {"error": "enrolling needs one engagement in view"}
@@ -591,10 +591,10 @@ def build(session: AsyncSession, project: Project | None, user: User,
         cb_raw, cb_hash = new_agent_key()
         ci_raw, ci_hash = new_agent_key()
         tok_raw, tok_hash = new_agent_key()
-        expires = datetime.now(timezone.utc) + ENROL_TTL
+        expires = datetime.now(timezone.utc) + ENROLL_TTL
         a = Agent(project_id=pid, name=name.strip(),
                   callback_key_hash=cb_hash, call_in_key_hash=ci_hash,
-                  enrol_token_hash=tok_hash, enrol_expires_at=expires,
+                  enroll_token_hash=tok_hash, enroll_expires_at=expires,
                   connection_mode=connection_mode, target_os=target_os,
                   status="offline")
         session.add(a)
@@ -605,10 +605,10 @@ def build(session: AsyncSession, project: Project | None, user: User,
             "project": project.code,
             # Returned once. It is a credential, so it is said plainly
             # that it will not be shown again.
-            "enrol_token": tok_raw,
+            "enroll_token": tok_raw,
             "expires_at": expires.isoformat(),
             "run": (f"jaws run --server <this oddjob url> "
-                    f"--enrol {tok_raw} --name {a.name}"),
+                    f"--enroll {tok_raw} --name {a.name}"),
             "note": ("this token is shown once and is good for a short "
                      "while; the agent trades it for a keypair it makes "
                      "itself, and will then only take tasking from this "
@@ -638,7 +638,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
              "are waiting on a decision about unknown hosts.",
              _obj({"task_id": {"type": "integer"}}, ["task_id"]),
              jaws_task_status),
-        Tool("enrol_jaws",
+        Tool("enroll_jaws",
              "Create a new Jaws agent for this engagement and return the "
              "one-time command to run on the host. Admin only.",
              _obj({"name": {"type": "string"},
@@ -646,7 +646,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
                                  "enum": ["linux", "darwin", "windows"]},
                    "connection_mode": {"type": "string",
                                        "enum": ["callback", "call_in"]}},
-                  ["name"]), enrol_jaws, writes=True),
+                  ["name"]), enroll_jaws, writes=True),
         Tool("add_note", "Append a note to a host's timeline.",
              _obj({"host": {"type": "string"}, "note": {"type": "string"}},
                   ["host", "note"]), add_note, writes=True),

@@ -25,8 +25,8 @@ type Config struct {
 	// listener. Separate from CallbackKey on purpose: they protect
 	// opposite directions, and one leaking should not hand over both.
 	CallInKey string
-	// EnrolToken is one-time, traded for a keypair on first run.
-	EnrolToken string
+	// EnrollToken is one-time, traded for a keypair on first run.
+	EnrollToken string
 
 	// Listen is the inbound address, empty to disable. Loopback by
 	// default because the reverse channel is a convenience and an open
@@ -88,7 +88,7 @@ func (c *Config) Validate() error {
 		// The payload is sealed end to end, so plaintext here does not
 		// expose scan results. It still exposes which agent is talking
 		// to which Oddjob, how often, and how much — and it leaves the
-		// enrolment exchange, which is NOT sealed because it is what
+		// enrollment exchange, which is NOT sealed because it is what
 		// establishes the key, open to anyone on the path.
 		//
 		// Loopback is excepted because that is a tunnel endpoint, where
@@ -104,10 +104,10 @@ func (c *Config) Validate() error {
 	// So this only refuses when there is clearly nothing at all --
 	// the identity file is looked for later, before any request.
 	if strings.TrimSpace(c.CallbackKey) == "" &&
-		strings.TrimSpace(c.EnrolToken) == "" &&
+		strings.TrimSpace(c.EnrollToken) == "" &&
 		!c.hasSavedIdentity() {
 		problems = append(problems,
-			"nothing to authenticate with: pass --enrol with the one-time "+
+			"nothing to authenticate with: pass --enroll with the one-time "+
 				"token Oddjob showed when this agent was created, or --key "+
 				"for an agent enrolled before identities existed")
 	}
@@ -173,8 +173,8 @@ func (c *Config) FromEnv() {
 	if c.CallInKey == "" {
 		c.CallInKey = os.Getenv("JAWS_CALL_IN_KEY")
 	}
-	if c.EnrolToken == "" {
-		c.EnrolToken = os.Getenv("JAWS_ENROL_TOKEN")
+	if c.EnrollToken == "" {
+		c.EnrollToken = os.Getenv("JAWS_ENROLL_TOKEN")
 	}
 	// Only when the flag was left at its default: an explicit
 	// --workdir is the operator saying where, and the environment

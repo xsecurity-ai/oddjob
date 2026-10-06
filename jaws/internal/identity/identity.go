@@ -5,11 +5,11 @@
 // never leaves it: the server is sent only the public half and stores
 // only that, so a dump of Oddjob's database cannot impersonate any
 // agent. In the other direction the agent pins the server's public key
-// at enrolment and checks it on every inbound call, which is what makes
+// at enrollment and checks it on every inbound call, which is what makes
 // this agent belong to one Oddjob rather than to whoever finds the
 // port.
 //
-// Enrolment is a one-time token traded for that pair of facts. After it
+// Enrollment is a one-time token traded for that pair of facts. After it
 // has been traded the token is useless, and the file written here is
 // the only thing that lets the agent keep working — so it is written
 // 0600 and, on a host where that cannot be guaranteed, is the thing
@@ -105,7 +105,7 @@ func FromParts(privateKey, serverPublicKey string) (*Identity, error) {
 		ServerPublicKey: serverPublicKey}, "")
 }
 
-// New builds an identity from a completed enrolment and writes it.
+// New builds an identity from a completed enrollment and writes it.
 func New(path string, f File) (*Identity, error) {
 	id, err := fromFile(f, path)
 	if err != nil {
@@ -124,7 +124,7 @@ func (i *Identity) Save() error {
 	}
 	// Written to a temporary file and renamed so a crash midway cannot
 	// leave a half-written identity, which would look like corruption
-	// and cost an operator a re-enrolment.
+	// and cost an operator a re-enrollment.
 	tmp := i.path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return err

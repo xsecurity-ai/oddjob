@@ -9,7 +9,7 @@ ordinary furniture there, and against one of those TLS protects the
 traffic from everyone except the box whose entire job is reading it.
 
 So the body is sealed under a key only the two endpoints hold, derived
-from the X25519 halves exchanged at enrolment, and TLS stays underneath
+from the X25519 halves exchanged at enrollment, and TLS stays underneath
 for everything else it is good for. A middlebox sees an opaque envelope
 addressed to a URL it can read, which is the most that can be given
 away while remaining routable.
@@ -43,11 +43,11 @@ log = logging.getLogger("oddjob.agentseal")
 #: to a browser, which has no key and no way to get one.
 SEALED_PREFIX = "/api/agents/"
 
-#: Enrolment is the one agent route that cannot be sealed: it is the
+#: Enrollment is the one agent route that cannot be sealed: it is the
 #: exchange that establishes the key. It carries a one-time token and
 #: a public half, neither of which is a secret worth hiding — the
 #: token authenticates and is burned, and the public key is public.
-NEVER_SEALED = ("/api/agents/enrol",)
+NEVER_SEALED = ("/api/agents/enroll", "/api/agents/enrol")
 
 
 async def _agent_key(agent_id: str) -> tuple[Agent, bytes] | None:

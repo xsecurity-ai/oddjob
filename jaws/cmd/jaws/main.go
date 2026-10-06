@@ -33,7 +33,7 @@ Keys can come from the environment instead of the command line, which
 is how to keep them out of the process list on a shared host:
 
   JAWS_SERVER  JAWS_KEY  JAWS_CALL_IN_KEY  JAWS_ADVERTISE
-  JAWS_ENROL_TOKEN  JAWS_WORKDIR
+  JAWS_ENROLL_TOKEN  JAWS_WORKDIR
 `
 
 func main() {
@@ -73,7 +73,7 @@ func cmdRun(argv []string) int {
 	fs.StringVar(&cfg.Server, "server", "", "Oddjob base URL")
 	fs.StringVar(&cfg.CallbackKey, "key", "", "callback key (or JAWS_KEY)")
 	fs.StringVar(&cfg.CallInKey, "call-in-key", "", "key the server must present")
-	fs.StringVar(&cfg.EnrolToken, "enrol", "", "one-time enrolment token from Oddjob (or JAWS_ENROL_TOKEN)")
+	fs.StringVar(&cfg.EnrollToken, "enroll", "", "one-time enrollment token from Oddjob (or JAWS_ENROLL_TOKEN)")
 	fs.StringVar(&cfg.Listen, "listen", "", "inbound API address, e.g. 127.0.0.1:7777")
 	fs.StringVar(&cfg.Advertise, "advertise", "", "URL the server should use to reach --listen")
 	fs.StringVar(&cfg.Name, "name", cfg.Name, "name to report")
@@ -91,16 +91,16 @@ func cmdRun(argv []string) int {
 	}
 	if cfg.Insecure {
 		// Narrower than it used to read: the payload is sealed under
-		// keys pinned at enrolment, so a man in the middle cannot read
+		// keys pinned at enrollment, so a man in the middle cannot read
 		// results or forge tasking. What is given up is the transport's
-		// own protection of the enrolment exchange and the metadata.
+		// own protection of the enrollment exchange and the metadata.
 		log.Printf("WARNING: TLS verification is OFF. The payload is still " +
-			"sealed end to end, but the enrolment exchange and all traffic " +
+			"sealed end to end, but the enrollment exchange and all traffic " +
 			"metadata are exposed to anyone on the path")
 	}
 	if cfg.AllowPlaintext {
 		log.Printf("WARNING: talking to a plaintext http:// server by " +
-			"request. The payload is sealed; the enrolment exchange is not")
+			"request. The payload is sealed; the enrollment exchange is not")
 	}
 
 	priv, advice := tools.RawSocketCapable()
