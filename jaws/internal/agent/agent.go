@@ -50,15 +50,15 @@ func (a *Agent) Status() map[string]any {
 	defer a.mu.Unlock()
 	priv, advice := tools.RawSocketCapable()
 	return map[string]any{
-		"name":        a.cfg.Name,
-		"version":     config.Version,
-		"platform":    runtime.GOOS,
-		"arch":        runtime.GOARCH,
-		"privileged":  priv,
-		"privilege":   advice,
-		"busy":        a.busy,
+		"name":         a.cfg.Name,
+		"version":      config.Version,
+		"platform":     runtime.GOOS,
+		"arch":         runtime.GOARCH,
+		"privileged":   priv,
+		"privilege":    advice,
+		"busy":         a.busy,
 		"current_task": a.current,
-		"server":      a.cfg.Server,
+		"server":       a.cfg.Server,
 	}
 }
 

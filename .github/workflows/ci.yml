@@ -175,6 +175,52 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+  jaws:
+    name: jaws builds for every target
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: jaws/go.sum
+
+      - name: Formatted
+        working-directory: jaws
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt would change:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: Vet
+        working-directory: jaws
+        run: go vet ./...
+
+      - name: Tests
+        working-directory: jaws
+        run: go test -race ./...
+
+      # The agent is only useful if it reaches the host it is needed
+      # on, and that host is whatever the client has. A target that
+      # stops compiling is found here rather than at the point someone
+      # needs a Windows binary.
+      - name: Cross-compile every release target
+        working-directory: jaws
+        run: make release
+
+      - name: The binaries are static
+        working-directory: jaws
+        run: |
+          # A dynamically linked agent fails on the older glibc it will
+          # meet in the field, which is exactly where it cannot be
+          # debugged.
+          if file dist/jaws-linux-amd64 | grep -q 'dynamically linked'; then
+            file dist/jaws-linux-amd64; exit 1
+          fi
+          ./dist/jaws-linux-amd64 version
+
   docker:
     name: image builds and the stack comes up
     runs-on: ubuntu-latest
