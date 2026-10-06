@@ -64,6 +64,17 @@ function needsName(t: Target): boolean {
   return t.kind !== 'mobile' && !!addressOf(t) && !hasName(t)
 }
 
+/** A name on record and no address to go with it — the mirror of
+ *  `needsName`, and what the two "find IPs" actions are for.
+ *
+ *  A mobile app is excluded for the opposite reason to the other
+ *  direction: it has no address because there is nothing to resolve,
+ *  so it is not a gap. Listing it would turn a correct N/A into a
+ *  permanent outstanding task. */
+function needsAddress(t: Target): boolean {
+  return t.kind !== 'mobile' && hasName(t) && !(t.ip_address ?? '').trim()
+}
+
 // ----------------------------------------------------------- widths
 // Widths are computed from the rows rather than measured, because the
 // grid lives inside DataTable and MUI's autosize measures what is
@@ -128,6 +139,9 @@ export function TargetsView({ project }: { project: string | null }) {
 
   const unnamed = useMemo(() => rows.filter(needsName), [rows])
   const unnamedSelected = useMemo(() => selectedRows.filter(needsName), [selectedRows])
+  const unaddressed = useMemo(() => rows.filter(needsAddress), [rows])
+  const unaddressedSelected = useMemo(
+    () => selectedRows.filter(needsAddress), [selectedRows])
 
   const patch = useMutation({
     mutationFn: (v: { project: string; host: string; body: Partial<Target> }) =>
@@ -141,7 +155,12 @@ export function TargetsView({ project }: { project: string | null }) {
   const onEnumerate = (a: EnumerateAction) => {
     if (a === 'detect-domains') setDetecting(true)
     else if (a === 'scan-ranges') setScanningRanges(true)
-    else {
+    else if (a === 'ip-all' || a === 'ip-selected') {
+      // Forward: a name we hold, resolved to the address it points at.
+      const src = a === 'ip-all' ? unaddressed : unaddressedSelected
+      setLookup({ kind: 'nslookup', subjects: src.map((t) => t.host) })
+    } else {
+      // Reverse: an address we hold, asked what it is called.
       const src = a === 'fqdn-all' ? unnamed : unnamedSelected
       setLookup({ kind: 'reverse_ip', subjects: src.map(addressOf) })
     }
@@ -384,7 +403,9 @@ export function TargetsView({ project }: { project: string | null }) {
             <EnumerateMenu onPick={onEnumerate}
               selectedCount={selected.length}
               unnamedCount={unnamed.length}
-              unnamedSelectedCount={unnamedSelected.length} />
+              unnamedSelectedCount={unnamedSelected.length}
+              unaddressedCount={unaddressed.length}
+              unaddressedSelectedCount={unaddressedSelected.length} />
             {/* Shown whenever a lookup has come home with anything to
                 report, not only when there is a decision to take: a
                 lookup that found nothing, and one whose single answer

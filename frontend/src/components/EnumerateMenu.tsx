@@ -23,6 +23,8 @@ export type EnumerateAction =
   | 'detect-domains'
   | 'fqdn-all'
   | 'fqdn-selected'
+  | 'ip-all'
+  | 'ip-selected'
   | 'scan-ranges'
 
 /** A menu entry that is off, and the true reason why. */
@@ -45,11 +47,15 @@ function Blocked({ label, why, icon }: {
 }
 
 export function EnumerateMenu({ onPick, selectedCount, unnamedCount,
-                                unnamedSelectedCount }: {
+                                unnamedSelectedCount, unaddressedCount,
+                                unaddressedSelectedCount }: {
   onPick: (a: EnumerateAction) => void
   selectedCount: number
   /** Targets in the project with an address and no name. */
   unnamedCount: number
+  /** The mirror: a name on record and no address against it. */
+  unaddressedCount: number
+  unaddressedSelectedCount: number
   /** The same, within the current selection. */
   unnamedSelectedCount: number
 }) {
@@ -107,6 +113,30 @@ export function EnumerateMenu({ onPick, selectedCount, unnamedCount,
             : <Blocked label="Find FQDNs for selected IPs without one"
                 icon={<DnsIcon fontSize="small" />}
                 why={`All ${selectedCount} selected row(s) already have a name, or have no address to look up.`} />}
+
+        <Divider sx={{ borderColor: alpha(neon.purple, 0.2) }} />
+
+        {unaddressedCount
+          ? item('ip-all', 'Find IPs for all hosts without one',
+                 <LanIcon fontSize="small" />,
+                 `${unaddressedCount} target${unaddressedCount === 1 ? '' : 's'} `
+                 + `named but with no address recorded`)
+          : <Blocked label="Find IPs for all hosts without one"
+              icon={<LanIcon fontSize="small" />}
+              why="Every named target here already has an address." />}
+
+        {!selectedCount
+          ? <Blocked label="Find IPs for selected hosts without one"
+              icon={<LanIcon fontSize="small" />}
+              why="Nothing is selected. Tick the rows you want resolved." />
+          : unaddressedSelectedCount
+            ? item('ip-selected', 'Find IPs for selected hosts without one',
+                   <LanIcon fontSize="small" />,
+                   `${unaddressedSelectedCount} of ${selectedCount} selected `
+                   + `row${selectedCount === 1 ? '' : 's'} need one`)
+            : <Blocked label="Find IPs for selected hosts without one"
+                icon={<LanIcon fontSize="small" />}
+                why={`All ${selectedCount} selected row(s) already have an address, or are mobile apps that cannot have one.`} />}
 
         <Divider sx={{ borderColor: alpha(neon.purple, 0.2) }} />
         {item('scan-ranges', 'Scan new ranges', <RadarIcon fontSize="small" />,

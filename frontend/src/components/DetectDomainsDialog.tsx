@@ -46,6 +46,57 @@ export function DetectDomainsDialog({ project, onClose }: {
     () => new Set((searched.data ?? []).map((s) => s.domain)),
     [searched.data])
 
+  //: How far through an "all roots" sweep we are, so a run over
+  //: forty domains is not a frozen dialog.
+  const [sweep, setSweep] = useState<{ done: number; total: number;
+                                       now: string } | null>(null)
+
+  /** Detect across every root this project touches.
+   *
+   *  Generation is offline — it extrapolates from names already held
+   *  and performs no lookups — so running it for every root costs
+   *  nothing on the wire and is the obvious thing to want. Doing them
+   *  one at a time was busywork.
+   *
+   *  Results accumulate rather than replace, because the point is one
+   *  list to triage. Roots already searched are included: the whole
+   *  reason to re-run is that new data has since made new names
+   *  derivable. */
+  const runAll = async () => {
+    const roots_ = (roots.data ?? []).map((r) => r.domain).filter(Boolean)
+    if (!roots_.length) return
+    setBusy(true); setErr(null); setPicked(new Set())
+    const merged: DomainCandidate[] = []
+    const seen = new Set<number>()
+    const failures: string[] = []
+    try {
+      for (let i = 0; i < roots_.length; i++) {
+        setSweep({ done: i, total: roots_.length, now: roots_[i] })
+        try {
+          const r = await api.detectDomains(project, roots_[i], true)
+          for (const c of r.candidates) {
+            if (!seen.has(c.id)) { seen.add(c.id); merged.push(c) }
+          }
+        } catch (e) {
+          // One root failing is not the sweep failing. Collected and
+          // named at the end rather than aborting forty domains in.
+          failures.push(`${roots_[i]}: `
+                        + (e instanceof Error ? e.message : String(e)))
+        }
+      }
+      merged.sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      setResult({ domain: `${roots_.length} root domain(s)`,
+                  candidates: merged } as typeof result)
+      if (failures.length) {
+        setErr(`${failures.length} of ${roots_.length} did not run: `
+               + failures.slice(0, 3).join('; ')
+               + (failures.length > 3 ? ' …' : ''))
+      }
+      await qc.invalidateQueries({ queryKey: ['domain-searches', project] })
+      await qc.invalidateQueries({ queryKey: ['domain-roots', project] })
+    } finally { setBusy(false); setSweep(null) }
+  }
+
   const run = async (force = false) => {
     setBusy(true); setErr(null)
     try {
@@ -145,6 +196,20 @@ export function DetectDomainsDialog({ project, onClose }: {
               sx={{ mt: 0.3, color: neon.cyan, borderColor: alpha(neon.cyan, 0.6) }}>
               {busy ? '…' : 'Detect'}
             </Button>
+            <Tooltip title={(roots.data ?? []).length
+              ? `Run it for every root this project touches (${(roots.data ?? []).length}). Generation is offline — it extrapolates from names already held and sends nothing — so this costs nothing on the wire.`
+              : 'This project has no root domains yet.'}>
+              <span>
+                <Button variant="outlined"
+                  disabled={busy || !(roots.data ?? []).length}
+                  onClick={runAll}
+                  sx={{ mt: 0.3, color: neon.green,
+                        borderColor: alpha(neon.green, 0.6) }}>
+                  All {(roots.data ?? []).length
+                    ? `(${(roots.data ?? []).length})` : ''}
+                </Button>
+              </span>
+            </Tooltip>
             {alreadySearched.has(domain.trim().toLowerCase()) && (
               <Tooltip title="Searched before — run again to look for names that new data has made possible">
                 <Button variant="text" disabled={busy} onClick={() => run(true)}
@@ -174,6 +239,17 @@ export function DetectDomainsDialog({ project, onClose }: {
             </>
           )}
 
+          {sweep && (
+            <Box sx={{ mb: 1 }}>
+              <LinearProgress variant="determinate"
+                value={(sweep.done / sweep.total) * 100}
+                sx={{ height: 3, bgcolor: alpha(neon.green, 0.15),
+                      '& .MuiLinearProgress-bar': { bgcolor: neon.green } }} />
+              <Typography sx={{ fontSize: 11, color: neon.muted, mt: 0.4 }}>
+                {sweep.done} of {sweep.total} — {sweep.now}
+              </Typography>
+            </Box>
+          )}
           {candidates.length > 0 && (
             <Box sx={{ maxHeight: '46vh', overflow: 'auto',
                        border: `1px solid ${alpha(neon.purple, 0.25)}`, borderRadius: 1 }}>
