@@ -17,6 +17,7 @@ from ..schemas import (EventCreate, EventOut, ImplantOut, Page, PocOut,
                        TargetCreate, TargetDetail,
                        TargetOut, TargetUpdate, VulnOut)
 from .projects import resolve_project
+from ..scopegate import assert_allowed
 from ..timeline import describe_changes, record
 from ..security import (get_current_user, require_project,
                         visible_project_ids)
@@ -194,6 +195,9 @@ async def create_target(body: TargetCreate, project: str = Query(..., descriptio
                              Target.host == body.host))).scalar_one_or_none()
     if dup:
         raise HTTPException(409, f"target {body.host!r} already in project {pr.code}")
+    await assert_allowed(session, pr.id, body.host,
+                         f"adding {body.host!r} to {pr.code}",
+                         ip=body.ip_address)
     t = Target(project_id=pr.id, **body.model_dump())
     session.add(t)
     await session.flush()

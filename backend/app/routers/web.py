@@ -19,6 +19,7 @@ from ..query import paginate
 from ..schemas import (Page, WebAddressCreate, WebAddressOut,
                        WebAddressUpdate, WebPacket)
 from ..filtering import apply_filters
+from ..scopegate import assert_allowed
 from ..security import (assert_role_for_target, get_current_user,
                         visible_project_ids)
 from ..timeline import record
@@ -364,6 +365,12 @@ async def replay(web_id: int, body: ReplayIn,
             f"{hostname!r} is not a target in this engagement. Replay only "
             f"sends to hosts the project already has — otherwise this is an "
             f"open proxy for anyone with an account. Add the host first.")
+    # Being a target is not enough. This route puts a real request on the
+    # wire, so it is held to the out-of-scope list as well — a host the
+    # project acquired before the list said otherwise is still a host
+    # nobody may send to.
+    await assert_allowed(session, target.project_id, hostname,
+                         "replaying to", ip=known.ip_address)
 
     scheme = orig.scheme or "http"
     if not path.startswith("/"):

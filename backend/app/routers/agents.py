@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_session
 from ..events import broker
 from ..models import Agent, AgentTask, Project, Setting, User
+from ..scopegate import check_task_targets, index_for, refuse
 from ..security import (get_current_user, new_agent_key, require_project,
                         verify_key)
 from .. import agentcrypto
@@ -283,6 +284,38 @@ def _stale(a: Agent) -> str:
     if seen and (datetime.now(timezone.utc) - seen) < OFFLINE_AFTER:
         return "online"
     return "offline"
+
+
+# ------------------------------------------------------------ the scope
+#: Task kinds that send packets at whatever they are pointed at. Checked
+#: against the project's scope lists before they are queued and again
+#: before they are handed over.
+#:
+#: `install` and `shell` are absent because they name no target: install
+#: acts on the agent itself, and shell is already refused to everything
+#: but a deliberate operator. If a kind is ever added that reaches the
+#: network without putting its hosts in `args`, this list is where it
+#: would be missed — so the extractor errs wide, see scopegate.task_hosts.
+SCOPED_KINDS = tuple(k for k in TASK_KINDS if k not in ("install",))
+
+
+async def _assert_task_in_scope(session: AsyncSession, pr: Project,
+                                kind: str, args: dict | None) -> None:
+    """Refuse a task that would reach a host this project may not touch.
+
+    The point of enforcement that matters most. Everything else here
+    writes rows; this one puts packets on somebody's network from a
+    machine inside it, and the agent cannot be the one to decide — it
+    does what it is told, which is the entire design.
+    """
+    if kind not in SCOPED_KINDS:
+        return
+    idx = await index_for(session, pr.id)
+    if not idx.defined:
+        return
+    ruling = check_task_targets(idx, args)
+    if ruling is not None:
+        raise refuse(ruling, f"a {kind} task on {pr.code}")
 
 
 # ---------------------------------------------------------- dispatching
@@ -826,6 +859,7 @@ async def create_task(agent_id: int, body: TaskIn,
             raise HTTPException(
                 422, f"not installable: {', '.join(bad)}. Allowed: "
                      f"{', '.join(INSTALLABLE)}")
+    await _assert_task_in_scope(session, pr, body.kind, body.args)
 
     t = AgentTask(agent_id=a.id, project_id=pr.id, requested_by=user.id,
                   kind=body.kind, args=json.dumps(body.args or {}),
@@ -898,6 +932,7 @@ async def create_pooled_task(body: TaskIn,
         raise HTTPException(
             422, "this project routes by region, so a pooled task needs "
                  "`region` — or queue it against a specific agent")
+    await _assert_task_in_scope(session, pr, body.kind, body.args)
 
     t = AgentTask(agent_id=None, project_id=pr.id, requested_by=user.id,
                   kind=body.kind, args=json.dumps(body.args or {}),
@@ -1098,12 +1133,44 @@ async def heartbeat(request: Request, a: Agent = Depends(agent_even_if_killed),
                 "reason": "this agent was killed from Oddjob"}
     a.status = "online"
 
+    # Scope is re-checked here, not only at queue time. A task may sit
+    # in the queue for hours, and the list can move under it — a host
+    # added to the out-of-scope list after the scan was planned is
+    # exactly the case a one-time check at queue time misses, and the
+    # cost of missing it is packets on a host the client told us to
+    # leave alone.
+    idx = await index_for(session, a.project_id)
+
+    def scope_refusal(task: AgentTask) -> str | None:
+        if not idx.defined or task.kind not in SCOPED_KINDS:
+            return None
+        try:
+            args = json.loads(task.args) if task.args else {}
+        except ValueError:
+            args = {}
+        ruling = check_task_targets(idx, args if isinstance(args, dict) else {})
+        return ruling.reason if ruling is not None else None
+
+    def drop(task: AgentTask, why: str) -> None:
+        """Fail it rather than skip it. A task silently passed over on
+        every poll is one an operator watches stay 'queued' forever
+        with nothing saying why."""
+        task.status = "failed"
+        task.error = f"refused by the project's scope at dispatch: {why}"
+        task.finished_at = datetime.now(timezone.utc)
+
     # Work addressed to this agent by name comes first: the operator
     # chose it, and a routing policy should not second-guess that.
-    t = (await session.execute(
-        select(AgentTask).where(AgentTask.agent_id == a.id,
-                                AgentTask.status == "queued")
-        .order_by(AgentTask.id).limit(1))).scalar_one_or_none()
+    t = None
+    for cand in (await session.execute(
+            select(AgentTask).where(AgentTask.agent_id == a.id,
+                                    AgentTask.status == "queued")
+            .order_by(AgentTask.id).limit(25))).scalars():
+        why = scope_refusal(cand)
+        if why is None:
+            t = cand
+            break
+        drop(cand, why)
 
     if t is None:
         # Then the project's pool, oldest first, subject to the routing
@@ -1117,6 +1184,10 @@ async def heartbeat(request: Request, a: Agent = Depends(agent_even_if_killed),
                                     AgentTask.status == "queued")
             .order_by(AgentTask.id).limit(25))).scalars().all()
         for cand in pool:
+            why = scope_refusal(cand)
+            if why is not None:
+                drop(cand, why)
+                continue
             if project is not None and await _may_claim(session, project, a, cand):
                 cand.agent_id = a.id
                 t = cand

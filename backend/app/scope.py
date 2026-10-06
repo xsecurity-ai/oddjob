@@ -1,26 +1,46 @@
-"""Classify a scope entry.
+"""Classify a scope entry, and decide whether a host is inside the scope.
 
-The kind is derived, never asked for. A scope document arrives as a pasted
-block of a few hundred lines mixing ranges, addresses and names; making a
-human tag each one is both tedious and the reason a /24 ends up recorded as
-a hostname.
+Two halves, deliberately in one module. Classification derives the kind of
+an entry; matching consumes those kinds. Split across two files they drift —
+a kind added to one and not the other is a scope list that silently stops
+enforcing part of itself, which is the worst bug this file could have.
+
+**Classification.** The kind is derived, never asked for. A scope document
+arrives as a pasted block of a few hundred lines mixing ranges, addresses,
+names and wildcards; making a human tag each one is both tedious and the
+reason a /24 ends up recorded as a hostname.
 
 Ambiguity is resolved in the only safe direction: anything that does not
 parse cleanly is REJECTED and named back to the caller, rather than being
 filed as an FQDN because that is the loosest bucket. A scope list silently
 containing a typo'd range is worse than one that refused to load.
+
+**Matching.** `ScopeIndex` answers one question — may this project do
+something new with this host — with three outcomes, never two:
+
+    ALLOWED   it is in the in-list, or no in-list was declared
+    BARRED    it matched the out-list. Nothing may touch it, ever
+    OUTSIDE   an in-list exists and this is not in it. Nothing NEW
+
+BARRED and OUTSIDE are different claims and the callers treat them
+differently: BARRED stops work on a host the project already has, OUTSIDE
+only stops the project acquiring new ones. Collapsing them would either
+let a barred host keep being scanned or retroactively freeze an engagement
+the day someone typed a scope list into it.
+
+Out always trumps in. An entry on both lists is barred.
 """
 from __future__ import annotations
 
 import ipaddress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from .hosts import InvalidHost, validate_host
+from .hosts import InvalidHost, normalise_host, validate_host
 
 
 @dataclass
 class Entry:
-    kind: str          # cidr | ipv4 | ipv6 | fqdn
+    kind: str          # cidr | ipv4 | ipv6 | fqdn | wildcard
     value: str
     included: bool
 
@@ -62,8 +82,29 @@ def classify(raw: str) -> Entry:
     except ValueError:
         pass
 
-    # Otherwise it must be a well-formed hostname. A wildcard is not a host
-    # and is not a range, so it has no place in a target list.
+    # A wildcard is not a host — you cannot scan one — but it is a
+    # perfectly good scope entry, and it is how scope documents are
+    # written. Only the leading-label form is accepted: `*.acme.example`
+    # reads unambiguously, while `a.*.example` and `*acme.example` do
+    # not, and a pattern an operator has to squint at is one that bars
+    # the wrong thing.
+    if s.startswith("*."):
+        rest = s[2:]
+        try:
+            base = validate_host(rest)
+        except InvalidHost as e:
+            raise ValueError(f"{raw!r} is not a usable wildcard: {e}")
+        if "." not in base:
+            raise ValueError(
+                f"{raw!r} wildcards a single label, which would cover an "
+                f"entire TLD")
+        return Entry("wildcard", f"*.{base}", included)
+    if "*" in s:
+        raise ValueError(
+            f"{raw!r} has a '*' somewhere other than the first label; "
+            f"only `*.name.example` is understood")
+
+    # Otherwise it must be a well-formed hostname.
     try:
         host = validate_host(s)
     except InvalidHost as e:
@@ -100,3 +141,335 @@ def classify_many(lines: list[str]) -> tuple[list[Entry], list[str]]:
 def _looks_like_cidr(s: str) -> bool:
     head, _, tail = s.partition("/")
     return tail.isdigit() and (":" in head or head.replace(".", "").isdigit())
+
+
+# ============================================================== countries
+#: ISO 3166-1 alpha-2, so a typo is refused at the door rather than
+#: becoming a list entry that silently matches nothing. On an out-of-scope
+#: list that failure is invisible and dangerous: "CN is barred" spelled
+#: `cm` bars Cameroon and tests China.
+ISO_3166_1 = frozenset("""
+ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj
+bl bm bn bo bq br bs bt bv bw by bz ca cc cd cf cg ch ci ck cl cm cn co cr
+cu cv cw cx cy cz de dj dk dm do dz ec ee eg eh er es et fi fj fk fm fo fr
+ga gb gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu
+id ie il im in io iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ky kz
+la lb lc li lk lr ls lt lu lv ly ma mc md me mf mg mh mk ml mm mn mo mp mq
+mr ms mt mu mv mw mx my mz na nc ne nf ng ni nl no np nr nu nz om pa pe pf
+pg ph pk pl pm pn pr ps pt pw py qa re ro rs ru rw sa sb sc sd se sg sh si
+sj sk sl sm sn so sr ss st sv sx sy sz tc td tf tg th tj tk tl tm tn to tr
+tt tv tw tz ua ug um us uy uz va vc ve vg vi vn vu wf ws ye yt za zm zw
+""".split())
+
+
+def classify_country(raw: str) -> str:
+    """-> a lowercase alpha-2 code, or raise ValueError saying why not.
+
+    Deliberately not a name lookup. "United Kingdom" has four common
+    spellings and two plausible codes, and a scope list is not the place
+    to be lenient about which one was meant.
+    """
+    c = (raw or "").strip().lower()
+    if not c:
+        raise ValueError("empty country")
+    if len(c) != 2 or not c.isalpha():
+        raise ValueError(
+            f"{raw!r} is not an ISO 3166-1 alpha-2 code (two letters, e.g. 'jp')")
+    if c not in ISO_3166_1:
+        raise ValueError(f"{raw!r} is not an assigned ISO 3166-1 alpha-2 code")
+    return c
+
+
+# =============================================================== matching
+ALLOWED = "allowed"
+BARRED = "barred"
+OUTSIDE = "outside"
+
+#: The kinds that describe an address or a name, as opposed to a country.
+#: An in-list made only of countries must not also act as an allowlist of
+#: hosts, and vice versa — the two questions are answered separately.
+HOST_KINDS = ("cidr", "ipv4", "ipv6", "fqdn", "wildcard")
+
+
+@dataclass(frozen=True)
+class Ruling:
+    """A decision and the sentence that explains it.
+
+    The reason is not decoration. It is what the operator reads when a
+    scan is refused, and "out of scope" without naming the entry that
+    barred it means editing the list by trial and error.
+    """
+    verdict: str
+    reason: str
+
+    @property
+    def allowed(self) -> bool:
+        return self.verdict == ALLOWED
+
+
+#: Deliberately no __bool__: `if ruling:` on a security decision reads
+#: fine and is wrong the one time somebody returns the wrong object.
+
+
+@dataclass
+class _Side:
+    """One list — in or out — indexed so a lookup is not a scan.
+
+    Networks are bucketed by prefix length: masking the address once per
+    distinct length and hitting a set is a few dozen operations whatever
+    the list holds, where walking every network is linear in it. A real
+    scope document runs to a few hundred ranges and is consulted once per
+    host in an import of thousands.
+    """
+    names: set[str] = field(default_factory=set)
+    #: ".acme.example" for an entry of "*.acme.example".
+    suffixes: dict[str, str] = field(default_factory=dict)
+    addrs: dict[str, str] = field(default_factory=dict)
+    #: version -> prefixlen -> {masked network int: the entry as written}
+    nets: dict[int, dict[int, dict[int, str]]] = field(default_factory=dict)
+    countries: set[str] = field(default_factory=set)
+
+    @property
+    def has_hosts(self) -> bool:
+        return bool(self.names or self.suffixes or self.addrs or self.nets)
+
+    def add(self, kind: str, value: str) -> None:
+        if kind == "country":
+            self.countries.add(value.lower())
+            return
+        if kind == "wildcard":
+            self.suffixes[value[1:].lower()] = value     # "*.x.y" -> ".x.y"
+            return
+        if kind == "fqdn":
+            self.names.add(normalise_host(value))
+            return
+        if kind in ("ipv4", "ipv6"):
+            try:
+                ip = ipaddress.ip_address(value)
+            except ValueError:
+                return          # a row that cannot be parsed matches nothing
+            self.addrs[ip.compressed] = value
+            return
+        if kind == "cidr":
+            try:
+                net = ipaddress.ip_network(value, strict=False)
+            except ValueError:
+                return
+            (self.nets.setdefault(net.version, {})
+                 .setdefault(net.prefixlen, {})[int(net.network_address)]) = value
+
+    def match_name(self, host: str) -> str | None:
+        """-> the entry that covers this name, or None."""
+        if host in self.names:
+            return host
+        # Walk the parents rather than every wildcard: a name has a
+        # handful of labels and the list may have hundreds of patterns.
+        #
+        # `*.acme.example` covers a.acme.example and a.b.acme.example but
+        # NOT acme.example itself, which is how certificates and DNS both
+        # read it. An operator who wants the apex adds it as its own line.
+        i = host.find(".")
+        while i != -1:
+            hit = self.suffixes.get(host[i:])
+            if hit:
+                return hit
+            i = host.find(".", i + 1)
+        return None
+
+    def match_ip(self, ip) -> str | None:
+        hit = self.addrs.get(ip.compressed)
+        if hit:
+            return hit
+        for plen, bucket in (self.nets.get(ip.version) or {}).items():
+            masked = int(ip) & (((1 << plen) - 1) << (ip.max_prefixlen - plen))
+            hit = bucket.get(masked)
+            if hit:
+                return hit
+        return None
+
+
+@dataclass(frozen=True)
+class _Attribution:
+    """An operator's statement that some part of the estate is in a country.
+
+    See `ScopeIndex.country_of` for why this is declared rather than
+    looked up.
+    """
+    kind: str
+    value: str
+    country: str
+    #: Higher wins when several entries cover the same host. An exact
+    #: name or address beats a range; a longer prefix beats a shorter one.
+    rank: int
+
+
+def _parse_host(host: str):
+    """-> an ip_address object, or None if it is a name (or unusable)."""
+    try:
+        return ipaddress.ip_address((host or "").strip().split("%", 1)[0])
+    except ValueError:
+        return None
+
+
+class ScopeIndex:
+    """The two lists of one project, ready to answer questions.
+
+    Built once and reused: an import asks per host, and rebuilding from
+    the rows each time would make a 4,000-host file 4,000 queries.
+    """
+
+    def __init__(self, entries=()) -> None:
+        self.inc = _Side()
+        self.out = _Side()
+        self.attributions: list[_Attribution] = []
+        for e in entries:
+            self.add(e.kind, e.value, e.included,
+                     getattr(e, "country", None))
+
+    def add(self, kind: str, value: str, included: bool,
+            country: str | None = None) -> None:
+        (self.inc if included else self.out).add(kind, value)
+        if country and kind in HOST_KINDS:
+            self.attributions.append(
+                _Attribution(kind, value, country.lower(),
+                             _rank(kind, value)))
+
+    @property
+    def defined(self) -> bool:
+        """Is there anything here that could refuse anything?"""
+        return bool(self.inc.has_hosts or self.inc.countries
+                    or self.out.has_hosts or self.out.countries)
+
+    # ------------------------------------------------------- geolocation
+    def country_of(self, host: str, ip: str | None = None) -> str | None:
+        """Which country this host is in, or None for "not determined".
+
+        **Nothing here performs a lookup, and nothing here may.** Resolving
+        an address to a country means handing a client's target list to a
+        third-party geolocation service, which is a disclosure of the
+        engagement itself — see the same decision for Jaws `geo` routing in
+        models.Agent.regions. So the attribution is operator-declared: a
+        country written onto a scope entry says "this range is in JP", and
+        that statement, held locally, is what resolves every address it
+        covers.
+
+        None is a third answer and not a synonym for "nowhere". The caller
+        must not read it as "not in a barred country" — see `check`.
+
+        Linear because the entries that CARRY a country are the few the
+        operator bothered to annotate, not the whole list.
+        """
+        if not self.attributions:
+            return None
+        h = normalise_host(host)
+        addr = _parse_host(h) or (_parse_host(ip) if ip else None)
+        best: _Attribution | None = None
+        for a in self.attributions:
+            if not _covers(a, h, addr):
+                continue
+            if best is None or a.rank > best.rank:
+                best = a
+        return best.country if best else None
+
+    # ------------------------------------------------------- the decision
+    def check(self, host: str, ip: str | None = None) -> Ruling:
+        """May the project do something new with this host?
+
+        `ip` is the address already recorded for it, where one is known.
+        It is used, and a DNS lookup is not: resolving the name here would
+        both send traffic and make the answer depend on what a resolver
+        said this second.
+        """
+        h = normalise_host(host)
+        if not h:
+            return Ruling(BARRED, "an empty host is not a scope decision "
+                                  "anyone can make")
+        addr = _parse_host(h)
+        other = _parse_host(ip) if ip else None
+
+        # ---- out first, and out always wins -----------------------------
+        hit = self.out.match_name(h) if addr is None else None
+        if hit:
+            return Ruling(BARRED, f"{h} matches the out-of-scope entry {hit}")
+        for a, why in ((addr, h), (other, f"{h} (recorded as {ip})")):
+            if a is None:
+                continue
+            hit = self.out.match_ip(a)
+            if hit:
+                return Ruling(BARRED, f"{why} matches the out-of-scope "
+                                      f"entry {hit}")
+
+        country = self.country_of(h, ip)
+        if country and country in self.out.countries:
+            return Ruling(BARRED, f"{h} is declared to be in {country.upper()}, "
+                                  f"which is out of scope")
+
+        # ---- then the allowlist, if one was declared --------------------
+        if self.inc.has_hosts:
+            ok = (self.inc.match_name(h) if addr is None
+                  else self.inc.match_ip(addr))
+            # A name is let in by its recorded address too. An operator
+            # whose scope document is a list of ranges expects the hosts
+            # living in them to be in scope, and refusing every name
+            # because it is not literally written down would make a
+            # CIDR-only scope reject the whole engagement.
+            if not ok and other is not None:
+                ok = self.inc.match_ip(other)
+            if not ok:
+                return Ruling(OUTSIDE,
+                              f"{h} is not in this project's in-scope list")
+
+        if self.inc.countries:
+            # Undetermined is refused here, and only here. An in-scope
+            # country list is a statement that work happens in named
+            # places; "we cannot say where this is" does not satisfy it.
+            # The out-list above takes the opposite reading of the same
+            # unknown, because a barred-country list that refused
+            # everything unattributed would bar the entire project.
+            if country is None:
+                return Ruling(OUTSIDE,
+                              f"no country is declared for {h}; this project "
+                              f"restricts work to "
+                              f"{', '.join(sorted(c.upper() for c in self.inc.countries))}. "
+                              f"Declare one on a scope entry that covers it.")
+            if country not in self.inc.countries:
+                return Ruling(OUTSIDE, f"{h} is declared to be in "
+                                       f"{country.upper()}, which is not in "
+                                       f"this project's in-scope countries")
+
+        return Ruling(ALLOWED, f"{h} is in scope")
+
+
+def _rank(kind: str, value: str) -> int:
+    """How specific a country attribution is. Bigger wins."""
+    if kind in ("fqdn", "ipv4", "ipv6"):
+        return 1_000_000
+    if kind == "wildcard":
+        # A longer suffix is a narrower claim.
+        return 1000 + len(value)
+    try:
+        return ipaddress.ip_network(value, strict=False).prefixlen
+    except ValueError:
+        return 0
+
+
+def _covers(a: _Attribution, host: str, addr) -> bool:
+    if a.kind == "fqdn":
+        return addr is None and host == normalise_host(a.value)
+    if a.kind == "wildcard":
+        if addr is not None:
+            return False
+        suffix = a.value[1:].lower()
+        return host.endswith(suffix) and host != suffix.lstrip(".")
+    if addr is None:
+        return False
+    if a.kind in ("ipv4", "ipv6"):
+        try:
+            return addr == ipaddress.ip_address(a.value)
+        except ValueError:
+            return False
+    try:
+        net = ipaddress.ip_network(a.value, strict=False)
+    except ValueError:
+        return False
+    return addr.version == net.version and addr in net

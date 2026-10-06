@@ -37,6 +37,7 @@ from ..importers.model import (ImportError_, ParsedCredential, ParsedHost,
                                ParsedVuln, ParsedWebAddress)
 from ..models import (Credential, Implant, Project, Service, Target, User,
                       Vuln, WebAddress, implies_alive, ImportJob)
+from ..scopegate import index_for
 from ..weburl import BadUrl, merge_sources
 from ..weburl import parse as parse_url
 from ..weburl import exchange_key, url_key
@@ -127,6 +128,11 @@ class ImportResult(BaseModel):
     unknown_hosts: list[UnknownHostOut] = []
     #: Hosts whose rows were dropped because nobody asked for them.
     rejected_hosts: dict[str, int] = {}
+    #: host -> why the project's scope refused it. A different answer
+    #: from `rejected_hosts`: nobody asked for those, while these were
+    #: asked for and are not permitted. Named individually, because "14
+    #: hosts were out of scope" is not something an operator can check.
+    barred_hosts: dict[str, str] = {}
     #: host -> the existing target its data was attached to.
     mapped_hosts: dict[str, str] = {}
     created_hosts: list[str] = []
@@ -214,8 +220,11 @@ async def _host(session: AsyncSession, project: Project, ph: ParsedHost,
                 scan: ParsedScan, res: ImportResult, source: str,
                 policy: Policy) -> Target | None:
     # The policy decides whether this host may be written at all, and
-    # whether its data belongs on a different target entirely.
-    allowed = policy.resolve(ph.host)
+    # whether its data belongs on a different target entirely. The
+    # address goes with the name: a scope document written as ranges can
+    # only recognise `web01.acme.example` by the address the scan found
+    # it at.
+    allowed = policy.resolve(ph.host, ph.ip_address or ph.ipv6_address)
     if allowed is None:
         return None
     try:
@@ -590,6 +599,7 @@ async def ingest(session: AsyncSession, project: Project, scan: ParsedScan,
             res.notes_recorded += 1
 
     res.rejected_hosts = dict(policy.rejected)
+    res.barred_hosts = dict(policy.barred)
     res.mapped_hosts = dict(policy.mapped)
     res.created_hosts = list(policy.created)
     await session.commit()
@@ -649,6 +659,7 @@ def _merge(agg: ImportResult, part: ImportResult) -> None:
         if e not in agg.errors:
             agg.errors.append(e)
     agg.mapped_hosts.update(part.mapped_hosts)
+    agg.barred_hosts.update(part.barred_hosts)
     for h, c in part.rejected_hosts.items():
         agg.rejected_hosts[h] = agg.rejected_hosts.get(h, 0) + c
 
@@ -675,6 +686,7 @@ async def _run_stream(session: AsyncSession, project: Project, path: str,
     known = await _known(session, project)
     policy = Policy(mode=("open" if mode == "open" else "strict"),
                     known=set(known),
+                    scope=await index_for(session, project.id),
                     decisions={k.strip().rstrip(".").lower():
                                Decision(action=v.action, target=v.target)
                                for k, v in (decisions or {}).items()})
@@ -684,14 +696,16 @@ async def _run_stream(session: AsyncSession, project: Project, path: str,
             counts = hosts_fn(path)
         except ImportError_ as e:
             raise HTTPException(422, str(e))
+        # A host scope will refuse is not offered as a decision; see
+        # policy.survey for why asking about one is worse than not.
         unknown = [UnknownHostOut(host=h, web=c, total=c)
                    for h, c in sorted(counts.items(), key=lambda kv: -kv[1])
-                   if h not in known]
+                   if h not in known and policy.scope_allows_new(h)]
         if [u for u in unknown if u.host not in policy.decisions]:
             return ImportResult(
                 project=project.code, format=detected, tool="burp-history",
                 hosts_seen=len(counts), needs_decision=True,
-                unknown_hosts=unknown)
+                unknown_hosts=unknown, barred_hosts=dict(policy.barred))
 
     agg = ImportResult(project=project.code, format=detected, tool=detected)
     seen: set[str] = set()
@@ -718,6 +732,11 @@ async def _run_stream(session: AsyncSession, project: Project, path: str,
     finally:
         session.sync_session.expire_on_commit = was_expiring
     agg.hosts_seen = len(seen)
+    # The survey above refuses hosts before the first chunk is read, so
+    # those reasons are not in any part result. Carried over here, or a
+    # streamed import would silently drop the one thing it most needs to
+    # say.
+    agg.barred_hosts.update(policy.barred)
     return agg
 
 
@@ -780,12 +799,13 @@ async def _run(session: AsyncSession, project: Project, text: str, fmt: str,
 
     known = await _known(session, project)
     policy = Policy(mode=("open" if mode == "open" else "strict"), known=set(known),
+                    scope=await index_for(session, project.id),
                     decisions={k.strip().rstrip(".").lower():
                                Decision(action=v.action, target=v.target)
                                for k, v in (decisions or {}).items()})
 
     if policy.mode == "strict":
-        unknown = survey(scan, known)
+        unknown = survey(scan, known, policy)
         undecided = [u for u in unknown
                      if u.host not in policy.decisions]
         if undecided:
@@ -797,6 +817,7 @@ async def _run(session: AsyncSession, project: Project, text: str, fmt: str,
                 needs_decision=True,
                 unknown_hosts=[UnknownHostOut(**{**u.__dict__, "total": u.total})
                                for u in unknown],
+                barred_hosts=dict(policy.barred),
                 errors=list(scan.errors))
 
     return await ingest(session, project, scan, detected,

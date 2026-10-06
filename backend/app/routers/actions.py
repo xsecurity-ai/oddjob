@@ -19,6 +19,7 @@ from ..events import broker
 from ..models import Action, Project, Service, Target, User
 from ..query import apply_sort, paginate
 from ..schemas import ActionOut, ActionRequest, Page
+from ..scopegate import assert_allowed
 from ..security import assert_role_for_target, get_current_user, visible_project_ids
 
 router = APIRouter(prefix="/api", tags=["actions"])
@@ -78,6 +79,16 @@ async def request_action(service_id: int, body: ActionRequest,
     # An active probe changes the record and touches someone else's host, so
     # it needs write authority on the project, not merely read.
     await assert_role_for_target(session, user, svc.target_id, "user")
+
+    # And the project's scope lists, which are a different question from
+    # authority. `actions.is_in_scope` still refuses everything on its
+    # own account — see the interlock there — so this is the earlier and
+    # more useful refusal, not the only one: a barred host is told so
+    # here rather than queueing a job that comes back "unavailable".
+    tgt = await session.get(Target, svc.target_id)
+    if tgt is not None:
+        await assert_allowed(session, tgt.project_id, tgt.host,
+                             f"probing {tgt.host}", ip=tgt.ip_address)
 
     busy = (await session.execute(
         select(Action).where(Action.service_id == service_id, Action.kind == body.kind,

@@ -949,4 +949,91 @@ export const api = {
   enumerateRanges: (project: string) =>
     req<Array<{ value: string; kind: string; addresses: number; targets: number }>>(
       '/api/enumerate/ranges' + qs({ project })),
+  // --- project scope ---
+  // The shapes are written inline rather than as exported interfaces so
+  // this block stays one contiguous addition; ProjectConfigView derives
+  // its types from these signatures, so there is still only one
+  // definition. Note `kind` includes 'wildcard' and 'country', which the
+  // older ScopeEntry above predates.
+  projectConfig: (project: string) =>
+    req<{
+      project: Project
+      scope: Array<{
+        id: number
+        kind: 'cidr' | 'ipv4' | 'ipv6' | 'fqdn' | 'wildcard' | 'country'
+        value: string
+        included: boolean
+        /** Operator-declared, never looked up. Null is "undetermined",
+         *  which is a different claim from "no country". */
+        country: string | null
+        notes: string | null
+      }>
+      /** Whether anything in the lists could refuse anything. */
+      scope_defined: boolean
+      /** Once true the project may not acquire anything outside the list. */
+      allowlist_active: boolean
+    }>(`/api/projects/${encodeURIComponent(project)}/config`),
+
+  updateProject: (project: string, body: {
+    name?: string; client?: string | null; codename?: string | null
+    description?: string | null; status?: string
+  }) =>
+    req<Project>(`/api/projects/${encodeURIComponent(project)}`,
+      { method: 'PATCH', body: JSON.stringify(body) }),
+
+  /** Append entries. `included` picks the list; a line's own leading `!`
+   *  still wins, because that is how scope documents are pasted. */
+  addProjectScope: (project: string, body: {
+    lines?: string[]; countries?: string[]; included?: boolean
+    country?: string | null
+  }) =>
+    req<ProjectCreated>(`/api/projects/${encodeURIComponent(project)}/scope`,
+      { method: 'POST', body: JSON.stringify(body) }),
+
+  patchProjectScope: (project: string, entryId: number, body: {
+    included?: boolean; country?: string | null; notes?: string | null
+  }) =>
+    req<{ id: number; kind: string; value: string; included: boolean
+          country: string | null; notes: string | null }>(
+      `/api/projects/${encodeURIComponent(project)}/scope/${entryId}`,
+      { method: 'PATCH', body: JSON.stringify(body) }),
+
+  deleteProjectScope: (project: string, entryId: number) =>
+    req<void>(`/api/projects/${encodeURIComponent(project)}/scope/${entryId}`,
+      { method: 'DELETE' }),
+
+  /** Which hosts the project already holds that the lists would refuse.
+   *  Read-only: nothing is deleted until `applyProjectScope`. */
+  scopeViolations: (project: string) =>
+    req<ScopeApplyResult>(
+      `/api/projects/${encodeURIComponent(project)}/scope/violations`),
+
+  /** `remove` needs the hosts named. Applying to "whatever the report
+   *  said" acts on a list that may have moved since it was read, and the
+   *  server refuses it for the same reason. */
+  applyProjectScope: (project: string, action: 'report' | 'remove' | 'ignore',
+                      hosts: string[] = []) =>
+    req<ScopeApplyResult>(
+      `/api/projects/${encodeURIComponent(project)}/scope/apply`,
+      { method: 'POST', body: JSON.stringify({ action, hosts }) }),
+}
+
+/** The violation report, shared by the read and the apply. */
+export interface ScopeApplyResult {
+  project: string
+  scope_defined: boolean
+  violations: Array<{
+    id: number
+    host: string
+    ip_address: string | null
+    /** 'barred' — on the out-of-scope list, nothing may touch it.
+     *  'outside' — an in-scope list exists and this is not on it, so it
+     *  could not be added today. The two want different answers. */
+    verdict: 'barred' | 'outside'
+    reason: string
+    services: number; vulns: number; pocs: number
+  }>
+  action: string
+  removed: string[]
+  detail: string
 }
