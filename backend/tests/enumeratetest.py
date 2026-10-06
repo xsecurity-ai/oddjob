@@ -174,5 +174,35 @@ check("ranges is served", st == 200, f"status={st} {str(ranges)[:120]}")
 check("with no scope defined there is nothing to report",
       ranges == [] or isinstance(ranges, list), str(ranges)[:120])
 
+
+print("== the names you did not pick are still findings ==")
+# An address answering to several names is usually shared hosting or a
+# load balancer, and those other names are leads — frequently the most
+# useful thing a reverse lookup produces. Choosing one must not discard
+# the rest.
+call("/api/targets?project=ENUM", "POST", {"host": "198.51.100.77"}, token=admin)
+finish("reverse_ip", {"targets": ["198.51.100.77"]},
+       [{"ip": "198.51.100.77",
+         "domains": ["alpha.acme.example", "beta.acme.example",
+                     "gamma.acme.example"],
+         "sources": ["ptr"], "partial": False}])
+st, _ = call("/api/enumerate/resolve?project=ENUM", "POST",
+             {"host": "198.51.100.77", "field": "host",
+              "value": "alpha.acme.example",
+              "also_resolved": ["alpha.acme.example", "beta.acme.example",
+                                "gamma.acme.example"]}, token=admin)
+check("the pick applies", st == 200, f"status={st}")
+
+st, tl = call("/api/targets/ENUM/alpha.acme.example/timeline", token=admin)
+events = tl if isinstance(tl, list) else (tl or {}).get("items", [])
+blob = json.dumps(events)
+check("the other names are recorded against the target",
+      "beta.acme.example" in blob and "gamma.acme.example" in blob,
+      f"status={st} {blob[:140]}")
+check("and the one chosen is not listed as an also-ran",
+      blob.count("alpha.acme.example") >= 1, blob[:80])
+check("the note says what they are and are not",
+      "shared hosting" in blob or "load balancer" in blob, blob[:160])
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

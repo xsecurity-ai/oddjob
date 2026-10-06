@@ -83,6 +83,15 @@ class ResolveIn(BaseModel):
     host: str
     field: str = Field(description="host | ip_address")
     value: str
+    #: Every name the lookup returned, not only the one chosen.
+    #:
+    #: Picking one name does not make the others untrue. An address
+    #: answering to six names is usually shared hosting or a load
+    #: balancer, and those other names are leads — frequently the most
+    #: useful thing a reverse lookup produces. Throwing them away
+    #: because a dropdown only has room for one answer loses them
+    #: silently, so they are recorded against the target.
+    also_resolved: list[str] = []
 
 
 class RangeCoverage(BaseModel):
@@ -251,6 +260,29 @@ async def resolve(body: ResolveIn, project: str = Query(...),
         await record(session, t.id, "change",
                      f"named {name} from a reverse lookup on {was}",
                      actor=user, source="jaws:reverse_ip")
+
+        # The names not chosen. Recorded as their own entry rather than
+        # folded into the line above, because this is a finding about
+        # the address — what else lives there — and not a note about
+        # the rename.
+        others = [n for n in
+                  dict.fromkeys(x.strip().lower().rstrip(".")
+                                for x in body.also_resolved)
+                  if n and n != name]
+        if others:
+            shown = others[:40]
+            more = f" (+{len(others) - len(shown)} more)" if len(others) > len(shown) else ""
+            await record(
+                session, t.id, "discovered",
+                f"{was} also resolves to {len(others)} other name(s)",
+                detail=("A reverse lookup on " + was + " returned these as "
+                        "well as " + name + ". They are not necessarily the "
+                        "same host — an address answering to several names "
+                        "is usually shared hosting or a load balancer — but "
+                        "each is a lead and none is in scope merely because "
+                        "it appeared here:\n\n"
+                        + "\n".join(shown) + more),
+                actor=user, source="jaws:reverse_ip")
     elif body.field == "ip_address":
         if not _is_ip(value):
             raise HTTPException(422, f"{value!r} is not an IP address")

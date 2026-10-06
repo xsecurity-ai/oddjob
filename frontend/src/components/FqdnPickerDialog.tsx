@@ -105,6 +105,10 @@ function Row({ row, project, onBusy }: {
   const apply = useMutation({
     mutationFn: () => api.enumerateResolve(project, {
       host: row.target_host, field: row.field, value: pick,
+      // All of them, not just the pick. Choosing one name does not
+      // make the others untrue, and they are often the most useful
+      // thing a reverse lookup produces.
+      also_resolved: row.options,
     }),
     onMutate: () => { setErr(null); onBusy(true) },
     onError: (e) => setErr(e instanceof Error ? e.message : String(e)),

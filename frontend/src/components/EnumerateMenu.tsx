@@ -88,11 +88,11 @@ export function EnumerateMenu({ onPick, selectedCount, unnamedCount,
         {unnamedCount
           ? item('fqdn-all', 'Find FQDNs for all IPs without one',
                  <DnsIcon fontSize="small" />,
-                 `${unnamedCount} target${unnamedCount === 1 ? '' : 's'} with an `
-                 + `address and no name`)
+                 `${unnamedCount} target${unnamedCount === 1 ? '' : 's'} named by `
+                 + `an address, with no hostname yet`)
           : <Blocked label="Find FQDNs for all IPs without one"
               icon={<DnsIcon fontSize="small" />}
-              why="Every target in this project already carries a name, or has no address to look up." />}
+              why="No target here is named by an address — they all already carry a hostname." />}
 
         {!selectedCount
           ? <Blocked label="Find FQDNs for selected IPs without one"
