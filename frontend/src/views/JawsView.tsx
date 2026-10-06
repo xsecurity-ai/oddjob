@@ -6,6 +6,7 @@ import {
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
 import DownloadIcon from '@mui/icons-material/Download'
+import EditIcon from '@mui/icons-material/EditOutlined'
 import ContentCopyIcon from '@mui/icons-material/ContentCopy'
 import PowerSettingsNewIcon from '@mui/icons-material/PowerSettingsNew'
 import type { GridColDef } from '@mui/x-data-grid'
@@ -303,11 +304,98 @@ function Routing({ project, routing }:
           'Pooled tasks run on an agent serving their region, or wait.'}
       </Box>
       {routing.unassigned_tasks > 0 && (
-        <Chip size="small" label={`${routing.unassigned_tasks} waiting`}
-          sx={{ height: 19, fontSize: 10.5, color: neon.yellow,
-                bgcolor: alpha(neon.yellow, 0.12) }} />
+        <Tooltip title="Queued for the project rather than for one agent, so it belongs to none of them yet and cannot show in a per-agent column. The routing mode decides who takes it when one next asks for work.">
+          <Chip size="small"
+            label={`${routing.unassigned_tasks} waiting for an agent`}
+            sx={{ height: 21, fontSize: 11, fontWeight: 600,
+                  color: neon.yellow, bgcolor: alpha(neon.yellow, 0.16),
+                  border: `1px solid ${alpha(neon.yellow, 0.5)}` }} />
+        </Tooltip>
+      )}
+      {routing.unassigned_tasks > 0 && routing.eligible === 0 && (
+        // Waiting work and nobody able to take it is the one case
+        // where this number means something is wrong rather than
+        // merely in progress.
+        <Chip size="small" label="no agent online to take it" sx={{
+          height: 21, fontSize: 11, color: neon.red,
+          bgcolor: alpha(neon.red, 0.14),
+          border: `1px solid ${alpha(neon.red, 0.5)}` }} />
       )}
     </Stack>
+  )
+}
+
+/** Rename an agent, change where it sits in the running order, or say
+ *  which regions it serves.
+ *
+ *  Both numeric settings only matter in one routing mode each, and the
+ *  dialog says which — a priority field on a project running mesh is
+ *  a control that does nothing, and leaving the operator to discover
+ *  that is how a setting gets blamed for not working. */
+function EditAgentDialog({ project, agent, mode, onClose }: {
+  project: string; agent: JawsAgent; mode?: string; onClose: () => void
+}) {
+  const qc = useQueryClient()
+  const [name, setName] = useState(agent.name)
+  const [priority, setPriority] = useState(String(agent.priority))
+  const [regions, setRegions] = useState((agent.regions ?? []).join(', '))
+  const [notes, setNotes] = useState('')
+
+  const save = useMutation({
+    mutationFn: () => api.patchAgent(project, agent.id, {
+      name: name.trim() || undefined,
+      priority: Number.isFinite(Number(priority)) ? Number(priority) : undefined,
+      // Sent even when empty: clearing the box is how an agent stops
+      // serving a region, so an empty string has to reach the server
+      // rather than being treated as "no change".
+      regions,
+      notes: notes.trim() || undefined,
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['jaws-agents', project] })
+      onClose()
+    },
+  })
+
+  return (
+    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ color: neon.cyan }}>{agent.name}</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ mt: 0.5 }}>
+          <TextField size="small" label="Name" value={name} autoFocus
+            helperText="What it is called here. Where it sits, not what it is."
+            onChange={(e) => setName(e.target.value)} />
+
+          <TextField size="small" label="Priority" value={priority}
+            type="number"
+            helperText={mode === 'primary'
+              ? 'Lower goes first. This project runs primary routing, so this decides who serves.'
+              : `Lower goes first — but only in primary routing. This project runs ${mode ?? 'mesh'}, so this has no effect today.`}
+            onChange={(e) => setPriority(e.target.value)} />
+
+          <TextField size="small" label="Regions" value={regions}
+            placeholder="jp, eu, us-east"
+            helperText={mode === 'geo'
+              ? 'Comma separated. This project routes by region, so an agent with none set will never be given region-tagged work.'
+              : `Comma separated — but only consulted in region routing. This project runs ${mode ?? 'mesh'}, so this agent takes work regardless.`}
+            onChange={(e) => setRegions(e.target.value)} />
+
+          <TextField size="small" label="Add a note" value={notes}
+            multiline minRows={2}
+            helperText="Why this agent is where it is, for whoever reads this later."
+            onChange={(e) => setNotes(e.target.value)} />
+        </Stack>
+        {save.error ? <Alert severity="error" sx={{ mt: 2 }}>
+          {String(save.error)}</Alert> : null}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} sx={{ color: neon.muted }}>Cancel</Button>
+        <Button disabled={save.isPending} onClick={() => save.mutate()}
+          sx={{ color: neon.green }}>
+          {save.isPending ? 'Saving…' : 'Save'}
+        </Button>
+      </DialogActions>
+    </Dialog>
   )
 }
 
@@ -317,6 +405,7 @@ export function JawsView({ project }: { project: string | null }) {
   const { canWrite } = useAuth()
   const [wizard, setWizard] = useState(false)
   const [confirmKill, setConfirmKill] = useState<JawsAgent | null>(null)
+  const [editing, setEditing] = useState<JawsAgent | null>(null)
   // A killed agent leaves the table, because the table answers "what
   // is deployed" and it no longer is. The record stays — it holds the
   // output of scans that ran — so it is hidden rather than deleted,
@@ -458,22 +547,36 @@ export function JawsView({ project }: { project: string | null }) {
       ),
     },
     {
-      field: 'running_tasks', headerName: 'In progress', width: 120,
-      renderCell: (p) => (
-        <Stack direction="row" spacing={0.6} alignItems="center">
-          <Box sx={{ color: p.value ? neon.cyan : alpha(neon.muted, 0.45),
-                     fontWeight: p.value ? 600 : 400 }}>
-            {p.value || '—'}
-          </Box>
-          {p.row.queued_tasks > 0 && (
-            <Tooltip title={`${p.row.queued_tasks} also waiting`}>
-              <Box sx={{ color: neon.muted, fontSize: 11 }}>
-                +{p.row.queued_tasks}
-              </Box>
-            </Tooltip>
-          )}
-        </Stack>
-      ),
+      field: 'running_tasks', headerName: 'Working on', width: 150,
+      renderCell: (p) => {
+        const running = p.value as number
+        const queued = p.row.queued_tasks
+        if (!running && !queued) {
+          return <Box component="span" sx={{ color: alpha(neon.muted, 0.4) }}>idle</Box>
+        }
+        return (
+          <Stack direction="row" spacing={0.8} alignItems="baseline">
+            {running > 0 && (
+              <Tooltip title={`${running} task(s) this agent has taken and is running`}>
+                <Box sx={{ color: neon.cyan, fontWeight: 600 }}>
+                  {running} running
+                </Box>
+              </Tooltip>
+            )}
+            {queued > 0 && (
+              // Spelled out rather than a bare "+N". Work addressed to
+              // this agent by name sits here until it finishes what it
+              // has; an unlabelled number next to another number is a
+              // puzzle, not a status.
+              <Tooltip title={`${queued} task(s) addressed to this agent by name, waiting for it`}>
+                <Box sx={{ color: neon.yellow, fontSize: 11.5 }}>
+                  {running > 0 ? '· ' : ''}{queued} queued
+                </Box>
+              </Tooltip>
+            )}
+          </Stack>
+        )
+      },
     },
     {
       field: 'completed_tasks', headerName: 'Completed', width: 116,
@@ -546,15 +649,35 @@ export function JawsView({ project }: { project: string | null }) {
       },
     },
     {
-      field: 'regions', headerName: 'Regions', width: 120,
+      field: 'regions', headerName: 'Regions', width: 134,
       sortable: false,
       valueGetter: (v) => (v as string[] | undefined)?.join(', ') ?? '',
-      renderCell: (p) => p.value
-        ? <Box sx={{ color: neon.purple, fontSize: 12 }}>{p.value}</Box>
-        : <Box component="span" sx={{ color: alpha(neon.muted, 0.4) }}>—</Box>,
+      renderCell: (p) => {
+        const set = (p.row.regions ?? []) as string[]
+        if (set.length) {
+          return <Box sx={{ color: neon.purple, fontSize: 12 }}>{set.join(', ')}</Box>
+        }
+        // "all" is true in mesh and primary, where regions are never
+        // consulted. It is false in geo, where an agent with none set
+        // matches no region-tagged task at all — labelling that "all"
+        // would be a lie in precisely the mode the field exists for.
+        if (routing?.mode === 'geo') {
+          return (
+            <Tooltip title="This project routes by region and this agent serves none, so it will never be given region-tagged work. Edit it to set some.">
+              <Chip size="small" label="none set" sx={{ height: 18, fontSize: 10,
+                color: neon.red, bgcolor: alpha(neon.red, 0.12) }} />
+            </Tooltip>
+          )
+        }
+        return (
+          <Tooltip title="No regions set, and this project does not route by region — so it is eligible for anything.">
+            <Box sx={{ color: neon.muted, fontSize: 12 }}>all</Box>
+          </Tooltip>
+        )
+      },
     },
     {
-      field: 'actions', headerName: '', width: 56, sortable: false,
+      field: 'actions', headerName: '', width: 86, sortable: false,
       filterable: false,
       renderCell: (p) => {
         if (!canWrite(project)) return null
@@ -567,11 +690,18 @@ export function JawsView({ project }: { project: string | null }) {
           )
         }
         return (
-          <Tooltip title="Kill this Jaws">
-            <IconButton size="small" onClick={() => setConfirmKill(p.row)}>
-              <PowerSettingsNewIcon sx={{ fontSize: 17, color: neon.red }} />
-            </IconButton>
-          </Tooltip>
+          <Stack direction="row" spacing={0.2}>
+            <Tooltip title="Edit this Jaws">
+              <IconButton size="small" onClick={() => setEditing(p.row)}>
+                <EditIcon sx={{ fontSize: 16, color: neon.cyan }} />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Kill this Jaws">
+              <IconButton size="small" onClick={() => setConfirmKill(p.row)}>
+                <PowerSettingsNewIcon sx={{ fontSize: 17, color: neon.red }} />
+              </IconButton>
+            </Tooltip>
+          </Stack>
         )
       },
     },
@@ -625,6 +755,11 @@ export function JawsView({ project }: { project: string | null }) {
 
       {wizard && (
         <DeployWizard project={project} onClose={() => setWizard(false)} />
+      )}
+
+      {editing && (
+        <EditAgentDialog project={project} agent={editing}
+          mode={routing?.mode} onClose={() => setEditing(null)} />
       )}
 
       <Dialog open={!!confirmKill} onClose={() => setConfirmKill(null)}>

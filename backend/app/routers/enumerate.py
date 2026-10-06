@@ -24,6 +24,8 @@ true until something changes it.
 """
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import ipaddress
 import json
 
@@ -37,6 +39,7 @@ from ..events import broker
 from ..hosts import InvalidHost, validate_host
 from ..models import AgentTask, Project, ProjectScope, Target, User
 from ..security import get_current_user, require_project
+from .. import merge as merge_mod
 from ..timeline import record
 
 router = APIRouter(prefix="/api/enumerate", tags=["enumerate"])
@@ -340,3 +343,79 @@ async def ranges(project: str = Query(...),
                                  addresses=net.num_addresses, targets=inside))
     out.sort(key=lambda r: (r.targets, -r.addresses))
     return out
+
+
+# ------------------------------------------------------------- merging
+class MergeIn(BaseModel):
+    #: The target that will survive, named as the inventory names it.
+    into: str
+    #: Refuse unless the caller has seen a plan. Merging moves findings
+    #: and deletes a row; approving a verb is not the same as approving
+    #: a list of consequences.
+    confirm: bool = False
+
+
+@router.get("/merge-plan")
+async def merge_plan(host: str = Query(...), into: str = Query(...),
+                     project: str = Query(...),
+                     pr: Project = Depends(require_project("readonly")),
+                     _: User = Depends(get_current_user),
+                     session: AsyncSession = Depends(get_session)):
+    """What merging one target into another would do. Writes nothing."""
+    src, dst = await _two(session, pr, host, into)
+    return asdict(await merge_mod.plan(session, src, dst))
+
+
+@router.post("/merge")
+async def merge_targets(body: MergeIn, host: str = Query(...),
+                        project: str = Query(...),
+                        pr: Project = Depends(require_project("user")),
+                        user: User = Depends(get_current_user),
+                        session: AsyncSession = Depends(get_session)):
+    """Fold one target into another.
+
+    The destination survives and keeps its name. Everything the source
+    holds moves to it, and the source row goes.
+
+    Both sides get a timeline entry — the destination because it has
+    absorbed another host's findings and that is material to anyone
+    reading it later, and the entry names what moved rather than
+    saying "merged", because "where did these services come from" is
+    the question someone will have in three weeks.
+    """
+    src, dst = await _two(session, pr, host, body.into)
+    p = await merge_mod.plan(session, src, dst)
+    blocking = [w for w in p.warnings
+                if w.startswith(("a target cannot", "these targets are"))]
+    if blocking:
+        raise HTTPException(409, "; ".join(blocking))
+    if not body.confirm:
+        raise HTTPException(
+            428, "merging moves findings and deletes a target. Fetch "
+                 "/api/enumerate/merge-plan, show it, and repeat with "
+                 "confirm=true.")
+
+    done = await merge_mod.merge(session, src, dst, actor=user.username)
+    summary = merge_mod.describe(done)
+    await record(session, dst.id, "change", summary.split("\n")[0],
+                 detail=summary, actor=user, source="merge")
+    await session.commit()
+    await broker.publish("targets", action="merge", host=dst.host,
+                         project=pr.code)
+    for ch in ("services", "vulns", "web"):
+        await broker.publish(ch, action="merge", project=pr.code)
+    return {"ok": True, "surviving": dst.host, "removed": p.source,
+            "summary": summary, **asdict(done)}
+
+
+async def _two(session: AsyncSession, pr: Project, host: str,
+               into: str) -> tuple[Target, Target]:
+    async def one(name: str) -> Target:
+        t = (await session.execute(
+            select(Target).where(Target.project_id == pr.id,
+                                 Target.host == name.strip().lower()))
+             ).scalar_one_or_none()
+        if t is None:
+            raise HTTPException(404, f"{pr.code} has no target {name!r}")
+        return t
+    return await one(host), await one(into)

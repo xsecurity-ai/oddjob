@@ -798,6 +798,9 @@ export const api = {
   }) =>
     req<AgentEnrolled>('/api/agents' + qs({ project }),
       { method: 'POST', body: JSON.stringify(body) }),
+  /** Rename, re-prioritise, set the regions it serves, or annotate it.
+   *  Priority only matters in `primary` routing (lower goes first);
+   *  regions only in `geo`. */
   patchAgent: (project: string, id: number, body: {
     name?: string; priority?: number; regions?: string; notes?: string
   }) =>
