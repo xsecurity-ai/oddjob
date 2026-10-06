@@ -14,7 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from .db import DB_PATH, init_db
 from .gatekeeper import (FORBIDDEN_HTML, Gatekeeper, NOT_FOUND_HTML,
                          wants_html)
-from .routers import (agents, actions, agent, auth, bulk, credentials, domains, explore,
+from .routers import (agents, actions, agent, auth, bulk, credentials, domains,
+                      enumerate as enumerate_routes, explore,
                       index as api_index, rest,
                       findings, google, magic, meta, projects, reports, scans,
                       services, settings, targets, web)
@@ -119,7 +120,7 @@ for r in (auth.router, google.router, magic.router, projects.router, targets.rou
           services.router, findings.router, credentials.router,
           explore.router, actions.router, settings.router, bulk.router,
           scans.router, web.router, domains.router, agent.router,
-          rest.router, api_index.router, agents.router,
+          rest.router, api_index.router, agents.router, enumerate_routes.router,
           reports.router,
           meta.router):
     app.include_router(r)
