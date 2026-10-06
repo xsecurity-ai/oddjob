@@ -10,6 +10,7 @@ import (
 
 	"github.com/xsecurity-ai/oddjob/jaws/internal/client"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/config"
+	"github.com/xsecurity-ai/oddjob/jaws/internal/spool"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/tasks"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/tools"
 )
@@ -17,6 +18,7 @@ import (
 type Agent struct {
 	cfg *config.Config
 	cli *client.Client
+	sp  *spool.Spool
 
 	mu      sync.Mutex
 	busy    bool
@@ -25,8 +27,19 @@ type Agent struct {
 }
 
 func New(cfg *config.Config) *Agent {
+	// A spool that cannot be opened is not fatal: an agent that still
+	// runs scans and reports them live is far better than one that
+	// refuses to start. What is lost is the crash-safety, so it is
+	// said out loud rather than discovered later.
+	sp, err := spool.Open(cfg.SpoolDir())
+	if err != nil {
+		log.Printf("WARNING: no spool at %s (%v) — results will not survive "+
+			"a crash between finishing a scan and reporting it",
+			cfg.SpoolDir(), err)
+	}
 	return &Agent{
 		cfg: cfg,
+		sp:  sp,
 		cli: client.New(cfg.Server, cfg.CallbackKey, cfg.Insecure),
 		// Buffered depth 1: a wake that arrives while one is already
 		// pending is the same wake. Blocking the caller — which is an
@@ -58,6 +71,7 @@ func (a *Agent) Status() map[string]any {
 		"privilege":    advice,
 		"busy":         a.busy,
 		"current_task": a.current,
+		"owed_results": a.owed(),
 		"server":       a.cfg.Server,
 	}
 }
@@ -106,6 +120,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 
+	// Before taking anything new: whatever is owed from last time.
+	a.drain(ctx)
+
 	tick := time.NewTicker(a.cfg.Heartbeat)
 	defer tick.Stop()
 
@@ -117,6 +134,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-tick.C:
 		case <-a.wake:
 		}
+
+		a.drain(ctx)
 
 		resp, err := a.cli.Heartbeat(ctx)
 		if err != nil {
@@ -163,6 +182,11 @@ func (a *Agent) execute(ctx context.Context, t *client.Task) {
 	}()
 
 	log.Printf("task %d: %s", t.ID, t.Kind)
+	if a.sp != nil {
+		if err := a.sp.Begin(t.ID, t.Kind); err != nil {
+			log.Printf("task %d: spool: %v", t.ID, err)
+		}
+	}
 	if err := a.cli.StartTask(ctx, t.ID); err != nil {
 		log.Printf("task %d: could not mark running: %v", t.ID, err)
 	}
@@ -191,6 +215,16 @@ func (a *Agent) execute(ctx context.Context, t *client.Task) {
 	log.Printf("task %d: %s in %s — %s", t.ID, res.Status,
 		time.Since(start).Round(time.Second), res.Summary+res.Error)
 
+	// On disk before it goes on the wire. From here the result is
+	// owed to the server and will be re-sent until acknowledged,
+	// including across a restart.
+	if a.sp != nil {
+		if err := a.sp.Finish(t.ID, res.Status, res.Output, res.Stderr,
+			res.Summary, res.ExitCode, res.Error); err != nil {
+			log.Printf("task %d: spool: %v", t.ID, err)
+		}
+	}
+
 	a.report(ctx, t.ID, client.Result{
 		Status: res.Status, Output: res.Output, Stderr: res.Stderr,
 		Summary: res.Summary, ExitCode: res.ExitCode, Error: res.Error,
@@ -199,10 +233,72 @@ func (a *Agent) execute(ctx context.Context, t *client.Task) {
 
 func (a *Agent) report(ctx context.Context, id int, r client.Result) {
 	if err := a.cli.SubmitResult(ctx, id, r); err != nil {
-		// The scan already ran against the client's estate. Saying so
-		// loudly is the least we can do; the operator can re-task.
+		if a.sp != nil {
+			a.sp.Attempted(id)
+			// Not lost any more: it is on disk and the next drain will
+			// try again. Worth saying at all because a result that is
+			// hours late is still a surprise to whoever is watching.
+			log.Printf("task %d: not delivered (%v) — held in the spool "+
+				"and will be retried", id, err)
+			return
+		}
 		log.Printf("task %d: RESULT LOST: %v", id, err)
+		return
 	}
+	if a.sp != nil {
+		if err := a.sp.Delivered(id); err != nil {
+			log.Printf("task %d: spool: %v", id, err)
+		}
+	}
+}
+
+// drain re-sends anything the spool still owes the server, and closes
+// out work that was interrupted.
+//
+// Run at startup and on every heartbeat. The startup case is the one
+// that matters: it is how a result that finished moments before a
+// reboot still reaches the engagement.
+func (a *Agent) drain(ctx context.Context) {
+	if a.sp == nil {
+		return
+	}
+
+	// Tasks that were mid-flight when the process stopped. The tool is
+	// gone with it, so they cannot be finished -- but the server is
+	// still waiting, and a task stuck in `running` forever is worse
+	// than a task that says plainly it was interrupted.
+	orphans, _ := a.sp.Orphaned()
+	for _, e := range orphans {
+		log.Printf("task %d: was running when this agent stopped — "+
+			"reporting it as interrupted", e.TaskID)
+		_ = a.sp.Finish(e.TaskID, "failed", "", "", "", -1,
+			"the agent stopped while this task was running; "+
+				"it did not complete and produced no output")
+	}
+
+	pending, _ := a.sp.Pending()
+	for _, e := range pending {
+		if ctx.Err() != nil {
+			return
+		}
+		log.Printf("task %d: delivering a result held since %s (attempt %d)",
+			e.TaskID, e.EndedAt, e.Attempts+1)
+		a.report(ctx, e.TaskID, client.Result{
+			Status: e.Status, Output: e.Output, Stderr: e.Stderr,
+			Summary: e.Summary, ExitCode: e.ExitCode, Error: e.Error,
+		})
+	}
+}
+
+// owed is how many results are waiting to be delivered, for the
+// call-in API. An operator asking "is this agent stuck?" wants this
+// number, not a boolean.
+func (a *Agent) owed() int {
+	if a.sp == nil {
+		return 0
+	}
+	_, pending := a.sp.Count()
+	return pending
 }
 
 func toString(v any) string {

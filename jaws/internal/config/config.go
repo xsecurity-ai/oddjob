@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -93,6 +94,19 @@ func defaultWorkDir() string {
 // FromEnv fills anything still empty from JAWS_* variables, so a key
 // need never appear in a command line — process lists are readable by
 // every user on the box, which on an engagement host is the point.
+// SpoolDir is where results wait until the server has them. Under
+// WorkDir, which the operator already chose and which has to be
+// writable for the tools to stage output anyway.
+func (c *Config) SpoolDir() string {
+	return filepath.Join(c.WorkDir, "spool")
+}
+
+// IdentityPath is where the agent's keypair and the pinned server key
+// live. Beside the spool, and 0600.
+func (c *Config) IdentityPath() string {
+	return filepath.Join(c.WorkDir, "identity.json")
+}
+
 func (c *Config) FromEnv() {
 	if c.Server == "" {
 		c.Server = os.Getenv("JAWS_SERVER")
