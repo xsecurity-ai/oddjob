@@ -463,7 +463,7 @@ async def _slack_channels(session: AsyncSession,
         return []
 
 
-@router.get("/{code}/slack/me", response_model=SlackMeOut)
+@router.get("/{project}/slack/me", response_model=SlackMeOut)
 async def slack_me(pr: Project = Depends(require_project("readonly")),
                    user: User = Depends(get_current_user),
                    session: AsyncSession = Depends(get_session)):
@@ -488,7 +488,7 @@ async def slack_me(pr: Project = Depends(require_project("readonly")),
         invite_result=m.invite_result if m else None)
 
 
-@router.post("/{code}/slack/me", response_model=SlackMeOut)
+@router.post("/{project}/slack/me", response_model=SlackMeOut)
 async def slack_me_confirm(body: SlackMeIn,
                            pr: Project = Depends(require_project("readonly")),
                            user: User = Depends(get_current_user),
@@ -532,7 +532,7 @@ async def slack_me_confirm(body: SlackMeIn,
     return await slack_me(pr=pr, user=user, session=session)
 
 
-@router.post("/{code}/slack/me/decline", response_model=SlackMeOut)
+@router.post("/{project}/slack/me/decline", response_model=SlackMeOut)
 async def slack_me_decline(pr: Project = Depends(require_project("readonly")),
                            user: User = Depends(get_current_user),
                            session: AsyncSession = Depends(get_session)):

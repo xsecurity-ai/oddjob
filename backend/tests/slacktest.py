@@ -420,4 +420,56 @@ st, r = call("/api/projects", "POST",
              {"code": "NOCH", "name": "No channel", "codename": "QUIET"}, token=admin)
 check("with the setting off, no channel is created", CREATED == [], str(CREATED))
 
+
+print("\n== the slack-handle prompt endpoints are actually reachable ==")
+# These were written with a {code} path parameter while require_project
+# reads one named {project}, so every call returned 422 "a project is
+# required" and the whole prompt was dead on arrival. Nothing caught it
+# because the UI was built against the source, not a running server.
+call("/api/projects", "POST",
+     {"code": "SLKME", "name": "Slack me"}, token=admin)
+
+st, me = call("/api/projects/SLKME/slack/me", token=admin)
+check("GET slack/me resolves the project from the path", st == 200,
+      f"status={st} {str(me)[:90]}")
+check("and reports whether slack is on for it",
+      isinstance((me or {}).get("slack_enabled"), bool), str(me)[:90])
+# This suite configures slack site-wide and auto-creates a channel per
+# project, so a new project genuinely does have a destination — which
+# is exactly the condition that should prompt.
+check("with a channel configured, it asks", (me or {}).get("prompt") is True,
+      str(me)[:90])
+check("and names the channel it would add you to",
+      (me or {}).get("channels"), str(me)[:90])
+
+st, done = call("/api/projects/SLKME/slack/me", "POST",
+                {"handle": "@someone", "save_as_default": True}, token=admin)
+check("POST slack/me is reachable too", st == 200, f"status={st}")
+check("the @ is stripped on the way in",
+      (done or {}).get("handle") == "someone", str((done or {}).get("handle")))
+check("and it is recorded as confirmed", (done or {}).get("confirmed") is True,
+      str(done)[:90])
+# The handle is fictional and the workspace is a stub, so the invite
+# cannot succeed. The point is that it is reported as a failure with
+# the reason, rather than the handle being saved and the invite
+# silently looking like it worked.
+res = str((done or {}).get("invite_result") or "")
+check("a failed invite is reported with its reason, not swallowed",
+      "no member matching" in res, res[:120])
+check("and the handle is kept anyway, so it is not asked again",
+      (done or {}).get("handle") == "someone", str(done)[:90])
+
+st, me2 = call("/api/projects/SLKME/slack/me", token=admin)
+check("the default is now on the profile and offered back",
+      (me2 or {}).get("default_handle") == "someone", str(me2)[:90])
+
+st, dec = call("/api/projects/SLKME/slack/me/decline", "POST", {}, token=admin)
+check("decline is reachable", st == 200, f"status={st}")
+check("and clears the confirmation rather than keeping both",
+      (dec or {}).get("declined") is True and (dec or {}).get("confirmed") is False,
+      str(dec)[:90])
+
+st, _ = call("/api/projects/NOSUCH/slack/me", token=admin)
+check("an unknown project is 404, not 422", st == 404, f"status={st}")
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
