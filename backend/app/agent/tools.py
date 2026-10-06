@@ -21,6 +21,8 @@ an agent reading them is being fed untrusted input all day.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+import re
 from typing import Any, Callable
 
 from sqlalchemy import false as sa_false, func, or_, select, true as sa_true, distinct
@@ -28,7 +30,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..domains import registrable
 from ..hosts import InvalidHost, validate_host
-from ..models import (Credential, DomainCandidate, Implant, Poc, Project,
+from ..models import (ROLE_ORDER, Agent, AgentTask, Credential, DomainCandidate,
+                      Implant, Poc, Project,
                       Service, Target, User, Vuln, WebAddress)
 from ..timeline import record
 
@@ -61,7 +64,8 @@ MAX_ROWS = 200
 
 
 def build(session: AsyncSession, project: Project | None, user: User,
-          allow_writes: bool, scope_ids: list[int] | None = None) -> list[Tool]:
+          allow_writes: bool, scope_ids: list[int] | None = None,
+          role: str | None = None) -> list[Tool]:
     """Tools for one project, or for everything the user may read.
 
     `project` is the engagement in view; None means the operator is
@@ -78,6 +82,11 @@ def build(session: AsyncSession, project: Project | None, user: User,
     engagement named is not a thing to guess at.
     """
     pid = project.id if project else None
+    #: The caller's role on the project in view. Some actions need more
+    #: than "writes are allowed": enrolling an agent creates something
+    #: that runs privileged commands on a machine, which is an admin's
+    #: decision and not a contributor's.
+    rank = ROLE_ORDER.get(role or "", -1)
 
     def scoped(col):
         """The project predicate for whichever scope is in force."""
@@ -333,7 +342,45 @@ def build(session: AsyncSession, project: Project | None, user: User,
                         "targets": int(n)})
         return {"projects": out, "count": len(out)}
 
+    def _tools_of(a: Agent) -> dict:
+        try:
+            return json.loads(a.tools) if a.tools else {}
+        except ValueError:
+            return {}
+
+    async def list_jaws(**_) -> dict:
+        """The agents deployed on this engagement."""
+        if pid is None:
+            return {"error": "listing agents needs one engagement in view"}
+        rows = (await session.execute(
+            select(Agent).where(Agent.project_id == pid)
+            .order_by(Agent.name))).scalars().all()
+        out = []
+        for a in rows:
+            queued = int((await session.execute(
+                select(func.count()).select_from(AgentTask)
+                .where(AgentTask.agent_id == a.id,
+                       AgentTask.status.in_(("queued", "claimed", "running"))))
+            ).scalar_one())
+            out.append({
+                "id": a.id, "name": a.name, "status": a.status,
+                "platform": a.platform, "hostname": a.hostname,
+                "address": a.outbound_ip or a.last_ip,
+                # Said plainly: an agent without raw sockets cannot run
+                # masscan and will silently connect-scan with nmap, so
+                # it changes what tasking is worth sending.
+                "raw_sockets": a.privileged,
+                "tools": sorted(_tools_of(a)),
+                "work_in_flight": queued,
+                "last_seen": a.last_seen.isoformat() if a.last_seen else None})
+        return {"agents": out, "count": len(out)}
+
     reads = [
+        Tool("list_jaws",
+             "Jaws agents on this engagement: where each is deployed, "
+             "whether it can raw-socket scan, what tools it has, and what "
+             "it is working on.",
+             _obj({}), list_jaws),
         Tool("list_projects",
              "The engagements you can see, with a target count for each. "
              "Use this first when asked about more than one engagement, or "
@@ -435,7 +482,156 @@ def build(session: AsyncSession, project: Project | None, user: User,
         await session.commit()
         return {"ok": True, "host": t.host, "title": title}
 
+    # ------------------------------------------------------ jaws writes
+    async def task_jaws(kind: str, targets: str, agent: str = "",
+                        ports: str = "", region: str = "") -> dict:
+        """Queue work for an agent, or for the project's pool."""
+        from ..routers.agents import TASK_KINDS
+        if pid is None or project is None:
+            return {"error": "tasking needs one engagement in view"}
+        kind = (kind or "").strip().lower()
+        if kind not in TASK_KINDS:
+            return {"error": f"unknown task {kind!r}. Known: "
+                             f"{', '.join(sorted(TASK_KINDS))}"}
+        if kind in ("install", "shell"):
+            # Installing software on, or running arbitrary commands on,
+            # a privileged process inside a client network is not
+            # something to do because a sentence asked for it.
+            return {"error": f"{kind} is not available through the "
+                             f"assistant; queue it yourself from the Jaws "
+                             f"page, where the allowlist and the agent are "
+                             f"both in front of you"}
+        hosts = [t for t in re.split(r"[\s,]+", targets or "") if t]
+        if not hosts:
+            return {"error": "no targets given"}
+
+        chosen: Agent | None = None
+        if agent.strip():
+            chosen = (await session.execute(
+                select(Agent).where(Agent.project_id == pid,
+                                    Agent.name == agent.strip()))).scalar_one_or_none()
+            if chosen is None:
+                return {"error": f"no agent named {agent!r} on {project.code}"}
+            if chosen.status == "disabled":
+                return {"error": f"{chosen.name} has been killed"}
+
+        args: dict = {"targets": hosts}
+        if ports.strip():
+            args["ports"] = ports.strip()
+        t = AgentTask(
+            agent_id=chosen.id if chosen else None,
+            project_id=pid, requested_by=user.id, kind=kind,
+            args=json.dumps(args),
+            region=(region or "").strip().lower() or None,
+            import_as=TASK_KINDS.get(kind), status="queued")
+        session.add(t)
+        await session.commit()
+        await session.refresh(t)
+        return {"ok": True, "task_id": t.id, "kind": kind,
+                "targets": hosts,
+                "assigned_to": chosen.name if chosen else
+                               "the project pool — routing will pick an agent",
+                "note": "queued; results import when the agent reports back"}
+
+    async def jaws_task_status(task_id: int) -> dict:
+        if pid is None:
+            return {"error": "needs one engagement in view"}
+        t = await session.get(AgentTask, int(task_id))
+        if t is None or t.project_id != pid:
+            return {"error": f"no task {task_id} on this engagement"}
+        a = await session.get(Agent, t.agent_id) if t.agent_id else None
+        imp = None
+        if t.import_result:
+            try:
+                imp = json.loads(t.import_result)
+            except ValueError:
+                imp = None
+        return {"id": t.id, "kind": t.kind, "status": t.status,
+                "agent": a.name if a else None,
+                "summary": t.summary, "error": t.error,
+                "needs_decision": bool(imp and imp.get("needs_decision")),
+                "unknown_hosts": [u.get("host") for u in
+                                  (imp or {}).get("unknown_hosts", [])]}
+
+    async def enrol_jaws(name: str, target_os: str = "linux",
+                         connection_mode: str = "callback") -> dict:
+        """Create an agent and return what the operator must run."""
+        from ..routers.agents import ENROL_TTL, server_identity
+        from ..security import new_agent_key
+        if pid is None or project is None:
+            return {"error": "enrolling needs one engagement in view"}
+        if rank < ROLE_ORDER["admin"]:
+            # Enrolling creates something that will run privileged
+            # commands on a machine and send their output here. A
+            # contributor asking nicely is not the same as an admin
+            # deciding.
+            return {"error": "enrolling a Jaws is an admin action on this "
+                             "project; ask someone with that role"}
+        if target_os not in ("linux", "darwin", "windows"):
+            return {"error": "target_os is linux, darwin or windows"}
+        if connection_mode not in ("callback", "call_in"):
+            return {"error": "connection_mode is callback or call_in"}
+
+        _, server_pub = await server_identity(session)
+        cb_raw, cb_hash = new_agent_key()
+        ci_raw, ci_hash = new_agent_key()
+        tok_raw, tok_hash = new_agent_key()
+        expires = datetime.now(timezone.utc) + ENROL_TTL
+        a = Agent(project_id=pid, name=name.strip(),
+                  callback_key_hash=cb_hash, call_in_key_hash=ci_hash,
+                  enrol_token_hash=tok_hash, enrol_expires_at=expires,
+                  connection_mode=connection_mode, target_os=target_os,
+                  status="offline")
+        session.add(a)
+        await session.commit()
+        await session.refresh(a)
+        return {
+            "ok": True, "agent_id": a.id, "name": a.name,
+            "project": project.code,
+            # Returned once. It is a credential, so it is said plainly
+            # that it will not be shown again.
+            "enrol_token": tok_raw,
+            "expires_at": expires.isoformat(),
+            "run": (f"jaws run --server <this oddjob url> "
+                    f"--enrol {tok_raw} --name {a.name}"),
+            "note": ("this token is shown once and is good for a short "
+                     "while; the agent trades it for a keypair it makes "
+                     "itself, and will then only take tasking from this "
+                     "Oddjob"),
+            "server_public_key": server_pub,
+        }
+
     return reads + [
+        Tool("task_jaws",
+             "Queue a scan on a Jaws agent. Name an agent to pin the work "
+             "to it, or leave it out to let the project's routing choose. "
+             "Results import automatically when the agent reports back.",
+             _obj({"kind": {"type": "string",
+                            "description": "nmap, masscan, amass, gobuster, "
+                                           "gospider, nuclei, httpx, "
+                                           "nslookup, reverse_ip"},
+                   "targets": {"type": "string",
+                               "description": "hosts or ranges, space or "
+                                              "comma separated"},
+                   "agent": {"type": "string",
+                             "description": "agent name; omit for the pool"},
+                   "ports": {"type": "string"},
+                   "region": {"type": "string"}},
+                  ["kind", "targets"]), task_jaws, writes=True),
+        Tool("jaws_task_status",
+             "How a queued Jaws task is getting on, and whether its results "
+             "are waiting on a decision about unknown hosts.",
+             _obj({"task_id": {"type": "integer"}}, ["task_id"]),
+             jaws_task_status),
+        Tool("enrol_jaws",
+             "Create a new Jaws agent for this engagement and return the "
+             "one-time command to run on the host. Admin only.",
+             _obj({"name": {"type": "string"},
+                   "target_os": {"type": "string",
+                                 "enum": ["linux", "darwin", "windows"]},
+                   "connection_mode": {"type": "string",
+                                       "enum": ["callback", "call_in"]}},
+                  ["name"]), enrol_jaws, writes=True),
         Tool("add_note", "Append a note to a host's timeline.",
              _obj({"host": {"type": "string"}, "note": {"type": "string"}},
                   ["host", "note"]), add_note, writes=True),
