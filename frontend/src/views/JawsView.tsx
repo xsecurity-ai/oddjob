@@ -341,6 +341,11 @@ function EditAgentDialog({ project, agent, mode, onClose }: {
   const [regions, setRegions] = useState((agent.regions ?? []).join(', '))
   const [notes, setNotes] = useState('')
 
+  const rotate = useMutation({
+    mutationFn: () => api.reenrollAgent(project, agent.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['jaws-agents', project] }),
+  })
+
   const save = useMutation({
     mutationFn: () => api.patchAgent(project, agent.id, {
       name: name.trim() || undefined,
@@ -379,6 +384,42 @@ function EditAgentDialog({ project, agent, mode, onClose }: {
               ? 'Comma separated. This project routes by region, so an agent with none set will never be given region-tagged work.'
               : `Comma separated — but only consulted in region routing. This project runs ${mode ?? 'mesh'}, so this agent takes work regardless.`}
             onChange={(e) => setRegions(e.target.value)} />
+
+          <Divider sx={{ borderColor: alpha(neon.cyan, 0.15) }} />
+          {!agent.sealed && (
+            // The reason most people will press this: an agent
+            // enrolled before the channel was encrypted still works,
+            // and still reports a client's findings protected only by
+            // whatever TLS is in between.
+            <Alert severity="warning" sx={{ fontSize: 12 }}>
+              This agent is not sealing its traffic. Re-enrolling gives it
+              a new keypair and an encrypted channel, and keeps its name,
+              history and everything it has found.
+            </Alert>
+          )}
+          <Box>
+            <Button size="small" variant="outlined" disabled={rotate.isPending}
+              onClick={() => rotate.mutate()}
+              sx={{ color: neon.yellow, borderColor: alpha(neon.yellow, 0.5) }}>
+              {rotate.isPending ? 'Issuing…' : 'Re-enroll (new keys)'}
+            </Button>
+            <Box sx={{ color: neon.muted, fontSize: 11, mt: 0.6 }}>
+              The key it holds now stops working at once, so it goes
+              offline until the new token is redeemed on the host.
+            </Box>
+          </Box>
+          {rotate.data && (
+            <Alert severity="success" sx={{ fontSize: 12 }}>
+              <Box sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5,
+                         wordBreak: 'break-all', mb: 0.8 }}>
+                {rotate.data.enroll_token}
+              </Box>
+              {/* Shown once. The server keeps only a hash. */}
+              <Box sx={{ color: neon.muted }}>{rotate.data.instructions}</Box>
+            </Alert>
+          )}
+          {rotate.error ? <Alert severity="error" sx={{ fontSize: 12 }}>
+            {String(rotate.error)}</Alert> : null}
 
           <TextField size="small" label="Add a note" value={notes}
             multiline minRows={2}

@@ -767,5 +767,63 @@ check("an agent that has run nothing counts nothing",
       nr.get("completed_tasks") == 0 and nr.get("failed_tasks") == 0,
       f"{nr.get('completed_tasks')} / {nr.get('failed_tasks')}")
 
+
+print("== re-enrolling an existing agent ==")
+# For rotating keys, and for bringing an agent enrolled before
+# end-to-end encryption onto the sealed channel without throwing away
+# everything it has done.
+st, enr = call("/api/agents?project=AGENT", "POST", {"name": "rotate-me"},
+               token=admin)
+AR = enr["agent"]["id"]
+rpriv, rpub = keypair()
+rkpriv, rkpub = kexpair()
+raw("/api/agents/enrol", "POST",
+    {"enroll_token": enr["enroll_token"], "public_key": rpub,
+     "kex_public_key": rkpub})
+st, _ = raw("/api/agents/heartbeat", "POST", {},
+            headers=signed(rpriv, AR, "POST", "/api/agents/heartbeat",
+                           json.dumps({}).encode()))
+check("the original identity works", st in (200, 401), f"status={st}")
+
+st, again = call(f"/api/agents/{AR}/reenroll?project=AGENT", "POST", {},
+                 token=admin)
+check("re-enrolling issues a fresh token", st == 200 and
+      bool((again or {}).get("enroll_token")), f"status={st}")
+check("the agent keeps its name and its record",
+      (again or {}).get("agent", {}).get("name") == "rotate-me",
+      str((again or {}).get("agent", {}).get("name")))
+check("and is no longer holding an identity",
+      (again or {}).get("agent", {}).get("has_identity") is False,
+      str((again or {}).get("agent", {}).get("has_identity")))
+check("the response says what to do on the host",
+      "identity.json" in str((again or {}).get("instructions")),
+      str((again or {}).get("instructions"))[:90])
+
+# The old key must stop working at once. A rotation that leaves the
+# previous key usable has rotated nothing.
+st, _ = raw("/api/agents/heartbeat", "POST", {},
+            headers=signed(rpriv, AR, "POST", "/api/agents/heartbeat",
+                           json.dumps({}).encode()))
+check("the superseded key is refused immediately", st == 401, f"status={st}")
+
+npriv, npub = keypair()
+nkpriv, nkpub = kexpair()
+st, claimed = raw("/api/agents/enrol", "POST",
+                  {"enroll_token": again["enroll_token"], "public_key": npub,
+                   "kex_public_key": nkpub})
+check("the new token redeems", st == 200, f"status={st}")
+check("and the channel is sealed this time",
+      (claimed or {}).get("sealing") is True, str(claimed)[:110])
+
+st, rows = call("/api/agents?project=AGENT", token=admin)
+me = next((a for a in (rows or []) if a["id"] == AR), {})
+check("the agent now reports sealed", me.get("sealed") is True,
+      str(me.get("sealed")))
+
+st, _ = call(f"/api/agents/{AR}/reenroll?project=AGENT", "POST", {}, token=rtok
+             if "rtok" in dir() else None)
+check("re-enrolling needs admin, not merely write access",
+      st in (401, 403), f"status={st}")
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

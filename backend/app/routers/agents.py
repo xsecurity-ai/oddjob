@@ -875,6 +875,75 @@ async def reach_agent(agent_id: int,
                     status=body if isinstance(body, dict) else None)
 
 
+class ReEnrolled(BaseModel):
+    agent: AgentOut
+    enroll_token: str
+    enroll_expires_at: datetime
+    server_public_key: str
+    server_kex_public_key: str
+    #: What the operator has to do on the host, because the agent will
+    #: not recover on its own.
+    instructions: str
+
+
+@router.post("/{agent_id}/reenroll", response_model=ReEnrolled)
+async def reenroll_agent(agent_id: int,
+                         pr: Project = Depends(require_project("admin")),
+                         _: User = Depends(get_current_user),
+                         session: AsyncSession = Depends(get_session)):
+    """Issue a fresh one-time token for an agent that already exists.
+
+    For rotating an agent's keys, and for bringing one enrolled before
+    end-to-end encryption onto the sealed channel. Creating a new agent
+    would do the same for the channel and orphan everything this one
+    has done — its name, its task history, what it found — so the
+    record is kept and only the keys change.
+
+    The identity on the host stops working the moment this is called.
+    That is the point: a rotation that leaves the old key usable has
+    rotated nothing. The agent cannot recover on its own, because the
+    key it holds is no longer one the server knows, so the response
+    says exactly what to do on the host.
+    """
+    a = await session.get(Agent, agent_id)
+    if a is None or a.project_id != pr.id:
+        raise HTTPException(404, "no such agent")
+
+    _, server_pub = await server_identity(session)
+    _, server_kex_pub = await server_kex(session)
+
+    cb_raw, cb_hash = new_agent_key()
+    ci_raw, ci_hash = new_agent_key()
+    tok_raw, tok_hash = new_agent_key()
+    expires = datetime.now(timezone.utc) + ENROLL_TTL
+
+    # The old identity goes now, not when the new one is redeemed. An
+    # agent whose keys are being rotated because they may be exposed
+    # must stop being accepted immediately, and an unredeemed token is
+    # not a reason to keep trusting the key it replaces.
+    a.public_key = None
+    a.kex_public_key = None
+    a.enroll_used_at = None
+    a.enroll_token_hash = tok_hash
+    a.enroll_expires_at = expires
+    a.callback_key_hash = cb_hash
+    a.call_in_key_hash = ci_hash
+    await session.commit()
+    await session.refresh(a)
+    await broker.publish("agents", action="reenroll", project=pr.code)
+
+    return ReEnrolled(
+        agent=_agent_out(a, pr.code),
+        enroll_token=tok_raw, enroll_expires_at=expires,
+        server_public_key=server_pub, server_kex_public_key=server_kex_pub,
+        instructions=(
+            f"{a.name} will fail to authenticate from now until it redeems "
+            f"this token. On the host: stop the agent, delete identity.json "
+            f"from its workdir (the old keypair is no longer accepted), and "
+            f"start it again with --enroll and this token. In Docker, "
+            f"removing the state volume does the same thing."))
+
+
 @router.post("/{agent_id}/kill", response_model=AgentOut)
 async def kill_agent(agent_id: int,
                      pr: Project = Depends(require_project("admin")),

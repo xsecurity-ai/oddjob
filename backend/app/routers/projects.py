@@ -12,7 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_session
 from ..events import broker
 from .. import slack
-from ..models import (Poc, Project, ProjectACL, ProjectContact, ProjectScope,
+from ..models import (Agent, Credential, Poc, Project, ProjectACL,
+                      ProjectContact, ProjectScope,
                       ProjectSlackMember,
                       Service, Target, User, Vuln)
 from ..query import apply_search, apply_sort, paginate
@@ -672,10 +673,65 @@ async def clear_slack_token(project: str, pr: Project = Depends(require_project(
     await broker.publish("projects", action="update", project=pr.code)
 
 
+@router.get("/{project}/deletion", response_model=dict)
+async def deletion_preview(pr: Project = Depends(require_project("admin")),
+                           _: User = Depends(get_current_user),
+                           session: AsyncSession = Depends(get_session)):
+    """What deleting this project would destroy.
+
+    Counted rather than estimated, and shown before the confirmation
+    is typed. An engagement is months of someone's work and the delete
+    is a cascade; the number of findings about to go is the thing that
+    makes an operator stop, not the word "permanent".
+    """
+    async def n(model, *where):
+        return int((await session.execute(
+            select(func.count()).select_from(model).where(*where))).scalar_one())
+
+    tids = select(Target.id).where(Target.project_id == pr.id)
+    agents = await n(Agent, Agent.project_id == pr.id)
+    return {
+        "code": pr.code,
+        "targets": await n(Target, Target.project_id == pr.id),
+        "services": await n(Service, Service.target_id.in_(tids)),
+        "vulns": await n(Vuln, Vuln.target_id.in_(tids)),
+        "pocs": await n(Poc, Poc.target_id.in_(tids)),
+        "credentials": await n(Credential, Credential.project_id == pr.id),
+        "agents": agents,
+        #: Said separately because it is the one consequence that
+        #: reaches outside this database: those agents are processes
+        #: running on other people's machines, and deleting their
+        #: record leaves them authenticating against nothing, forever,
+        #: with nobody watching the logs they write.
+        "agent_warning": (
+            f"{agents} Jaws agent(s) belong to this project and will be "
+            f"deleted with it. Any that are still running will keep trying "
+            f"to connect and will never succeed. Kill them first if you "
+            f"want them to stop cleanly." if agents else ""),
+    }
+
+
 @router.delete("/{project}", status_code=204)
-async def delete_project(project: str, pr: Project = Depends(require_project("admin")),
+async def delete_project(project: str, confirm: str = Query(
+                             "", description="must equal the project code"),
+                         pr: Project = Depends(require_project("admin")),
+                         _: User = Depends(get_current_user),
                          session: AsyncSession = Depends(get_session)):
-    """Deletes the project AND every target, service, vuln and PoC in it."""
+    """Delete the project and everything in it.
+
+    Requires the code to be typed back. Not UI politeness — the server
+    refuses without it, because this is reachable from the API and a
+    scripted DELETE against the wrong code should not be able to take
+    an engagement with it.
+
+    Admin on the project, which a site admin always has.
+    """
+    if (confirm or "").strip() != pr.code:
+        raise HTTPException(
+            428, f"deleting {pr.code} destroys every target, finding, "
+                 f"credential and agent in it, and cannot be undone. Repeat "
+                 f"with confirm={pr.code} to proceed. "
+                 f"GET /api/projects/{pr.code}/deletion lists what goes.")
     code = pr.code
     await session.delete(pr)
     await session.commit()

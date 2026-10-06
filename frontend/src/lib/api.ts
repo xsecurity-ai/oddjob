@@ -806,6 +806,21 @@ export const api = {
   }) =>
     req<JawsAgent>(`/api/agents/${id}` + qs({ project }),
       { method: 'PATCH', body: JSON.stringify(body) }),
+  /** Rotate an agent's keys, keeping its record and history.
+   *
+   *  Its current identity stops being accepted immediately — a
+   *  rotation that leaves the old key usable has rotated nothing — so
+   *  the agent is dead until someone redeems the returned token on
+   *  the host. The response says what to do there. */
+  reenrollAgent: (project: string, id: number) => req<{
+    agent: JawsAgent
+    enroll_token: string
+    enroll_expires_at: string
+    server_public_key: string
+    server_kex_public_key: string
+    instructions: string
+  }>(`/api/agents/${id}/reenroll` + qs({ project }), { method: 'POST' }),
+
   /** Stop it. Keeps the agent and everything it found; see the backend
    *  route for why this is not a delete. */
   killAgent: (project: string, id: number) =>
@@ -1011,6 +1026,22 @@ export const api = {
     req<{ ok: boolean; surviving: string; removed: string; summary: string }>(
       '/api/enumerate/merge' + qs({ project, host }),
       { method: 'POST', body: JSON.stringify({ into, confirm: true }) }),
+
+  /** What deleting a project would destroy. Counted, not estimated. */
+  deletionPreview: (project: string) => req<{
+    code: string; targets: number; services: number; vulns: number
+    pocs: number; credentials: number; agents: number
+    /** Non-empty when agents would go with it — the one consequence
+     *  that reaches outside this database. */
+    agent_warning: string
+  }>(`/api/projects/${encodeURIComponent(project)}/deletion`),
+
+  /** Delete a project and everything in it. The code must be passed
+   *  back; the server refuses otherwise, so this cannot be done by a
+   *  stray scripted DELETE either. */
+  deleteProject: (project: string) =>
+    req<void>(`/api/projects/${encodeURIComponent(project)}`
+              + qs({ confirm: project }), { method: 'DELETE' }),
 
   // --- project scope ---
   // The shapes are written inline rather than as exported interfaces so

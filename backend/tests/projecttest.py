@@ -282,4 +282,53 @@ st, r = call("/api/targets?project=CN1", "POST",
              {"host": "x.cn1.example", "kind": "datacentre"}, token=admin)
 check("an unknown kind is still refused", st == 422, f"{st} {str(r)[:70]}")
 
+
+print("\n== deleting a project ==")
+# An engagement is months of work behind one button, and the delete is
+# a cascade. The typed code is enforced on the server, not only in the
+# dialog: this route is reachable from the API, and a scripted DELETE
+# against the wrong code should not be able to take an engagement with
+# it.
+call("/api/projects", "POST", {"code": "DOOMED", "name": "Doomed"}, token=admin)
+call("/api/targets?project=DOOMED", "POST", {"host": "a.acme.example"}, token=admin)
+
+st, prev = call("/api/projects/DOOMED/deletion", token=admin)
+check("the preview counts what would go", st == 200 and prev.get("targets") == 1,
+      f"status={st} {str(prev)[:110]}")
+check("and names the project it is about", (prev or {}).get("code") == "DOOMED",
+      str((prev or {}).get("code")))
+
+st, err = call("/api/projects/DOOMED", "DELETE", token=admin)
+check("deleting without the code is refused", st == 428, f"status={st}")
+check("and the refusal says how to proceed", "confirm=DOOMED" in str(err),
+      str(err)[:130])
+
+st, _ = call("/api/projects/DOOMED?confirm=doomed", "DELETE", token=admin)
+check("the wrong case is not the code", st == 428, f"status={st}")
+st, _ = call("/api/projects/DOOMED?confirm=SOMETHINGELSE", "DELETE", token=admin)
+check("another project's code is not the code", st == 428, f"status={st}")
+
+st, still = call("/api/projects/DOOMED", token=admin)
+check("nothing was deleted by any of that", st == 200, f"status={st}")
+
+print("-- who may do it --")
+call("/api/users", "POST", {"username": "dw", "password": "dw-password-123"},
+     token=admin)
+call("/api/projects/DOOMED/acl", "POST", {"username": "dw", "role": "user"},
+     token=admin)
+dwtok = call("/api/auth/login", "POST",
+             {"username": "dw", "password": "dw-password-123"})[1]["access_token"]
+st, _ = call("/api/projects/DOOMED?confirm=DOOMED", "DELETE", token=dwtok)
+# Write access is not the same as being able to end the engagement.
+check("a contributor cannot delete a project", st == 403, f"status={st}")
+st, _ = call("/api/projects/DOOMED/deletion", token=dwtok)
+check("nor see the deletion preview", st == 403, f"status={st}")
+
+call("/api/projects/DOOMED/acl", "POST", {"username": "dw", "role": "admin"},
+     token=admin)
+st, _ = call("/api/projects/DOOMED?confirm=DOOMED", "DELETE", token=dwtok)
+check("a project admin can", st == 204, f"status={st}")
+st, _ = call("/api/projects/DOOMED", token=admin)
+check("and it is gone", st == 404, f"status={st}")
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

@@ -9,6 +9,7 @@ import DeleteIcon from '@mui/icons-material/DeleteOutline'
 import GppBadIcon from '@mui/icons-material/GppBadOutlined'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type ScopeApplyResult } from '../lib/api'
+import { DeleteProjectCard } from '../components/DeleteProjectCard'
 import { ProjectSlackCard } from '../components/ProjectSlackCard'
 import { neon, glow } from '../theme'
 
@@ -473,6 +474,8 @@ export function ProjectConfigView({ project }: { project: string | null }) {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <DeleteProjectCard project={data.project.code} />
     </Box>
   )
 }
