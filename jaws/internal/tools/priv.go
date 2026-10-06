@@ -43,6 +43,27 @@ func RawSocketCapable() (bool, string) {
 		}
 		return true, "elevated, Npcap present"
 	}
+	if runtime.GOOS == "linux" {
+		// Ask the kernel what this process holds before trusting uid.
+		// In a container, root with CAP_NET_RAW dropped cannot open a
+		// raw socket, and claiming otherwise sends SYN work to an
+		// agent that will connect-scan instead.
+		if has, known := linuxEffectiveNetRaw(); known {
+			if has {
+				if Privileged() {
+					return true, "running as root with cap_net_raw"
+				}
+				return true, "holds cap_net_raw"
+			}
+			if Privileged() {
+				return false, "running as root but CAP_NET_RAW is not in " +
+					"this process's capability set — in a container, add " +
+					"--cap-add=NET_RAW; masscan will refuse and nmap will " +
+					"fall back to connect scans"
+			}
+			return false, unprivilegedAdvice()
+		}
+	}
 	if Privileged() {
 		return true, "running as root"
 	}

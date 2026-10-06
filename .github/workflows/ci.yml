@@ -210,6 +210,26 @@ jobs:
         working-directory: jaws
         run: make release
 
+      # The agent image is how most people will actually deploy this,
+      # and it has already hidden one bug the binaries could not: file
+      # capabilities that are present and not effective.
+      - name: The agent image builds and can raw-socket
+        working-directory: jaws
+        run: |
+          docker build -q -t jaws-agent .
+          docker run --rm --cap-drop=ALL --cap-add=NET_RAW --cap-add=NET_ADMIN \
+            jaws-agent check > /tmp/check.json || true
+          cat /tmp/check.json
+          python3 - <<'EOF'
+          import json
+          d = json.load(open("/tmp/check.json"))
+          missing = d.get("missing_baseline") or []
+          assert not missing, f"baseline tools missing from the image: {missing}"
+          assert d["privileged"], (
+              "the image reports no raw sockets with NET_RAW granted — "
+              "masscan would refuse and nmap would silently connect-scan")
+          EOF
+
       - name: The binaries are static
         working-directory: jaws
         run: |

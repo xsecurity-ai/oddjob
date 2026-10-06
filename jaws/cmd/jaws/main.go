@@ -32,7 +32,8 @@ const usage = `jaws — enumeration agent for Oddjob
 Keys can come from the environment instead of the command line, which
 is how to keep them out of the process list on a shared host:
 
-  JAWS_SERVER  JAWS_KEY  JAWS_CALL_IN_KEY  JAWS_ADVERTISE  JAWS_ENROL_TOKEN
+  JAWS_SERVER  JAWS_KEY  JAWS_CALL_IN_KEY  JAWS_ADVERTISE
+  JAWS_ENROL_TOKEN  JAWS_WORKDIR
 `
 
 func main() {

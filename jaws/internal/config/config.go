@@ -140,6 +140,12 @@ func (c *Config) FromEnv() {
 	if c.EnrolToken == "" {
 		c.EnrolToken = os.Getenv("JAWS_ENROL_TOKEN")
 	}
+	// Only when the flag was left at its default: an explicit
+	// --workdir is the operator saying where, and the environment
+	// should not quietly win against that.
+	if env := os.Getenv("JAWS_WORKDIR"); env != "" && c.WorkDir == Defaults().WorkDir {
+		c.WorkDir = env
+	}
 	if c.Advertise == "" {
 		c.Advertise = os.Getenv("JAWS_ADVERTISE")
 	}
