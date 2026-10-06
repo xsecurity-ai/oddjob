@@ -115,10 +115,7 @@ export function ProfileView() {
 
   const [fullName, setFullName] = useState(u.full_name ?? '')
   const [email, setEmail] = useState(u.email ?? '')
-  // Read structurally: /api/auth/me returns slack_handle, but the User
-  // interface in lib/api.ts does not declare it.
-  const [slack, setSlack] = useState(
-    (u as { slack_handle?: string | null }).slack_handle ?? '')
+  const [slack, setSlack] = useState(u.slack_handle ?? '')
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -140,7 +137,9 @@ export function ProfileView() {
         // that now says "someone".
         slack_handle: slack.trim() || null,
       })
-      setSlack((saved as { slack_handle?: string | null }).slack_handle ?? '')
+      // Read back from the response so the server's @-stripping
+      // shows, rather than leaving what was typed on screen.
+      setSlack(saved.slack_handle ?? '')
       await refresh()
       setMsg({ kind: 'ok', text: 'Details saved.' })
     } catch (e) {

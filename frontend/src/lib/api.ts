@@ -464,6 +464,9 @@ export interface Group { id: number; name: string; description: string | null }
 export interface User {
   id: number; username: string; email: string | null; full_name: string | null
   avatar_url: string | null
+  /** Offered as the default when joining an engagement that uses Slack.
+   *  Stored bare, without the @. */
+  slack_handle: string | null
   is_site_admin: boolean; is_active: boolean
   /** Which sign-in methods actually work for this account. */
   has_password: boolean; has_google: boolean

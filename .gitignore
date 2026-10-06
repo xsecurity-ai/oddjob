@@ -64,3 +64,8 @@ __pycache__/
 .idea/
 .vscode/
 *.swp
+
+# Agent worktrees. Checkouts of this same repo, created while work is
+# parallelised; committing them as gitlinks points at branches that do
+# not exist for anyone else.
+.claude/worktrees/
