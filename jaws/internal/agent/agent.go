@@ -3,6 +3,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"runtime"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/xsecurity-ai/oddjob/jaws/internal/client"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/config"
+	"github.com/xsecurity-ai/oddjob/jaws/internal/identity"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/spool"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/tasks"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/tools"
@@ -19,6 +21,7 @@ type Agent struct {
 	cfg *config.Config
 	cli *client.Client
 	sp  *spool.Spool
+	id  *identity.Identity
 
 	mu      sync.Mutex
 	busy    bool
@@ -114,8 +117,77 @@ func (a *Agent) Register(ctx context.Context) error {
 	return nil
 }
 
+// ensureIdentity loads this agent's keypair, or trades an enrolment
+// token for one.
+//
+// Done before anything else talks to the server, because from here on
+// every request is signed with it.
+func (a *Agent) ensureIdentity(ctx context.Context) error {
+	path := a.cfg.IdentityPath()
+	id, err := identity.Load(path)
+	if err != nil {
+		// A corrupt identity is not something to paper over by
+		// generating a new one: the server knows the old public key,
+		// so a silent replacement would just fail to authenticate
+		// with a confusing message.
+		return fmt.Errorf("%s exists but cannot be read (%w) — move it "+
+			"aside and enrol this agent again", path, err)
+	}
+	if id != nil {
+		a.id = id
+		a.cli.UseIdentity(id)
+		log.Printf("identity: agent %d on %s, pinned to this server",
+			id.AgentID, id.Project)
+		return nil
+	}
+
+	if a.cfg.EnrolToken == "" {
+		if a.cfg.CallbackKey != "" {
+			// An older agent, or one deliberately run on a key. It
+			// still works; it is simply not the stronger scheme.
+			log.Printf("no identity — authenticating with the callback key")
+			return nil
+		}
+		return fmt.Errorf("nothing to authenticate with: pass --enrol with " +
+			"the token Oddjob showed when this agent was created")
+	}
+
+	priv, pub, err := identity.Generate()
+	if err != nil {
+		return fmt.Errorf("generating a keypair: %w", err)
+	}
+	log.Printf("enrolling with a one-time token")
+	resp, err := a.cli.Enrol(ctx, a.cfg.EnrolToken, pub)
+	if err != nil {
+		return fmt.Errorf("enrolling: %w", err)
+	}
+	id, err = identity.New(path, identity.File{
+		AgentID: resp.AgentID, Project: resp.Project, Server: a.cfg.Server,
+		PrivateKey: priv, PublicKey: pub,
+		ServerPublicKey: resp.ServerPublicKey,
+		ConnectionMode:  resp.ConnectionMode,
+		EnrolledAt:      time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		// The exchange succeeded and the token is now burned, so a
+		// failure to persist means this agent cannot be recovered
+		// without enrolling again. Say exactly that.
+		return fmt.Errorf("enrolled as agent %d but could not save the "+
+			"identity to %s (%w) — the token is spent, so enrol again "+
+			"once the path is writable", resp.AgentID, path, err)
+	}
+	a.id = id
+	a.cli.UseIdentity(id)
+	log.Printf("enrolled as agent %d on %s; this agent now only accepts "+
+		"tasking from this Oddjob", resp.AgentID, resp.Project)
+	return nil
+}
+
 // Run is the main loop. It returns only when ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
+	if err := a.ensureIdentity(ctx); err != nil {
+		return err
+	}
 	if err := a.registerWithRetry(ctx); err != nil {
 		return err
 	}
@@ -144,6 +216,14 @@ func (a *Agent) Run(ctx context.Context) error {
 			// will log back into for days.
 			log.Printf("heartbeat: %v", err)
 			continue
+		}
+		if resp.Shutdown {
+			// Killed from Oddjob. Drain first: a result this agent is
+			// still holding is the last useful thing it can do, and
+			// exiting with it undelivered would lose a scan that ran.
+			log.Printf("told to stop: %s", resp.Reason)
+			a.drain(ctx)
+			return nil
 		}
 		if resp.Task == nil {
 			continue

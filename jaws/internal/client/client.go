@@ -11,13 +11,23 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/xsecurity-ai/oddjob/jaws/internal/identity"
 )
 
 type Client struct {
 	base string
 	key  string
+	id   *identity.Identity
 	http *http.Client
 }
+
+// UseIdentity switches this client from presenting a bearer key to
+// signing each request. Once set, the key is not sent at all: the
+// server refuses a key from an agent that has an identity, and sending
+// both would only mean leaking the weaker secret onto the wire twice a
+// minute for no benefit.
+func (c *Client) UseIdentity(id *identity.Identity) { c.id = id }
 
 func New(base, key string, insecure bool) *Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
@@ -64,6 +74,36 @@ type Task struct {
 type HeartbeatResp struct {
 	OK   bool  `json:"ok"`
 	Task *Task `json:"task"`
+	//: Set when the agent has been killed from Oddjob. It is answered
+	//: rather than refused so it can stop, instead of retrying forever
+	//: against a 403 it cannot interpret.
+	Shutdown bool   `json:"shutdown"`
+	Reason   string `json:"reason"`
+}
+
+// EnrolReq trades a one-time token for an identity.
+type EnrolReq struct {
+	EnrolToken string `json:"enrol_token"`
+	PublicKey  string `json:"public_key"`
+}
+
+type EnrolResp struct {
+	OK              bool   `json:"ok"`
+	AgentID         int    `json:"agent_id"`
+	Project         string `json:"project"`
+	ServerPublicKey string `json:"server_public_key"`
+	ConnectionMode  string `json:"connection_mode"`
+}
+
+// Enrol runs before there is any identity, so it is the one call that
+// carries no credential but the token itself.
+func (c *Client) Enrol(ctx context.Context, token, pub string) (*EnrolResp, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var out EnrolResp
+	err := c.do(ctx, "POST", "/api/agents/enrol",
+		EnrolReq{EnrolToken: token, PublicKey: pub}, &out)
+	return &out, err
 }
 
 type Result struct {
@@ -78,19 +118,29 @@ type Result struct {
 func (c *Client) do(ctx context.Context, method, path string,
 	body any, out any) error {
 
+	var raw []byte
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("encoding %s: %w", path, err)
 		}
-		rdr = bytes.NewReader(b)
+		raw, rdr = b, bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rdr)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.key)
+	if c.id != nil {
+		// Signed over exactly these bytes. Anything that rewrites the
+		// body after this point breaks the signature, which is why the
+		// marshalled form is reused rather than re-encoded.
+		for k, v := range c.id.Sign(method, path, raw) {
+			req.Header.Set(k, v)
+		}
+	} else {
+		req.Header.Set("Authorization", "Bearer "+c.key)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Jaws (authorised security assessment)")
 

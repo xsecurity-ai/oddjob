@@ -12,6 +12,7 @@ import KeyIcon from '@mui/icons-material/VpnKeyOutlined'
 import PublicIcon from '@mui/icons-material/PublicOutlined'
 import UploadIcon from '@mui/icons-material/UploadFileOutlined'
 import DescriptionIcon from '@mui/icons-material/DescriptionOutlined'
+import MemoryIcon from '@mui/icons-material/MemoryOutlined'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import SmartToyIcon from '@mui/icons-material/SmartToyOutlined'
 import PersonIcon from '@mui/icons-material/PersonOutline'
@@ -38,6 +39,7 @@ import { SiteConfigView } from './views/SiteConfigView'
 import { WebView } from './views/WebView'
 import { ImportView } from './views/ImportView'
 import { ReportsView } from './views/ReportsView'
+import { JawsView } from './views/JawsView'
 import { useHostModal } from './components/HostModal'
 import { AgentPanel } from './components/AgentPanel'
 import { UsersView } from './views/UsersView'
@@ -261,7 +263,15 @@ export default function App() {
     },
     { key: 'vulns', label: 'Vulns', icon: <BugReportIcon fontSize="small" /> },
     { key: 'credentials', label: 'Credentials', icon: <KeyIcon fontSize="small" /> },
-    { key: 'reports', label: 'Reports', icon: <DescriptionIcon fontSize="small" /> },
+    // Jaws sits under Reports as a sibling of the written deliverable:
+    // both answer "what has this engagement actually done".
+    {
+      key: 'reports', label: 'Reports', icon: <DescriptionIcon fontSize="small" />,
+      children: [
+        { key: 'reports', label: 'Written', icon: <DescriptionIcon fontSize="small" /> },
+        { key: 'jaws', label: 'Jaws', icon: <MemoryIcon fontSize="small" /> },
+      ],
+    },
     { key: 'import', label: 'Import', icon: <UploadIcon fontSize="small" /> },
   ]
   const ADMIN_NAV = [
@@ -287,6 +297,7 @@ export default function App() {
     web: <WebView project={scope} />,
     import: <ImportView project={project === ALL ? null : project} />,
     reports: <ReportsView project={project === ALL ? null : project} />,
+    jaws: <JawsView project={project === ALL ? null : project} />,
     config: <SiteConfigView />,
     users: <UsersView />,
     profile: <ProfileView />,

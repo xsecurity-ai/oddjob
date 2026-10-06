@@ -260,6 +260,74 @@ export interface UnknownHost {
   total: number
 }
 export interface HostDecision { action: 'add' | 'map' | 'reject'; target?: string }
+
+/** A Jaws instance. Bound to exactly one project, for its whole life. */
+export interface JawsAgent {
+  id: number
+  project_code: string
+  name: string
+  status: string
+  platform: string | null
+  arch: string | null
+  version: string | null
+  hostname: string | null
+  privileged: boolean
+  tools: Record<string, string>
+  call_in_url: string | null
+  last_seen: string | null
+  last_ip: string | null
+  queued_tasks: number
+  /** Taken by the agent and in flight, as distinct from waiting. */
+  running_tasks: number
+  connection_mode: string
+  target_os: string | null
+  priority: number
+  regions: string[]
+  /** It has completed the identity exchange. */
+  has_identity: boolean
+  /** Enrolled, token still good, has never connected. */
+  enrolled_pending: boolean
+  created_at: string | null
+}
+/** Shown once, at enrolment. None of it is recoverable afterwards. */
+export interface AgentEnrolled {
+  agent: JawsAgent
+  callback_key: string
+  call_in_key: string
+  /** One-time. The agent trades it for a keypair it generates itself. */
+  enrol_token: string
+  enrol_expires_at: string
+  /** This Oddjob's public key. The agent pins it, so it will only ever
+   *  take tasking from this instance. */
+  server_public_key: string
+}
+export interface JawsRouting {
+  mode: 'mesh' | 'primary' | 'geo'
+  /** Who is serving right now in primary mode. Derived from live
+   *  heartbeats — an observation, not a setting. */
+  current_primary: number | null
+  current_primary_name: string | null
+  eligible: number
+  unassigned_tasks: number
+}
+export interface JawsTask {
+  id: number
+  agent_id: number
+  project_code: string
+  kind: string
+  args: Record<string, unknown>
+  status: string
+  summary: string | null
+  exit_code: number | null
+  error: string | null
+  import_as: string | null
+  import_result: ImportResult | null
+  created_at: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+export const JAWS_KINDS = ['nmap', 'masscan', 'amass', 'gobuster', 'nuclei',
+  'httpx', 'nslookup', 'reverse_ip'] as const
 export interface WebPacket {
   id: number; url: string; method: string | null; status_code: number | null
   host: string
@@ -705,4 +773,50 @@ export const api = {
   patchTarget: (project: string, host: string, body: Partial<Pick<Target, 'hacked' | 'alive' | 'notes'>>) =>
     req<Target>(`/api/targets/${encodeURIComponent(project)}/${encodeURIComponent(host)}`,
       { method: 'PATCH', body: JSON.stringify(body) }),
+
+  // Jaws agents. Every call is project-scoped because an agent is:
+  // enrolled into one project, tasked only from that project, and its
+  // results import only there.
+  agents: (project: string) => req<JawsAgent[]>('/api/agents' + qs({ project })),
+  enrolAgent: (project: string, body: {
+    name: string; connection_mode?: string; target_os?: string; notes?: string
+  }) =>
+    req<AgentEnrolled>('/api/agents' + qs({ project }),
+      { method: 'POST', body: JSON.stringify(body) }),
+  patchAgent: (project: string, id: number, body: {
+    name?: string; priority?: number; regions?: string; notes?: string
+  }) =>
+    req<JawsAgent>(`/api/agents/${id}` + qs({ project }),
+      { method: 'PATCH', body: JSON.stringify(body) }),
+  /** Stop it. Keeps the agent and everything it found; see the backend
+   *  route for why this is not a delete. */
+  killAgent: (project: string, id: number) =>
+    req<JawsAgent>(`/api/agents/${id}/kill` + qs({ project }), { method: 'POST' }),
+  deleteAgent: (project: string, id: number) =>
+    req<void>(`/api/agents/${id}` + qs({ project }), { method: 'DELETE' }),
+
+  jawsRouting: (project: string) =>
+    req<JawsRouting>('/api/agents/routing' + qs({ project })),
+  setJawsRouting: (project: string, mode: string) =>
+    req<JawsRouting>('/api/agents/routing' + qs({ project }),
+      { method: 'PUT', body: JSON.stringify({ mode }) }),
+  /** Queue for the project rather than a named agent, so the routing
+   *  mode decides which Jaws runs it. */
+  queuePooledTask: (project: string, kind: string,
+                    args: Record<string, unknown>, region?: string) =>
+    req<JawsTask>('/api/agents/tasks' + qs({ project }),
+      { method: 'POST', body: JSON.stringify({ kind, args, region }) }),
+
+  agentTasks: (project: string, id: number, limit = 50) =>
+    req<JawsTask[]>(`/api/agents/${id}/tasks` + qs({ project, limit })),
+  queueTask: (project: string, id: number, kind: string, args: Record<string, unknown>) =>
+    req<JawsTask>(`/api/agents/${id}/tasks` + qs({ project }),
+      { method: 'POST', body: JSON.stringify({ kind, args }) }),
+  // The step that makes a scan count: a result arrives with no operator
+  // attached, so anything the project has not seen is surveyed and
+  // nothing is written until someone answers.
+  importTaskResult: (project: string, agentId: number, taskId: number,
+                     decisions: Record<string, HostDecision>) =>
+    req<ImportResult>(`/api/agents/${agentId}/tasks/${taskId}/import` + qs({ project }),
+      { method: 'POST', body: JSON.stringify({ decisions }) }),
 }

@@ -23,6 +23,8 @@ type Config struct {
 	// listener. Separate from CallbackKey on purpose: they protect
 	// opposite directions, and one leaking should not hand over both.
 	CallInKey string
+	// EnrolToken is one-time, traded for a keypair on first run.
+	EnrolToken string
 
 	// Listen is the inbound address, empty to disable. Loopback by
 	// default because the reverse channel is a convenience and an open
@@ -43,6 +45,16 @@ type Config struct {
 	WorkDir string
 }
 
+// hasSavedIdentity reports whether a previous run already enrolled.
+// Only the presence of the file matters here; whether it is readable
+// is the agent's problem to report properly, with the path in the
+// message, rather than this turning into "nothing to authenticate
+// with" for a file that is merely unreadable.
+func (c *Config) hasSavedIdentity() bool {
+	_, err := os.Stat(c.IdentityPath())
+	return err == nil
+}
+
 func (c *Config) Validate() error {
 	var problems []string
 	if strings.TrimSpace(c.Server) == "" {
@@ -51,9 +63,17 @@ func (c *Config) Validate() error {
 		!strings.HasPrefix(c.Server, "https://") {
 		problems = append(problems, "--server must start with http:// or https://")
 	}
-	if strings.TrimSpace(c.CallbackKey) == "" {
+	// Three ways to be authenticated, and the check cannot see the
+	// third: an identity already saved on disk from a previous run.
+	// So this only refuses when there is clearly nothing at all --
+	// the identity file is looked for later, before any request.
+	if strings.TrimSpace(c.CallbackKey) == "" &&
+		strings.TrimSpace(c.EnrolToken) == "" &&
+		!c.hasSavedIdentity() {
 		problems = append(problems,
-			"--key is required (shown once when the agent was enrolled)")
+			"nothing to authenticate with: pass --enrol with the one-time "+
+				"token Oddjob showed when this agent was created, or --key "+
+				"for an agent enrolled before identities existed")
 	}
 	if c.Listen != "" && c.CallInKey == "" {
 		// Otherwise the listener is an unauthenticated command endpoint
@@ -116,6 +136,9 @@ func (c *Config) FromEnv() {
 	}
 	if c.CallInKey == "" {
 		c.CallInKey = os.Getenv("JAWS_CALL_IN_KEY")
+	}
+	if c.EnrolToken == "" {
+		c.EnrolToken = os.Getenv("JAWS_ENROL_TOKEN")
 	}
 	if c.Advertise == "" {
 		c.Advertise = os.Getenv("JAWS_ADVERTISE")

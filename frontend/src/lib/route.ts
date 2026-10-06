@@ -35,7 +35,7 @@ export interface Route {
 const GLOBAL = new Set(['projects', 'config', 'users', 'profile'])
 /** Views that live under a project. */
 const SCOPED = new Set(['targets', 'services', 'web', 'vulns', 'credentials',
-                        'reports', 'import'])
+                        'reports', 'jaws', 'import'])
 
 /** Where a bare `/` lands. The project list, not targets-across-
  *  everything: with no project chosen, "which engagement" is the

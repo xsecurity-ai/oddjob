@@ -32,7 +32,7 @@ const usage = `jaws — enumeration agent for Oddjob
 Keys can come from the environment instead of the command line, which
 is how to keep them out of the process list on a shared host:
 
-  JAWS_SERVER  JAWS_KEY  JAWS_CALL_IN_KEY  JAWS_ADVERTISE
+  JAWS_SERVER  JAWS_KEY  JAWS_CALL_IN_KEY  JAWS_ADVERTISE  JAWS_ENROL_TOKEN
 `
 
 func main() {
@@ -72,6 +72,7 @@ func cmdRun(argv []string) int {
 	fs.StringVar(&cfg.Server, "server", "", "Oddjob base URL")
 	fs.StringVar(&cfg.CallbackKey, "key", "", "callback key (or JAWS_KEY)")
 	fs.StringVar(&cfg.CallInKey, "call-in-key", "", "key the server must present")
+	fs.StringVar(&cfg.EnrolToken, "enrol", "", "one-time enrolment token from Oddjob (or JAWS_ENROL_TOKEN)")
 	fs.StringVar(&cfg.Listen, "listen", "", "inbound API address, e.g. 127.0.0.1:7777")
 	fs.StringVar(&cfg.Advertise, "advertise", "", "URL the server should use to reach --listen")
 	fs.StringVar(&cfg.Name, "name", cfg.Name, "name to report")
