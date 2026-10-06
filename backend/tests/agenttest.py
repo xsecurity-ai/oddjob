@@ -543,5 +543,128 @@ st, err = call(f"/api/agents/{A2}/reach?project=AGENT", "POST", {}, token=admin)
 check("reaching an agent that never advertised an address is refused", st == 409,
       f"status={st} {str(err)[:80]}")
 
+
+print("== the channel is sealed, and cannot be talked out of it ==")
+# Signing proves who sent a thing. It does not hide it, and what goes
+# over this channel is a client's own vulnerability inventory from
+# inside that client's network, where a TLS-terminating proxy is
+# ordinary. These check the payload is unreadable to anything between
+# the two endpoints, and that an agent which can seal is not allowed
+# to stop.
+import base64 as _b64
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes as _hashes
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+
+def kexpair():
+    p = X25519PrivateKey.generate()
+    return p, _b64.b64encode(p.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
+
+
+def derive(priv, peer_pub_b64):
+    peer = __import__("cryptography.hazmat.primitives.asymmetric.x25519",
+                      fromlist=["X25519PublicKey"]).X25519PublicKey
+    secret = priv.exchange(peer.from_public_bytes(_b64.b64decode(peer_pub_b64)))
+    return HKDF(algorithm=_hashes.SHA256(), length=32, salt=None,
+                info=b"oddjob/jaws seal v1").derive(secret)
+
+
+def binding(direction, aid, method, path, ts, nonce):
+    return "\n".join(["v1", direction, str(aid), method.upper(),
+                       path, ts, nonce]).encode()
+
+
+st, en3 = call("/api/agents?project=AGENT", "POST", {"name": "sealed"}, token=admin)
+A3 = en3["agent"]["id"]
+spriv3, spub3 = keypair()
+kpriv3, kpub3 = kexpair()
+st, claimed3 = raw("/api/agents/enrol", "POST",
+                   {"enrol_token": en3["enrol_token"], "public_key": spub3,
+                    "kex_public_key": kpub3})
+check("enrolment accepts a key-agreement half", st == 200, f"status={st}")
+check("and the server hands back its own", 
+      len(_b64.b64decode((claimed3 or {}).get("server_kex_public_key") or "")) == 32,
+      str(claimed3)[:120])
+check("and confirms the channel will be sealed",
+      (claimed3 or {}).get("sealing") is True, str(claimed3)[:120])
+
+KEY3 = derive(kpriv3, claimed3["server_kex_public_key"])
+
+
+def sealed_call(path, body, method="POST", aid=None, key=None, bind_path=None):
+    """Seal, then sign the envelope — signing what actually goes out."""
+    aid = A3 if aid is None else aid
+    key = KEY3 if key is None else key
+    ts, nonce = str(int(time.time())), secrets.token_urlsafe(12)
+    plain = json.dumps(body).encode()
+    n = os.urandom(12)
+    env = _b64.b64encode(n + ChaCha20Poly1305(key).encrypt(
+        n, plain, binding("req", aid, method, bind_path or path, ts, nonce))).decode()
+    wire = env.encode()
+    msg = "\n".join([method.upper(), path,
+                      hashlib.sha256(wire).hexdigest(), ts, nonce]).encode()
+    h = {"X-Jaws-Agent": str(aid), "X-Jaws-Timestamp": ts,
+         "X-Jaws-Nonce": nonce,
+         "X-Jaws-Signature": _b64.b64encode(spriv3.sign(msg)).decode(),
+         "X-Jaws-Sealed": "v1"}
+    r = urllib.request.Request(BASE + path, method=method, data=wire)
+    r.add_header("Content-Type", "application/json")
+    for k, v in h.items():
+        r.add_header(k, v)
+    try:
+        with urllib.request.urlopen(r, timeout=60) as x:
+            return x.status, x.read(), x.headers.get("X-Jaws-Sealed"), ts, nonce
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), e.headers.get("X-Jaws-Sealed"), ts, nonce
+
+
+st, body3, sealhdr, ts3, nonce3 = sealed_call("/api/agents/heartbeat", {})
+check("a sealed, signed heartbeat is accepted", st == 200, f"status={st}")
+check("and the reply comes back sealed too", sealhdr == "v1", str(sealhdr))
+check("the reply is not readable as JSON",
+      not body3.lstrip().startswith(b"{"), body3[:40])
+
+rawb = _b64.b64decode(body3)
+opened = ChaCha20Poly1305(KEY3).decrypt(
+    rawb[:12], rawb[12:],
+    binding("res", A3, "POST", "/api/agents/heartbeat", ts3, nonce3))
+check("and opens to the answer with our key", json.loads(opened).get("ok") is True,
+      opened[:80])
+
+print("-- no downgrade --")
+st, _ = raw("/api/agents/heartbeat", "POST", {},
+            headers=signed(spriv3, A3, "POST", "/api/agents/heartbeat",
+                           json.dumps({}).encode()))
+check("an agent that can seal may not send in the clear", st == 401,
+      f"status={st} — otherwise an attacker just omits the header")
+
+other_priv, other_pub = kexpair()
+wrong = derive(other_priv, claimed3["server_kex_public_key"])
+st, _, _, _, _ = sealed_call("/api/agents/heartbeat", {}, key=wrong)
+check("a body sealed with the wrong key does not open", st == 401, f"status={st}")
+
+st, _, _, _, _ = sealed_call("/api/agents/heartbeat", {},
+                             bind_path="/api/agents/register")
+check("a body bound to another route does not open here", st == 401,
+      f"status={st}")
+
+print("-- a real result, and what a watcher would see --")
+st, t3 = call(f"/api/agents/{A3}/tasks?project=AGENT", "POST",
+              {"kind": "nmap", "args": {"targets": ["scanme.example.org"]}},
+              token=admin)
+T3 = t3["id"]
+sealed_call("/api/agents/heartbeat", {})
+sealed_call(f"/api/agents/tasks/{T3}/result",
+            {"status": "done", "output": NMAP, "exit_code": 0})
+st, lst = call(f"/api/agents/{A3}/tasks?project=AGENT", token=admin)
+row = next((t for t in (lst or []) if t["id"] == T3), {})
+check("a sealed scan result arrives intact", row.get("status") == "done",
+      str(row.get("status")))
+imp = row.get("import_result") or {}
+check("and is imported as usual", imp.get("hosts_seen") == 1, str(imp)[:100])
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

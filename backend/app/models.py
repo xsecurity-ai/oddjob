@@ -1055,6 +1055,16 @@ class Agent(Base, TimestampMixin):
     #: an attacker cannot strip the signature to get the weaker scheme.
     public_key: Mapped[str | None] = mapped_column(String(64))
 
+    #: The agent's X25519 public half, for sealing the payload.
+    #:
+    #: Signing proves who sent a thing; it does not hide it. What
+    #: travels here is a client's own vulnerability inventory, and the
+    #: agent sits inside that client's network where a TLS-terminating
+    #: proxy is ordinary corporate furniture. TLS protects it from
+    #: everyone except the box reading everything, so the body is
+    #: sealed under a key only the two endpoints hold.
+    kex_public_key: Mapped[str | None] = mapped_column(String(64))
+
     #: One-time enrolment. The token is what the operator pastes into
     #: the agent once; the agent exchanges it for an identity and it is
     #: burned. Short-lived, because an unused enrolment token lying in

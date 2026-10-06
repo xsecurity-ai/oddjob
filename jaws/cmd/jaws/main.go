@@ -79,6 +79,8 @@ func cmdRun(argv []string) int {
 	fs.StringVar(&cfg.Name, "name", cfg.Name, "name to report")
 	fs.DurationVar(&cfg.Heartbeat, "heartbeat", cfg.Heartbeat, "poll interval")
 	fs.BoolVar(&cfg.Insecure, "insecure", false, "skip TLS verification")
+	fs.BoolVar(&cfg.AllowPlaintext, "allow-plaintext", false,
+		"permit a non-loopback http:// server")
 	fs.StringVar(&cfg.WorkDir, "workdir", cfg.WorkDir, "where tool output is staged")
 	_ = fs.Parse(argv)
 
@@ -88,8 +90,17 @@ func cmdRun(argv []string) int {
 		return 2
 	}
 	if cfg.Insecure {
-		log.Printf("WARNING: TLS verification is OFF — anyone on the path " +
-			"can read and alter this agent's traffic")
+		// Narrower than it used to read: the payload is sealed under
+		// keys pinned at enrolment, so a man in the middle cannot read
+		// results or forge tasking. What is given up is the transport's
+		// own protection of the enrolment exchange and the metadata.
+		log.Printf("WARNING: TLS verification is OFF. The payload is still " +
+			"sealed end to end, but the enrolment exchange and all traffic " +
+			"metadata are exposed to anyone on the path")
+	}
+	if cfg.AllowPlaintext {
+		log.Printf("WARNING: talking to a plaintext http:// server by " +
+			"request. The payload is sealed; the enrolment exchange is not")
 	}
 
 	priv, advice := tools.RawSocketCapable()

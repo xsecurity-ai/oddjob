@@ -183,8 +183,17 @@ func (a *Agent) ensureIdentity(ctx context.Context) error {
 	if id != nil {
 		a.id = id
 		a.cli.UseIdentity(id)
-		log.Printf("identity: agent %d on %s, pinned to this server",
-			id.AgentID, id.Project)
+		if id.CanSeal() {
+			log.Printf("identity: agent %d on %s, pinned, channel sealed",
+				id.AgentID, id.Project)
+		} else {
+			// Said every time rather than once: an agent reporting a
+			// client's findings in the clear should be noisy about it.
+			log.Printf("WARNING: agent %d on %s has no key-agreement key — "+
+				"results travel unsealed, protected only by whatever TLS "+
+				"is between here and the server. Re-enrol to fix.",
+				id.AgentID, id.Project)
+		}
 		return nil
 	}
 
@@ -203,17 +212,35 @@ func (a *Agent) ensureIdentity(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("generating a keypair: %w", err)
 	}
+	kexPriv, kexPub, err := identity.GenerateKex()
+	if err != nil {
+		return fmt.Errorf("generating a key-agreement pair: %w", err)
+	}
 	log.Printf("enrolling with a one-time token")
-	resp, err := a.cli.Enrol(ctx, a.cfg.EnrolToken, pub)
+	resp, err := a.cli.Enrol(ctx, a.cfg.EnrolToken, pub, kexPub)
 	if err != nil {
 		return fmt.Errorf("enrolling: %w", err)
+	}
+	if !resp.Sealing || resp.ServerKexPublicKey == "" {
+		// The token is spent either way, so this cannot be retried —
+		// but running on would mean sending a client's scan results
+		// over a channel this agent was built to encrypt. Stopping
+		// with the reason is the better failure.
+		return fmt.Errorf(
+			"enrolled as agent %d, but the server did not establish an "+
+				"encrypted channel (sealing=%v). Refusing to run: results "+
+				"would travel unsealed. The server is likely older than "+
+				"this agent", resp.AgentID, resp.Sealing)
 	}
 	id, err = identity.New(path, identity.File{
 		AgentID: resp.AgentID, Project: resp.Project, Server: a.cfg.Server,
 		PrivateKey: priv, PublicKey: pub,
-		ServerPublicKey: resp.ServerPublicKey,
-		ConnectionMode:  resp.ConnectionMode,
-		EnrolledAt:      time.Now().UTC().Format(time.RFC3339),
+		ServerPublicKey:    resp.ServerPublicKey,
+		KexPrivateKey:      kexPriv,
+		KexPublicKey:       kexPub,
+		ServerKexPublicKey: resp.ServerKexPublicKey,
+		ConnectionMode:     resp.ConnectionMode,
+		EnrolledAt:         time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		// The exchange succeeded and the token is now burned, so a

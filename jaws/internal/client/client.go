@@ -4,11 +4,14 @@ package client
 import (
 	"bytes"
 	"context"
+	crand "crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,26 +91,32 @@ type HeartbeatResp struct {
 
 // EnrolReq trades a one-time token for an identity.
 type EnrolReq struct {
-	EnrolToken string `json:"enrol_token"`
-	PublicKey  string `json:"public_key"`
+	EnrolToken   string `json:"enrol_token"`
+	PublicKey    string `json:"public_key"`
+	KexPublicKey string `json:"kex_public_key,omitempty"`
 }
 
 type EnrolResp struct {
-	OK              bool   `json:"ok"`
-	AgentID         int    `json:"agent_id"`
-	Project         string `json:"project"`
-	ServerPublicKey string `json:"server_public_key"`
-	ConnectionMode  string `json:"connection_mode"`
+	OK                 bool   `json:"ok"`
+	AgentID            int    `json:"agent_id"`
+	Project            string `json:"project"`
+	ServerPublicKey    string `json:"server_public_key"`
+	ServerKexPublicKey string `json:"server_kex_public_key"`
+	//: The server confirming it recorded our key-agreement half. If
+	//: this is false the channel cannot be sealed, and the agent
+	//: refuses rather than reporting scans in the clear.
+	Sealing        bool   `json:"sealing"`
+	ConnectionMode string `json:"connection_mode"`
 }
 
 // Enrol runs before there is any identity, so it is the one call that
 // carries no credential but the token itself.
-func (c *Client) Enrol(ctx context.Context, token, pub string) (*EnrolResp, error) {
+func (c *Client) Enrol(ctx context.Context, token, pub, kexPub string) (*EnrolResp, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var out EnrolResp
 	err := c.do(ctx, "POST", "/api/agents/enrol",
-		EnrolReq{EnrolToken: token, PublicKey: pub}, &out)
+		EnrolReq{EnrolToken: token, PublicKey: pub, KexPublicKey: kexPub}, &out)
 	return &out, err
 }
 
@@ -118,6 +127,15 @@ type Result struct {
 	Summary  string `json:"summary,omitempty"`
 	ExitCode int    `json:"exit_code"`
 	Error    string `json:"error,omitempty"`
+}
+
+// newNonce mirrors the identity package's: 128 bits, used once.
+func newNonce() string {
+	b := make([]byte, 16)
+	if _, err := crand.Read(b); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func (c *Client) do(ctx context.Context, method, path string,
@@ -136,11 +154,37 @@ func (c *Client) do(ctx context.Context, method, path string,
 	if err != nil {
 		return err
 	}
+	var sealKey []byte
 	if c.id != nil {
-		// Signed over exactly these bytes. Anything that rewrites the
-		// body after this point breaks the signature, which is why the
-		// marshalled form is reused rather than re-encoded.
-		for k, v := range c.id.Sign(method, path, raw) {
+		// Sealed first, then signed, so the signature covers exactly
+		// what goes on the wire. The headers carry the timestamp and
+		// nonce the binding needs, so they are minted here and reused
+		// for both.
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		nonce := newNonce()
+
+		if c.id.CanSeal() {
+			k, err := c.id.SealKey()
+			if err != nil {
+				return fmt.Errorf("deriving the seal key: %w", err)
+			}
+			sealKey = k
+			env, err := identity.Seal(k, raw, identity.ChannelBinding(
+				"req", c.id.AgentID, method, path, ts, nonce))
+			if err != nil {
+				// Refused rather than sent in the clear. An agent that
+				// cannot seal is an agent that stops talking, not one
+				// that quietly downgrades.
+				return fmt.Errorf("sealing %s: %w", path, err)
+			}
+			raw = []byte(env)
+			rdr = bytes.NewReader(raw)
+			req.Body = io.NopCloser(rdr)
+			req.ContentLength = int64(len(raw))
+			req.Header.Set(identity.SealedHeader, identity.SealVersion)
+		}
+
+		for k, v := range c.id.SignAt(method, path, raw, ts, nonce) {
 			req.Header.Set(k, v)
 		}
 	} else {
@@ -155,18 +199,40 @@ func (c *Client) do(ctx context.Context, method, path string,
 	}
 	defer resp.Body.Close()
 
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, 256<<20))
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	// A sealed reply has to be opened before anything can be said
+	// about it, including whether it is an error.
+	if resp.Header.Get(identity.SealedHeader) != "" && sealKey != nil {
+		ts := req.Header.Get("X-Jaws-Timestamp")
+		nonce := req.Header.Get("X-Jaws-Nonce")
+		opened, err := identity.Unseal(sealKey, string(payload),
+			identity.ChannelBinding("res", c.id.AgentID, method, path, ts, nonce))
+		if err != nil {
+			return fmt.Errorf("%s %s: the reply did not open (%w) — it was "+
+				"not sealed by the Oddjob this agent enrolled with", method,
+				path, err)
+		}
+		payload = opened
+	}
+
 	if resp.StatusCode >= 300 {
 		// Carry the server's own message. "401" alone sends people
 		// hunting through firewall rules when the answer is that the
 		// key was revoked.
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 600))
+		snippet := payload
+		if len(snippet) > 600 {
+			snippet = snippet[:600]
+		}
 		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status,
 			strings.TrimSpace(string(snippet)))
 	}
 	if out == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return json.Unmarshal(payload, out)
 }
 
 func (c *Client) Register(ctx context.Context, r RegisterReq) (*RegisterResp, error) {

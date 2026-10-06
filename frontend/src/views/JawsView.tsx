@@ -483,6 +483,33 @@ export function JawsView({ project }: { project: string | null }) {
       },
     },
     {
+      // Not a detail. An agent that is not sealing sends a client's
+      // findings over the wire protected only by the transport, and
+      // nothing else in this table would say so.
+      field: 'sealed', headerName: 'Encrypted', width: 112,
+      renderCell: (p) => {
+        if (!p.row.has_identity) {
+          return (
+            <Tooltip title="Enrolled before end-to-end encryption existed; it authenticates with a bearer key and its payload is protected only by TLS. Re-enrol to fix.">
+              <Chip size="small" label="legacy" sx={{ height: 18, fontSize: 10,
+                color: neon.red, bgcolor: alpha(neon.red, 0.12) }} />
+            </Tooltip>
+          )
+        }
+        return p.value ? (
+          <Tooltip title="Payload sealed end to end under keys exchanged at enrolment — unreadable even to a TLS-terminating proxy in between">
+            <Chip size="small" label="sealed" sx={{ height: 18, fontSize: 10,
+              color: neon.green, bgcolor: alpha(neon.green, 0.12) }} />
+          </Tooltip>
+        ) : (
+          <Tooltip title="Signed but not sealed: results are protected only by whatever TLS is between this agent and Oddjob. Re-enrol to establish an encrypted channel.">
+            <Chip size="small" label="TLS only" sx={{ height: 18, fontSize: 10,
+              color: neon.yellow, bgcolor: alpha(neon.yellow, 0.14) }} />
+          </Tooltip>
+        )
+      },
+    },
+    {
       field: 'regions', headerName: 'Regions', width: 120,
       sortable: false,
       valueGetter: (v) => (v as string[] | undefined)?.join(', ') ?? '',

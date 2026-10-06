@@ -115,6 +115,12 @@ class AgentOut(BaseModel):
     priority: int = 100
     regions: list[str] = []
     has_identity: bool = False
+    #: Whether its payload is encrypted end to end. False means results
+    #: reach us protected only by whatever TLS is in between — an agent
+    #: enrolled before sealing existed. Surfaced because an operator
+    #: cannot otherwise tell, and "this one reports a client's findings
+    #: in the clear" is not a thing to leave invisible.
+    sealed: bool = False
     enrolled_pending: bool = False
     created_at: datetime | None = None
 
@@ -255,6 +261,7 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         connection_mode=a.connection_mode, target_os=a.target_os,
         priority=a.priority, regions=sorted(_regions_of(a)),
         has_identity=bool(a.public_key),
+        sealed=bool(a.kex_public_key),
         # Enrolled, token still good, never connected. Distinct from
         # "offline", which means it connected once and then stopped.
         enrolled_pending=bool(a.enrol_token_hash) and not a.public_key,
@@ -378,6 +385,34 @@ async def _may_claim(session: AsyncSession, project: Project, agent: Agent,
 
 
 # ------------------------------------------------------ server identity
+async def server_kex(session: AsyncSession) -> tuple[str, str]:
+    """This instance's X25519 pair, made once and kept.
+
+    Separate from the signing identity: one key, one job. Reusing an
+    Ed25519 key for key agreement is possible and is the kind of
+    cleverness that turns into a paper.
+    """
+    row = await session.get(Setting, agentcrypto.SERVER_KEX_SETTING)
+    if row is not None and row.value:
+        return row.value, agentcrypto.kex_public_of(row.value)
+    priv, pub = agentcrypto.generate_kex()
+    if row is None:
+        session.add(Setting(key=agentcrypto.SERVER_KEX_SETTING, value=priv))
+    else:
+        row.value = priv
+    await session.commit()
+    return priv, pub
+
+
+async def sealed_key(session: AsyncSession, a: Agent) -> bytes | None:
+    """The symmetric key shared with this agent, or None if it has no
+    key-agreement half — an agent enrolled before sealing existed."""
+    if not a.kex_public_key:
+        return None
+    priv, _pub = await server_kex(session)
+    return agentcrypto.shared_key(priv, a.kex_public_key)
+
+
 async def server_identity(session: AsyncSession) -> tuple[str, str]:
     """This instance's Ed25519 keypair, made once and kept.
 
@@ -433,7 +468,13 @@ async def _signed_agent(request: Request, session: AsyncSession,
     if a is None or not a.public_key:
         raise HTTPException(401, "unknown agent")
 
-    body = await request.body()
+    # Sealed requests are signed over the envelope, not its contents:
+    # the signature covers exactly what crossed the network. The seal
+    # middleware has already swapped in the plaintext by now, so it
+    # leaves the original here for this check.
+    body = getattr(request.state, "sealed_body", None)
+    if body is None:
+        body = await request.body()
     if not agentcrypto.verify(a.public_key, sig, request.method,
                               request.url.path, body, ts, nonce):
         raise HTTPException(401, "signature does not verify")
@@ -1019,6 +1060,9 @@ class IdentityIn(BaseModel):
     public_key: str = Field(description="Ed25519, base64 raw. The agent made "
                                         "this on its own host; the private "
                                         "half is not sent.")
+    kex_public_key: str | None = Field(
+        None, description="X25519, base64 raw. Omitting it means no sealing, "
+                          "which an agent older than this field will do.")
 
 
 @router.post("/enrol", response_model=dict)
@@ -1064,15 +1108,29 @@ async def claim_identity(body: IdentityIn,
             401, "this enrolment token has expired — enrol the agent again")
 
     match.public_key = key
+    kex = (body.kex_public_key or "").strip()
+    if kex:
+        try:
+            if len(agentcrypto.unb64(kex)) != 32:
+                raise ValueError
+        except Exception:
+            raise HTTPException(422, "kex_public_key must be a base64 X25519 key")
+        match.kex_public_key = kex
     match.enrol_used_at = now
     # Burned, so the same token cannot register a second key later.
     match.enrol_token_hash = None
     _, server_pub = await server_identity(session)
+    _, server_kex_pub = await server_kex(session)
     code = await _project_code(session, match.project_id)
     await session.commit()
     await broker.publish("agents", action="identity", project=code)
     return {"ok": True, "agent_id": match.id, "project": code,
             "server_public_key": server_pub,
+            "server_kex_public_key": server_kex_pub,
+            # Said back so the agent can refuse to run unsealed against
+            # a server that cannot seal, rather than discovering it by
+            # sending a scan result in the clear.
+            "sealing": bool(match.kex_public_key),
             "connection_mode": match.connection_mode}
 
 

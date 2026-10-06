@@ -12,6 +12,7 @@ from fastapi.responses import (FileResponse, HTMLResponse,
 from fastapi.staticfiles import StaticFiles
 
 from .db import DB_PATH, init_db
+from .agentseal import AgentSeal
 from .gatekeeper import (FORBIDDEN_HTML, Gatekeeper, NOT_FOUND_HTML,
                          wants_html)
 from .routers import (agents, actions, agent, auth, bulk, credentials, domains,
@@ -94,9 +95,15 @@ from . import headers as _headers      # noqa: E402
 #                     reports an opaque network error instead of the 401
 #                     the SPA is waiting for.
 #   Gatekeeper        authentication.
+#   AgentSeal         decrypts an agent's request body and encrypts the
+#                     reply. Innermost on purpose: the route should see
+#                     plaintext and know nothing about sealing, because
+#                     a route that has to remember is a route that one
+#                     day forgets and sends a scan result in the clear.
 #
 # So they are added in the reverse of that.
 app.add_middleware(Gatekeeper)
+app.add_middleware(AgentSeal)
 
 # The Vite dev server runs on another origin; in production the built SPA is
 # served from this same app and CORS is irrelevant.

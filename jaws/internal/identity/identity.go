@@ -39,15 +39,21 @@ type File struct {
 	PrivateKey      string `json:"private_key"`
 	PublicKey       string `json:"public_key"`
 	ServerPublicKey string `json:"server_public_key"`
-	ConnectionMode  string `json:"connection_mode"`
-	EnrolledAt      string `json:"enrolled_at"`
+	//: The X25519 halves, for sealing. Empty on an agent enrolled
+	//: before sealing existed; such an agent still works, unsealed.
+	KexPrivateKey      string `json:"kex_private_key,omitempty"`
+	KexPublicKey       string `json:"kex_public_key,omitempty"`
+	ServerKexPublicKey string `json:"server_kex_public_key,omitempty"`
+	ConnectionMode     string `json:"connection_mode"`
+	EnrolledAt         string `json:"enrolled_at"`
 }
 
 type Identity struct {
 	File
-	priv ed25519.PrivateKey
-	srv  ed25519.PublicKey
-	path string
+	priv    ed25519.PrivateKey
+	srv     ed25519.PublicKey
+	path    string
+	sealKey []byte
 }
 
 // Generate makes a new keypair. The private half exists only here until
@@ -128,8 +134,17 @@ func (i *Identity) Save() error {
 
 // Sign returns the headers that authenticate one request.
 func (i *Identity) Sign(method, path string, body []byte) map[string]string {
-	ts := strconv.FormatInt(time.Now().Unix(), 10)
-	nonce := newNonce()
+	return i.SignAt(method, path, body, strconv.FormatInt(time.Now().Unix(), 10),
+		newNonce())
+}
+
+// SignAt is Sign with the timestamp and nonce supplied.
+//
+// Sealing needs the same two values in its channel binding, and
+// minting them twice would bind the envelope to one nonce and the
+// signature to another.
+func (i *Identity) SignAt(method, path string, body []byte,
+	ts, nonce string) map[string]string {
 	sig := ed25519.Sign(i.priv, Canonical(method, path, body, ts, nonce))
 	return map[string]string{
 		"X-Jaws-Agent":     strconv.Itoa(i.AgentID),

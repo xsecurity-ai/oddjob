@@ -4,6 +4,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,6 +45,9 @@ type Config struct {
 	Insecure bool
 	// WorkDir is where tool output is staged before it is sent home.
 	WorkDir string
+	// AllowPlaintext permits a non-loopback http:// server. Opt-in and
+	// announced, because the thing it gives up is quiet.
+	AllowPlaintext bool
 }
 
 // hasSavedIdentity reports whether a previous run already enrolled.
@@ -55,6 +60,22 @@ func (c *Config) hasSavedIdentity() bool {
 	return err == nil
 }
 
+// isLoopback reports whether the server URL points back at this host.
+// A reverse tunnel terminates on 127.0.0.1, and demanding TLS inside
+// an SSH tunnel is theatre.
+func isLoopback(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	h := u.Hostname()
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
 func (c *Config) Validate() error {
 	var problems []string
 	if strings.TrimSpace(c.Server) == "" {
@@ -62,6 +83,21 @@ func (c *Config) Validate() error {
 	} else if !strings.HasPrefix(c.Server, "http://") &&
 		!strings.HasPrefix(c.Server, "https://") {
 		problems = append(problems, "--server must start with http:// or https://")
+	} else if strings.HasPrefix(c.Server, "http://") && !c.AllowPlaintext &&
+		!isLoopback(c.Server) {
+		// The payload is sealed end to end, so plaintext here does not
+		// expose scan results. It still exposes which agent is talking
+		// to which Oddjob, how often, and how much — and it leaves the
+		// enrolment exchange, which is NOT sealed because it is what
+		// establishes the key, open to anyone on the path.
+		//
+		// Loopback is excepted because that is a tunnel endpoint, where
+		// the encryption is the tunnel's and adding TLS inside it buys
+		// nothing.
+		problems = append(problems,
+			"--server is plaintext http://. Use https://, or pass "+
+				"--allow-plaintext if this is deliberate (a tunnel, a lab). "+
+				"Loopback addresses are already excepted.")
 	}
 	// Three ways to be authenticated, and the check cannot see the
 	// third: an identity already saved on disk from a previous run.

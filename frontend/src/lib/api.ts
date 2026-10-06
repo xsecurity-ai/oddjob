@@ -289,6 +289,9 @@ export interface JawsAgent {
   regions: string[]
   /** It has completed the identity exchange. */
   has_identity: boolean
+  /** Its payload is encrypted end to end. False means results reach
+   *  Oddjob protected only by whatever TLS is in between. */
+  sealed: boolean
   /** Enrolled, token still good, has never connected. */
   enrolled_pending: boolean
   created_at: string | null
