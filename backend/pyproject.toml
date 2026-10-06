@@ -21,6 +21,10 @@ dependencies = [
     "reportlab>=5.0.1",
     "python-docx>=1.2.0",
     "defusedxml>=0.7.1",
+    # Ed25519 for agent identities. Was already present transitively;
+    # depending on it directly means an upstream dropping it does not
+    # silently take agent authentication with it.
+    "cryptography>=43",
 ]
 
 [dependency-groups]

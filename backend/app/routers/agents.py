@@ -28,14 +28,15 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
 from ..events import broker
-from ..models import Agent, AgentTask, Project, User
+from ..models import Agent, AgentTask, Project, Setting, User
 from ..security import (get_current_user, new_agent_key, require_project,
                         verify_key)
+from .. import agentcrypto
 from ..timeline import record
 from .scans import HostDecision
 
@@ -50,8 +51,14 @@ OFFLINE_AFTER = timedelta(seconds=90)
 #: package" instruction from the server is remote code execution with
 #: extra steps, and the agent runs privileged. The server can authorise
 #: anything on this list and nothing else.
-INSTALLABLE = ("amass", "nmap", "masscan", "gobuster", "nuclei", "httpx",
-               "subfinder", "ffuf", "whatweb", "nikto", "dnsx", "naabu")
+INSTALLABLE = ("amass", "nmap", "masscan", "gobuster", "gospider", "nuclei",
+               "httpx", "subfinder", "ffuf", "whatweb", "nikto", "dnsx",
+               "naabu")
+
+#: How long an unused enrolment token stays good. Short, because a
+#: token sitting in a terminal history or a chat message is a way onto
+#: the engagement, and the operator is normally pasting it immediately.
+ENROL_TTL = timedelta(hours=2)
 
 #: Task kinds the agent knows how to run, and the importer that reads
 #: each one's output. None means the result is not a scan import.
@@ -60,6 +67,7 @@ TASK_KINDS: dict[str, str | None] = {
     "masscan": "masscan",
     "amass": None,
     "gobuster": None,
+    "gospider": None,
     "nuclei": "nuclei",
     "httpx": "httpx",
     "nslookup": None,
@@ -85,22 +93,49 @@ class AgentOut(BaseModel):
     last_seen: datetime | None = None
     last_ip: str | None = None
     queued_tasks: int = 0
+    #: Tasks actually in flight, as distinct from waiting. An operator
+    #: watching a scan wants to know something is happening, and
+    #: "queued" does not say that.
+    running_tasks: int = 0
+    connection_mode: str = "callback"
+    target_os: str | None = None
+    #: Whether the agent has completed the identity exchange. Until it
+    #: has, it is enrolled but has never connected.
+    has_identity: bool = False
+    enrolled_pending: bool = False
     created_at: datetime | None = None
 
 
 class AgentEnrolled(BaseModel):
-    """Returned once, at enrolment. The keys are never shown again."""
+    """Returned once, at enrolment. None of this is recoverable later."""
     agent: AgentOut
     callback_key: str = Field(description="Give this to Jaws. It authenticates "
                                           "the agent to the server.")
     call_in_key: str = Field(description="Jaws requires this on inbound calls, "
                                          "so the agent can tell the server from "
                                          "anyone else who finds the port.")
+    enrol_token: str = Field(
+        description="One-time. The agent exchanges it for an identity on "
+                    "first run and it is burned.")
+    enrol_expires_at: datetime = Field(
+        description="After this the token is refused and the agent must be "
+                    "enrolled again.")
+    server_public_key: str = Field(
+        description="This Oddjob's Ed25519 public key. The agent pins it, so "
+                    "it will only ever take tasking from this instance.")
 
 
 class EnrolIn(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     notes: str | None = None
+    connection_mode: str = Field(
+        "callback",
+        description="callback (the agent dials out; works from inside a "
+                    "client network with nothing exposed) or call_in (the "
+                    "server reaches the agent)")
+    target_os: str | None = Field(
+        None, description="linux | darwin | windows — which binary and "
+                          "install snippet to hand the operator")
 
 
 class RegisterIn(BaseModel):
@@ -154,13 +189,20 @@ def _tools(raw: str | None) -> dict:
         return {}
 
 
-def _agent_out(a: Agent, code: str, queued: int = 0) -> AgentOut:
+def _agent_out(a: Agent, code: str, queued: int = 0,
+               running: int = 0) -> AgentOut:
     return AgentOut(
         id=a.id, project_code=code, name=a.name, status=a.status,
         platform=a.platform, arch=a.arch, version=a.version,
         hostname=a.hostname, privileged=a.privileged, tools=_tools(a.tools),
         call_in_url=a.call_in_url, last_seen=a.last_seen, last_ip=a.last_ip,
-        queued_tasks=queued, created_at=a.created_at)
+        queued_tasks=queued, running_tasks=running,
+        connection_mode=a.connection_mode, target_os=a.target_os,
+        has_identity=bool(a.public_key),
+        # Enrolled, token still good, never connected. Distinct from
+        # "offline", which means it connected once and then stopped.
+        enrolled_pending=bool(a.enrol_token_hash) and not a.public_key,
+        created_at=a.created_at)
 
 
 def _task_out(t: AgentTask, code: str) -> TaskOut:
@@ -181,22 +223,95 @@ def _stale(a: Agent) -> str:
     """Offline is an observation, disabled is a decision."""
     if a.status == "disabled":
         return "disabled"
-    if a.last_seen and (datetime.now(timezone.utc) - a.last_seen) < OFFLINE_AFTER:
+    seen = _aware(a.last_seen)
+    if seen and (datetime.now(timezone.utc) - seen) < OFFLINE_AFTER:
         return "online"
     return "offline"
 
 
-# ----------------------------------------------------------- agent auth
-async def agent_from_key(request: Request,
-                         session: AsyncSession = Depends(get_session)) -> Agent:
-    """Authenticate the AGENT to the server, by its callback key.
+# ------------------------------------------------------ server identity
+async def server_identity(session: AsyncSession) -> tuple[str, str]:
+    """This instance's Ed25519 keypair, made once and kept.
 
-    Scanned linearly because the key is not stored in any form we can
-    index on — only a hash — and there are tens of agents, not
-    millions. If that ever stops being true, store a short public
-    prefix alongside the hash and look up on that, exactly as the API
-    keys do.
+    It is what an agent pins, so rotating it deliberately orphans every
+    enrolled agent -- which is the correct behaviour if the private key
+    is believed lost, and a bad surprise otherwise. Nothing here
+    rotates it automatically.
     """
+    row = await session.get(Setting, agentcrypto.SERVER_KEY_SETTING)
+    if row is not None and row.value:
+        return row.value, agentcrypto.public_of(row.value)
+    priv, pub = agentcrypto.generate()
+    if row is None:
+        session.add(Setting(key=agentcrypto.SERVER_KEY_SETTING, value=priv))
+    else:
+        row.value = priv
+    await session.commit()
+    return priv, pub
+
+
+# ----------------------------------------------------------- agent auth
+async def _signed_agent(request: Request, session: AsyncSession,
+                        allow_disabled: bool = False) -> Agent | None:
+    """Authenticate by Ed25519 signature, or return None if none offered.
+
+    Raises rather than returning None once an agent has been *named*: a
+    caller claiming to be agent 7 with a bad signature is a failure, not
+    an invitation to try the weaker scheme.
+    """
+    sig = request.headers.get(agentcrypto.SIG_HEADER, "").strip()
+    claimed = request.headers.get(agentcrypto.AGENT_HEADER, "").strip()
+    if not sig and not claimed:
+        return None
+
+    ts = request.headers.get(agentcrypto.TS_HEADER, "").strip()
+    nonce = request.headers.get(agentcrypto.NONCE_HEADER, "").strip()
+    if not (sig and claimed and ts and nonce):
+        raise HTTPException(401, "a signed request needs agent, timestamp, "
+                                 "nonce and signature")
+    if not agentcrypto.fresh(ts):
+        # Said precisely, because the usual cause is a drifted clock on
+        # a host nobody has logged into for weeks, and "unauthorised"
+        # sends the operator looking in the wrong place.
+        raise HTTPException(401, "timestamp outside the accepted window — "
+                                 "check the clock on the agent host")
+    if not agentcrypto.nonces.check_and_add(nonce):
+        raise HTTPException(401, "nonce already used")
+
+    try:
+        a = await session.get(Agent, int(claimed))
+    except ValueError:
+        raise HTTPException(401, "malformed agent id")
+    if a is None or not a.public_key:
+        raise HTTPException(401, "unknown agent")
+
+    body = await request.body()
+    if not agentcrypto.verify(a.public_key, sig, request.method,
+                              request.url.path, body, ts, nonce):
+        raise HTTPException(401, "signature does not verify")
+    if a.status == "disabled" and not allow_disabled:
+        raise HTTPException(403, "this agent is disabled")
+    return a
+
+
+async def _resolve_agent(request: Request, session: AsyncSession,
+                         allow_disabled: bool) -> Agent:
+    """Authenticate the AGENT to the server.
+
+    Two schemes, and the order matters. An agent that has registered a
+    public key must sign; presenting its callback key instead is
+    refused. Without that rule an attacker who obtained the weaker
+    secret could simply omit the signature and be let in, which would
+    make the stronger scheme decorative.
+
+    The key path remains for agents enrolled before identities existed.
+    Keys are scanned linearly because only a hash is stored and there
+    are tens of agents, not millions.
+    """
+    signed = await _signed_agent(request, session, allow_disabled)
+    if signed is not None:
+        return signed
+
     auth = request.headers.get("Authorization", "")
     key = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     if not key:
@@ -205,10 +320,47 @@ async def agent_from_key(request: Request,
         raise HTTPException(401, "no agent key supplied")
     for a in (await session.execute(select(Agent))).scalars():
         if verify_key(key, a.callback_key_hash):
-            if a.status == "disabled":
+            if a.public_key:
+                raise HTTPException(
+                    401, "this agent has an identity and must sign its "
+                         "requests; a key alone is not accepted")
+            if a.status == "disabled" and not allow_disabled:
                 raise HTTPException(403, "this agent is disabled")
             return a
     raise HTTPException(401, "unknown agent key")
+
+
+async def agent_from_key(request: Request,
+                         session: AsyncSession = Depends(get_session)) -> Agent:
+    """The ordinary case: a working agent doing work."""
+    return await _resolve_agent(request, session, allow_disabled=False)
+
+
+async def agent_even_if_killed(request: Request,
+                               session: AsyncSession = Depends(get_session)) -> Agent:
+    """For the two routes that must be able to answer a killed agent.
+
+    A 403 is not actionable by a process whose whole job is to retry:
+    it would reconnect every few seconds forever. Heartbeat and
+    register therefore authenticate it, then tell it to exit. No other
+    route accepts a disabled agent, so it can be told to stop and can
+    do nothing else.
+    """
+    return await _resolve_agent(request, session, allow_disabled=True)
+
+
+def _aware(dt: datetime | None) -> datetime | None:
+    """Treat a stored timestamp as UTC when the driver returns it naive.
+
+    Postgres hands back tz-aware values for a `DateTime(timezone=True)`
+    column; SQLite hands back naive ones for the same column. Comparing
+    the two raises, so an expiry check that works against the real
+    database fails only on the one the tests use -- or the reverse,
+    which is worse.
+    """
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 async def _project_code(session: AsyncSession, project_id: int) -> str:
@@ -228,17 +380,30 @@ async def enrol(body: EnrolIn, project: str = Query(...),
     that can run privileged commands on a machine and send their output
     here. That is not a reader's decision.
     """
+    if body.connection_mode not in ("callback", "call_in"):
+        raise HTTPException(422, "connection_mode is callback or call_in")
+    if body.target_os not in (None, "linux", "darwin", "windows"):
+        raise HTTPException(422, "target_os is linux, darwin or windows")
+
+    _, server_pub = await server_identity(session)
+
     cb_raw, cb_hash = new_agent_key()
     ci_raw, ci_hash = new_agent_key()
+    tok_raw, tok_hash = new_agent_key()
+    expires = datetime.now(timezone.utc) + ENROL_TTL
     a = Agent(project_id=pr.id, name=body.name.strip(),
               callback_key_hash=cb_hash, call_in_key_hash=ci_hash,
+              enrol_token_hash=tok_hash, enrol_expires_at=expires,
+              connection_mode=body.connection_mode, target_os=body.target_os,
               notes=body.notes, status="offline")
     session.add(a)
     await session.commit()
     await session.refresh(a)
     await broker.publish("agents", action="enrol", project=pr.code)
     return AgentEnrolled(agent=_agent_out(a, pr.code),
-                         callback_key=cb_raw, call_in_key=ci_raw)
+                         callback_key=cb_raw, call_in_key=ci_raw,
+                         enrol_token=tok_raw, enrol_expires_at=expires,
+                         server_public_key=server_pub)
 
 
 @router.get("", response_model=list[AgentOut])
@@ -249,14 +414,26 @@ async def list_agents(project: str | None = Query(None),
     rows = (await session.execute(
         select(Agent).where(Agent.project_id == pr.id)
         .order_by(Agent.name))).scalars().all()
+
+    # One grouped count rather than a query per agent. The per-agent
+    # version was two round trips per row, which is invisible with three
+    # agents and is not the shape to leave in place.
+    counts: dict[tuple[int, str], int] = {
+        (aid, status): n
+        for aid, status, n in (await session.execute(
+            select(AgentTask.agent_id, AgentTask.status,
+                   func.count(AgentTask.id))
+            .where(AgentTask.project_id == pr.id,
+                   AgentTask.status.in_(("queued", "claimed", "running")))
+            .group_by(AgentTask.agent_id, AgentTask.status))).all()}
+
     out = []
     for a in rows:
         a.status = _stale(a)
-        queued = len((await session.execute(
-            select(AgentTask.id).where(AgentTask.agent_id == a.id,
-                                       AgentTask.status.in_(
-                                           ("queued", "claimed", "running"))))).all())
-        out.append(_agent_out(a, pr.code, queued))
+        # Claimed counts as in flight: the agent has taken it and the
+        # operator is waiting on it, which is what the column means.
+        running = counts.get((a.id, "running"), 0) + counts.get((a.id, "claimed"), 0)
+        out.append(_agent_out(a, pr.code, counts.get((a.id, "queued"), 0), running))
     return out
 
 
@@ -274,14 +451,74 @@ async def set_agent(agent_id: int, enabled: bool = Query(...),
     return _agent_out(a, pr.code)
 
 
-@router.delete("/{agent_id}", status_code=204)
-async def remove_agent(agent_id: int,
-                       pr: Project = Depends(require_project("admin")),
-                       _: User = Depends(get_current_user),
-                       session: AsyncSession = Depends(get_session)):
+@router.post("/{agent_id}/kill", response_model=AgentOut)
+async def kill_agent(agent_id: int,
+                     pr: Project = Depends(require_project("admin")),
+                     _: User = Depends(get_current_user),
+                     session: AsyncSession = Depends(get_session)):
+    """Stop an agent, without losing what it found.
+
+    Three things at once, because any one alone leaves a way back in:
+    the record is disabled so its credential is refused, its unstarted
+    tasking is cancelled so a reconnecting process finds nothing to do,
+    and the next heartbeat is answered with an instruction to exit.
+
+    Deliberately not a delete. The tasks carry the output of scans that
+    already ran against the client's estate, and that is evidence --
+    see `remove_agent`, which will not throw it away by accident
+    either. An agent that cannot reach the network any more still has a
+    history worth keeping.
+    """
     a = await session.get(Agent, agent_id)
     if a is None or a.project_id != pr.id:
         raise HTTPException(404, "no such agent")
+    a.status = "disabled"
+    # Queued work is pointless now; work already running will report
+    # back if the process is still alive, and is left alone so that
+    # result is not lost.
+    cancelled = 0
+    for t in (await session.execute(
+            select(AgentTask).where(AgentTask.agent_id == a.id,
+                                    AgentTask.status == "queued"))).scalars():
+        t.status = "failed"
+        t.error = "cancelled: the agent was killed before this task started"
+        t.finished_at = datetime.now(timezone.utc)
+        cancelled += 1
+    await session.commit()
+    await session.refresh(a)
+    # Not written to the timeline: an Event hangs off a target, and an
+    # agent is not one. Inventing a target_id to get a line in the log
+    # would put a false entry on a real host.
+    await broker.publish("agents", action="killed", project=pr.code)
+    return _agent_out(a, pr.code)
+
+
+@router.delete("/{agent_id}", status_code=204)
+async def remove_agent(agent_id: int, force: bool = Query(False),
+                       pr: Project = Depends(require_project("admin")),
+                       _: User = Depends(get_current_user),
+                       session: AsyncSession = Depends(get_session)):
+    """Delete the record entirely. Takes its task history with it.
+
+    Refused by default when any task still holds tool output: that
+    output is the raw proof a scan ran and what it saw, and the FK
+    cascades, so one click would remove it with no copy anywhere. Kill
+    the agent instead, or pass force if the loss is intended.
+    """
+    a = await session.get(Agent, agent_id)
+    if a is None or a.project_id != pr.id:
+        raise HTTPException(404, "no such agent")
+    if not force:
+        held = (await session.execute(
+            select(func.count(AgentTask.id)).where(
+                AgentTask.agent_id == a.id,
+                AgentTask.output.is_not(None),
+                AgentTask.output != ""))).scalar_one()
+        if held:
+            raise HTTPException(
+                409, f"{a.name} has {held} task(s) still holding tool output, "
+                     f"which deleting would destroy. Kill the agent to stop "
+                     f"it and keep the evidence, or repeat with force=true.")
     await session.delete(a)
     await session.commit()
 
@@ -394,9 +631,72 @@ async def import_task_result(agent_id: int, task_id: int,
 
 
 # --------------------------------------------------------- agent routes
+class IdentityIn(BaseModel):
+    """What the agent presents once, to trade a token for an identity."""
+    enrol_token: str
+    public_key: str = Field(description="Ed25519, base64 raw. The agent made "
+                                        "this on its own host; the private "
+                                        "half is not sent.")
+
+
+@router.post("/enrol", response_model=dict)
+async def claim_identity(body: IdentityIn,
+                         session: AsyncSession = Depends(get_session)):
+    """Trade a one-time token for a mutual identity.
+
+    This is the only moment the two sides learn each other. The agent
+    sends the public half of a key it generated locally; it gets back
+    this instance's public key, which it pins. From then on neither
+    side accepts the other on a shared secret.
+
+    The token is burned on success. It is not burned on a *failed*
+    attempt, because the common failure is a typo and invalidating the
+    token would mean re-enrolling for a slip -- but it is single-use
+    and short-lived, so a burned-on-success token cannot be replayed to
+    register a second key against the same agent.
+    """
+    tok = (body.enrol_token or "").strip()
+    key = (body.public_key or "").strip()
+    if not tok or not key:
+        raise HTTPException(422, "both enrol_token and public_key are required")
+    try:
+        if len(agentcrypto.unb64(key)) != 32:
+            raise ValueError
+    except Exception:
+        raise HTTPException(422, "public_key must be a base64 Ed25519 key")
+
+    now = datetime.now(timezone.utc)
+    match: Agent | None = None
+    for a in (await session.execute(
+            select(Agent).where(Agent.enrol_token_hash.is_not(None)))).scalars():
+        if verify_key(tok, a.enrol_token_hash or ""):
+            match = a
+            break
+    if match is None:
+        raise HTTPException(401, "unknown or already-used enrolment token")
+    if match.enrol_used_at is not None:
+        raise HTTPException(409, "this enrolment token has already been used")
+    expires = _aware(match.enrol_expires_at)
+    if expires and expires < now:
+        raise HTTPException(
+            401, "this enrolment token has expired — enrol the agent again")
+
+    match.public_key = key
+    match.enrol_used_at = now
+    # Burned, so the same token cannot register a second key later.
+    match.enrol_token_hash = None
+    _, server_pub = await server_identity(session)
+    code = await _project_code(session, match.project_id)
+    await session.commit()
+    await broker.publish("agents", action="identity", project=code)
+    return {"ok": True, "agent_id": match.id, "project": code,
+            "server_public_key": server_pub,
+            "connection_mode": match.connection_mode}
+
+
 @router.post("/register", response_model=dict)
 async def register(body: RegisterIn, request: Request,
-                   a: Agent = Depends(agent_from_key),
+                   a: Agent = Depends(agent_even_if_killed),
                    session: AsyncSession = Depends(get_session)):
     """Jaws announcing itself. Idempotent: it runs on every reconnect."""
     a.platform, a.arch = body.platform, body.arch
@@ -406,8 +706,14 @@ async def register(body: RegisterIn, request: Request,
     a.call_in_url = body.call_in_url
     a.last_seen = datetime.now(timezone.utc)
     a.last_ip = request.client.host if request.client else None
-    if a.status != "disabled":
-        a.status = "online"
+    if a.status == "disabled":
+        # A killed agent that comes back -- a restarted service, a
+        # rebooted host -- is told to stop rather than refused. A 403
+        # it cannot interpret would have it retry forever.
+        await session.commit()
+        return {"ok": True, "agent_id": a.id, "shutdown": True,
+                "reason": "this agent was killed from Oddjob"}
+    a.status = "online"
     await session.commit()
     code = await _project_code(session, a.project_id)
     await broker.publish("agents", action="register", project=code)
@@ -422,7 +728,7 @@ async def register(body: RegisterIn, request: Request,
 
 
 @router.post("/heartbeat", response_model=dict)
-async def heartbeat(request: Request, a: Agent = Depends(agent_from_key),
+async def heartbeat(request: Request, a: Agent = Depends(agent_even_if_killed),
                     session: AsyncSession = Depends(get_session)):
     """Keepalive, and the poll that hands out work.
 
@@ -432,8 +738,16 @@ async def heartbeat(request: Request, a: Agent = Depends(agent_from_key),
     """
     a.last_seen = datetime.now(timezone.utc)
     a.last_ip = request.client.host if request.client else None
-    if a.status != "disabled":
-        a.status = "online"
+    if a.status == "disabled":
+        # Killed. Answer the heartbeat rather than refusing it, so the
+        # agent is told to stop instead of retrying forever against a
+        # 403 it cannot interpret. Recorded first: this is the last
+        # thing we will hear from it, and when it stopped is worth
+        # knowing.
+        await session.commit()
+        return {"ok": True, "task": None, "shutdown": True,
+                "reason": "this agent was killed from Oddjob"}
+    a.status = "online"
 
     t = (await session.execute(
         select(AgentTask).where(AgentTask.agent_id == a.id,

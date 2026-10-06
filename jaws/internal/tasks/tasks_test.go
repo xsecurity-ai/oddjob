@@ -152,7 +152,7 @@ func TestFirstLineTakesTheReasonNotTheUsage(t *testing.T) {
 // can assert on without the tool installed.
 func TestRunnersRefuseAnEmptySubject(t *testing.T) {
 	for _, kind := range []string{"nmap", "masscan", "amass", "gobuster",
-		"nuclei", "httpx", "nslookup", "reverse_ip"} {
+		"gospider", "nuclei", "httpx", "nslookup", "reverse_ip"} {
 		run, ok := Runners[kind]
 		if !ok {
 			t.Fatalf("no runner registered for %q", kind)

@@ -968,6 +968,35 @@ class Agent(Base, TimestampMixin):
     call_in_key_hash: Mapped[str | None] = mapped_column(String(128))
     call_in_url: Mapped[str | None] = mapped_column(String(300))
 
+    #: The agent's Ed25519 public key, base64 raw. The private half is
+    #: made on the agent's own host at enrolment and never sent, so what
+    #: is stored here cannot impersonate it -- unlike the key hashes
+    #: above, which authenticate a secret that existed in two places.
+    #: Null for an agent enrolled before identities existed; those still
+    #: authenticate by key. Once this is set, a key alone is refused, so
+    #: an attacker cannot strip the signature to get the weaker scheme.
+    public_key: Mapped[str | None] = mapped_column(String(64))
+
+    #: One-time enrolment. The token is what the operator pastes into
+    #: the agent once; the agent exchanges it for an identity and it is
+    #: burned. Short-lived, because an unused enrolment token lying in
+    #: a terminal history is a way onto the engagement.
+    enrol_token_hash: Mapped[str | None] = mapped_column(String(128))
+    enrol_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    enrol_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    #: callback | call_in. Which way the connection is made. Callback is
+    #: the default and the one that works from inside a client network
+    #: with nothing exposed; call_in exists for a host that cannot dial
+    #: out but can be reached.
+    connection_mode: Mapped[str] = mapped_column(
+        String(16), default="callback", server_default="callback")
+    #: The OS the operator said they were deploying to, which is how the
+    #: UI knows which binary and which install snippet to hand them. The
+    #: agent reports `platform` for itself once it connects; this is the
+    #: intent, that is the fact, and they are kept apart on purpose.
+    target_os: Mapped[str | None] = mapped_column(String(16))
+
     #: What it reported about itself on registration.
     platform: Mapped[str | None] = mapped_column(String(32))     # linux|darwin|windows
     arch: Mapped[str | None] = mapped_column(String(16))

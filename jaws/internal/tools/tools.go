@@ -41,6 +41,11 @@ var Known = map[string]pkg{
 		gomod: "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"},
 	"ffuf": {apt: "ffuf", brew: "ffuf", choco: "ffuf", version: "-V",
 		gomod: "github.com/ffuf/ffuf/v2@latest"},
+	// Crawls a site and reports what it links to, including URLs found
+	// in JavaScript, which is where the interesting endpoints usually
+	// are. Go-only: there is no distro package anywhere.
+	"gospider": {apt: "", brew: "", choco: "", version: "--version",
+		gomod: "github.com/jaeles-project/gospider@latest"},
 	"whatweb": {apt: "whatweb", brew: "whatweb", choco: "", version: "--version"},
 	"nikto":   {apt: "nikto", brew: "nikto", choco: "", version: "-Version"},
 	"dnsx": {apt: "", brew: "dnsx", choco: "", version: "-version",

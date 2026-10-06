@@ -49,6 +49,8 @@ PUBLIC_EXACT = {
     # See PUBLIC_PREFIX: these carry an agent key, not a session.
     "/api/agents/register",
     "/api/agents/heartbeat",
+    # The one-time token is the credential here; there is no identity yet.
+    "/api/agents/enrol",
 }
 
 PUBLIC_PREFIX = (

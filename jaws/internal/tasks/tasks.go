@@ -15,6 +15,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +45,7 @@ var Runners = map[string]Runner{
 	"masscan":    runMasscan,
 	"amass":      runAmass,
 	"gobuster":   runGobuster,
+	"gospider":   runGospider,
 	"nuclei":     runNuclei,
 	"httpx":      runHTTPX,
 	"nslookup":   runNSLookup,
@@ -73,6 +76,26 @@ func subjects(args map[string]any, names ...string) []string {
 		}
 	}
 	return out
+}
+
+// intOr reads a bound a caller may have sent as a JSON number, which
+// decodes as float64, or as a string from a form field.
+func intOr(args map[string]any, key string, def int) int {
+	switch v := args[key].(type) {
+	case float64:
+		if v > 0 {
+			return int(v)
+		}
+	case int:
+		if v > 0 {
+			return v
+		}
+	case string:
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
 }
 
 func str(args map[string]any, key string) string {
@@ -383,6 +406,86 @@ func runGobuster(ctx context.Context, args map[string]any, workDir string) Resul
 			"url": url, "wordlist": wordlist, "found": found}),
 		Stderr:   tail(r.stderr, 4000),
 		Summary:  fmt.Sprintf("gobuster: %d path(s) on %s", len(found), url),
+		ExitCode: r.code,
+	}
+}
+
+// ----------------------------------------------------------- gospider
+// gospider crawls a site and reports what it links to, including URLs
+// it finds inside JavaScript. Run with -json so the output is parsed
+// rather than scraped, and the URLs are pulled out into a plain list
+// so the result is useful without knowing gospider's record shape.
+func runGospider(ctx context.Context, args map[string]any, workDir string) Result {
+	us := subjects(args, "url", "urls", "site", "sites")
+	if len(us) == 0 {
+		return failed("gospider needs `targets` (or `url`)")
+	}
+	if tools.Path("gospider") == "" {
+		return failed("gospider is not installed on this agent")
+	}
+
+	depth := intOr(args, "depth", 2)
+	concurrency := intOr(args, "concurrency", 5)
+	argv := []string{"--json", "--quiet", "-d", strconv.Itoa(depth),
+		"-c", strconv.Itoa(concurrency)}
+	for _, u := range us {
+		argv = append(argv, "-s", u)
+	}
+	// Off unless asked for. Following a link off the target is how a
+	// crawl ends up touching something nobody authorised.
+	if b, ok := args["subdomains"].(bool); ok && b {
+		argv = append(argv, "--subs")
+	}
+	if b, ok := args["other_sources"].(bool); ok && b {
+		// Pulls from the Wayback Machine, Common Crawl and friends:
+		// third-party lookups, not traffic to the target.
+		argv = append(argv, "--other-source")
+	}
+	argv = append(argv, extraArgs(args)...)
+
+	r := runCmd(ctx, timeout(args, 45*time.Minute), "gospider", argv...)
+	if r.code != 0 && strings.TrimSpace(r.stdout) == "" {
+		return Result{Status: "failed", Stderr: tail(r.stderr, 4000),
+			ExitCode: r.code,
+			Error: fmt.Sprintf("gospider did not complete: %s",
+				firstLine(r.stderr))}
+	}
+
+	type rec struct {
+		Output string `json:"output"`
+		Source string `json:"source"`
+		Type   string `json:"type"`
+		Status int    `json:"status"`
+	}
+	seen := map[string]bool{}
+	urls := []string{}
+	byType := map[string]int{}
+	for _, line := range strings.Split(r.stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line[0] != '{' {
+			continue
+		}
+		var x rec
+		if json.Unmarshal([]byte(line), &x) != nil {
+			continue
+		}
+		byType[x.Type]++
+		u := strings.TrimSpace(x.Output)
+		if u == "" || seen[u] {
+			continue
+		}
+		seen[u] = true
+		urls = append(urls, u)
+	}
+	sort.Strings(urls)
+
+	return Result{
+		Status: "done",
+		Output: recon.JSON(map[string]any{
+			"sites": us, "depth": depth, "urls": urls, "by_type": byType}),
+		Stderr: tail(r.stderr, 4000),
+		Summary: fmt.Sprintf("gospider: %d url(s) across %d site(s)",
+			len(urls), len(us)),
 		ExitCode: r.code,
 	}
 }
