@@ -836,4 +836,47 @@ export const api = {
                      decisions: Record<string, HostDecision>) =>
     req<ImportResult>(`/api/agents/${agentId}/tasks/${taskId}/import` + qs({ project }),
       { method: 'POST', body: JSON.stringify({ decisions }) }),
+
+  // --- slack handles ---
+  /**
+   * One person's Slack handle for one engagement.
+   *
+   * Three routes, one resource, one state: GET says whether to ask and
+   * with what, POST records an answer and attempts the channel invites,
+   * POST `/decline` stops the asking for this engagement. All three
+   * return the same shape, so they are one call here — which also keeps
+   * the response type written once rather than three times.
+   *
+   * `answer` omitted is the GET. It never writes, so it is safe to run
+   * on opening a project.
+   */
+  slackMe: (project: string,
+            answer?: { handle: string; save_as_default: boolean } | 'decline') =>
+    req<{
+      slack_enabled: boolean
+      /** Ask now: Slack is on for this project and this person has
+       *  neither confirmed a handle nor declined. */
+      prompt: boolean
+      /** Their profile default, for the one-click answer. */
+      default_handle: string | null
+      /** What they already gave for THIS project, which may differ from
+       *  the default — a consultant can be in the client's workspace
+       *  under another name. */
+      handle: string | null
+      confirmed: boolean
+      declined: boolean
+      channels: string[]
+      /** Verbatim from the server: `channel: added` or `channel: <reason>`
+       *  per destination, joined with "; ". An invite can fail — commonly
+       *  because the person is not in the Slack workspace yet — and this
+       *  is the only place that says so. */
+      invite_result: string | null
+    }>(`/api/projects/${encodeURIComponent(project)}/slack/me`
+         + (answer === 'decline' ? '/decline' : ''),
+      answer === undefined ? undefined : {
+        method: 'POST',
+        // The decline route takes no body; an empty object keeps the
+        // Content-Type honest rather than sending `null`.
+        body: JSON.stringify(answer === 'decline' ? {} : answer),
+      }),
 }

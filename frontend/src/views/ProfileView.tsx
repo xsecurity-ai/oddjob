@@ -115,6 +115,10 @@ export function ProfileView() {
 
   const [fullName, setFullName] = useState(u.full_name ?? '')
   const [email, setEmail] = useState(u.email ?? '')
+  // Read structurally: /api/auth/me returns slack_handle, but the User
+  // interface in lib/api.ts does not declare it.
+  const [slack, setSlack] = useState(
+    (u as { slack_handle?: string | null }).slack_handle ?? '')
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -128,7 +132,15 @@ export function ProfileView() {
     e.preventDefault()
     setMsg(null)
     try {
-      await api.updateProfile({ full_name: fullName || null, email: email || null })
+      const saved = await api.updateProfile({
+        full_name: fullName || null, email: email || null,
+        // Empty clears it, which is the only way to stop it being
+        // offered. The server stores it bare, so read the saved value
+        // back rather than leaving "@someone" on screen beside a row
+        // that now says "someone".
+        slack_handle: slack.trim() || null,
+      })
+      setSlack((saved as { slack_handle?: string | null }).slack_handle ?? '')
       await refresh()
       setMsg({ kind: 'ok', text: 'Details saved.' })
     } catch (e) {
@@ -216,6 +228,14 @@ export function ProfileView() {
                        onChange={(e) => setFullName(e.target.value)} />
             <TextField size="small" label="Email" type="email" value={email}
                        onChange={(e) => setEmail(e.target.value)} />
+            <TextField size="small" label="Default Slack handle" value={slack}
+                       onChange={(e) => setSlack(e.target.value)} placeholder="@someone"
+                       helperText={`Offered as the one-click answer when you open an
+                                    engagement that posts to Slack. Each engagement keeps
+                                    its own handle — a client's workspace may know you by
+                                    another name — so this is only the suggestion. Stored
+                                    without the @. Leave it empty and you will be asked
+                                    to type one each time.`.replace(/\s+/g, ' ')} />
             <Box>
               <Button type="submit" size="small" variant="outlined"
                 sx={{ color: neon.cyan, borderColor: alpha(neon.cyan, 0.5) }}>Save</Button>
