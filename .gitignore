@@ -23,6 +23,10 @@ pg.env
 id_rsa*
 
 # Scanner output and evidence. Not ours to publish.
+# These are deliberately unanchored: an engagement directory can turn up
+# anywhere under here and the cost of missing one is publishing a
+# client's data. The cost of a false positive is a build error, which is
+# the trade we want.
 *.nessus
 *.gnmap
 *.nmap
@@ -30,6 +34,14 @@ evidence/
 loot/
 scans/
 recon/
+
+# ...which caught our own source. `recon/` above matches a directory of
+# that name at any depth, so the agent's recon package was silently left
+# out of a commit and only CI noticed, because a local build still had
+# the file on disk. Un-ignoring a path inside an ignored directory needs
+# the directory itself re-included, not just the files under it.
+!jaws/internal/recon/
+!jaws/internal/recon/**
 
 # Reports, which are client deliverables.
 *.docx
