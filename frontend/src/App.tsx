@@ -10,7 +10,6 @@ import LanIcon from '@mui/icons-material/LanOutlined'
 import BugReportIcon from '@mui/icons-material/BugReportOutlined'
 import KeyIcon from '@mui/icons-material/VpnKeyOutlined'
 import PublicIcon from '@mui/icons-material/PublicOutlined'
-import UploadIcon from '@mui/icons-material/UploadFileOutlined'
 import DescriptionIcon from '@mui/icons-material/DescriptionOutlined'
 import MemoryIcon from '@mui/icons-material/MemoryOutlined'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
@@ -263,16 +262,14 @@ export default function App() {
     },
     { key: 'vulns', label: 'Vulns', icon: <BugReportIcon fontSize="small" /> },
     { key: 'credentials', label: 'Credentials', icon: <KeyIcon fontSize="small" /> },
-    // Jaws sits under Reports as a sibling of the written deliverable:
-    // both answer "what has this engagement actually done".
-    {
-      key: 'reports', label: 'Reports', icon: <DescriptionIcon fontSize="small" />,
-      children: [
-        { key: 'reports', label: 'Written', icon: <DescriptionIcon fontSize="small" /> },
-        { key: 'jaws', label: 'Jaws', icon: <MemoryIcon fontSize="small" /> },
-      ],
-    },
-    { key: 'import', label: 'Import', icon: <UploadIcon fontSize="small" /> },
+    { key: 'reports', label: 'Reports', icon: <DescriptionIcon fontSize="small" /> },
+    // Its own entry, directly below Reports rather than nested inside
+    // it. Nesting cost a click to reach a view an operator checks while
+    // a scan is running, and hid it entirely until Reports was open.
+    { key: 'jaws', label: 'Jaws', icon: <MemoryIcon fontSize="small" /> },
+    // No sidebar entry: importing happens from the table you are
+    // already looking at (Targets, Services, Vulns), which keeps the
+    // filters you had. The route still resolves, so old links work.
   ]
   const ADMIN_NAV = [
     ...(siteAdmin ? [{ key: 'config', label: 'Site Config',

@@ -11,6 +11,7 @@ already in front of the person who owns it.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,7 +19,8 @@ from ..agent import AgentError, build, run, token_kind
 from ..agent.providers import anthropic_chat, openai_chat
 from ..db import get_session
 from ..models import Project, User
-from ..security import get_current_user, require_project
+from ..security import (effective_role, get_current_user, require_project,
+                        visible_project_ids)
 from .settings import load_all
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
@@ -106,6 +108,12 @@ class AgentStatus(BaseModel):
     allow_writes: bool
     max_steps: int
     tools: list[str] = []
+    #: Which engagements this session can see. One code, or how many
+    #: the caller may read when asking across all of them. Surfaced so
+    #: the UI can say it and so the bound is observable rather than
+    #: something you have to trust.
+    scope: str = ""
+    scope_projects: int | None = None
     detail: str | None = None
 
 
@@ -114,26 +122,33 @@ DEFAULT_MODEL = {"anthropic": "claude-sonnet-5-5", "openai": "gpt-4o",
 
 
 async def _resolve(session: AsyncSession,
-                   pr: Project) -> tuple[str, str, str, str, str | None, dict]:
+                   pr: Project | None) -> tuple[str, str, str, str, str | None, dict]:
     """-> (provider, token, model, source, base_url, cfg).
 
     Project overrides site, per field. A local provider carries a base URL
     and usually no token at all.
+
+    With no project -- the all-engagements scope -- there is nothing to
+    override with, so the site settings stand alone. Deliberately not
+    "borrow a token from some project": a key one client's engagement
+    was configured with should not quietly pay for a question about
+    another's.
     """
     cfg = await load_all(session)
-    provider = (pr.agent_provider or cfg.get("agent.provider") or "anthropic").lower()
+    provider = ((pr.agent_provider if pr else None)
+                or cfg.get("agent.provider") or "anthropic").lower()
     if provider not in ("anthropic", "openai", "local"):
         provider = "anthropic"
 
-    proj_token = {"anthropic": pr.agent_anthropic_token,
-                  "openai": pr.agent_openai_token,
+    proj_token = {"anthropic": pr.agent_anthropic_token if pr else None,
+                  "openai": pr.agent_openai_token if pr else None,
                   # A local server is shared infrastructure; there is no
                   # per-project key worth having for it.
                   "local": None}[provider]
     site_token = str(cfg.get(f"agent.{provider}_token") or "")
     token = (proj_token or "").strip() or site_token.strip()
     source = "project" if (proj_token or "").strip() else "site"
-    model = ((pr.agent_model or "").strip()
+    model = (((pr.agent_model if pr else "") or "").strip()
              or str(cfg.get(f"agent.{provider}_model") or "").strip()
              or DEFAULT_MODEL[provider])
     base_url = (str(cfg.get("agent.local_base_url") or "").strip()
@@ -141,20 +156,59 @@ async def _resolve(session: AsyncSession,
     return provider, token, model, source, base_url, cfg
 
 
+#: The value that means "not one engagement, all of them". A sentinel
+#: rather than an absent parameter so the caller is saying it on
+#: purpose: an omitted project is far more often a bug in the caller
+#: than a deliberate request for every client's data at once.
+ALL_PROJECTS = "*"
+
+
+async def _optional_project(project: str = Query(...),
+                            user: User = Depends(get_current_user),
+                            session: AsyncSession = Depends(get_session)
+                            ) -> Project | None:
+    """The project in view, or None when the caller asked for all.
+
+    `require_project` resolves from the request and cannot express
+    "none", so the same rule is applied here directly: unknown and
+    not-allowed both give 404, because telling an unauthorised caller
+    that a project exists is itself a disclosure.
+    """
+    ref = (project or "").strip()
+    if ref == ALL_PROJECTS:
+        return None
+    pr = (await session.execute(
+        select(Project).where(
+            Project.code == ref.upper().replace(" ", "-")))).scalar_one_or_none()
+    if pr is None and ref.isdigit():
+        pr = await session.get(Project, int(ref))
+    if pr is None:
+        raise HTTPException(404, f"no project {ref!r}")
+    if await effective_role(session, user, pr.id) is None:
+        raise HTTPException(404, f"no project {ref!r}")
+    return pr
+
+
 @router.get("/status", response_model=AgentStatus)
 async def status(project: str = Query(...),
-                 pr: Project = Depends(require_project("readonly")),
+                 pr: Project | None = Depends(_optional_project),
                  user: User = Depends(get_current_user),
                  session: AsyncSession = Depends(get_session)):
     """Whether the agent can run here, and on whose credentials."""
     provider, token, model, source, base_url, cfg = await _resolve(session, pr)
     allow = bool(cfg.get("agent.allow_writes", False))
-    tools = build(session, pr, user, allow)
+    scope = None if pr else await visible_project_ids(session, user)
+    if pr is None:
+        allow = False          # no single project for a write to land in
+    tools = build(session, pr, user, allow, scope_ids=scope)
     # A local server needs a URL, not a key; most want no key at all.
     ok = bool(base_url) if provider == "local" else bool(token)
     return AgentStatus(
         configured=ok, provider=provider, model=model, source=source,
         endpoint=base_url,
+        scope=(pr.code if pr else "all projects you can read"),
+        scope_projects=(None if pr else
+                        (None if scope is None else len(scope))),
         token_kind=("none needed" if provider == "local" and not token
                     else token_kind(provider, token)),
         allow_writes=allow,
@@ -169,7 +223,7 @@ async def status(project: str = Query(...),
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(body: ChatRequest, project: str = Query(...),
-               pr: Project = Depends(require_project("readonly")),
+               pr: Project | None = Depends(_optional_project),
                user: User = Depends(get_current_user),
                session: AsyncSession = Depends(get_session)):
     """Ask the agent about this engagement.
@@ -184,23 +238,42 @@ async def chat(body: ChatRequest, project: str = Query(...),
             422, "no local model server URL configured. Set it in "
                  "Site Config → Agent.")
     if provider != "local" and not token:
+        where = f" for {pr.code} in the project's settings" if pr else ""
         raise HTTPException(
-            422, f"no {provider} token configured. Set one in Site Config, or "
-                 f"override it for {pr.code} in the project's settings.")
+            422, f"no {provider} token configured. Set one in Site Config"
+                 f"{', or override it' + where if where else ''}.")
 
     allow = bool(cfg.get("agent.allow_writes", False))
-    # A reader must not gain write access through the agent, whatever the
-    # site setting says.
-    from ..security import effective_role
     from ..models import ROLE_ORDER
-    role = await effective_role(session, user, pr.id)
-    if allow and ROLE_ORDER.get(role or "", -1) < ROLE_ORDER["user"]:
+    if pr is None:
+        # Across every engagement there is no single role to check and
+        # no single project a write could land in. Reading widely is
+        # the point; writing widely is not.
         allow = False
+        scope = await visible_project_ids(session, user)
+    else:
+        scope = None
+        # A reader must not gain write access through the agent,
+        # whatever the site setting says.
+        role = await effective_role(session, user, pr.id)
+        if allow and ROLE_ORDER.get(role or "", -1) < ROLE_ORDER["user"]:
+            allow = False
 
-    tools = build(session, pr, user, allow)
-    system = SYSTEM.format(
-        code=pr.code, client=f" for {pr.client}" if pr.client else "",
-        writes=WRITES_ON if allow else WRITES_OFF)
+    tools = build(session, pr, user, allow, scope_ids=scope)
+    if pr is None:
+        n = "every project" if scope is None else f"{len(scope)} project(s)"
+        system = SYSTEM.format(
+            code=f"ALL ENGAGEMENTS ({n} you can read)",
+            client="",
+            writes="You are answering across several engagements at once. "
+                   "Always say which project a host or finding belongs to — "
+                   "an answer that mixes clients without labelling them is "
+                   "worse than no answer. You cannot make changes in this "
+                   "mode; ask the operator to pick a project first.")
+    else:
+        system = SYSTEM.format(
+            code=pr.code, client=f" for {pr.client}" if pr.client else "",
+            writes=WRITES_ON if allow else WRITES_OFF)
     messages = [m.model_dump() for m in body.history]
     messages.append({"role": "user", "content": body.message})
     max_steps = max(1, min(int(cfg.get("agent.max_steps") or 12), 50))

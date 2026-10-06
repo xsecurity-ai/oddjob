@@ -9,6 +9,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,7 +37,8 @@ var Known = map[string]pkg{
 	"nuclei": {apt: "", brew: "nuclei", choco: "nuclei", version: "-version",
 		gomod: "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"},
 	"httpx": {apt: "", brew: "", choco: "", version: "-version",
-		gomod: "github.com/projectdiscovery/httpx/cmd/httpx@latest"},
+		gomod:       "github.com/projectdiscovery/httpx/cmd/httpx@latest",
+		mustMention: "projectdiscovery"},
 	"subfinder": {apt: "", brew: "subfinder", choco: "", version: "-version",
 		gomod: "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"},
 	"ffuf": {apt: "ffuf", brew: "ffuf", choco: "ffuf", version: "-V",
@@ -64,6 +66,16 @@ type pkg struct {
 	// simply fails on the most common agent platform there is.
 	snap  string
 	gomod string
+	// mustMention is a string the version output has to contain for
+	// this to be the tool we meant.
+	//
+	// `httpx` is the case that forced it: the Python HTTP library
+	// installs a CLI of the same name, and on a developer's machine it
+	// usually wins the PATH. Jaws would report httpx as installed,
+	// accept an httpx task, run the wrong program against a client's
+	// estate and report no findings — indistinguishable from a clean
+	// result. A name on PATH is not proof of identity.
+	mustMention string
 }
 
 // Path returns the absolute path of a tool, or "" if it is absent.
@@ -87,20 +99,98 @@ func Version(ctx context.Context, name string) string {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	out, _ := exec.CommandContext(ctx, name, p.version).CombinedOutput()
-	if m := versionRe.FindString(string(out)); m != "" {
-		return m
-	}
-	if s := strings.TrimSpace(string(out)); s != "" {
-		if i := strings.IndexByte(s, '\n'); i > 0 {
-			s = s[:i]
+
+	// The same tool spells this differently between releases --
+	// gobuster 3.6 wants `version` and 3.8 wants `--version`, and the
+	// one that is wrong prints "No help topic for 'version'". Taking
+	// the first line of whatever came back recorded that sentence as
+	// the version and reported it to the server as fact.
+	probes := []string{p.version}
+	for _, alt := range []string{"--version", "-version", "version", "-V", "-v"} {
+		if alt != p.version {
+			probes = append(probes, alt)
 		}
-		return trunc(s, 60)
 	}
+	var firstLine string
+	for _, probe := range probes {
+		out, _ := exec.CommandContext(ctx, name, probe).CombinedOutput()
+		if m := versionRe.FindString(string(out)); m != "" {
+			return m
+		}
+		if firstLine == "" {
+			if t := strings.TrimSpace(string(out)); t != "" && !looksLikeRefusal(t) {
+				if i := strings.IndexByte(t, '\n'); i > 0 {
+					t = t[:i]
+				}
+				firstLine = trunc(t, 60)
+			}
+		}
+	}
+	if firstLine != "" {
+		return firstLine
+	}
+	// Installed, version unknown. Better than a usage message dressed
+	// up as a version number in the agent inventory.
 	return "present"
 }
 
+// looksLikeRefusal spots a tool complaining about the flag rather than
+// answering it. Such output is not a version, and recording it as one
+// puts a lie in the inventory an operator reads.
+func looksLikeRefusal(s string) bool {
+	l := strings.ToLower(s)
+	for _, bad := range []string{
+		"no help topic", "unknown command", "unknown flag", "unknown option",
+		"usage:", "invalid option", "unrecognized", "not a valid",
+		"flag provided but not defined",
+	} {
+		if strings.Contains(l, bad) {
+			return true
+		}
+	}
+	return false
+}
+
+// Verify reports whether the binary on PATH under this name is
+// actually the tool meant, and why not when it is not.
+func Verify(ctx context.Context, name string) (ok bool, why string) {
+	p, known := Known[name]
+	if !known {
+		return false, "not a tool this agent knows"
+	}
+	if Path(name) == "" {
+		return false, "not installed"
+	}
+	if p.mustMention == "" {
+		return true, ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var seen string
+	for _, probe := range []string{p.version, "--version", "-version", "version"} {
+		out, _ := exec.CommandContext(ctx, name, probe).CombinedOutput()
+		t := strings.TrimSpace(string(out))
+		if t == "" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(t), strings.ToLower(p.mustMention)) {
+			return true, ""
+		}
+		if seen == "" {
+			seen = trunc(strings.SplitN(t, "\n", 2)[0], 80)
+		}
+	}
+	return false, fmt.Sprintf(
+		"a different program called %q is on PATH at %s (it says %q); "+
+			"expected the one from %s", name, Path(name), seen, p.mustMention)
+}
+
 // Installed reports every known tool that is on the box, with versions.
+//
+// A tool that fails verification is left out entirely rather than
+// listed with a warning: this inventory is what the server uses to
+// decide whether it can run a task, and "present but wrong" would get
+// the task dispatched anyway.
 func Installed(ctx context.Context) map[string]string {
 	out := map[string]string{}
 	names := make([]string, 0, len(Known))
@@ -109,8 +199,28 @@ func Installed(ctx context.Context) map[string]string {
 	}
 	sort.Strings(names)
 	for _, n := range names {
-		if Path(n) != "" {
-			out[n] = Version(ctx, n)
+		if Path(n) == "" {
+			continue
+		}
+		if ok, _ := Verify(ctx, n); !ok {
+			continue
+		}
+		out[n] = Version(ctx, n)
+	}
+	return out
+}
+
+// Impostors are names on PATH that are not the tool they appear to be.
+// Reported separately so an operator sees why a tool they believe is
+// installed is missing from the inventory.
+func Impostors(ctx context.Context) map[string]string {
+	out := map[string]string{}
+	for n := range Known {
+		if Path(n) == "" {
+			continue
+		}
+		if ok, why := Verify(ctx, n); !ok {
+			out[n] = why
 		}
 	}
 	return out

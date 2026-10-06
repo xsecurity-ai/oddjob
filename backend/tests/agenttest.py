@@ -482,5 +482,66 @@ check("work addressed to an agent by name is not overridden by the policy",
       (hb or {}).get("task", {}).get("id") == (direct or {}).get("id"),
       str(hb)[:110])
 
+print("== the assistant across projects, bounded by what you may read ==")
+# Two engagements, and a user who may read only one. The question:
+# when the assistant is widened to "all projects", does it widen to
+# all of THIS USER's projects, or to everybody's?
+call("/api/projects", "POST", {"code": "ALPHA", "name": "Alpha"}, token=admin)
+call("/api/projects", "POST", {"code": "BRAVO", "name": "Bravo"}, token=admin)
+for proj, host in (("ALPHA", "alpha-1.example"), ("BRAVO", "bravo-1.example")):
+    call(f"/api/targets?project={proj}", "POST", {"host": host}, token=admin)
+
+call("/api/users", "POST",
+     {"username": "narrow", "password": "narrow-password-1"}, token=admin)
+st, narrow = call("/api/auth/login", "POST",
+                  {"username": "narrow", "password": "narrow-password-1"})
+ntok = (narrow or {}).get("access_token")
+check("a second user can log in", bool(ntok), f"status={st}")
+
+st, _ = call("/api/projects/ALPHA/acl", "POST",
+             {"username": "narrow", "role": "readonly"}, token=admin)
+check("and is granted readonly on ALPHA only", st in (200, 201, 204),
+      f"status={st}")
+
+st, wide = call("/api/agent/status?project=*", token=ntok)
+check("the assistant accepts the all-projects scope", st == 200,
+      f"status={st} {str(wide)[:90]}")
+check("and bounds it to the one project they can read",
+      (wide or {}).get("scope_projects") == 1,
+      f"scope_projects={(wide or {}).get('scope_projects')} — BRAVO must not count")
+
+st, asadmin = call("/api/agent/status?project=*", token=admin)
+check("a site admin is bounded by nothing",
+      st == 200 and (asadmin or {}).get("scope_projects") is None,
+      str((asadmin or {}).get("scope_projects")))
+
+st, scoped = call("/api/agent/status?project=ALPHA", token=ntok)
+check("with one project in view the scope says so",
+      st == 200 and (scoped or {}).get("scope") == "ALPHA", str(scoped)[:80])
+
+st, _ = call("/api/agent/status?project=BRAVO", token=ntok)
+check("a project they cannot read is still 404, not 403", st == 404,
+      f"status={st} — 403 would confirm BRAVO exists")
+
+check("writes are off when no single project is in view",
+      (wide or {}).get("allow_writes") is False,
+      str((wide or {}).get("allow_writes")))
+
+print("== agent binaries ==")
+st, dl = call("/api/agents/downloads", token=admin)
+check("the download list is served", st == 200 and "builds" in (dl or {}),
+      f"status={st}")
+check("it names all six targets", len((dl or {}).get("builds", [])) == 6,
+      str(len((dl or {}).get("builds", []))))
+st, _ = call("/api/agents/downloads")
+check("and needs a session", st == 401, f"status={st}")
+st, _ = call("/api/agents/download/plan9/mips", token=admin)
+check("an unknown platform is refused clearly", st == 404, f"status={st}")
+
+print("== reaching into an agent ==")
+st, err = call(f"/api/agents/{A2}/reach?project=AGENT", "POST", {}, token=admin)
+check("reaching an agent that never advertised an address is refused", st == 409,
+      f"status={st} {str(err)[:80]}")
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

@@ -27,6 +27,22 @@ func Privileged() bool {
 // Linux a capability on the binary is another, and a box set up that
 // way can SYN scan without Jaws being root at all.
 func RawSocketCapable() (bool, string) {
+	// Windows is the exception: being elevated is necessary and not
+	// sufficient. nmap and masscan reach the wire through Npcap, and
+	// without the driver an elevated process still cannot SYN scan.
+	// Reporting "privileged" on elevation alone sent exactly the
+	// tasks that need raw sockets to a host that would fail them.
+	if runtime.GOOS == "windows" {
+		if !Privileged() {
+			return false, unprivilegedAdvice()
+		}
+		if !npcapPresent() {
+			return false, "elevated, but Npcap is not installed — " +
+				"masscan will refuse and nmap will fall back to connect " +
+				"scans; install it from npcap.com"
+		}
+		return true, "elevated, Npcap present"
+	}
 	if Privileged() {
 		return true, "running as root"
 	}
@@ -39,6 +55,30 @@ func RawSocketCapable() (bool, string) {
 		}
 	}
 	return false, unprivilegedAdvice()
+}
+
+// npcapPresent looks for the driver rather than the installer's
+// registry entry: what matters is whether a capture library is there
+// to be loaded now.
+func npcapPresent() bool {
+	root := os.Getenv("SystemRoot")
+	if root == "" {
+		root = `C:\Windows`
+	}
+	for _, p := range []string{
+		root + `\System32\Npcap\wpcap.dll`,
+		root + `\SysWOW64\Npcap\wpcap.dll`,
+		root + `\System32\Npcap\packet.dll`,
+		// WinPcap's old location. Deprecated and unmaintained, but a
+		// host that has it can still capture, and claiming otherwise
+		// would be its own wrong answer.
+		root + `\System32\wpcap.dll`,
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func unprivilegedAdvice() string {

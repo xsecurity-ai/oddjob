@@ -104,7 +104,7 @@ func cmdRun(argv []string) int {
 
 	var in *callin.Server
 	if cfg.Listen != "" {
-		in = callin.New(cfg.Listen, cfg.CallInKey, ag)
+		in = callin.New(cfg.Listen, cfg.CallInKey, ag, ag)
 		in.Start()
 	}
 
@@ -142,10 +142,17 @@ func cmdCheck() int {
 		"privileged":      priv,
 		"privilege":       advice,
 		"package_manager": mgrName,
+		"outbound_ip":     recon.OutboundIP(),
+		"interfaces":      recon.InterfaceIPs(),
 		"tools":           tools.Installed(ctx),
 	}
 	if why != "" {
 		out["package_manager_note"] = why
+	}
+	// Named separately so "httpx is installed, why does httpx not
+	// work" has an answer on the first look rather than the third.
+	if imp := tools.Impostors(ctx); len(imp) > 0 {
+		out["wrong_tool_on_path"] = imp
 	}
 	missing := []string{}
 	for _, t := range tools.Baseline {

@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from sqlalchemy import func, or_, select, distinct
+from sqlalchemy import false as sa_false, func, or_, select, true as sa_true, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..domains import registrable
@@ -60,13 +60,40 @@ def _rows(items: list[dict], limit: int, total: int) -> dict:
 MAX_ROWS = 200
 
 
-def build(session: AsyncSession, project: Project, user: User,
-          allow_writes: bool) -> list[Tool]:
-    pid = project.id
+def build(session: AsyncSession, project: Project | None, user: User,
+          allow_writes: bool, scope_ids: list[int] | None = None) -> list[Tool]:
+    """Tools for one project, or for everything the user may read.
+
+    `project` is the engagement in view; None means the operator is
+    asking across all of them, which is the ordinary case for a
+    question like "which hosts anywhere run an SSH we should look at".
+
+    `scope_ids` bounds that: the projects this user is allowed to see.
+    It is not an optimisation. Without it, widening the assistant's
+    reach would quietly hand every user every client's data, which is
+    the one mistake in this codebase that would matter outside it.
+    None means site admin — genuinely everything.
+
+    Writes stay addressed to a single project. "Add this host" with no
+    engagement named is not a thing to guess at.
+    """
+    pid = project.id if project else None
+
+    def scoped(col):
+        """The project predicate for whichever scope is in force."""
+        if pid is not None:
+            return col == pid
+        if scope_ids is None:
+            return sa_true()
+        if not scope_ids:
+            # No readable projects: match nothing. An empty IN () is
+            # not portable, and `false` is the honest answer anyway.
+            return sa_false()
+        return col.in_(scope_ids)
 
     async def _target(host: str) -> Target | None:
         return (await session.execute(
-            select(Target).where(Target.project_id == pid,
+            select(Target).where(scoped(Target.project_id),
                                  Target.host == host.strip().lower()))).scalar_one_or_none()
 
     # ------------------------------------------------------------ reads
@@ -74,16 +101,24 @@ def build(session: AsyncSession, project: Project, user: User,
         async def count(model, *where):
             stmt = select(func.count()).select_from(model)
             if model is Target:
-                stmt = stmt.where(Target.project_id == pid, *where)
+                stmt = stmt.where(scoped(Target.project_id), *where)
             else:
                 stmt = (stmt.join(Target, Target.id == model.target_id)
-                        .where(Target.project_id == pid, *where))
+                        .where(scoped(Target.project_id), *where))
             return int((await session.execute(stmt)).scalar_one())
 
         sev = {s: await count(Vuln, Vuln.severity == s)
                for s in ("critical", "high", "medium", "low", "info")}
         return {
-            "project": project.code, "name": project.name, "client": project.client,
+            # Which engagement these numbers cover, said in the answer
+            # rather than assumed: across all of them, a total with no
+            # scope on it invites being quoted as one client's figure.
+            "scope": (project.code if project else
+                      ("every project" if scope_ids is None
+                       else f"{len(scope_ids)} project(s) you can read")),
+            "project": project.code if project else None,
+            "name": project.name if project else None,
+            "client": project.client if project else None,
             "targets": await count(Target),
             "alive": await count(Target, Target.alive.is_(True)),
             "compromised": await count(Target, Target.hacked.is_(True)),
@@ -99,7 +134,7 @@ def build(session: AsyncSession, project: Project, user: User,
 
     async def list_targets(search: str = "", only_alive: bool = False,
                            only_compromised: bool = False, limit: int = 50) -> dict:
-        stmt = select(Target).where(Target.project_id == pid)
+        stmt = select(Target).where(scoped(Target.project_id))
         if search:
             like = f"%{search}%"
             stmt = stmt.where(or_(Target.host.ilike(like), Target.ip_address.ilike(like),
@@ -118,7 +153,8 @@ def build(session: AsyncSession, project: Project, user: User,
     async def get_host(host: str) -> dict:
         t = await _target(host)
         if t is None:
-            return {"error": f"no target {host!r} in {project.code}"}
+            where = project.code if project else "any project you can read"
+            return {"error": f"no target {host!r} in {where}"}
         svcs = (await session.execute(
             select(Service).where(Service.target_id == t.id)
             .order_by(Service.port))).scalars().all()
@@ -146,7 +182,7 @@ def build(session: AsyncSession, project: Project, user: User,
     async def list_findings(severity: str = "", search: str = "",
                             host: str = "", limit: int = 50) -> dict:
         stmt = (select(Vuln, Target.host).join(Target, Target.id == Vuln.target_id)
-                .where(Target.project_id == pid))
+                .where(scoped(Target.project_id)))
         if severity:
             stmt = stmt.where(Vuln.severity == severity.lower())
         if host:
@@ -167,7 +203,7 @@ def build(session: AsyncSession, project: Project, user: User,
     async def list_services(port: int = 0, service: str = "",
                             only_unknown: bool = False, limit: int = 50) -> dict:
         stmt = (select(Service, Target.host).join(Target, Target.id == Service.target_id)
-                .where(Target.project_id == pid))
+                .where(scoped(Target.project_id)))
         if port:
             stmt = stmt.where(Service.port == int(port))
         if service:
@@ -185,7 +221,7 @@ def build(session: AsyncSession, project: Project, user: User,
     async def list_web(search: str = "", status_code: int = 0, limit: int = 50) -> dict:
         stmt = (select(WebAddress, Target.host)
                 .join(Target, Target.id == WebAddress.target_id)
-                .where(Target.project_id == pid))
+                .where(scoped(Target.project_id)))
         if search:
             like = f"%{search}%"
             stmt = stmt.where(or_(WebAddress.url.ilike(like), WebAddress.title.ilike(like)))
@@ -200,7 +236,7 @@ def build(session: AsyncSession, project: Project, user: User,
                      MAX_ROWS, total)
 
     async def list_credentials(search: str = "", limit: int = 50) -> dict:
-        stmt = select(Credential).where(Credential.project_id == pid)
+        stmt = select(Credential).where(scoped(Credential.project_id))
         if search:
             like = f"%{search}%"
             stmt = stmt.where(or_(Credential.username.ilike(like),
@@ -237,9 +273,13 @@ def build(session: AsyncSession, project: Project, user: User,
         d = (domain or "").strip().lower().lstrip("*.").rstrip(".")
         if "." not in d:
             return {"error": f"{d!r} is a single label, not a domain"}
+        if pid is None:
+            return {"error": "suggesting domains needs one engagement in "
+                             "view — the generated names come from that "
+                             "project's known hosts. Pick a project first."}
         hosts = await known_hosts(session, pid)
         existing = {c.name for c in (await session.execute(
-            select(DomainCandidate).where(DomainCandidate.project_id == pid))).scalars()}
+            select(DomainCandidate).where(scoped(DomainCandidate.project_id)))).scalars()}
         out = generate(d, hosts, limit=max(1, min(int(limit), 200)), already=existing)
         return {"domain": d, "note": "generated offline from known hosts; "
                                      "no lookups were performed",
@@ -261,7 +301,7 @@ def build(session: AsyncSession, project: Project, user: User,
                     func.count().label("services"),
                     func.count(distinct(Service.target_id)).label("hosts"))
              .join(Target, Target.id == Service.target_id)
-             .where(Target.project_id == pid))
+             .where(scoped(Target.project_id)))
         if protocol:
             q = q.where(Service.protocol == protocol.strip().lower())
         q = (q.group_by(Service.port, Service.protocol)
@@ -332,6 +372,12 @@ def build(session: AsyncSession, project: Project, user: User,
         return {"ok": True, "host": t.host}
 
     async def add_target(host: str, notes: str = "") -> dict:
+        if pid is None or project is None:
+            # Guessing which engagement a new host belongs to is the
+            # kind of mistake that puts one client's asset in another
+            # client's report.
+            return {"error": "adding a host needs one engagement in view; "
+                             "pick a project and ask again"}
         try:
             clean = validate_host(host)
         except InvalidHost as e:

@@ -275,7 +275,11 @@ export interface JawsAgent {
   tools: Record<string, string>
   call_in_url: string | null
   last_seen: string | null
+  /** Where the connection arrived from — the last hop, not the agent. */
   last_ip: string | null
+  /** The agent's own internet-facing address, from its routing table. */
+  outbound_ip: string | null
+  interfaces: string[]
   queued_tasks: number
   /** Taken by the agent and in flight, as distinct from waiting. */
   running_tasks: number
@@ -794,6 +798,19 @@ export const api = {
     req<JawsAgent>(`/api/agents/${id}/kill` + qs({ project }), { method: 'POST' }),
   deleteAgent: (project: string, id: number) =>
     req<void>(`/api/agents/${id}` + qs({ project }), { method: 'DELETE' }),
+
+  jawsDownloads: () => req<{
+    builds: Array<{ os: string; arch: string; name: string
+                    available: boolean; bytes: number }>
+    any: boolean
+  }>('/api/agents/downloads'),
+  /** The binary itself is a normal authenticated GET; the cookie goes
+   *  with it, so a plain link works and the browser streams it. */
+  jawsDownloadUrl: (goos: string, arch: string) =>
+    `/api/agents/download/${encodeURIComponent(goos)}/${encodeURIComponent(arch)}`,
+  reachAgent: (project: string, id: number) =>
+    req<{ ok: boolean; detail: string; status: Record<string, unknown> | null }>(
+      `/api/agents/${id}/reach` + qs({ project }), { method: 'POST' }),
 
   jawsRouting: (project: string) =>
     req<JawsRouting>('/api/agents/routing' + qs({ project })),

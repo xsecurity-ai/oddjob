@@ -91,6 +91,14 @@ func fromFile(f File, path string) (*Identity, error) {
 		srv: ed25519.PublicKey(sp), path: path}, nil
 }
 
+// FromParts builds an in-memory identity from the two keys that
+// matter, with nothing on disk. For tests and for callers that have
+// already loaded the material themselves.
+func FromParts(privateKey, serverPublicKey string) (*Identity, error) {
+	return fromFile(File{PrivateKey: privateKey,
+		ServerPublicKey: serverPublicKey}, "")
+}
+
 // New builds an identity from a completed enrolment and writes it.
 func New(path string, f File) (*Identity, error) {
 	id, err := fromFile(f, path)
@@ -135,6 +143,12 @@ func (i *Identity) Sign(method, path string, body []byte) map[string]string {
 // Anything that fails here is not our server, whatever it claims.
 func (i *Identity) VerifyServer(method, path string, body []byte,
 	ts, nonce, sig string) bool {
+	// An agent with no identity cannot have pinned anything, so there
+	// is nothing a signature could be checked against. Answered rather
+	// than panicked: this is reachable from the network.
+	if i == nil || i.srv == nil {
+		return false
+	}
 	raw, err := base64.StdEncoding.DecodeString(sig)
 	if err != nil {
 		return false

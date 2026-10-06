@@ -3,6 +3,7 @@ import type { GridColDef } from '@mui/x-data-grid'
 import { useQuery } from '@tanstack/react-query'
 import { api, type Service } from '../lib/api'
 import { DataTable } from '../components/DataTable'
+import { ImportReportButton } from '../components/ImportReportButton'
 import { useHostModal } from '../components/HostModal'
 import { useExplore } from '../components/ExploreModal'
 import { ServiceActions } from '../components/ServiceActions'
@@ -159,6 +160,7 @@ export function ServicesView({ project }: { project: string | null }) {
       project={project}
       canWrite={writable}
       note={writable ? undefined : 'read-only'}
+      extraActions={writable ? <ImportReportButton project={project} /> : undefined}
     />
   )
 }

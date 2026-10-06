@@ -19,6 +19,34 @@ COPY frontend/ ./
 RUN npm run build
 
 
+# --------------------------------------------------------- jaws agents
+# The agent binaries the UI hands out when deploying a Jaws. Built here
+# so an operator can download one from the Oddjob they are already
+# logged into, rather than being sent to find a release elsewhere and
+# having to trust whatever they find.
+#
+# All six targets, because the host an agent is needed on is whatever
+# the client has. Static (CGO_ENABLED=0) so they run on the older glibc
+# they will meet in the field.
+FROM golang:1.26-alpine AS jaws
+WORKDIR /build/jaws
+
+COPY jaws/go.mod jaws/go.sum ./
+RUN go mod download
+
+COPY jaws/ ./
+RUN set -eu; \
+    for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 \
+             windows/amd64 windows/arm64; do \
+      os="${t%/*}"; arch="${t#*/}"; \
+      out="dist/jaws-$os-$arch"; \
+      [ "$os" = windows ] && out="$out.exe"; \
+      CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+        go build -trimpath -ldflags "-s -w" -o "$out" ./cmd/jaws; \
+    done; \
+    ls -l dist/
+
+
 # ------------------------------------------------------- python deps
 # A separate stage purely so `uv` (45 MB) and its caches do not ship.
 FROM python:3.13-slim AS deps
@@ -58,6 +86,7 @@ ENV PYTHONUNBUFFERED=1 \
 COPY --from=deps --chown=oddjob:oddjob /opt/venv /opt/venv
 COPY --chown=oddjob:oddjob backend/ /app/backend/
 COPY --from=ui --chown=oddjob:oddjob /build/frontend/dist /app/frontend/dist
+COPY --from=jaws --chown=oddjob:oddjob /build/jaws/dist /app/jaws-dist
 COPY --chown=oddjob:oddjob docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # `data` holds the session-signing key, which has to outlive the

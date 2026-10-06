@@ -54,6 +54,11 @@ type RegisterReq struct {
 	Privileged bool              `json:"privileged"`
 	Tools      map[string]string `json:"tools"`
 	CallInURL  string            `json:"call_in_url,omitempty"`
+	//: What the agent sees of itself. The server only ever sees the
+	//: last hop the connection came from, which behind NAT or a
+	//: tunnel is not the agent at all.
+	OutboundIP string   `json:"outbound_ip,omitempty"`
+	Interfaces []string `json:"interfaces,omitempty"`
 }
 
 type RegisterResp struct {

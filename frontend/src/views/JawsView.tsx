@@ -5,6 +5,7 @@ import {
   Stepper, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
+import DownloadIcon from '@mui/icons-material/Download'
 import ContentCopyIcon from '@mui/icons-material/ContentCopy'
 import PowerSettingsNewIcon from '@mui/icons-material/PowerSettingsNew'
 import type { GridColDef } from '@mui/x-data-grid'
@@ -57,6 +58,47 @@ function Copy({ text }: { text: string }) {
         <ContentCopyIcon sx={{ fontSize: 15, color: done ? neon.green : neon.muted }} />
       </IconButton>
     </Tooltip>
+  )
+}
+
+/** Both architectures for the chosen OS, because the operator knows
+ *  which machine they are walking to and we do not. */
+function DownloadRow({ os }: { os: string }) {
+  const { data } = useQuery({
+    queryKey: ['jaws-downloads'],
+    queryFn: () => api.jawsDownloads(),
+    staleTime: 300000,
+  })
+  const builds = (data?.builds ?? []).filter((b) => b.os === os)
+  if (!data) return null
+  if (!builds.some((b) => b.available)) {
+    // Said plainly rather than shown as a dead button: an image built
+    // without the Go stage genuinely has none, and that is a build
+    // problem, not something the operator can click past.
+    return (
+      <Alert severity="warning" sx={{ mt: 0.5 }}>
+        This Oddjob has no {OS_LABEL[os] ?? os} agent binary to hand out.
+        They are built into the image; in a development checkout, run
+        {' '}<code>make release</code> in <code>jaws/</code>.
+      </Alert>
+    )
+  }
+  return (
+    <Stack direction="row" spacing={1} sx={{ mt: 0.5 }}>
+      {builds.map((b) => (
+        <Button key={b.arch} size="small" variant="outlined"
+          startIcon={<DownloadIcon />}
+          disabled={!b.available}
+          href={api.jawsDownloadUrl(b.os, b.arch)}
+          download={b.name}
+          sx={{ color: neon.cyan, borderColor: alpha(neon.cyan, 0.5) }}>
+          {b.arch}
+          <Box component="span" sx={{ color: neon.muted, ml: 0.8, fontSize: 11 }}>
+            {(b.bytes / 1048576).toFixed(1)} MB
+          </Box>
+        </Button>
+      ))}
+    </Stack>
   )
 }
 
@@ -176,9 +218,15 @@ function DeployWizard({ project, onClose }:
               {' '}{project}, and it pins this Oddjob — it will not accept
               instructions from any other.
             </Typography>
-            <Stack direction="row" alignItems="center">
+            <Typography variant="overline" sx={{ color: neon.cyan,
+                                                 display: 'block', mt: 1 }}>
+              Get the binary
+            </Typography>
+            <DownloadRow os={os} />
+
+            <Stack direction="row" alignItems="center" sx={{ mt: 2 }}>
               <Typography variant="overline" sx={{ color: neon.cyan, flex: 1 }}>
-                On the {OS_LABEL[os]} host
+                Then, on the {OS_LABEL[os]} host
               </Typography>
               <Copy text={cmd} />
             </Stack>
@@ -264,6 +312,11 @@ export function JawsView({ project }: { project: string | null }) {
   const { canWrite } = useAuth()
   const [wizard, setWizard] = useState(false)
   const [confirmKill, setConfirmKill] = useState<JawsAgent | null>(null)
+  // A killed agent leaves the table, because the table answers "what
+  // is deployed" and it no longer is. The record stays — it holds the
+  // output of scans that ran — so it is hidden rather than deleted,
+  // and can be brought back into view.
+  const [showKilled, setShowKilled] = useState(false)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['jaws-agents', project],
@@ -286,6 +339,10 @@ export function JawsView({ project }: { project: string | null }) {
       qc.invalidateQueries({ queryKey: ['jaws-routing', project] })
     },
   })
+
+  const all = data ?? []
+  const killed = all.filter((a) => a.status === 'disabled')
+  const rows = showKilled ? all : all.filter((a) => a.status !== 'disabled')
 
   const columns: GridColDef<JawsAgent>[] = [
     {
@@ -342,12 +399,44 @@ export function JawsView({ project }: { project: string | null }) {
       },
     },
     {
-      field: 'last_ip', headerName: 'IPv4', width: 140,
-      valueGetter: (v) => v ?? '',
-      renderCell: (p) => p.value
-        ? <Box sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
-            {p.value}</Box>
-        : <Box component="span" sx={{ color: alpha(neon.muted, 0.4) }}>—</Box>,
+      // The agent's own answer, not the source address of its
+      // connection. Those differ whenever there is NAT, a proxy or a
+      // tunnel in between, and in those cases the observed one is the
+      // last hop — 127.0.0.1 through a reverse tunnel — which tells an
+      // operator nothing about what the client will see in their logs.
+      field: 'outbound_ip', headerName: 'IPv4', width: 150,
+      valueGetter: (_v, row) => row.outbound_ip ?? row.last_ip ?? '',
+      renderCell: (p) => {
+        const own = p.row.outbound_ip
+        const seen = p.row.last_ip
+        if (!own && !seen) {
+          return <Box component="span" sx={{ color: alpha(neon.muted, 0.4) }}>—</Box>
+        }
+        const others = (p.row.interfaces ?? []).filter((i) => i !== own)
+        const differs = own && seen && own !== seen
+        return (
+          <Tooltip title={
+            (own ? `Reported by the agent: ${own}\n` : '') +
+            (seen ? `Connection seen from: ${seen}` +
+                    (differs ? '  (NAT, proxy or tunnel in between)' : '') : '') +
+            (others.length ? `\nAlso on: ${others.join(', ')}` : '')
+          }>
+            <Stack direction="row" spacing={0.6} alignItems="center"
+              sx={{ minWidth: 0 }}>
+              <Box sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12,
+                         color: own ? neon.text : alpha(neon.muted, 0.7),
+                         overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {own || seen}
+              </Box>
+              {others.length > 0 && (
+                <Box sx={{ color: neon.muted, fontSize: 10.5 }}>
+                  +{others.length}
+                </Box>
+              )}
+            </Stack>
+          </Tooltip>
+        )
+      },
     },
     {
       field: 'last_seen', headerName: 'Last heartbeat', width: 152,
@@ -441,7 +530,7 @@ export function JawsView({ project }: { project: string | null }) {
     <Box sx={{ p: 2 }}>
       <Routing project={project} routing={routing} />
       <DataTable
-        rows={data ?? []}
+        rows={rows}
         columns={columns}
         loading={isLoading}
         error={error as Error | null}
@@ -450,13 +539,25 @@ export function JawsView({ project }: { project: string | null }) {
         note={`Each Jaws is sealed to ${project}: it authenticates to this ` +
               `Oddjob alone, takes tasking only from ${project}, and ` +
               `everything it finds imports into ${project}.`}
-        extraActions={canWrite(project) ? (
-          <Button size="small" startIcon={<AddIcon />}
-            onClick={() => setWizard(true)}
-            sx={{ color: neon.green }}>
-            Deploy a Jaws
-          </Button>
-        ) : undefined}
+        extraActions={
+          <Stack direction="row" spacing={1} alignItems="center">
+            {canWrite(project) && (
+              <Button size="small" startIcon={<AddIcon />}
+                onClick={() => setWizard(true)}
+                sx={{ color: neon.green }}>
+                Deploy a Jaws
+              </Button>
+            )}
+            {killed.length > 0 && (
+              <Button size="small" onClick={() => setShowKilled((v) => !v)}
+                sx={{ color: neon.muted, fontSize: 11 }}>
+                {showKilled
+                  ? `hide ${killed.length} killed`
+                  : `show ${killed.length} killed`}
+              </Button>
+            )}
+          </Stack>
+        }
       />
 
       {wizard && (

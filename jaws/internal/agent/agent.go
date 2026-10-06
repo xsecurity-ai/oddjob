@@ -12,6 +12,7 @@ import (
 	"github.com/xsecurity-ai/oddjob/jaws/internal/client"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/config"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/identity"
+	"github.com/xsecurity-ai/oddjob/jaws/internal/recon"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/spool"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/tasks"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/tools"
@@ -51,6 +52,32 @@ func New(cfg *config.Config) *Agent {
 	}
 }
 
+// VerifyServer checks an inbound call against the server this agent
+// pinned at enrolment.
+//
+// Lives on the Agent rather than being satisfied by *Identity
+// directly, for two reasons that both bit:
+//
+// A typed nil wrapped in an interface is not nil. Handing callin an
+// `*Identity` that happened to be nil produced a non-nil Verifier
+// whose nil check passed and which then panicked on the first inbound
+// request — a crash reachable by anyone who could open the port.
+//
+// And the identity does not exist when the listener is built: it is
+// created during enrolment, which happens later. Capturing it at
+// construction meant capturing nothing, permanently. Read here, under
+// the lock, it is whatever the agent currently has.
+func (a *Agent) VerifyServer(method, path string, body []byte,
+	ts, nonce, sig string) bool {
+	a.mu.Lock()
+	id := a.id
+	a.mu.Unlock()
+	if id == nil {
+		return false
+	}
+	return id.VerifyServer(method, path, body, ts, nonce, sig)
+}
+
 // Wake asks the loop to poll now instead of at the next heartbeat.
 // Safe to call from the inbound API.
 func (a *Agent) Wake() {
@@ -85,6 +112,40 @@ func (a *Agent) Register(ctx context.Context) error {
 	priv, advice := tools.RawSocketCapable()
 	log.Printf("privilege: %s", advice)
 
+	host, _ := hostname()
+	announce := func(note string) error {
+		resp, err := a.cli.Register(ctx, client.RegisterReq{
+			Platform:   runtime.GOOS,
+			Arch:       runtime.GOARCH,
+			Version:    config.Version,
+			Hostname:   host,
+			Privileged: priv,
+			Tools:      tools.Installed(ctx),
+			CallInURL:  a.cfg.Advertise,
+			OutboundIP: recon.OutboundIP(),
+			Interfaces: recon.InterfaceIPs(),
+		})
+		if err != nil {
+			return err
+		}
+		if note != "" {
+			log.Printf("registered as agent %d on project %s (%s)",
+				resp.AgentID, resp.Project, note)
+		}
+		return nil
+	}
+
+	// Announce before installing anything. Provisioning a bare Windows
+	// box through chocolatey takes minutes, and registering only at
+	// the end meant the server knew nothing about the agent for all of
+	// it -- the UI showed "awaiting first contact" for a host that was
+	// in fact working. Registration is idempotent, so saying it twice
+	// costs nothing and the second one carries the real inventory.
+	if err := announce(""); err != nil {
+		log.Printf("initial announce failed (%v) — continuing; the "+
+			"registration after tool install is the one that matters", err)
+	}
+
 	log.Printf("ensuring baseline tools: %v", tools.Baseline)
 	for _, r := range tools.Ensure(ctx, tools.Baseline, tools.Privileged()) {
 		switch r.Action {
@@ -99,22 +160,8 @@ func (a *Agent) Register(ctx context.Context) error {
 		}
 	}
 
-	host, _ := hostname()
-	resp, err := a.cli.Register(ctx, client.RegisterReq{
-		Platform:   runtime.GOOS,
-		Arch:       runtime.GOARCH,
-		Version:    config.Version,
-		Hostname:   host,
-		Privileged: priv,
-		Tools:      tools.Installed(ctx),
-		CallInURL:  a.cfg.Advertise,
-	})
-	if err != nil {
-		return err
-	}
-	log.Printf("registered as agent %d on project %s (%s)",
-		resp.AgentID, resp.Project, resp.Note)
-	return nil
+	// Again, now that the inventory is true.
+	return announce("ready")
 }
 
 // ensureIdentity loads this agent's keypair, or trades an enrolment

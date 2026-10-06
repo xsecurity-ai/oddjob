@@ -11,10 +11,12 @@
 package callin
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -25,14 +27,23 @@ type Waker interface {
 	Status() map[string]any
 }
 
+// Verifier is the agent's pinned view of its server. Supplied so the
+// inbound channel can check a signature instead of a shared secret:
+// the key proves only that the caller read it from somewhere, while a
+// signature proves it is the Oddjob this agent enrolled with.
+type Verifier interface {
+	VerifyServer(method, path string, body []byte, ts, nonce, sig string) bool
+}
+
 type Server struct {
 	key  string
+	id   Verifier
 	wake Waker
 	srv  *http.Server
 }
 
-func New(addr, key string, w Waker) *Server {
-	s := &Server{key: key, wake: w}
+func New(addr, key string, w Waker, id Verifier) *Server {
+	s := &Server{key: key, id: id, wake: w}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.health)
 	mux.HandleFunc("/status", s.auth(s.status))
@@ -54,6 +65,29 @@ func New(addr, key string, w Waker) *Server {
 // this endpoint and anyone who can reach the port.
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// A signature from the server this agent pinned is the
+		// stronger proof, so it is tried first and, when offered, is
+		// the only thing that counts -- otherwise a caller holding
+		// the weaker secret could simply omit it.
+		if sig := r.Header.Get("X-Jaws-Signature"); sig != "" {
+			if s.id == nil {
+				http.Error(w, `{"error":"this agent has no pinned server"}`,
+					http.StatusUnauthorized)
+				return
+			}
+			body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			if !s.id.VerifyServer(r.Method, r.URL.Path, body,
+				r.Header.Get("X-Jaws-Timestamp"),
+				r.Header.Get("X-Jaws-Nonce"), sig) {
+				http.Error(w, `{"error":"not signed by the Oddjob this agent enrolled with"}`,
+					http.StatusUnauthorized)
+				return
+			}
+			next(w, r)
+			return
+		}
+
 		got := r.Header.Get("X-Jaws-Call-In-Key")
 		if got == "" {
 			if a := r.Header.Get("Authorization"); len(a) > 7 &&

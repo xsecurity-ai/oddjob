@@ -24,9 +24,16 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
+from urllib.parse import urlsplit
+
+import httpx
 from datetime import datetime, timedelta, timezone
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -89,6 +96,9 @@ class AgentOut(BaseModel):
     hostname: str | None = None
     privileged: bool = False
     tools: dict = {}
+    #: Reported by the agent from its own routing table.
+    outbound_ip: str | None = None
+    interfaces: list[str] = []
     call_in_url: str | None = None
     last_seen: datetime | None = None
     last_ip: str | None = None
@@ -148,6 +158,8 @@ class RegisterIn(BaseModel):
     hostname: str | None = None
     privileged: bool = False
     tools: dict[str, str] = {}
+    outbound_ip: str | None = None
+    interfaces: list[str] = []
     call_in_url: str | None = None
 
 
@@ -219,6 +231,17 @@ def _tools(raw: str | None) -> dict:
         return {}
 
 
+def _jlist(raw: str | None) -> list[str]:
+    """A stored JSON list, or an empty one. Separate from `_tools`
+    because that falls back to a dict, and handing a dict to a field
+    typed as a list fails somewhere less obvious than here."""
+    try:
+        v = json.loads(raw) if raw else []
+    except ValueError:
+        return []
+    return [str(x) for x in v] if isinstance(v, list) else []
+
+
 def _agent_out(a: Agent, code: str, queued: int = 0,
                running: int = 0) -> AgentOut:
     return AgentOut(
@@ -226,6 +249,7 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         platform=a.platform, arch=a.arch, version=a.version,
         hostname=a.hostname, privileged=a.privileged, tools=_tools(a.tools),
         call_in_url=a.call_in_url, last_seen=a.last_seen, last_ip=a.last_ip,
+        outbound_ip=a.outbound_ip, interfaces=_jlist(a.interfaces),
         queued_tasks=queued, running_tasks=running,
         connection_mode=a.connection_mode, target_os=a.target_os,
         priority=a.priority, regions=sorted(_regions_of(a)),
@@ -558,6 +582,147 @@ async def set_agent(agent_id: int, body: AgentPatch | None = None,
     return _agent_out(a, pr.code)
 
 
+#: Where the built agent binaries are looked for, in order. The image
+#: builds them into the first; a development checkout has them in the
+#: second after `make release`.
+JAWS_DIRS = (
+    Path("/app/jaws-dist"),
+    Path(__file__).resolve().parents[3] / "jaws" / "dist",
+)
+
+JAWS_BINARIES = {
+    ("linux", "amd64"): "jaws-linux-amd64",
+    ("linux", "arm64"): "jaws-linux-arm64",
+    ("darwin", "amd64"): "jaws-darwin-amd64",
+    ("darwin", "arm64"): "jaws-darwin-arm64",
+    ("windows", "amd64"): "jaws-windows-amd64.exe",
+    ("windows", "arm64"): "jaws-windows-arm64.exe",
+}
+
+
+def _jaws_binary(name: str) -> Path | None:
+    for d in JAWS_DIRS:
+        p = d / name
+        # resolve() then check containment: the name comes from a fixed
+        # table rather than the caller, but a path join that can be
+        # talked out of its directory is worth closing anyway.
+        try:
+            rp = p.resolve()
+            if rp.is_file() and rp.is_relative_to(d.resolve()):
+                return rp
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+@router.get("/downloads")
+async def list_downloads(_: User = Depends(get_current_user)):
+    """Which agent binaries this Oddjob can hand out.
+
+    Reported rather than assumed, because an image built without the
+    Go stage has none, and a download button that 404s looks like a
+    bug rather than a missing build.
+    """
+    out = []
+    for (goos, arch), name in sorted(JAWS_BINARIES.items()):
+        p = _jaws_binary(name)
+        out.append({"os": goos, "arch": arch, "name": name,
+                    "available": p is not None,
+                    "bytes": p.stat().st_size if p else 0})
+    return {"builds": out,
+            "any": any(b["available"] for b in out)}
+
+
+@router.get("/download/{goos}/{arch}")
+async def download_agent(goos: str, arch: str,
+                         _: User = Depends(get_current_user)):
+    """Hand over the agent binary for a platform.
+
+    Behind a session on purpose. It is a static, non-secret artefact,
+    but an unauthenticated endpoint serving an executable from the
+    engagement's own server is a thing worth not having.
+    """
+    name = JAWS_BINARIES.get((goos.lower(), arch.lower()))
+    if name is None:
+        raise HTTPException(
+            404, f"no build for {goos}/{arch}. Available: "
+                 f"{', '.join(f'{o}/{a}' for o, a in sorted(JAWS_BINARIES))}")
+    p = _jaws_binary(name)
+    if p is None:
+        raise HTTPException(
+            503, f"this Oddjob has no {goos}/{arch} agent binary. They are "
+                 f"built into the image; in a development checkout run "
+                 f"`make release` in jaws/.")
+    return FileResponse(p, filename=name,
+                        media_type="application/octet-stream")
+
+
+class ReachOut(BaseModel):
+    ok: bool
+    detail: str
+    status: dict | None = None
+
+
+@router.post("/{agent_id}/reach", response_model=ReachOut)
+async def reach_agent(agent_id: int,
+                      pr: Project = Depends(require_project("user")),
+                      _: User = Depends(get_current_user),
+                      session: AsyncSession = Depends(get_session)):
+    """Call into the agent, instead of waiting for it to call us.
+
+    This is the other half of call-in mode, which until now was only a
+    stored URL: Oddjob never actually reached in, so the mode was a
+    label. It is useful for two things — telling an agent to poll now
+    rather than at its next heartbeat, and answering "is it actually
+    alive?" when the heartbeat is merely late.
+
+    The request is signed with this instance's private key. The agent
+    pinned the matching public key at enrolment and checks it, so
+    reaching an agent proves to *it* that the caller is the Oddjob it
+    enrolled with -- not merely someone who found the port.
+    """
+    a = await session.get(Agent, agent_id)
+    if a is None or a.project_id != pr.id:
+        raise HTTPException(404, "no such agent")
+    if not a.call_in_url:
+        raise HTTPException(
+            409, f"{a.name} has not advertised a reachable address. It is "
+                 f"running in {a.connection_mode} mode; an agent that dials "
+                 f"out does not need one.")
+
+    priv, _pub = await server_identity(session)
+    url = a.call_in_url.rstrip("/") + "/poll"
+    path = urlsplit(url).path or "/"
+    ts = str(int(time.time()))
+    nonce = secrets.token_urlsafe(12)
+    headers = {
+        "X-Jaws-Timestamp": ts,
+        "X-Jaws-Nonce": nonce,
+        "X-Jaws-Signature": agentcrypto.sign(priv, "POST", path, b"", ts, nonce),
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.post(url, headers=headers)
+    except httpx.HTTPError as e:
+        # A failure to reach it is a fact about the network between
+        # here and there, not about the agent. Said that way round so
+        # nobody concludes the host is down when the route is.
+        raise HTTPException(
+            502, f"could not reach {a.name} at {a.call_in_url}: {e}. That is "
+                 f"this server's view of the path, not proof the agent is down.")
+    if r.status_code >= 300:
+        raise HTTPException(
+            502, f"{a.name} refused the call ({r.status_code}): "
+                 f"{r.text[:200]}")
+    try:
+        body = r.json()
+    except ValueError:
+        body = None
+    return ReachOut(ok=True, detail=f"{a.name} answered and was asked to poll",
+                    status=body if isinstance(body, dict) else None)
+
+
 @router.post("/{agent_id}/kill", response_model=AgentOut)
 async def kill_agent(agent_id: int,
                      pr: Project = Depends(require_project("admin")),
@@ -885,6 +1050,8 @@ async def register(body: RegisterIn, request: Request,
     a.version, a.hostname = body.version, body.hostname
     a.privileged = bool(body.privileged)
     a.tools = json.dumps(body.tools or {})
+    a.outbound_ip = body.outbound_ip
+    a.interfaces = json.dumps(body.interfaces or [])
     a.call_in_url = body.call_in_url
     a.last_seen = datetime.now(timezone.utc)
     a.last_ip = request.client.host if request.client else None

@@ -4,6 +4,7 @@ import type { GridColDef } from '@mui/x-data-grid'
 import { useQuery } from '@tanstack/react-query'
 import { api, SEVERITY_RANK, type Vuln } from '../lib/api'
 import { DataTable } from '../components/DataTable'
+import { ImportReportButton } from '../components/ImportReportButton'
 import { useHostModal } from '../components/HostModal'
 import { VulnModal } from '../components/VulnModal'
 import { SEVERITY_COLOUR as SEV_COLOUR } from '../lib/severity'
@@ -107,6 +108,8 @@ export function VulnsView({ project }: { project: string | null }) {
       project={project}
       canWrite={canWrite(project)}
       note={canWrite(project) ? undefined : 'read-only'}
+      extraActions={canWrite(project)
+        ? <ImportReportButton project={project} /> : undefined}
     />
     <VulnModal id={detail} onClose={() => setDetail(null)}
       onHost={(proj, h) => { setDetail(null); open(proj, h) }} />

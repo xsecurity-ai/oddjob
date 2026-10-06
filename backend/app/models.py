@@ -1045,7 +1045,17 @@ class Agent(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(
         String(16), default="offline", server_default="offline", index=True)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Where the connection arrived from, as the server saw it. This is
+    #: the last hop, not the agent: behind NAT it is the gateway,
+    #: through a reverse tunnel it is 127.0.0.1.
     last_ip: Mapped[str | None] = mapped_column(String(45))
+    #: What the agent says its own internet-facing address is, found
+    #: from its routing table. This is the one that answers "what will
+    #: the client see in their logs", which `last_ip` cannot.
+    outbound_ip: Mapped[str | None] = mapped_column(String(45))
+    #: JSON list of every usable address on the host. A jump box
+    #: usually has one facing us and another facing the target.
+    interfaces: Mapped[str | None] = mapped_column(Text)
     notes: Mapped[str | None] = mapped_column(Text)
 
 
