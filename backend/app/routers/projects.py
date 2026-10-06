@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +13,7 @@ from ..db import get_session
 from ..events import broker
 from .. import slack
 from ..models import (Poc, Project, ProjectACL, ProjectContact, ProjectScope,
+                      ProjectSlackMember,
                       Service, Target, User, Vuln)
 from ..query import apply_search, apply_sort, paginate
 from ..scope import classify_many
@@ -417,3 +419,134 @@ async def clear_agent_token(project: str, which: str,
         raise HTTPException(404, f"no agent token named {which!r}")
     setattr(pr, f"agent_{which}_token", None)
     await session.commit()
+
+
+# ------------------------------------------------- slack membership
+class SlackMeOut(BaseModel):
+    """Whether to ask this person for their Slack handle, and with what."""
+    slack_enabled: bool
+    #: Ask now. True only when Slack is on for the project and we have
+    #: neither a confirmed handle nor a recorded refusal.
+    prompt: bool
+    #: Their profile default, offered as the one-click answer.
+    default_handle: str | None = None
+    #: What they already gave for this project, if anything.
+    handle: str | None = None
+    confirmed: bool = False
+    declined: bool = False
+    channels: list[str] = []
+    invite_result: str | None = None
+
+
+class SlackMeIn(BaseModel):
+    handle: str = Field(min_length=1, max_length=128)
+    #: Also store it on the profile, so the next project can offer it.
+    save_as_default: bool = False
+
+
+async def _slack_member(session: AsyncSession, project_id: int,
+                        user_id: int) -> ProjectSlackMember | None:
+    return (await session.execute(
+        select(ProjectSlackMember).where(
+            ProjectSlackMember.project_id == project_id,
+            ProjectSlackMember.user_id == user_id))).scalar_one_or_none()
+
+
+async def _slack_channels(session: AsyncSession,
+                          pr: Project) -> list[tuple[str, str]]:
+    """(token, channel) for everywhere this project posts. Empty means
+    Slack is not configured for it, which is how "enabled" is decided —
+    a project with no destination has nothing to add anyone to."""
+    try:
+        return await slack.targets_for(session, pr)
+    except Exception:                            # noqa: BLE001
+        return []
+
+
+@router.get("/{code}/slack/me", response_model=SlackMeOut)
+async def slack_me(pr: Project = Depends(require_project("readonly")),
+                   user: User = Depends(get_current_user),
+                   session: AsyncSession = Depends(get_session)):
+    """Should this person be asked for their Slack handle?
+
+    Asked on opening a project rather than only at the moment of
+    joining, because Slack is often turned on for an engagement after
+    people are already on it. The condition is a state, not an event:
+    Slack is on, and we do not have an answer from them yet.
+    """
+    dests = await _slack_channels(session, pr)
+    m = await _slack_member(session, pr.id, user.id)
+    return SlackMeOut(
+        slack_enabled=bool(dests),
+        prompt=bool(dests) and (m is None or
+                                (m.confirmed_at is None and m.declined_at is None)),
+        default_handle=user.slack_handle,
+        handle=m.handle if m else None,
+        confirmed=bool(m and m.confirmed_at),
+        declined=bool(m and m.declined_at),
+        channels=[ch for _tok, ch in dests],
+        invite_result=m.invite_result if m else None)
+
+
+@router.post("/{code}/slack/me", response_model=SlackMeOut)
+async def slack_me_confirm(body: SlackMeIn,
+                           pr: Project = Depends(require_project("readonly")),
+                           user: User = Depends(get_current_user),
+                           session: AsyncSession = Depends(get_session)):
+    """Record the handle and add them to the project's channels.
+
+    The handle is stored whatever the invite does. Failing to add
+    someone to a channel is a Slack problem — they may not be in the
+    workspace yet — and losing their answer because of it would mean
+    asking again on every visit.
+    """
+    handle = body.handle.strip().lstrip("@")
+    dests = await _slack_channels(session, pr)
+
+    m = await _slack_member(session, pr.id, user.id)
+    if m is None:
+        m = ProjectSlackMember(project_id=pr.id, user_id=user.id)
+        session.add(m)
+    m.handle = handle
+    m.declined_at = None
+    m.confirmed_at = datetime.now(timezone.utc)
+    if body.save_as_default:
+        user.slack_handle = handle
+
+    results: list[str] = []
+    if not dests:
+        results.append("slack is not configured for this project")
+    for token, channel in dests:
+        uid = m.slack_user_id
+        if not uid:
+            uid, why = await slack.find_user(token, handle, user.email)
+            if not uid:
+                results.append(f"{channel}: {why}")
+                continue
+            m.slack_user_id = uid
+        r = await slack.invite_to_channel(token, channel, uid)
+        results.append(f"{channel}: {'added' if r.ok else r.error}")
+
+    m.invite_result = "; ".join(results)[:2000]
+    await session.commit()
+    return await slack_me(pr=pr, user=user, session=session)
+
+
+@router.post("/{code}/slack/me/decline", response_model=SlackMeOut)
+async def slack_me_decline(pr: Project = Depends(require_project("readonly")),
+                           user: User = Depends(get_current_user),
+                           session: AsyncSession = Depends(get_session)):
+    """Stop asking, for this engagement.
+
+    Recorded rather than simply dismissed in the browser: a prompt
+    that reappears on every page load is one people learn to click
+    past without reading.
+    """
+    m = await _slack_member(session, pr.id, user.id)
+    if m is None:
+        m = ProjectSlackMember(project_id=pr.id, user_id=user.id)
+        session.add(m)
+    m.declined_at = datetime.now(timezone.utc)
+    m.confirmed_at = None
+    await session.commit()
+    return await slack_me(pr=pr, user=user, session=session)

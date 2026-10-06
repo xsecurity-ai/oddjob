@@ -159,6 +159,81 @@ SEVERITY_MARK = {
 }
 
 
+async def find_user(token: str, handle: str,
+                    email: str | None = None) -> tuple[str | None, str]:
+    """Resolve a Slack handle to a user id. -> (id, detail).
+
+    Email first when we have one: `users.lookupByEmail` is an exact
+    match and cheap. A handle has to be matched against the member
+    list, because Slack has no lookup-by-handle, and the thing people
+    type is sometimes the display name and sometimes the username.
+
+    Returns a reason rather than raising. Not finding someone is an
+    ordinary outcome -- they may simply not be in the workspace yet --
+    and it is the operator's problem to see, not an exception.
+    """
+    want = (handle or "").strip().lstrip("@").lower()
+    if email:
+        try:
+            d = await _call(token, "users.lookupByEmail", {"email": email})
+            if d.get("ok") and d.get("user", {}).get("id"):
+                return d["user"]["id"], f"matched on email {email}"
+        except Exception as e:                   # noqa: BLE001
+            log.warning("slack lookupByEmail failed: %s", e)
+    if not want:
+        return None, "no handle given"
+
+    cursor, scanned = "", 0
+    while True:
+        payload = {"limit": 200}
+        if cursor:
+            payload["cursor"] = cursor
+        try:
+            d = await _call(token, "users.list", payload)
+        except Exception as e:                   # noqa: BLE001
+            return None, f"could not read the member list: {e}"
+        if not d.get("ok"):
+            return None, f"could not read the member list: {d.get('error')}"
+        for m in d.get("members", []):
+            if m.get("deleted") or m.get("is_bot"):
+                continue
+            prof = m.get("profile") or {}
+            names = {str(m.get("name") or "").lower(),
+                     str(prof.get("display_name") or "").lower(),
+                     str(prof.get("display_name_normalized") or "").lower(),
+                     str(prof.get("real_name") or "").lower()}
+            if want in {n for n in names if n}:
+                return m.get("id"), f"matched @{want} in the workspace"
+            scanned += 1
+        cursor = (d.get("response_metadata") or {}).get("next_cursor") or ""
+        if not cursor:
+            break
+    return None, (f"no member matching @{want} in this workspace "
+                  f"(checked {scanned}) — they may need to be invited to "
+                  f"the workspace first")
+
+
+async def invite_to_channel(token: str, channel: str,
+                            user_id: str) -> Posted:
+    """Add one person to one channel.
+
+    `already_in_channel` is a success: the state we wanted is the
+    state we have, and reporting it as an error would make a repeat
+    confirmation look broken.
+    """
+    try:
+        d = await _call(token, "conversations.invite",
+                        {"channel": channel, "users": user_id})
+    except Exception as e:                       # noqa: BLE001
+        return Posted(ok=False, error=f"{type(e).__name__}: {e}"[:300])
+    if d.get("ok"):
+        return Posted(ok=True, channel=channel)
+    err = str(d.get("error") or "")
+    if err in ("already_in_channel", "cant_invite_self"):
+        return Posted(ok=True, channel=channel)
+    return Posted(ok=False, error=err[:300])
+
+
 def finding_line(severity: str, host: str, title: str) -> str:
     """`$severity on $host: $title` — the channel message."""
     sev = (severity or "info").lower()

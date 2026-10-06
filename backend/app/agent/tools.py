@@ -312,7 +312,33 @@ def build(session: AsyncSession, project: Project | None, user: User,
                           for p, pr, n, h in rows],
                 "note": "counted across the whole project, not a sample"}
 
+    async def list_projects(**_) -> dict:
+        """Which engagements are in scope for this conversation."""
+        stmt = select(Project).order_by(Project.code)
+        if pid is not None:
+            stmt = stmt.where(Project.id == pid)
+        elif scope_ids is not None:
+            if not scope_ids:
+                return {"projects": [],
+                        "note": "you have access to no projects"}
+            stmt = stmt.where(Project.id.in_(scope_ids))
+        rows = (await session.execute(stmt)).scalars().all()
+        out = []
+        for p in rows:
+            n = (await session.execute(
+                select(func.count()).select_from(Target)
+                .where(Target.project_id == p.id))).scalar_one()
+            out.append({"code": p.code, "name": p.name,
+                        "codename": p.codename, "client": p.client,
+                        "targets": int(n)})
+        return {"projects": out, "count": len(out)}
+
     reads = [
+        Tool("list_projects",
+             "The engagements you can see, with a target count for each. "
+             "Use this first when asked about more than one engagement, or "
+             "to break a total down by project.",
+             _obj({}), list_projects),
         Tool("project_overview", "Counts across the whole engagement: targets, "
              "services, findings by severity, web addresses, C2 implants. Start here.",
              _obj({}), overview),

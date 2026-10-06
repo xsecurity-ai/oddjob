@@ -490,6 +490,8 @@ class UserOut(BaseModel):
     email: str | None = None
     full_name: str | None = None
     avatar_url: str | None = None
+    #: Offered as the default when joining an engagement that uses Slack.
+    slack_handle: str | None = None
     # Derived from membership of the site-admins group, not stored per user.
     is_site_admin: bool
     is_active: bool
@@ -861,6 +863,9 @@ class ProfileUpdate(BaseModel):
     authorisation is the whole problem."""
     full_name: str | None = None
     email: str | None = None
+    #: The handle to offer when an engagement with Slack asks. Stored
+    #: without the @, so the two spellings do not become two people.
+    slack_handle: str | None = Field(default=None, max_length=128)
     new_password: str | None = Field(default=None, min_length=8)
     current_password: str | None = Field(
         default=None, description="required when changing an existing password")

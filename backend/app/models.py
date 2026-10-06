@@ -337,6 +337,12 @@ class User(Base, TimestampMixin):
     password_hash: Mapped[str | None] = mapped_column(String(255))
     google_sub: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     avatar_url: Mapped[str | None] = mapped_column(String(512))
+    #: The handle this person uses in Slack, as a default. Offered when
+    #: they join an engagement that has Slack, so the common case is
+    #: one click rather than typing it again per project -- while
+    #: still letting them use a different one, because a consultant
+    #: may be in the client's workspace under another name.
+    slack_handle: Mapped[str | None] = mapped_column(String(128))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
     groups: Mapped[list["Group"]] = relationship(
@@ -369,6 +375,42 @@ class Group(Base, TimestampMixin):
         secondary=user_groups, back_populates="groups", lazy="selectin")
     acls: Mapped[list["ProjectACL"]] = relationship(
         back_populates="group", cascade="all, delete-orphan", passive_deletes=True)
+
+
+class ProjectSlackMember(Base, TimestampMixin):
+    """One person's Slack handle for one engagement, and whether we asked.
+
+    Separate from ProjectACL because access can be granted to a group,
+    and a group has no Slack handle -- the thing being recorded here is
+    about a person on a project, which is not the same shape as a
+    grant.
+
+    `declined_at` exists so the prompt is asked once and not on every
+    visit. Someone who says no is saying no to this engagement's
+    channels, not to being asked ever again about anything.
+    """
+    __tablename__ = "project_slack_members"
+    __table_args__ = (
+        UniqueConstraint("project_id", "user_id", name="uq_slack_member"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    #: What they gave for this project. May differ from the profile
+    #: default, which is the whole reason it is stored per project.
+    handle: Mapped[str | None] = mapped_column(String(128))
+    #: Slack's own id, once resolved. Kept because a handle can be
+    #: changed by its owner and the id cannot.
+    slack_user_id: Mapped[str | None] = mapped_column(String(32))
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    declined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: What happened when we tried to add them, kept verbatim. An
+    #: invite that failed should be visible as a failure rather than
+    #: looking like it worked.
+    invite_result: Mapped[str | None] = mapped_column(Text)
 
 
 class ProjectACL(Base, TimestampMixin):

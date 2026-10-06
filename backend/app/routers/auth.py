@@ -138,6 +138,13 @@ async def update_profile(body: ProfileUpdate, user: User = Depends(get_current_u
                 raise HTTPException(403, "current password is incorrect")
         user.password_hash = hash_password(new)
 
+    if "slack_handle" in data:
+        # Stored bare. "@alice" and "alice" are one person, and keeping
+        # both spellings would make the workspace lookup miss half the
+        # time depending on how someone typed it.
+        h = (data["slack_handle"] or "").strip().lstrip("@")
+        data["slack_handle"] = h or None
+
     for k, v in data.items():
         setattr(user, k, v)
     await session.commit()
