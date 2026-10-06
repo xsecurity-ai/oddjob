@@ -22,6 +22,7 @@ from ..models import (DomainCandidate, DomainSearch, Project, Target, User,
                       WebAddress)
 from ..schemas import (DetectBatch, DetectRequest, DetectResult, DomainCandidateOut,
                        DomainSearchOut, PromoteRequest)
+from ..scopegate import index_for
 from ..security import get_current_user, require_project
 from ..timeline import record
 
@@ -292,6 +293,13 @@ async def promote(body: PromoteRequest, project: str = Query(...),
         select(DomainCandidate).where(DomainCandidate.project_id == pr.id,
                                       DomainCandidate.id.in_(body.ids)))).scalars().all()
     created, skipped = [], []
+    refused: dict[str, str] = {}
+    # A candidate is a guess, so this is the one creation path where the
+    # host was never observed anywhere. All the more reason to check it:
+    # the generator extrapolates from names the estate uses, and the
+    # neighbouring domain it extrapolates onto is frequently somebody
+    # else's.
+    idx = await index_for(session, pr.id)
     now = datetime.now(timezone.utc)
     for c in rows:
         dup = (await session.execute(
@@ -300,6 +308,14 @@ async def promote(body: PromoteRequest, project: str = Query(...),
         if dup is not None:
             c.state, c.decided_by, c.decided_at = "exists", user.id, now
             skipped.append(c.name)
+            continue
+        ruling = idx.check(c.name)
+        if not ruling.allowed:
+            # Left in whatever state it was in rather than marked
+            # rejected: nobody decided against this candidate, the scope
+            # list did, and recording it as a human judgement would be a
+            # lie in the audit trail.
+            refused[c.name] = ruling.reason
             continue
         t = Target(project_id=pr.id, host=c.name, alive=None)
         session.add(t)
@@ -311,7 +327,8 @@ async def promote(body: PromoteRequest, project: str = Query(...),
         created.append(c.name)
     await session.commit()
     await broker.publish("targets", action="create", project=pr.code)
-    return {"created": created, "already_existed": skipped}
+    return {"created": created, "already_existed": skipped,
+            "out_of_scope": refused}
 
 
 @router.post("/candidates/reject")

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..scope import BARRED, ScopeIndex
+
 #: strict  only known hosts; unknown ones need a decision
 #: open    create whatever the file names (the old behaviour)
 MODES = ("strict", "open")
@@ -70,25 +72,82 @@ class Policy:
     known: set[str] = field(default_factory=set)
     #: host -> Decision, from the operator.
     decisions: dict[str, Decision] = field(default_factory=dict)
+    #: The project's scope lists, or None when it has none. This is the
+    #: only check here the operator cannot answer their way past: a
+    #: decision of "add" for a barred host is still refused, because an
+    #: import is one of the places a host nobody meant to touch gets
+    #: into an engagement.
+    scope: ScopeIndex | None = None
     #: Filled in as the ingest runs.
     rejected: dict[str, int] = field(default_factory=dict)
     mapped: dict[str, str] = field(default_factory=dict)
     created: list[str] = field(default_factory=list)
+    #: host -> why scope refused it. Kept apart from `rejected` because
+    #: the two are different answers: rejected means nobody asked for
+    #: this host, barred means they may not have it.
+    barred: dict[str, str] = field(default_factory=dict)
 
-    def resolve(self, host: str | None) -> str | None:
+    def _refuse(self, host: str, reason: str) -> None:
+        self.barred.setdefault(host, reason)
+
+    def scope_bars(self, host: str, ip: str | None = None) -> bool:
+        """Is this host on the out-of-scope list?
+
+        Asked of hosts the project already has as well as new ones. A
+        target acquired before the list existed is still a host nobody
+        may touch once it is on it, and an import that kept adding
+        services to it would be scanning-by-proxy.
+        """
+        if self.scope is None:
+            return False
+        ruling = self.scope.check(host, ip)
+        if ruling.verdict == BARRED:
+            self._refuse(host, ruling.reason)
+            return True
+        return False
+
+    def scope_allows_new(self, host: str, ip: str | None = None) -> bool:
+        """May this host be ADDED to the project?
+
+        Separate from `scope_bars` because the in-scope list governs only
+        what is new: an engagement that types its scope in on day three
+        must not thereby stop importing results for the hosts it already
+        worked on.
+
+        Child rows (a credential, a finding) carry no address, so they are
+        judged on the name alone. That is the strict reading and the right
+        one — otherwise a scan file adds hosts the allowlist exists to keep
+        out, by the back door.
+        """
+        if self.scope is None:
+            return True
+        ruling = self.scope.check(host, ip)
+        if ruling.allowed:
+            return True
+        self._refuse(host, ruling.reason)
+        return False
+
+    def resolve(self, host: str | None, ip: str | None = None) -> str | None:
         """-> the target name to write against, or None to drop this row.
 
-        A None means "the operator did not ask for this host", and the
-        caller must discard the row rather than inventing somewhere to
-        put it.
+        A None means "the operator did not ask for this host, or is not
+        allowed it", and the caller must discard the row rather than
+        inventing somewhere to put it.
         """
         if not host:
             return None
         h = host.strip().rstrip(".").lower()
         if not h:
             return None
+        # Before `known`, not after: being on the out list bars a host
+        # the project already has, which is the whole difference between
+        # that list and the in-scope one.
+        if self.scope_bars(h, ip):
+            return None
         if h in self.known:
             return h
+        if not self.scope_allows_new(h, ip):
+            return None
         if self.mode == "open":
             return h
 
@@ -103,6 +162,10 @@ class Policy:
             if t not in self.known:
                 self.rejected[h] = self.rejected.get(h, 0) + 1
                 return None
+            # Nor may it be used to reach a barred target: "attach this
+            # to that one instead" is still writing to that one.
+            if self.scope_bars(t):
+                return None
             self.mapped[h] = t
             return t
         if d.action == ADD:
@@ -116,11 +179,17 @@ class Policy:
         return None
 
 
-def survey(scan, known: set[str]) -> list[UnknownHost]:
+def survey(scan, known: set[str], policy: "Policy | None" = None) -> list[UnknownHost]:
     """Every host in the file the project does not already have.
 
     Counts what each one would bring, so the operator is choosing with
     the consequences in front of them.
+
+    A host the project's scope would refuse is left OUT of this list
+    rather than offered. Asking "add this host?" about one that cannot
+    be added produces a decision the import then ignores, which reads as
+    the import having lost it. The reason is recorded on the policy and
+    reported separately, so the host is named either way.
     """
     found: dict[str, UnknownHost] = {}
 
@@ -129,6 +198,8 @@ def survey(scan, known: set[str]) -> list[UnknownHost]:
             return None
         h = name.strip().rstrip(".").lower()
         if not h or h in known:
+            return None
+        if policy is not None and not policy.scope_allows_new(h):
             return None
         return found.setdefault(h, UnknownHost(host=h))
 

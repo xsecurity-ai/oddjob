@@ -33,6 +33,7 @@ from ..hosts import InvalidHost, validate_host
 from ..models import (ROLE_ORDER, Agent, AgentTask, Credential, DomainCandidate,
                       Implant, Poc, Project,
                       Service, Target, User, Vuln, WebAddress)
+from ..scopegate import check_task_targets, index_for
 from ..timeline import record
 
 
@@ -457,6 +458,12 @@ def build(session: AsyncSession, project: Project | None, user: User,
             return {"error": str(e)}
         if await _target(clean):
             return {"error": f"{clean} already exists in {project.code}"}
+        # The assistant is a person's words turned into a write. The
+        # scope list is the one thing in that chain that did not come
+        # out of a sentence, so it gets the last say.
+        ruling = (await index_for(session, pid)).check(clean)
+        if not ruling.allowed:
+            return {"error": f"refused: {ruling.reason}"}
         t = Target(project_id=pid, host=clean, notes=notes or None, alive=None)
         session.add(t)
         await session.flush()
@@ -518,6 +525,14 @@ def build(session: AsyncSession, project: Project | None, user: User,
         args: dict = {"targets": hosts}
         if ports.strip():
             args["ports"] = ports.strip()
+        # Same gate as the Jaws page, reached the same way. A scan the
+        # operator could not queue by hand must not become queueable by
+        # asking for it in a sentence.
+        idx = await index_for(session, pid)
+        if idx.defined:
+            ruling = check_task_targets(idx, args)
+            if ruling is not None:
+                return {"error": f"refused: {ruling.reason}"}
         t = AgentTask(
             agent_id=chosen.id if chosen else None,
             project_id=pid, requested_by=user.id, kind=kind,

@@ -66,8 +66,12 @@ check("fqdn incl. URL-stripped and normalised",
       str(sorted(kinds.get("fqdn", []))))
 excl = sorted(e["value"] for e in r["scope"] if not e["included"])
 check("exclusions preserved", excl == ["10.0.0.5", "staging.acme.com"], str(excl))
-check("bad lines named, not fatal", len(r["scope_errors"]) == 3, str(r["scope_errors"])[:120])
-check("wildcard rejected", any("*" in e for e in r["scope_errors"]))
+check("bad lines named, not fatal", len(r["scope_errors"]) == 2, str(r["scope_errors"])[:120])
+# A wildcard is not a host and never will be, but it IS a scope entry —
+# scope documents are written with them, and the list is now enforced,
+# so refusing to record one meant refusing to enforce it.
+check("wildcard classified, not rejected",
+      kinds.get("wildcard") == ["*.acme.com"], str(kinds.get("wildcard")))
 check("single label rejected", any("single label" in e for e in r["scope_errors"]))
 
 print("\n== contacts and members ==")

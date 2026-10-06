@@ -16,7 +16,8 @@ from ..models import (Poc, Project, ProjectACL, ProjectContact, ProjectScope,
                       ProjectSlackMember,
                       Service, Target, User, Vuln)
 from ..query import apply_search, apply_sort, paginate
-from ..scope import classify_many
+from ..scope import classify_country, classify_many
+from ..scopegate import index_for
 from ..slack import channel_for, normalise_channel
 from .settings import load_all
 from ..schemas import (AgentOverride, AclOut, ContactIn, ContactOut, Page, ProjectCreate,
@@ -253,21 +254,86 @@ async def list_scope(project: str, pr: Project = Depends(require_project("readon
 
 
 class ScopeAdd(BaseModel):
-    lines: list[str]
+    lines: list[str] = []
+    #: Which list these go on. A line may still override it with a
+    #: leading `!`, because that is how scope documents are pasted; this
+    #: is the default for a line that says nothing.
+    included: bool = True
+    #: ISO 3166-1 alpha-2 country entries, kept apart from `lines`
+    #: because "jp" is indistinguishable from a hostname and guessing
+    #: between the two would put a typo on the geographic allowlist.
+    countries: list[str] = []
+    #: Declared country for every host entry in this batch. See
+    #: models.ProjectScope.country — nothing resolves this for you.
+    country: str | None = None
 
 
 @router.post("/{project}/scope", response_model=ProjectCreated)
 async def add_scope(project: str, body: ScopeAdd,
                     pr: Project = Depends(require_project("admin")),
                     session: AsyncSession = Depends(get_session)):
-    """Append entries. Existing values are left alone rather than duplicated."""
+    """Append entries, or amend the ones already here.
+
+    A value appears once. Re-adding it is not a duplicate row, it is a
+    statement about the entry that is already there, and the rule for
+    what that does is the same rule the matcher follows: **out wins.**
+
+      already in, added to out   moved to the out list
+      already out, added to in   REFUSED and named back. Un-barring a
+                                 host is a decision, not a side effect
+                                 of pasting a scope document over the
+                                 top of an earlier one. The cost of
+                                 getting it wrong is a scan of a host
+                                 the client said to leave alone.
+      a country supplied         recorded against the entry either way
+
+    Which also means the two lists cannot both literally contain the
+    same string. "Out trumps in" is about rules that OVERLAP — a range
+    on one list and an address inside it on the other — and that is
+    settled by the matcher, not here.
+    """
     entries, errors = classify_many(body.lines)
-    have = {v for (v,) in await session.execute(
-        select(ProjectScope.value).where(ProjectScope.project_id == pr.id))}
+    tag: str | None = None
+    if body.country:
+        try:
+            tag = classify_country(body.country)
+        except ValueError as e:
+            errors.append(str(e))
+    have = {r.value: r for r in (await session.execute(
+        select(ProjectScope).where(ProjectScope.project_id == pr.id))).scalars()}
+
+    def put(kind: str, value: str, included: bool) -> None:
+        # A country row IS a country; tagging it with one would read as
+        # "the country JP is located in JP".
+        mine = tag if kind != "country" else None
+        cur = have.get(value)
+        if cur is None:
+            cur = ProjectScope(project_id=pr.id, kind=kind, value=value,
+                               included=included, country=mine)
+            session.add(cur)
+            have[value] = cur
+            return
+        if cur.included and not included:
+            cur.included = False
+        elif included and not cur.included:
+            errors.append(
+                f"{value!r} is on the out-of-scope list; it was left there. "
+                f"Remove that entry deliberately if it really is in scope.")
+            return
+        if mine:
+            cur.country = mine
+
     for e in entries:
-        if e.value not in have:
-            session.add(ProjectScope(project_id=pr.id, kind=e.kind,
-                                     value=e.value, included=e.included))
+        # A line's own `!` wins; `included` is only the default for the
+        # rest of the batch.
+        put(e.kind, e.value, e.included and body.included)
+    for raw in body.countries:
+        try:
+            code = classify_country(raw)
+        except ValueError as e:
+            errors.append(str(e))
+            continue
+        put("country", code, body.included)
     await session.commit()
     await broker.publish("projects", action="scope", project=pr.code)
     rows = (await session.execute(
@@ -280,6 +346,47 @@ async def add_scope(project: str, body: ScopeAdd,
                           contacts=[], members=[], scope_errors=errors, member_errors=[])
 
 
+class ScopeEntryPatch(BaseModel):
+    """What can be changed about an entry without retyping it.
+
+    `value` is absent on purpose: editing it in place would change which
+    hosts a rule covers while keeping the row's id and its creation
+    date, so the audit trail would say the current rule had been in
+    force all along. Delete and re-add.
+    """
+    included: bool | None = None
+    #: "" clears it back to undetermined, which is a real state and not
+    #: the same as "no country".
+    country: str | None = None
+    notes: str | None = None
+
+
+@router.patch("/{project}/scope/{entry_id}", response_model=ScopeEntryOut)
+async def patch_scope(project: str, entry_id: int, body: ScopeEntryPatch,
+                      pr: Project = Depends(require_project("admin")),
+                      session: AsyncSession = Depends(get_session)):
+    e = await session.get(ProjectScope, entry_id)
+    if not e or e.project_id != pr.id:
+        raise HTTPException(404, f"no scope entry {entry_id} on {pr.code}")
+    data = body.model_dump(exclude_unset=True)
+    if "included" in data and data["included"] is not None:
+        e.included = bool(data["included"])
+    if "country" in data:
+        raw = (data["country"] or "").strip()
+        if not raw:
+            e.country = None
+        else:
+            try:
+                e.country = classify_country(raw)
+            except ValueError as err:
+                raise HTTPException(422, str(err))
+    if "notes" in data:
+        e.notes = data["notes"]
+    await session.commit()
+    await broker.publish("projects", action="scope", project=pr.code)
+    return ScopeEntryOut.model_validate(e)
+
+
 @router.delete("/{project}/scope/{entry_id}", status_code=204)
 async def delete_scope(project: str, entry_id: int,
                        pr: Project = Depends(require_project("admin")),
@@ -289,6 +396,206 @@ async def delete_scope(project: str, entry_id: int,
         raise HTTPException(404, f"no scope entry {entry_id} on {pr.code}")
     await session.delete(e)
     await session.commit()
+    await broker.publish("projects", action="scope", project=pr.code)
+
+
+# ------------------------------------------------- enforcing it on what exists
+class ViolationOut(BaseModel):
+    """One target the current lists would not allow in.
+
+    The host and the reason, never just a count. "14 hosts violate these
+    lists" is not something an operator can act on: deciding whether to
+    delete a target means knowing which one it is and which rule caught
+    it, and a number invites someone to click the button to find out.
+    """
+    id: int
+    host: str
+    ip_address: str | None = None
+    verdict: str
+    reason: str
+    #: What goes with it if it is removed. Deleting a target cascades to
+    #: its services, findings and PoCs, and that is not obvious from a
+    #: list of hostnames.
+    services: int = 0
+    vulns: int = 0
+    pocs: int = 0
+
+
+class ApplyOut(BaseModel):
+    project: str
+    #: True when the project has any scope entry at all. Without one
+    #: there is nothing to violate, which is different from complying.
+    scope_defined: bool
+    violations: list[ViolationOut]
+    #: What this call actually did. "report" changes nothing.
+    action: str = "report"
+    removed: list[str] = []
+    detail: str = ""
+
+
+async def _violations(session: AsyncSession, pr: Project) -> list[ViolationOut]:
+    """Targets the project holds that its own lists would now refuse.
+
+    Both verdicts are reported. A barred host is one nothing may touch;
+    an outside-the-allowlist host is one that could not be added today
+    but is not itself forbidden. They are shown apart because the right
+    answer differs — the first is usually a mistake to undo, the second
+    is often work done before the list was written down.
+    """
+    idx = await index_for(session, pr.id)
+    if not idx.defined:
+        return []
+    rows = (await session.execute(
+        select(Target).where(Target.project_id == pr.id)
+        .order_by(Target.host))).scalars().all()
+    bad = [(t, idx.check(t.host, t.ip_address)) for t in rows]
+    bad = [(t, r) for t, r in bad if not r.allowed]
+    if not bad:
+        return []
+
+    ids = [t.id for t, _ in bad]
+    counts: dict[tuple[str, int], int] = {}
+    for label, model in (("services", Service), ("vulns", Vuln), ("pocs", Poc)):
+        for tid, n in (await session.execute(
+                select(model.target_id, func.count())
+                .where(model.target_id.in_(ids))
+                .group_by(model.target_id))).all():
+            counts[(label, tid)] = n
+    return [ViolationOut(
+        id=t.id, host=t.host, ip_address=t.ip_address,
+        verdict=r.verdict, reason=r.reason,
+        services=counts.get(("services", t.id), 0),
+        vulns=counts.get(("vulns", t.id), 0),
+        pocs=counts.get(("pocs", t.id), 0)) for t, r in bad]
+
+
+@router.get("/{project}/scope/violations", response_model=ApplyOut)
+async def scope_violations(project: str,
+                           pr: Project = Depends(require_project("readonly")),
+                           session: AsyncSession = Depends(get_session)):
+    """Who in this project the lists would refuse. Changes nothing."""
+    idx = await index_for(session, pr.id)
+    rows = await _violations(session, pr)
+    return ApplyOut(
+        project=pr.code, scope_defined=idx.defined, violations=rows,
+        detail=(f"{len(rows)} host(s) currently violate these lists"
+                if rows else
+                "no host in this project violates these lists"
+                if idx.defined else
+                "this project has no scope lists, so nothing is enforced"))
+
+
+class ApplyIn(BaseModel):
+    action: str = Field(
+        "report",
+        description="report | remove | ignore. report changes nothing; "
+                    "remove deletes the named targets and everything hanging "
+                    "off them; ignore leaves them and records nothing.")
+    #: Which hosts to act on. Required for `remove`: applying to
+    #: "whatever the report said" invites acting on a list that moved
+    #: between the reading and the clicking.
+    hosts: list[str] = []
+
+
+@router.post("/{project}/scope/apply", response_model=ApplyOut)
+async def scope_apply(project: str, body: ApplyIn,
+                      pr: Project = Depends(require_project("admin")),
+                      session: AsyncSession = Depends(get_session)):
+    """Enforce the lists against what the project already holds.
+
+    Never automatic. Adding a scope entry does not delete anything — the
+    lists govern what is NEW, and a list edit that quietly destroyed
+    existing evidence would make people afraid to edit the list, which
+    is the worst outcome available here.
+
+    Three actions:
+
+    report  the default. Names every host and why.
+    remove  deletes the targets named in `hosts`, and with them their
+            services, findings and PoCs. Named explicitly, so a list
+            that changed since it was read cannot take something with it.
+    ignore  leaves them alone and records NOTHING. They will be reported
+            again next time, deliberately: a persisted "ignore" flag is
+            a way for an out-of-scope host to become invisible, which is
+            the exact failure this feature exists to prevent.
+    """
+    action = (body.action or "report").strip().lower()
+    if action not in ("report", "remove", "ignore"):
+        raise HTTPException(422, "action is report, remove or ignore")
+
+    idx = await index_for(session, pr.id)
+    rows = await _violations(session, pr)
+    removed: list[str] = []
+
+    if action == "remove":
+        wanted = {h.strip().rstrip(".").lower() for h in body.hosts if h.strip()}
+        if not wanted:
+            raise HTTPException(
+                422, "remove needs the hosts to remove, named. Deleting "
+                     "'everything currently in violation' acts on a list "
+                     "nobody read.")
+        offending = {v.host: v for v in rows}
+        unknown = sorted(wanted - set(offending))
+        if unknown:
+            # Refused rather than ignored: being asked to delete a host
+            # that is NOT in violation means the caller and the server
+            # disagree about the state, and guessing which is right is
+            # how the wrong target gets deleted.
+            raise HTTPException(
+                409, f"not currently in violation, so not removed: "
+                     f"{', '.join(unknown)}. Re-read the violations and try "
+                     f"again.")
+        for t in (await session.execute(
+                select(Target).where(Target.project_id == pr.id,
+                                     Target.host.in_(wanted)))).scalars():
+            removed.append(t.host)
+            await session.delete(t)
+        await session.commit()
+        for ch in ("targets", "services", "vulns", "web"):
+            await broker.publish(ch, action="scope-apply", project=pr.code)
+        rows = await _violations(session, pr)
+
+    detail = {
+        "report": f"{len(rows)} host(s) currently violate these lists",
+        "remove": (f"removed {len(removed)} host(s) and everything recorded "
+                   f"against them; {len(rows)} still in violation"),
+        "ignore": (f"{len(rows)} host(s) left in place. Nothing was recorded, "
+                   f"so they will be reported again."),
+    }[action]
+    return ApplyOut(project=pr.code, scope_defined=idx.defined,
+                    violations=rows, action=action, removed=removed,
+                    detail=detail)
+
+
+class ProjectConfigOut(BaseModel):
+    """Everything the project configuration screen edits, in one read."""
+    project: ProjectOut
+    scope: list[ScopeEntryOut]
+    #: Whether anything here would refuse anything. A project with an
+    #: empty list enforces nothing, and saying so is better than leaving
+    #: the screen to be read as "nothing is barred yet".
+    scope_defined: bool
+    #: True once an in-scope host entry exists: from that point the
+    #: project may not acquire anything outside it.
+    allowlist_active: bool
+
+
+@router.get("/{project}/config", response_model=ProjectConfigOut)
+async def project_config(project: str,
+                         pr: Project = Depends(require_project("readonly")),
+                         session: AsyncSession = Depends(get_session)):
+    rows = (await session.execute(
+        select(ProjectScope).where(ProjectScope.project_id == pr.id)
+        .order_by(ProjectScope.included.desc(), ProjectScope.kind,
+                  ProjectScope.value))).scalars().all()
+    idx = await index_for(session, pr.id)
+    row = (await session.execute(_counts_query().where(Project.id == pr.id))).first()
+    sp = bool((await load_all(session)).get("slack.default_private", True))
+    return ProjectConfigOut(
+        project=_out(row, sp),
+        scope=[ScopeEntryOut.model_validate(x) for x in rows],
+        scope_defined=idx.defined,
+        allowlist_active=bool(idx.inc.has_hosts or idx.inc.countries))
 
 
 @router.get("/{project}/contacts", response_model=list[ContactOut])

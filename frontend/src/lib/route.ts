@@ -33,9 +33,15 @@ export interface Route {
 
 /** Views that exist without a project in the path. */
 const GLOBAL = new Set(['projects', 'config', 'users', 'profile'])
-/** Views that live under a project. */
+/** Views that live under a project.
+ *
+ *  `settings` is the project's own configuration — its name, client and
+ *  scope lists. Deliberately not called `config`, which is the SITE
+ *  screen and is global: `/projects/ACME/config` would read as a
+ *  per-project copy of the deployment settings, and `/config` is already
+ *  that page. */
 const SCOPED = new Set(['targets', 'services', 'web', 'vulns', 'credentials',
-                        'reports', 'jaws', 'import'])
+                        'reports', 'jaws', 'import', 'settings'])
 
 /** Where a bare `/` lands. The project list, not targets-across-
  *  everything: with no project chosen, "which engagement" is the

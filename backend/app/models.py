@@ -913,19 +913,27 @@ class MagicLink(Base, TimestampMixin):
 
 
 # ====================================================== scope and contacts
-SCOPE_KINDS = ("cidr", "ipv4", "ipv6", "fqdn")
+SCOPE_KINDS = ("cidr", "ipv4", "ipv6", "fqdn", "wildcard", "country")
 
 
 class ProjectScope(Base, TimestampMixin):
-    """One scope entry: a CIDR, an address, or a name.
+    """One scope entry: a CIDR, an address, a name, a wildcard or a country.
 
     `kind` is DERIVED from the value, not chosen by the person typing it —
     asking someone to classify 400 pasted lines by hand is how a /24 ends up
-    filed as an FQDN. See scope.classify().
+    filed as an FQDN. See scope.classify(). The exception is `country`,
+    which is entered as its own list: a bare "jp" is indistinguishable from
+    a single-label hostname, and guessing between the two would put a
+    typo'd hostname on the geographic allowlist.
 
     `included` carries exclusions in the same table. A scope document is
     almost always "this range, except these hosts", and keeping exclusions
-    somewhere else is how they get missed.
+    somewhere else is how they get missed. It is also what makes the two
+    lists one list: out always trumps in, and a rule that has to compare
+    two tables to decide that is a rule that will one day read only one.
+
+    This table is ENFORCED, not merely recorded — see app/scopegate.py for
+    every path that consults it.
     """
     __tablename__ = "project_scope"
     __table_args__ = (
@@ -936,9 +944,18 @@ class ProjectScope(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(primary_key=True)
     project_id: Mapped[int] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True)
-    kind: Mapped[str] = mapped_column(String(8))
+    kind: Mapped[str] = mapped_column(String(16))
     value: Mapped[str] = mapped_column(String(255))
     included: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: Which country this entry's addresses are in, ISO 3166-1 alpha-2,
+    #: as DECLARED by the operator. This is the whole of Oddjob's
+    #: geolocation: nothing resolves an address to a country, because
+    #: doing so means sending the client's target list to a third party.
+    #: An entry with no country here contributes nothing to the country
+    #: lists, and a host no annotated entry covers has an UNDETERMINED
+    #: country, which is not the same as "no country" — scope.check()
+    #: treats the two differently on purpose.
+    country: Mapped[str | None] = mapped_column(String(2))
     notes: Mapped[str | None] = mapped_column(Text)
 
     project: Mapped["Project"] = relationship(back_populates="scope")

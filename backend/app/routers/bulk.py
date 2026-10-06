@@ -37,6 +37,8 @@ from ..models import (Credential, Poc, Project, ProjectACL, ROLE_ORDER,
                       Service, Target, User, Vuln)
 from ..schemas import (BulkIds, BulkOpResult, BulkPatch, BulkPayload,
                        BulkResult, PocIn, ServiceIn, TargetIn, VulnIn)
+from ..scope import BARRED
+from ..scopegate import index_for
 from ..security import effective_role, get_current_user
 
 router = APIRouter(prefix="/api/bulk", tags=["bulk"])
@@ -142,6 +144,38 @@ async def bulk_import(payload: BulkPayload,
         t.host: t for t in (await session.execute(
             select(Target).where(Target.project_id == pr.id, Target.host.in_(want)))).scalars()
     } if want else {}
+
+    # -------------------------------------------------------- the scope
+    # One index for the whole payload: the alternative is a query per
+    # row, and this route exists to load thousands of them.
+    #
+    # Every host is filtered here, before any loop below can create one.
+    # The children matter as much as the targets: `autocreate_targets`
+    # turns a vuln row naming a host nobody declared into a new target,
+    # which is a target creation path however it is spelled.
+    idx = await index_for(session, pr.id)
+    barred: dict[str, str] = {}
+    for h in sorted(want):
+        ip = next((d.get("ip_address") for hh, d in clean_targets if hh == h), None)
+        ruling = idx.check(h, ip)
+        # An existing target outside the in-scope list keeps working:
+        # the lists govern what is new. One on the out list does not.
+        if ruling.verdict == BARRED or (not ruling.allowed and h not in existing):
+            barred[h] = ruling.reason
+    if barred:
+        want -= set(barred)
+        kept_targets = [(h, d) for h, d in clean_targets if h not in barred]
+        skipped["targets"] += len(clean_targets) - len(kept_targets)
+        clean_targets = kept_targets
+        for kind in child_clean:
+            kept = [(h, d) for h, d in child_clean[kind] if h not in barred]
+            skipped[kind] += len(child_clean[kind]) - len(kept)
+            child_clean[kind] = kept
+        # Dropped from `existing` too, so a child row cannot reach a
+        # barred target that happens to already be in the project.
+        existing = {h: t for h, t in existing.items() if h not in barred}
+        for h, why in sorted(barred.items()):
+            note(f"scope: {why}")
 
     # Iterate the LIST, not a dict keyed by host: collapsing to a dict first
     # makes duplicate hosts vanish before they are counted, and the totals

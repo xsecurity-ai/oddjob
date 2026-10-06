@@ -12,6 +12,7 @@ import KeyIcon from '@mui/icons-material/VpnKeyOutlined'
 import PublicIcon from '@mui/icons-material/PublicOutlined'
 import DescriptionIcon from '@mui/icons-material/DescriptionOutlined'
 import MemoryIcon from '@mui/icons-material/MemoryOutlined'
+import TuneIcon from '@mui/icons-material/TuneOutlined'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import SmartToyIcon from '@mui/icons-material/SmartToyOutlined'
 import PersonIcon from '@mui/icons-material/PersonOutline'
@@ -39,6 +40,7 @@ import { WebView } from './views/WebView'
 import { ImportView } from './views/ImportView'
 import { ReportsView } from './views/ReportsView'
 import { JawsView } from './views/JawsView'
+import { ProjectConfigView } from './views/ProjectConfigView'
 import { useHostModal } from './components/HostModal'
 import { AgentPanel } from './components/AgentPanel'
 import { UsersView } from './views/UsersView'
@@ -267,6 +269,12 @@ export default function App() {
     // it. Nesting cost a click to reach a view an operator checks while
     // a scan is running, and hid it entirely until Reports was open.
     { key: 'jaws', label: 'Jaws', icon: <MemoryIcon fontSize="small" /> },
+    // Project config, not site config — it is the engagement's own name,
+    // client and SCOPE. Last in the list because it is opened rarely,
+    // but in the project group rather than under Admin: the scope lists
+    // decide what every other view here is allowed to touch, and hiding
+    // that behind an admin heading would make it look optional.
+    { key: 'settings', label: 'Project Config', icon: <TuneIcon fontSize="small" /> },
     // No sidebar entry: importing happens from the table you are
     // already looking at (Targets, Services, Vulns), which keeps the
     // filters you had. The route still resolves, so old links work.
@@ -295,6 +303,7 @@ export default function App() {
     import: <ImportView project={project === ALL ? null : project} />,
     reports: <ReportsView project={project === ALL ? null : project} />,
     jaws: <JawsView project={project === ALL ? null : project} />,
+    settings: <ProjectConfigView project={project === ALL ? null : project} />,
     config: <SiteConfigView />,
     users: <UsersView />,
     profile: <ProfileView />,

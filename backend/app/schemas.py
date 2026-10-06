@@ -960,6 +960,8 @@ class ScopeEntryOut(BaseModel):
     kind: str
     value: str
     included: bool
+    #: Operator-declared, never looked up. See models.ProjectScope.country.
+    country: str | None = None
     notes: str | None = None
 
 
