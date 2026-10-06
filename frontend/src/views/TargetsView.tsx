@@ -1,8 +1,6 @@
-import { useState } from 'react'
-import { Box, Button, Chip, IconButton, Tooltip, alpha } from '@mui/material'
-import BoltIcon from '@mui/icons-material/Bolt'
+import { useMemo, useState } from 'react'
+import { Badge, Box, Button, Chip, Tooltip, alpha } from '@mui/material'
 import ScanIcon from '@mui/icons-material/RadarOutlined'
-import TravelExploreIcon from '@mui/icons-material/TravelExplore'
 import type { GridColDef } from '@mui/x-data-grid'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Target } from '../lib/api'
@@ -11,6 +9,15 @@ import { DataTable } from '../components/DataTable'
 import { useHostModal } from '../components/HostModal'
 import { ImportScanDialog } from '../components/ImportScanDialog'
 import { DetectDomainsDialog } from '../components/DetectDomainsDialog'
+import {
+  EnumerateMenu, TargetRowActions, type EnumerateAction, type RowAction,
+} from '../components/EnumerateMenu'
+import {
+  FqdnPickerDialog, openChoices, useAutoApplySingles,
+} from '../components/FqdnPickerDialog'
+import { LookupQueueDialog, type LookupKind } from '../components/LookupQueueDialog'
+import { NmapScanDialog } from '../components/NmapScanDialog'
+import { ScanRangesDialog } from '../components/ScanRangesDialog'
 import { neon, glow } from '../theme'
 
 /** Zero is muted so the eye lands on the non-zero numbers. */
@@ -24,6 +31,63 @@ function Count({ n, color }: { n: number; color?: string }) {
   )
 }
 
+/** Is this string an address rather than a name? */
+function isAddress(v: string | null | undefined): boolean {
+  const s = (v ?? '').trim()
+  if (!s) return false
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) {
+    return s.split('.').every((o) => Number(o) <= 255)
+  }
+  // IPv6 is matched loosely on purpose: hex, colons and an optional
+  // zone. Anything with a colon in it is not a hostname, so a loose
+  // match here cannot mistake a name for an address.
+  return /^[0-9a-f:]+(%[0-9a-z]+)?$/i.test(s) && s.includes(':')
+}
+
+/** The address to look a target up by, or '' when it has none. */
+function addressOf(t: Target): string {
+  const ip = (t.ip_address ?? '').trim()
+  if (ip) return ip
+  return isAddress(t.host) ? t.host.trim() : ''
+}
+
+/** A target named by something other than its own address. */
+function hasName(t: Target): boolean {
+  return !isAddress(t.host)
+}
+
+/** An address on record and no name to go with it — what the two
+ *  "find FQDNs" actions are for. A mobile app is excluded: it has no
+ *  address, so it is not a gap in our coverage. */
+function needsName(t: Target): boolean {
+  return t.kind !== 'mobile' && !!addressOf(t) && !hasName(t)
+}
+
+// ----------------------------------------------------------- widths
+// Widths are computed from the rows rather than measured, because the
+// grid lives inside DataTable and MUI's autosize measures what is
+// rendered — and DataTable hands the grid ONE page at a time, so an
+// autosize would fit whichever page happened to be on screen first and
+// then jump. Deriving from the whole row set is stable across paging.
+//
+// The constants are the two fonts the grid actually uses: cells are
+// 'Share Tech Mono' at 12px, headers 'Orbitron' at 11px uppercase with
+// 0.14em tracking. Chips carry their own padding and a smaller face.
+const CELL_CH = 7.3
+const HEAD_CH = 8.2
+const CELL_PAD = 22
+/** Room for the sort arrow and the column menu button. */
+const HEAD_FURNITURE = 30
+
+function fit(header: string, widest: number, min = 60, max = 300): number {
+  const head = header.length * HEAD_CH + CELL_PAD + HEAD_FURNITURE
+  return Math.ceil(Math.min(max, Math.max(min, widest + CELL_PAD, head)))
+}
+
+const textWidth = (s: string) => s.length * CELL_CH
+/** A MUI chip at fontSize 10 with the padding this grid gives it. */
+const chipWidth = (s: string) => s.length * 6.4 + 20
+
 export function TargetsView({ project }: { project: string | null }) {
   const qc = useQueryClient()
   const { canWrite } = useAuth()
@@ -31,10 +95,36 @@ export function TargetsView({ project }: { project: string | null }) {
   const writable = canWrite(project)
   const [importing, setImporting] = useState(false)
   const [detecting, setDetecting] = useState(false)
+  const [picking, setPicking] = useState(false)
+  const [scanningRanges, setScanningRanges] = useState(false)
+  const [nmapOn, setNmapOn] = useState<string[] | null>(null)
+  const [lookup, setLookup] = useState<{ kind: LookupKind; subjects: string[] } | null>(null)
+  const [selected, setSelected] = useState<number[]>([])
+
   const { data, isLoading, error } = useQuery({
     queryKey: ['targets', project],
     queryFn: () => api.targets(project ?? undefined),
   })
+
+  // Lookup results that have come home. The SSE stream invalidates
+  // everything when an agent reports, so this refreshes by itself —
+  // no polling, and no window where the grid is newer than the badge.
+  const pending = useQuery({
+    queryKey: ['enumerate-pending', project],
+    queryFn: () => api.enumeratePending(project as string),
+    enabled: !!project && writable,
+  })
+  const autoError = useAutoApplySingles(writable ? project : null, pending.data)
+  const choices = useMemo(() => openChoices(pending.data), [pending.data])
+
+  const rows = useMemo(() => data?.items ?? [], [data])
+  const selectedRows = useMemo(() => {
+    const want = new Set(selected)
+    return rows.filter((t) => want.has(t.id))
+  }, [rows, selected])
+
+  const unnamed = useMemo(() => rows.filter(needsName), [rows])
+  const unnamedSelected = useMemo(() => selectedRows.filter(needsName), [selectedRows])
 
   const patch = useMutation({
     mutationFn: (v: { project: string; host: string; body: Partial<Target> }) =>
@@ -44,6 +134,45 @@ export function TargetsView({ project }: { project: string | null }) {
     // so the UI exercises live-refresh rather than faking it locally.
     onSettled: () => void qc.invalidateQueries({ queryKey: ['targets'] }),
   })
+
+  const onEnumerate = (a: EnumerateAction) => {
+    if (a === 'detect-domains') setDetecting(true)
+    else if (a === 'scan-ranges') setScanningRanges(true)
+    else {
+      const src = a === 'fqdn-all' ? unnamed : unnamedSelected
+      setLookup({ kind: 'reverse_ip', subjects: src.map(addressOf) })
+    }
+  }
+
+  const onRowAction = (t: Target, a: RowAction) => {
+    if (a === 'nmap') setNmapOn([t.host])
+    else if (a === 'find-hostname') {
+      setLookup({ kind: 'reverse_ip', subjects: [addressOf(t)] })
+    } else {
+      setLookup({ kind: 'nslookup', subjects: [t.host] })
+    }
+  }
+
+  const widths = useMemo(() => {
+    const kindLabel = (t: Target) =>
+      (t.kind === 'cloud' && t.provider ? t.provider : (t.kind ?? 'host'))
+    const widest = (f: (t: Target) => number) =>
+      rows.reduce((n, t) => Math.max(n, f(t)), 0)
+    return {
+      // "N/A" stands in for a mobile app in three of these columns, so
+      // it is part of the content even when no row is wide.
+      kind: fit('Type', Math.max(widest((t) => chipWidth(kindLabel(t))),
+                                 chipWidth('host'))),
+      ip: fit('IP Address', Math.max(
+        widest((t) => (t.kind === 'mobile' ? textWidth('N/A')
+                                           : textWidth(t.ip_address ?? ''))),
+        textWidth('255.255.255.255'))),
+      alive: fit('Alive', Math.max(chipWidth('DOWN'), textWidth('N/A'))),
+      hacked: fit('Hacked', chipWidth('PWNED') + 18),   // + the lamp and its gap
+      // An icon button, or the italic N/A a mobile row shows instead.
+      actions: fit('Action', Math.max(34, textWidth('N/A'))),
+    }
+  }, [rows])
 
   const columns: GridColDef<Target>[] = [
     {
@@ -59,7 +188,7 @@ export function TargetsView({ project }: { project: string | null }) {
       ),
     },
     {
-      field: 'kind', headerName: 'Type', width: 110,
+      field: 'kind', headerName: 'Type', width: widths.kind,
       type: 'singleSelect', valueOptions: ['host', 'mobile', 'cloud'],
       renderCell: (p) => {
         const c = p.value === 'mobile' ? neon.purple
@@ -78,7 +207,7 @@ export function TargetsView({ project }: { project: string | null }) {
     },
     { field: 'provider', headerName: 'Provider', width: 110,
       valueGetter: (v) => v ?? '' },
-    { field: 'ip_address', headerName: 'IP Address', flex: 1, minWidth: 130,
+    { field: 'ip_address', headerName: 'IP Address', width: widths.ip,
       valueGetter: (v) => v ?? '',
       // A mobile app has no address. "N/A" says that; a blank cell would
       // read as "not resolved yet", which is a claim about our coverage
@@ -94,7 +223,7 @@ export function TargetsView({ project }: { project: string | null }) {
     {
       // Tri-state. "Not probed" is shown as a dash, deliberately distinct from
       // a red DOWN: absence of a probe is not evidence the host is dead.
-      field: 'alive', headerName: 'Alive', width: 104,
+      field: 'alive', headerName: 'Alive', width: widths.alive,
       type: 'singleSelect', valueOptions: [
         { value: true, label: 'Up' }, { value: false, label: 'Down' },
       ],
@@ -128,8 +257,9 @@ export function TargetsView({ project }: { project: string | null }) {
       // Click to toggle: a lamp that lights red when the host is owned and
       // sits dark when it is not. This is the flag an operator flips most
       // often during an engagement, and making them open a dialog for it
-      // was the wrong trade.
-      field: 'hacked', headerName: 'Hacked', width: 116, type: 'boolean',
+      // was the wrong trade. It is also the ONLY way to set it now — the
+      // row action that duplicated it has gone.
+      field: 'hacked', headerName: 'Hacked', width: widths.hacked, type: 'boolean',
       renderCell: (p) => {
         const on = !!p.value
         const allowed = canWrite(p.row.project_code)
@@ -192,32 +322,16 @@ export function TargetsView({ project }: { project: string | null }) {
         <Box sx={{ color: neon.purple, fontSize: 11.5, letterSpacing: '0.06em' }}>{p.value}</Box>
       ) },
     {
-      field: 'actions', headerName: 'Action', width: 100, sortable: false, filterable: false,
-      renderCell: (p) => {
-        // Placeholder column, wired with the one action that is safe and
-        // reversible. Disabled for readonly so the UI matches what the API
-        // will actually permit, rather than offering a button that 403s.
-        const allowed = canWrite(p.row.project_code)
-        return (
-          <Tooltip title={allowed
-            ? (p.row.hacked ? 'Mark not pwned' : 'Mark pwned')
-            : 'Read-only on this project'}>
-            <span>
-              <IconButton size="small" disabled={!allowed}
-                onClick={() => patch.mutate({
-                  project: p.row.project_code, host: p.row.host,
-                  body: { hacked: !p.row.hacked },
-                })}
-                sx={{
-                  color: p.row.hacked ? neon.red : neon.muted,
-                  '&:hover': { color: neon.yellow, textShadow: glow(neon.yellow) },
-                }}>
-                <BoltIcon fontSize="small" />
-              </IconButton>
-            </span>
-          </Tooltip>
-        )
-      },
+      field: 'actions', headerName: 'Action', width: widths.actions,
+      sortable: false, filterable: false,
+      renderCell: (p) => (
+        <TargetRowActions
+          kind={p.row.kind}
+          hasIp={!!addressOf(p.row)}
+          hasName={hasName(p.row)}
+          allowed={canWrite(p.row.project_code)}
+          onPick={(a) => onRowAction(p.row, a)} />
+      ),
     },
   ]
 
@@ -229,8 +343,24 @@ export function TargetsView({ project }: { project: string | null }) {
       {detecting && project && (
         <DetectDomainsDialog project={project} onClose={() => setDetecting(false)} />
       )}
+      {scanningRanges && project && (
+        <ScanRangesDialog project={project} onClose={() => setScanningRanges(false)} />
+      )}
+      {nmapOn && project && (
+        <NmapScanDialog project={project} targets={nmapOn}
+          onClose={() => setNmapOn(null)} />
+      )}
+      {lookup && project && (
+        <LookupQueueDialog project={project} kind={lookup.kind}
+          subjects={lookup.subjects} onClose={() => setLookup(null)} />
+      )}
+      {picking && project && (
+        <FqdnPickerDialog project={project} rows={pending.data}
+          loading={pending.isLoading} error={pending.error as Error | null}
+          autoError={autoError} onClose={() => setPicking(false)} />
+      )}
       <DataTable
-        rows={data?.items ?? []}
+        rows={rows}
         columns={columns as GridColDef[]}
         loading={isLoading}
         error={error as Error | null}
@@ -239,14 +369,35 @@ export function TargetsView({ project }: { project: string | null }) {
         kind="targets"
         project={project}
         canWrite={writable}
+        onSelectionChange={setSelected}
         note={writable ? undefined : 'read-only'}
         extraActions={writable && project ? (
           <>
-            <Button size="small" variant="outlined" startIcon={<TravelExploreIcon sx={{ fontSize: 16 }} />}
-              onClick={() => setDetecting(true)}
-              sx={{ color: neon.green, borderColor: alpha(neon.green, 0.5), fontSize: 11, py: 0.3 }}>
-              Detect New Domains
-            </Button>
+            <EnumerateMenu onPick={onEnumerate}
+              selectedCount={selected.length}
+              unnamedCount={unnamed.length}
+              unnamedSelectedCount={unnamedSelected.length} />
+            {/* Shown whenever a lookup has come home with anything to
+                report, not only when there is a decision to take: a
+                lookup that found nothing, and one whose single answer
+                could not be applied, both need saying. The badge counts
+                only the decisions. */}
+            {(!!pending.data?.length || autoError) && (
+              <Tooltip title={choices.length
+                ? 'A reverse lookup returned more than one name for the same '
+                  + 'address. Only a person can say which is the right one.'
+                : 'Finished lookups, including ones that came back empty.'}>
+                <Badge badgeContent={choices.length} color="warning">
+                  <Button size="small" variant="outlined" onClick={() => setPicking(true)}
+                    sx={{ color: choices.length || autoError ? neon.yellow : neon.muted,
+                          borderColor: alpha(choices.length || autoError
+                            ? neon.yellow : neon.muted, 0.5),
+                          fontSize: 11, py: 0.3 }}>
+                    Lookup results
+                  </Button>
+                </Badge>
+              </Tooltip>
+            )}
             <Button size="small" variant="outlined" startIcon={<ScanIcon sx={{ fontSize: 16 }} />}
               onClick={() => setImporting(true)}
               sx={{ color: neon.cyan, borderColor: alpha(neon.cyan, 0.5), fontSize: 11, py: 0.3 }}>

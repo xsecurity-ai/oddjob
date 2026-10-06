@@ -906,4 +906,47 @@ export const api = {
   }) => req<{ user: User; invited: boolean; detail: string; grants: Acl[] }>(
     '/api/users/invite', { method: 'POST', body: JSON.stringify(b) }),
   // --- end user invites ---
+  // --- targets enumerate ---
+  // Shapes are written inline rather than as exported interfaces so the
+  // whole addition stays in one fenced block; other sessions are editing
+  // this file and a type declaration three hundred lines up is the part
+  // that does not merge. Consumers derive them with
+  // `Awaited<ReturnType<typeof api.enumeratePending>>[number]`.
+
+  /** Finished Jaws lookups whose answer the inventory does not carry yet.
+   *
+   *  The raw task output is not on TaskOut and should not be — the agent
+   *  list would then haul every scan's output — so the server reads it
+   *  and returns only the choice. Derived, never stored: applying one
+   *  makes it stop being returned. */
+  enumeratePending: (project: string) =>
+    req<Array<{
+      task_id: number
+      /** reverse_ip (address → names) or nslookup (name → addresses). */
+      kind: string
+      subject: string
+      target_host: string
+      field: 'host' | 'ip_address'
+      options: string[]
+      /** A source did not answer, so `options` is a floor, not a total. */
+      partial: boolean
+      note: string | null
+      finished_at: string | null
+    }>>('/api/enumerate/pending' + qs({ project })),
+
+  /** Write a chosen lookup answer onto the target. Refuses a rename that
+   *  would collide with another target rather than merging the two. */
+  enumerateResolve: (project: string, body: {
+    host: string; field: 'host' | 'ip_address'; value: string
+  }) =>
+    req<{ host: string; ip_address: string | null }>(
+      '/api/enumerate/resolve' + qs({ project }),
+      { method: 'POST', body: JSON.stringify(body) }),
+
+  /** The project's included CIDR scope, with how many targets sit in
+   *  each. `targets: 0` means nothing there has been looked at — which
+   *  is not the same claim as the range being empty. */
+  enumerateRanges: (project: string) =>
+    req<Array<{ value: string; kind: string; addresses: number; targets: number }>>(
+      '/api/enumerate/ranges' + qs({ project })),
 }

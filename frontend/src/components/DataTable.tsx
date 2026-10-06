@@ -41,6 +41,7 @@ function selectedIds(model: GridRowSelectionModel | undefined, rows: GridRowsPro
 export function DataTable({
   rows, columns, loading, error, initialSort, hiddenColumns, note,
   kind, project, canWrite = false, extraActions, tableId, server, getRowId,
+  onSelectionChange,
 }: {
   rows: GridRowsProp
   columns: GridColDef[]
@@ -68,6 +69,11 @@ export function DataTable({
    *  the browser is both slow and wrong, because a search would only
    *  ever see whatever subset had been fetched. */
   server?: ServerTable
+  /** Mirror of the grid's selection, for a view that acts on it.
+   *  Selection is owned here (see `ids` below) because driving the
+   *  grid's own model from React state never worked; a view that needs
+   *  the ids therefore cannot read them any other way. */
+  onSelectionChange?: (ids: number[]) => void
 }) {
   const qc = useQueryClient()
 
@@ -81,7 +87,11 @@ export function DataTable({
   // for the toolbar. Driving rowSelectionModel from React state fought MUI's
   // own model handling and nothing ever appeared ticked. `gen` bumps the
   // grid's key to clear the selection after an operation.
-  const [ids, setIds] = useState<number[]>([])
+  const [ids, setIdsState] = useState<number[]>([])
+  // One setter, so a view watching the selection also sees the clears
+  // that follow a delete or a bulk edit. Mirroring only the grid's own
+  // change event would leave it holding ids of rows that are gone.
+  const setIds = (next: number[]) => { setIdsState(next); onSelectionChange?.(next) }
 
   // Paging is ours in both modes, because the MIT DataGrid throws above
   // 100 rows a page. The grid is handed one page and `pageSize: -1`,
