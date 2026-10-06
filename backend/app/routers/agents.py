@@ -101,6 +101,8 @@ class AgentOut(BaseModel):
     target_os: str | None = None
     #: Whether the agent has completed the identity exchange. Until it
     #: has, it is enrolled but has never connected.
+    priority: int = 100
+    regions: list[str] = []
     has_identity: bool = False
     enrolled_pending: bool = False
     created_at: datetime | None = None
@@ -149,16 +151,43 @@ class RegisterIn(BaseModel):
     call_in_url: str | None = None
 
 
+class AgentPatch(BaseModel):
+    name: str | None = None
+    #: Lower runs first when the project is in primary mode.
+    priority: int | None = Field(None, ge=0, le=10000)
+    #: Comma-separated region labels, for geo routing.
+    regions: str | None = None
+    notes: str | None = None
+
+
+class RoutingIn(BaseModel):
+    mode: str = Field(description="mesh | primary | geo")
+
+
+class RoutingOut(BaseModel):
+    mode: str
+    #: In primary mode, who is actually serving right now. Derived from
+    #: live heartbeats, so this is an observation and not a setting.
+    current_primary: int | None = None
+    current_primary_name: str | None = None
+    eligible: int = 0
+    unassigned_tasks: int = 0
+
+
 class TaskIn(BaseModel):
     kind: str
     args: dict = {}
     #: Override the importer. Normally derived from `kind`.
     import_as: str | None = None
+    #: For a project routing by region: where this work must run from.
+    region: str | None = None
 
 
 class TaskOut(BaseModel):
     id: int
-    agent_id: int
+    #: Null while the task is in the project pool waiting for the
+    #: routing policy to pick an agent.
+    agent_id: int | None
     project_code: str
     kind: str
     args: dict = {}
@@ -166,6 +195,7 @@ class TaskOut(BaseModel):
     summary: str | None = None
     exit_code: int | None = None
     error: str | None = None
+    region: str | None = None
     import_as: str | None = None
     import_result: dict | None = None
     created_at: datetime | None = None
@@ -198,6 +228,7 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         call_in_url=a.call_in_url, last_seen=a.last_seen, last_ip=a.last_ip,
         queued_tasks=queued, running_tasks=running,
         connection_mode=a.connection_mode, target_os=a.target_os,
+        priority=a.priority, regions=sorted(_regions_of(a)),
         has_identity=bool(a.public_key),
         # Enrolled, token still good, never connected. Distinct from
         # "offline", which means it connected once and then stopped.
@@ -214,7 +245,8 @@ def _task_out(t: AgentTask, code: str) -> TaskOut:
     return TaskOut(
         id=t.id, agent_id=t.agent_id, project_code=code, kind=t.kind,
         args=j(t.args) or {}, status=t.status, summary=t.summary,
-        exit_code=t.exit_code, error=t.error, import_as=t.import_as,
+        exit_code=t.exit_code, error=t.error, region=t.region,
+        import_as=t.import_as,
         import_result=j(t.import_result), created_at=t.created_at,
         started_at=t.started_at, finished_at=t.finished_at)
 
@@ -227,6 +259,65 @@ def _stale(a: Agent) -> str:
     if seen and (datetime.now(timezone.utc) - seen) < OFFLINE_AFTER:
         return "online"
     return "offline"
+
+
+# ---------------------------------------------------------- dispatching
+JAWS_MODES = ("mesh", "primary", "geo")
+
+
+def _regions_of(a: Agent) -> set[str]:
+    return {r.strip().lower() for r in (a.regions or "").split(",") if r.strip()}
+
+
+async def _eligible_agents(session: AsyncSession, project_id: int) -> list[Agent]:
+    """Agents that could take work right now, best first.
+
+    Online and not disabled. Ordered by priority then id so the order
+    is total -- with ties broken arbitrarily, two agents could each
+    believe they are next.
+    """
+    rows = (await session.execute(
+        select(Agent).where(Agent.project_id == project_id,
+                            Agent.status != "disabled")
+        .order_by(Agent.priority, Agent.id))).scalars().all()
+    return [a for a in rows if _stale(a) == "online"]
+
+
+async def _may_claim(session: AsyncSession, project: Project, agent: Agent,
+                     task: AgentTask) -> bool:
+    """Whether this agent is the one that should run this task.
+
+    Called when an agent asks for work and an unassigned task is
+    waiting. The decision is made here, on each poll, rather than when
+    the task was queued -- which is what lets a primary failover or a
+    newly-arrived agent change the answer without anything having to
+    re-plan.
+    """
+    mode = (project.jaws_mode or "mesh").lower()
+
+    if mode == "geo":
+        want = (task.region or "").strip().lower()
+        if want:
+            # A task that names a region runs in that region or not at
+            # all. Falling back to "anyone" would quietly send work
+            # somewhere the operator deliberately excluded.
+            return want in _regions_of(agent)
+        # No region asked for: any eligible agent, as mesh.
+        return True
+
+    if mode == "primary":
+        eligible = await _eligible_agents(session, project.id)
+        if not eligible:
+            return False
+        # The election, such as it is: the best-ranked agent that is
+        # currently online. Nothing is stored, so a primary that stops
+        # heartbeating simply stops being the answer.
+        return eligible[0].id == agent.id
+
+    # mesh: first to ask. An agent mid-scan is not asking, so this
+    # spreads by actual capacity rather than by a count we would have
+    # to keep accurate.
+    return True
 
 
 # ------------------------------------------------------ server identity
@@ -438,16 +529,32 @@ async def list_agents(project: str | None = Query(None),
 
 
 @router.patch("/{agent_id}", response_model=AgentOut)
-async def set_agent(agent_id: int, enabled: bool = Query(...),
+async def set_agent(agent_id: int, body: AgentPatch | None = None,
+                    enabled: bool | None = Query(None),
                     pr: Project = Depends(require_project("admin")),
                     _: User = Depends(get_current_user),
                     session: AsyncSession = Depends(get_session)):
     a = await session.get(Agent, agent_id)
     if a is None or a.project_id != pr.id:
         raise HTTPException(404, "no such agent")
-    # Disabling is remembered; offline is recomputed from last_seen.
-    a.status = "offline" if enabled else "disabled"
+    if enabled is not None:
+        # Disabling is remembered; offline is recomputed from last_seen.
+        a.status = "offline" if enabled else "disabled"
+    if body is not None:
+        if body.name is not None:
+            a.name = body.name.strip() or a.name
+        if body.priority is not None:
+            a.priority = body.priority
+        if body.regions is not None:
+            # Normalised on the way in so "JP, eu " and "jp,eu" are the
+            # same thing when the dispatcher compares them.
+            a.regions = ",".join(
+                sorted({r.strip().lower() for r in body.regions.split(",")
+                        if r.strip()})) or None
+        if body.notes is not None:
+            a.notes = body.notes
     await session.commit()
+    await broker.publish("agents", action="update", project=pr.code)
     return _agent_out(a, pr.code)
 
 
@@ -494,33 +601,35 @@ async def kill_agent(agent_id: int,
 
 
 @router.delete("/{agent_id}", status_code=204)
-async def remove_agent(agent_id: int, force: bool = Query(False),
+async def remove_agent(agent_id: int,
                        pr: Project = Depends(require_project("admin")),
                        _: User = Depends(get_current_user),
                        session: AsyncSession = Depends(get_session)):
-    """Delete the record entirely. Takes its task history with it.
+    """Remove the agent record. Its task history is kept.
 
-    Refused by default when any task still holds tool output: that
-    output is the raw proof a scan ran and what it saw, and the FK
-    cascades, so one click would remove it with no copy anywhere. Kill
-    the agent instead, or pass force if the loss is intended.
+    The FK is SET NULL, not CASCADE: the tasks hold the raw output of
+    scans that ran against the client's estate, and losing that because
+    someone tidied up an agent list would be losing evidence.
+
+    Work the agent had taken but not finished is closed out here. It
+    can never report back -- the thing that was running it is gone --
+    and leaving it `claimed` would show an operator a scan that is
+    forever about to produce something.
     """
     a = await session.get(Agent, agent_id)
     if a is None or a.project_id != pr.id:
         raise HTTPException(404, "no such agent")
-    if not force:
-        held = (await session.execute(
-            select(func.count(AgentTask.id)).where(
+    for t in (await session.execute(
+            select(AgentTask).where(
                 AgentTask.agent_id == a.id,
-                AgentTask.output.is_not(None),
-                AgentTask.output != ""))).scalar_one()
-        if held:
-            raise HTTPException(
-                409, f"{a.name} has {held} task(s) still holding tool output, "
-                     f"which deleting would destroy. Kill the agent to stop "
-                     f"it and keep the evidence, or repeat with force=true.")
+                AgentTask.status.in_(("queued", "claimed", "running"))))).scalars():
+        t.status = "failed"
+        t.error = f"the agent {a.name} was deleted while this task was pending"
+        t.finished_at = datetime.now(timezone.utc)
+    await session.commit()
     await session.delete(a)
     await session.commit()
+    await broker.publish("agents", action="deleted", project=pr.code)
 
 
 @router.post("/{agent_id}/tasks", response_model=TaskOut, status_code=201)
@@ -555,6 +664,79 @@ async def create_task(agent_id: int, body: TaskIn,
 
     t = AgentTask(agent_id=a.id, project_id=pr.id, requested_by=user.id,
                   kind=body.kind, args=json.dumps(body.args or {}),
+                  region=(body.region or "").strip().lower() or None,
+                  import_as=body.import_as or TASK_KINDS.get(body.kind),
+                  status="queued")
+    session.add(t)
+    await session.commit()
+    await session.refresh(t)
+    await broker.publish("agents", action="task", project=pr.code)
+    return _task_out(t, pr.code)
+
+
+@router.get("/routing", response_model=RoutingOut)
+async def read_routing(pr: Project = Depends(require_project("readonly")),
+                       _: User = Depends(get_current_user),
+                       session: AsyncSession = Depends(get_session)):
+    eligible = await _eligible_agents(session, pr.id)
+    pending = (await session.execute(
+        select(func.count(AgentTask.id)).where(
+            AgentTask.project_id == pr.id, AgentTask.agent_id.is_(None),
+            AgentTask.status == "queued"))).scalar_one()
+    first = eligible[0] if eligible else None
+    mode = (pr.jaws_mode or "mesh").lower()
+    return RoutingOut(
+        mode=mode,
+        current_primary=first.id if (mode == "primary" and first) else None,
+        current_primary_name=first.name if (mode == "primary" and first) else None,
+        eligible=len(eligible), unassigned_tasks=pending)
+
+
+@router.put("/routing", response_model=RoutingOut)
+async def set_routing(body: RoutingIn,
+                      pr: Project = Depends(require_project("admin")),
+                      _: User = Depends(get_current_user),
+                      session: AsyncSession = Depends(get_session)):
+    mode = (body.mode or "").strip().lower()
+    if mode not in JAWS_MODES:
+        raise HTTPException(422, f"mode is one of {', '.join(JAWS_MODES)}")
+    pr.jaws_mode = mode
+    await session.commit()
+    await broker.publish("agents", action="routing", project=pr.code)
+    return await read_routing(pr=pr, _=_, session=session)
+
+
+@router.post("/tasks", response_model=TaskOut, status_code=201)
+async def create_pooled_task(body: TaskIn,
+                             pr: Project = Depends(require_project("user")),
+                             user: User = Depends(get_current_user),
+                             session: AsyncSession = Depends(get_session)):
+    """Queue work for the project rather than for a named agent.
+
+    This is what makes the routing modes mean anything: the task waits
+    unassigned until an agent asks for work and the policy says it is
+    the one. Queue against an agent directly when you specifically want
+    that agent -- a scan that must run from a particular vantage point
+    is a real requirement, and the policy does not override it.
+    """
+    if body.kind not in TASK_KINDS:
+        raise HTTPException(
+            422, f"unknown task kind {body.kind!r}. Known: "
+                 f"{', '.join(sorted(TASK_KINDS))}")
+    if body.kind == "install":
+        raise HTTPException(
+            422, "install is addressed to one agent, not to the pool — "
+                 "queue it against the agent you mean to change")
+    if (pr.jaws_mode or "mesh").lower() == "geo" and not (body.region or "").strip():
+        # Better refused than silently run from wherever answered first,
+        # which is the thing geo mode exists to prevent.
+        raise HTTPException(
+            422, "this project routes by region, so a pooled task needs "
+                 "`region` — or queue it against a specific agent")
+
+    t = AgentTask(agent_id=None, project_id=pr.id, requested_by=user.id,
+                  kind=body.kind, args=json.dumps(body.args or {}),
+                  region=(body.region or "").strip().lower() or None,
                   import_as=body.import_as or TASK_KINDS.get(body.kind),
                   status="queued")
     session.add(t)
@@ -749,10 +931,30 @@ async def heartbeat(request: Request, a: Agent = Depends(agent_even_if_killed),
                 "reason": "this agent was killed from Oddjob"}
     a.status = "online"
 
+    # Work addressed to this agent by name comes first: the operator
+    # chose it, and a routing policy should not second-guess that.
     t = (await session.execute(
         select(AgentTask).where(AgentTask.agent_id == a.id,
                                 AgentTask.status == "queued")
         .order_by(AgentTask.id).limit(1))).scalar_one_or_none()
+
+    if t is None:
+        # Then the project's pool, oldest first, subject to the routing
+        # policy. Walked rather than filtered in SQL because "is this
+        # agent the primary right now" is a question about live
+        # heartbeats, not a column.
+        project = await session.get(Project, a.project_id)
+        pool = (await session.execute(
+            select(AgentTask).where(AgentTask.project_id == a.project_id,
+                                    AgentTask.agent_id.is_(None),
+                                    AgentTask.status == "queued")
+            .order_by(AgentTask.id).limit(25))).scalars().all()
+        for cand in pool:
+            if project is not None and await _may_claim(session, project, a, cand):
+                cand.agent_id = a.id
+                t = cand
+                break
+
     task = None
     if t is not None:
         t.status = "claimed"

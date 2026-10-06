@@ -355,14 +355,132 @@ st, hb = raw("/api/agents/heartbeat", "POST", {},
 check("a killed agent is told to shut down, not merely refused",
       st == 200 and (hb or {}).get("shutdown") is True, f"status={st} {str(hb)[:100]}")
 
-print("== deleting must not quietly destroy evidence ==")
-st, _ = call(f"/api/agents/{AID}/tasks/{TID}/import?project=AGENT", "POST",
-             {"decisions": {"scanme.example.org": {"action": "add"}}}, token=admin)
-st, err = call(f"/api/agents/{AID}?project=AGENT", "DELETE", token=admin)
-check("delete is refused while tasks still hold tool output", st == 409,
-      f"status={st} {str(err)[:90]}")
-st, _ = call(f"/api/agents/{AID}?project=AGENT&force=true", "DELETE", token=admin)
-check("and goes through when the loss is stated outright", st == 204, f"status={st}")
+print("== deleting an agent must not destroy its evidence ==")
+# Those tasks hold real nmap output. The FK is SET NULL precisely so
+# this does not take it with it.
+st, before = call(f"/api/agents/{AID}/tasks?project=AGENT", token=admin)
+kept = [t["id"] for t in (before or []) if t.get("status") == "done"]
+check("the agent has finished work to lose", len(kept) > 0, str(len(kept)))
+
+st, _ = call(f"/api/agents/{AID}?project=AGENT", "DELETE", token=admin)
+check("delete goes through", st == 204, f"status={st}")
+
+# The services imported from that scan are the point: they must still
+# be there with the agent gone.
+st, svc = call("/api/services?project=AGENT&page_size=100", token=admin)
+rows = (svc or {}).get("items", svc) if isinstance(svc, (dict, list)) else []
+check("the findings it imported survive the agent",
+      len(rows) == 3 if isinstance(rows, list) else False, str(len(rows)))
+
+
+print("== routing across several agents ==")
+# Three agents, deliberately out of priority order, so "first" cannot
+# be an accident of insertion.
+fleet = {}
+for nm, prio, regions in (("tokyo", 50, "jp"), ("dublin", 10, "eu"),
+                          ("virginia", 20, "us-east")):
+    st, e = call("/api/agents?project=AGENT", "POST", {"name": nm}, token=admin)
+    pv, pb = keypair()
+    raw("/api/agents/enrol", "POST",
+        {"enrol_token": e["enrol_token"], "public_key": pb})
+    call(f"/api/agents/{e['agent']['id']}?project=AGENT", "PATCH",
+         {"priority": prio, "regions": regions}, token=admin)
+    fleet[nm] = {"id": e["agent"]["id"], "priv": pv}
+
+
+def beat(nm):
+    a = fleet[nm]
+    return raw("/api/agents/heartbeat", "POST", {},
+               headers=signed(a["priv"], a["id"], "POST",
+                              "/api/agents/heartbeat", json.dumps({}).encode()))
+
+
+def pooled(kind="nslookup", region=None, targets=("a.example",)):
+    body = {"kind": kind, "args": {"targets": list(targets)}}
+    if region:
+        body["region"] = region
+    return call("/api/agents/tasks?project=AGENT", "POST", body, token=admin)
+
+
+for nm in fleet:
+    beat(nm)  # all three now count as online
+
+st, r = call("/api/agents/routing?project=AGENT", token=admin)
+check("a project defaults to mesh", st == 200 and r["mode"] == "mesh", str(r)[:100])
+check("and sees all three as eligible", r["eligible"] == 3, str(r["eligible"]))
+
+print("-- mesh --")
+st, t = pooled()
+check("a pooled task is queued with no agent", st == 201 and t["agent_id"] is None,
+      f"status={st} agent={t.get('agent_id') if t else None}")
+st, hb = beat("tokyo")
+check("whoever asks first takes it",
+      (hb or {}).get("task", {}).get("id") == t["id"], str(hb)[:110])
+st, hb = beat("dublin")
+check("and it is not handed out twice", not (hb or {}).get("task"), str(hb)[:110])
+
+print("-- primary --")
+st, r = call("/api/agents/routing?project=AGENT", "PUT", {"mode": "primary"},
+             token=admin)
+check("mode switches to primary", st == 200 and r["mode"] == "primary", str(r)[:90])
+check("the lowest priority agent is primary",
+      r["current_primary_name"] == "dublin", str(r)[:140])
+
+st, t = pooled()
+st, hb = beat("tokyo")
+check("a non-primary is not given pooled work", not (hb or {}).get("task"),
+      str(hb)[:110])
+st, hb = beat("dublin")
+check("the primary is", (hb or {}).get("task", {}).get("id") == t["id"],
+      str(hb)[:110])
+
+st, _ = call(f"/api/agents/{fleet['dublin']['id']}/kill?project=AGENT", "POST",
+             {}, token=admin)
+beat("virginia"); beat("tokyo")
+st, r = call("/api/agents/routing?project=AGENT", token=admin)
+check("killing the primary elects the next by priority, with nothing stored",
+      r["current_primary_name"] == "virginia", str(r)[:140])
+st, t = pooled()
+st, hb = beat("virginia")
+check("and the new primary picks up the work",
+      (hb or {}).get("task", {}).get("id") == t["id"], str(hb)[:110])
+
+print("-- geo --")
+call("/api/agents/routing?project=AGENT", "PUT", {"mode": "geo"}, token=admin)
+st, err = pooled(region=None)
+check("in geo mode a pooled task without a region is refused", st == 422,
+      f"status={st} {str(err)[:100]}")
+
+st, t = pooled(region="jp")
+st, hb = beat("virginia")
+check("an agent outside the region does not get it", not (hb or {}).get("task"),
+      str(hb)[:110])
+st, hb = beat("tokyo")
+check("the agent serving that region does",
+      (hb or {}).get("task", {}).get("id") == t["id"], str(hb)[:110])
+
+st, t = pooled(region="antarctica")
+for nm in ("tokyo", "virginia"):
+    st2, hb = beat(nm)
+    check(f"{nm} refuses work for a region it does not serve",
+          not (hb or {}).get("task"), str(hb)[:90])
+st, r = call("/api/agents/routing?project=AGENT", token=admin)
+check("and the task is still visibly waiting, not quietly run elsewhere",
+      r["unassigned_tasks"] >= 1, str(r)[:120])
+
+st, _ = call("/api/agents/routing?project=AGENT", "PUT", {"mode": "anarchy"},
+             token=admin)
+check("an unknown routing mode is refused", st == 422, f"status={st}")
+
+print("-- a named agent still wins --")
+call("/api/agents/routing?project=AGENT", "PUT", {"mode": "primary"}, token=admin)
+st, direct = call(f"/api/agents/{fleet['tokyo']['id']}/tasks?project=AGENT", "POST",
+                  {"kind": "nslookup", "args": {"targets": ["b.example"]}},
+                  token=admin)
+st, hb = beat("tokyo")
+check("work addressed to an agent by name is not overridden by the policy",
+      (hb or {}).get("task", {}).get("id") == (direct or {}).get("id"),
+      str(hb)[:110])
 
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

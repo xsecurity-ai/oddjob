@@ -69,6 +69,25 @@ class Project(Base, TimestampMixin):
     #: codename is internal and is what the scan directories, the Slack
     #: channels and the operators are all named after.
     codename: Mapped[str | None] = mapped_column(String(64), index=True)
+
+    #: How work is spread when a project has more than one Jaws.
+    #:
+    #: mesh    — any online agent takes the next task. Whoever asks
+    #:           first gets it, which balances by capacity for free:
+    #:           a busy agent is not asking.
+    #: primary — one agent does the work and the others stand by. The
+    #:           primary is *derived*, not stored: the enabled, online
+    #:           agent with the lowest `priority`. So if it stops
+    #:           heartbeating the next one takes over on the next poll,
+    #:           with no leader record to go stale and no two agents
+    #:           able to believe they are primary at once.
+    #: geo     — a task is routed to an agent that serves its region.
+    #:           Regions are declared by the operator on both sides,
+    #:           not looked up: resolving a target address to a country
+    #:           would mean sending the client's addresses to a
+    #:           third-party geolocation service.
+    jaws_mode: Mapped[str] = mapped_column(
+        String(16), default="mesh", server_default="mesh")
     name: Mapped[str] = mapped_column(String(255))
     client: Mapped[str | None] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text)
@@ -997,6 +1016,16 @@ class Agent(Base, TimestampMixin):
     #: intent, that is the fact, and they are kept apart on purpose.
     target_os: Mapped[str | None] = mapped_column(String(16))
 
+    #: Lower goes first when the project is in `primary` mode. Ties
+    #: break on id, so the order is always total and two agents cannot
+    #: both consider themselves next.
+    priority: Mapped[int] = mapped_column(
+        Integer, default=100, server_default="100")
+    #: Comma-separated region labels this agent serves, for `geo` mode
+    #: — "jp", "eu", "us-east". Free text on purpose: the useful
+    #: division is the client's network, not a standard country list.
+    regions: Mapped[str | None] = mapped_column(String(255))
+
     #: What it reported about itself on registration.
     platform: Mapped[str | None] = mapped_column(String(32))     # linux|darwin|windows
     arch: Mapped[str | None] = mapped_column(String(16))
@@ -1036,12 +1065,26 @@ class AgentTask(Base, TimestampMixin):
     __table_args__ = (Index("ix_agent_tasks_agent_status", "agent_id", "status"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    agent_id: Mapped[int] = mapped_column(
-        ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+    #: Null while the task is waiting for the project's routing policy
+    #: to pick an agent. A task queued at the project rather than at a
+    #: named agent sits unassigned until one asks for work and is
+    #: eligible, which is what makes mesh, primary and geo possible
+    #: without a scheduler process.
+    #:
+    #: SET NULL rather than CASCADE: deleting an agent that had claimed
+    #: a task should return that task to the pool, not delete the
+    #: record of work that may already have run.
+    agent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), index=True)
     project_id: Mapped[int] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     requested_by: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"))
+
+    #: For `geo` routing: which region this work must run from. Set by
+    #: the operator, because the alternative is resolving the target's
+    #: address with a third-party service.
+    region: Mapped[str | None] = mapped_column(String(32))
 
     kind: Mapped[str] = mapped_column(String(32), index=True)
     args: Mapped[str | None] = mapped_column(Text)              # JSON
