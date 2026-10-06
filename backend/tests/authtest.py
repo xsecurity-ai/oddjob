@@ -401,4 +401,258 @@ if _m:
     check("a content-hashed asset is cached hard",
           _st == 200 and "immutable" in _cc, f"{_st} {_cc!r}")
 
+# =====================================================================
+# Creating an account from an email address.
+#
+# Two flows, decided by whether the site can send mail, and one rule that
+# holds in both: a collision is refused, never merged. Handing an
+# invitation to an account that already exists mails a working sign-in
+# link for somebody else's access to whoever was typed into the form.
+#
+# Ordered deliberately: the no-SMTP fallback is exercised first, because
+# once SMTP is configured there is no way back to that state within one
+# suite. Everything the rest of this file asserts has already run, so
+# turning mail on here cannot disturb it.
+# =====================================================================
+print("\n== new user: no SMTP, so the password flow, with the reason given ==")
+
+st, r = call("/api/users/invite", "POST", {"email": "nomail@acme.example"}, token=admin)
+check("email-only creation refused while there is no mail",
+      st == 409 and "SMTP is not configured" in str(r), f"status={st} {str(r)[:90]}")
+st, r = call("/api/users", token=admin)
+check("and the refusal created nothing",
+      not any(u["username"] == "nomail" for u in r),
+      str([u["username"] for u in r]))
+
+st, r = call("/api/users/invite", "POST",
+             {"email": "nomail@acme.example", "password": "fallback-password-1"}, token=admin)
+check("the password fallback creates the account", st == 201, f"status={st} {str(r)[:90]}")
+check("username derived from the address", r["user"]["username"] == "nomail", str(r)[:90])
+check("no invitation is claimed when none was sent",
+      r["invited"] is False and "no invitation sent" in r["detail"], str(r)[:120])
+st, r = call("/api/auth/login", "POST",
+             {"username": "nomail", "password": "fallback-password-1"})
+check("the fallback password works", st == 200, f"status={st}")
+
+st, r = call("/api/users/invite", "POST", {"email": "not-an-address"}, token=admin)
+check("a malformed address is refused", st == 422, f"status={st}")
+
+print("\n== configuring SMTP ==")
+# A throwaway SMTP sink, same shape as magictest's: asserting that we
+# *would* have sent an invitation proves nothing about whether the link
+# survives the trip.
+import re as _re2, socket as _sock2, threading as _thr, time as _time
+
+SMTP_PORT = int(os.environ.get("ODDJOB_TEST_SMTP_PORT", "8026"))
+INBOX: list[str] = []
+
+
+def _smtp_sink():
+    srv = _sock2.socket(_sock2.AF_INET, _sock2.SOCK_STREAM)
+    srv.setsockopt(_sock2.SOL_SOCKET, _sock2.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", SMTP_PORT)); srv.listen(5)
+    while True:
+        try:
+            c, _ = srv.accept()
+        except OSError:
+            return
+        _thr.Thread(target=_smtp_conn, args=(c,), daemon=True).start()
+
+
+def _smtp_conn(c):
+    f = c.makefile("rwb")
+    def say(s): c.sendall((s + "\r\n").encode())
+    say("220 localhost ESMTP test")
+    body, in_data = [], False
+    while True:
+        line = f.readline()
+        if not line:
+            break
+        txt = line.decode(errors="replace").rstrip("\r\n")
+        if in_data:
+            if txt == ".":
+                INBOX.append("\n".join(body)); body, in_data = [], False
+                say("250 OK")
+            else:
+                body.append(txt)
+            continue
+        up = txt.upper()
+        if up.startswith(("EHLO", "HELO")): say("250-localhost"); say("250 AUTH LOGIN PLAIN")
+        elif up.startswith(("MAIL", "RCPT")): say("250 OK")
+        elif up.startswith("AUTH"): say("235 OK")
+        elif up.startswith("DATA"): say("354 go ahead"); in_data = True
+        elif up.startswith("QUIT"): say("221 bye"); break
+        else: say("250 OK")
+    c.close()
+
+
+_thr.Thread(target=_smtp_sink, daemon=True).start()
+_time.sleep(0.4)
+
+SMTP_DRAFT = {"smtp.host": "127.0.0.1", "smtp.port": SMTP_PORT,
+              "smtp.security": "none", "smtp.from_address": "noreply@acme.example"}
+st, r = call("/api/settings/test/smtp", "POST",
+             {"values": SMTP_DRAFT, "to": "b@x.io"}, token=admin)
+check("smtp test passes against the sink", st == 200 and r["ok"] is True, str(r)[:110])
+st, r = call("/api/settings", "PATCH",
+             {"values": SMTP_DRAFT, "test_tokens": {"smtp": r.get("token")}}, token=admin)
+check("tested smtp values save", st == 200, f"status={st} {str(r)[:90]}")
+
+print("\n== new user: an address and nothing else ==")
+_n = len(INBOX)
+st, r = call("/api/users/invite", "POST",
+             {"email": "Someone.Else+oddjob@ACME.example", "full_name": "Someone Else"},
+             token=admin)
+check("an address alone creates the account", st == 201, f"status={st} {str(r)[:110]}")
+check("username is the local part, lowercased, +tag dropped",
+      r["user"]["username"] == "someone.else", str(r.get("user"))[:90])
+check("the address is stored lowercased",
+      r["user"]["email"] == "someone.else+oddjob@acme.example", str(r.get("user"))[:90])
+check("no password exists for anyone to intercept",
+      r["user"]["has_password"] is False, str(r.get("user"))[:90])
+check("the invitation is reported as sent",
+      r["invited"] is True and "someone.else+oddjob@acme.example" in r["detail"], str(r)[:120])
+_time.sleep(0.6)
+check("and it really was sent", len(INBOX) == _n + 1, f"inbox grew by {len(INBOX)-_n}")
+check("carrying a single-use sign-in link",
+      bool(_re2.search(r"/api/auth/magic/[A-Za-z0-9_\-]{20,}", INBOX[-1] if INBOX else "")),
+      (INBOX[-1][-120:] if INBOX else "empty inbox"))
+
+# The account exists but cannot be signed into until the link is redeemed
+# and a password is chosen: password_hash is NULL and /auth/login refuses
+# an account without one.
+st, r = call("/api/auth/login", "POST",
+             {"username": "someone.else", "password": "anything-at-all"})
+check("an invited account cannot be signed into before redemption", st == 401, f"status={st}")
+
+print("\n== collisions are refused, never merged ==")
+st, r = call("/api/users/invite", "POST", {"email": "someone.else@other.example"}, token=admin)
+check("a different address deriving a taken username is refused",
+      st == 409 and "already taken" in str(r), f"status={st} {str(r)[:110]}")
+check("and the refusal names a free alternative", "someone.else2" in str(r), str(r)[:120])
+st, r = call("/api/users", token=admin)
+check("no second account was created",
+      len([u for u in r if u["username"].startswith("someone.else")]) == 1,
+      str([u["username"] for u in r]))
+
+st, r = call("/api/users/invite", "POST",
+             {"email": "someone.else@other.example", "username": "else.someone"}, token=admin)
+check("an explicit username settles it",
+      st == 201 and r["user"]["username"] == "else.someone", f"status={st} {str(r)[:90]}")
+
+st, r = call("/api/users/invite", "POST",
+             {"email": "someone.else+oddjob@acme.example"}, token=admin)
+check("an address that already has an account is refused",
+      st == 409 and "already belongs to" in str(r), f"status={st} {str(r)[:110]}")
+
+# The important half of "never merged": a second invitation for an address
+# that is already here must not attach the grants it asked for to the
+# account that already owns it.
+st, r = call("/api/users/invite", "POST",
+             {"email": "nomail@acme.example",
+              "grants": [{"project": "FALCON-1", "role": "admin"}]}, token=admin)
+check("re-inviting an existing address does not re-use the account", st == 409, f"status={st}")
+st, r = call("/api/projects/FALCON-1/acl", token=admin)
+check("and grants nothing to it",
+      not any(a["username"] == "nomail" for a in r),
+      str([(a["username"], a["role"]) for a in r]))
+
+print("\n== project access, chosen in the same step ==")
+st, r = call("/api/users/invite", "POST", {
+    "email": "newbie@acme.example", "full_name": "New Bie",
+    "grants": [{"project": "FALCON-1", "role": "user"},
+               {"project": "OTHER", "role": "readonly"}]}, token=admin)
+check("a site admin may grant on any project", st == 201, f"status={st} {str(r)[:110]}")
+check("both grants come back",
+      sorted((g["project_code"], g["role"]) for g in r["grants"])
+      == [("FALCON-1", "user"), ("OTHER", "readonly")], str(r.get("grants")))
+st, r = call("/api/projects/FALCON-1/acl", token=admin)
+check("the grant is really on the project",
+      any(a["username"] == "newbie" and a["role"] == "user" for a in r),
+      str([(a["username"], a["role"]) for a in r]))
+
+st, r = call("/api/users/invite", "POST", {
+    "email": "bogus@acme.example",
+    "grants": [{"project": "FALCON-1", "role": "superuser"}]}, token=admin)
+check("a role that is not in ROLE_ORDER is refused", st == 422, f"status={st}")
+st, r = call("/api/users/invite", "POST", {
+    "email": "ghost@acme.example",
+    "grants": [{"project": "NO-SUCH-PROJECT", "role": "user"}]}, token=admin)
+check("an unknown project is 404", st == 404, f"status={st}")
+
+# Atomicity: the grants are all resolved before the account is created, so
+# a request with one bad entry leaves nothing behind. A half-applied
+# invitation is an account nobody asked for, named after a real person.
+st, r = call("/api/users/invite", "POST", {
+    "email": "partial@acme.example",
+    "grants": [{"project": "FALCON-1", "role": "user"},
+               {"project": "NO-SUCH-PROJECT", "role": "user"}]}, token=admin)
+check("one bad grant refuses the whole request", st == 404, f"status={st}")
+st, r = call("/api/users", token=admin)
+check("not even the account is created",
+      not any(u["username"] in ("partial", "bogus", "ghost") for u in r),
+      str([u["username"] for u in r]))
+
+print("\n== a project admin may only grant where they administer ==")
+# Created with a password even though SMTP works: supplying one is how a
+# caller says "I will hand this over myself", and it suppresses the email.
+st, r = call("/api/users/invite", "POST", {
+    "email": "pm@acme.example", "password": "pm-password-1",
+    "grants": [{"project": "FALCON-1", "role": "admin"}]}, token=admin)
+check("project admin created", st == 201, f"status={st} {str(r)[:110]}")
+check("a supplied password suppresses the invitation", r["invited"] is False, str(r)[:110])
+st, r = call("/api/auth/login", "POST", {"username": "pm", "password": "pm-password-1"})
+pm = r["access_token"]
+check("and signs in", st == 200, f"status={st}")
+
+st, r = call("/api/users/invite", "POST", {
+    "email": "friend@acme.example",
+    "grants": [{"project": "FALCON-1", "role": "user"}]}, token=pm)
+check("a project admin may bring someone onto their own project",
+      st == 201, f"status={st} {str(r)[:110]}")
+st, r = call("/api/projects/FALCON-1/acl", token=pm)
+check("and the grant lands",
+      any(a["username"] == "friend" and a["role"] == "user" for a in r),
+      str([(a["username"], a["role"]) for a in r]))
+
+# Not admin, but a member: 403, naming what they actually hold.
+st, _ = call("/api/projects/OTHER/acl", "POST", {"username": "pm", "role": "user"}, token=admin)
+st, r = call("/api/users/invite", "POST", {
+    "email": "intruder@acme.example",
+    "grants": [{"project": "OTHER", "role": "admin"}]}, token=pm)
+check("a project they are only a member of is refused",
+      st == 403 and "admin required on OTHER" in str(r), f"status={st} {str(r)[:110]}")
+
+# No access at all: 404 and not 403, so the endpoint cannot be used to
+# enumerate which project codes exist.
+st, _ = call("/api/projects", "POST", {"code": "THIRD", "name": "Third Engagement"}, token=admin)
+st, r = call("/api/users/invite", "POST", {
+    "email": "intruder@acme.example",
+    "grants": [{"project": "THIRD", "role": "readonly"}]}, token=pm)
+check("a project they cannot see at all is 404, not 403", st == 404, f"status={st}")
+
+st, r = call("/api/users/invite", "POST", {
+    "email": "intruder@acme.example",
+    "grants": [{"project": "FALCON-1", "role": "user"},
+               {"project": "THIRD", "role": "admin"}]}, token=pm)
+check("mixing a permitted grant with a forbidden one refuses both",
+      st == 404, f"status={st}")
+st, r = call("/api/users", token=admin)
+check("no account was created for any refused grant",
+      not any(u["username"] == "intruder" for u in r),
+      str([u["username"] for u in r]))
+
+st, r = call("/api/users/invite", "POST", {"email": "floating@acme.example"}, token=pm)
+check("a project admin cannot create an account with no grant at all",
+      st == 403, f"status={st} {str(r)[:110]}")
+
+st, r = call("/api/users/invite", "POST", {
+    "email": "byreader@acme.example",
+    "grants": [{"project": "FALCON-1", "role": "readonly"}]}, token=reader)
+check("a readonly member cannot create accounts at all",
+      st == 403 and "admin required on FALCON-1" in str(r), f"status={st} {str(r)[:110]}")
+
+st, r = call("/api/users/invite", "POST", {"email": "anon@acme.example"})
+check("and no credential at all is 401", st == 401, f"status={st}")
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

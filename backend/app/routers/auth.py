@@ -1,6 +1,8 @@
 """Login, users, groups, per-project ACLs and API keys."""
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -10,9 +12,9 @@ from ..headers import cookies_secure
 from ..db import get_session
 from ..events import broker
 from .. import slack
-from ..models import (ApiKey, Group, Project, ProjectACL,
+from ..models import (ApiKey, Group, Project, ProjectACL, ROLE_ORDER, ROLES,
                       SITE_ADMIN_GROUP, User)
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from ..schemas import (AclGrant, AclOut, ApiKeyCreated, ApiKeyOut, GroupCreate,
                        GroupOut, LoginRequest, LoginResponse, MeResponse,
@@ -21,6 +23,8 @@ from ..security import (COOKIE, TOKEN_TTL_HOURS, create_access_token,
                         effective_role, get_current_user, hash_password,
                         new_api_key, require_project, require_site_admin,
                         verify_password)
+from .magic import deliver_invite
+from .settings import load_all
 
 router = APIRouter(prefix="/api", tags=["auth"])
 
@@ -211,6 +215,241 @@ async def create_user(body: UserCreate, _: User = Depends(require_site_admin),
     u = (await session.execute(select(User).where(User.id == u.id))).scalar_one()
     await broker.publish("users", action="create")
     return UserOut.model_validate(u)
+
+
+# ------------------------------------------- invitation-driven creation
+#
+# The password flow above asks an administrator to invent a credential for
+# somebody else and then send it to them somehow. With mail configured there
+# is a better answer: create the account with NO password at all and email a
+# single-use link, so the first secret the account has is one its owner chose
+# and nobody else ever saw. `password_hash` stays NULL until then, and
+# /auth/login refuses an account with no hash, so the window between creation
+# and redemption is not a window anyone can sign in through.
+
+#: Everything a username may not contain. UserCreate allows letters, digits
+#: and . _ - ; anything else is FOLDED to a hyphen rather than deleted, so
+#: "a b@acme.example" and "ab@acme.example" do not derive the same name.
+_UNSAFE_IN_USERNAME = re.compile(r"[^a-z0-9._-]+")
+#: Deliberately crude. This is not an RFC 5321 parser — it rejects the
+#: typos (no @, no dot, stray spaces) and leaves the real verdict to
+#: whether the invitation arrives.
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$")
+
+
+def username_from_email(email: str) -> str:
+    """Derive an account name from an address.
+
+    The local part, lowercased, with any +tag dropped and anything outside
+    [a-z0-9._-] folded to a hyphen:
+
+        someone@acme.example              -> someone
+        Someone.Else+oddjob@acme.example  -> someone.else
+        "odd name"@acme.example           -> odd-name
+
+    The +tag goes because two addresses differing only by tag are one
+    mailbox, and carrying the tag into the name people see is noise.
+
+    This is a SUGGESTION. It is never applied over an existing account —
+    see the collision handling in `invite_user`.
+    """
+    local = email.split("@", 1)[0].lower().split("+", 1)[0]
+    name = _UNSAFE_IN_USERNAME.sub("-", local).strip("-._")[:64].strip("-._")
+    # An address whose whole local part is punctuation leaves nothing to
+    # name the account after. Better a dull name the admin can change than
+    # a 422 they cannot act on.
+    return name or "user"
+
+
+def _clean_username(v: str) -> str:
+    """Same rule as UserCreate, as an HTTP error rather than a 422 body."""
+    v = (v or "").strip().lower()
+    if not v or len(v) > 64:
+        raise HTTPException(422, "username must be 1-64 characters")
+    if not v.replace("-", "").replace("_", "").replace(".", "").isalnum():
+        raise HTTPException(422, "username may contain only letters, digits, . _ -")
+    return v
+
+
+async def _free_username(session: AsyncSession, base: str) -> str:
+    """A nearby unused name, for the error message only.
+
+    Suggested, never applied. Silently minting `alice2` for a second Alice
+    produces two accounts one keystroke apart, and whoever grants project
+    access later has no way to tell which one they are looking at.
+    """
+    for n in range(2, 100):
+        cand = f"{base[:64 - len(str(n))]}{n}"
+        if not (await session.execute(
+                select(User.id).where(User.username == cand))).first():
+            return cand
+    return ""
+
+
+class InviteGrant(BaseModel):
+    """One project the new account should get, and at what level."""
+    project: str
+    role: str
+
+    @field_validator("role")
+    @classmethod
+    def _r(cls, v: str) -> str:
+        # ROLE_ORDER is the real list; inventing names here is how a role
+        # that authorises nothing gets stored and silently denies everything.
+        v = (v or "").strip().lower()
+        if v not in ROLE_ORDER:
+            raise ValueError(f"role must be one of {', '.join(ROLES)}")
+        return v
+
+
+class UserInvite(BaseModel):
+    email: str
+    full_name: str | None = None
+    #: Only needed to settle a collision. Normally the server derives it.
+    username: str | None = None
+    #: The fallback for a deployment with no mail: an invitation cannot be
+    #: sent, so somebody has to set a first password out of band. Supplying
+    #: one also suppresses the email when SMTP *is* configured — the caller
+    #: has chosen to hand the credential over themselves.
+    password: str | None = Field(default=None, min_length=8)
+    grants: list[InviteGrant] = []
+
+
+class UserInvited(BaseModel):
+    user: UserOut
+    #: Whether the email actually went out. False is not a failure of the
+    #: creation — the account and its grants exist either way — so `detail`
+    #: says what happened and the Invite button on the row retries it.
+    invited: bool
+    detail: str
+    grants: list[AclOut] = []
+
+
+async def _resolve_grants(session: AsyncSession, actor: User,
+                          grants: list[InviteGrant]) -> list[tuple[Project, str]]:
+    """Resolve requested grants, refusing any the caller does not administer.
+
+    THIS is the control. The picker in the dialog only offers projects the
+    caller administers, but that is a convenience: a caller who posts a
+    project code straight at this endpoint gets the same answer. A site
+    admin passes because effective_role returns "admin" everywhere.
+
+    Every grant is checked BEFORE the account exists, so one bad entry
+    creates nothing. A half-applied invitation would leave an account
+    nobody asked for, named after a real person, with no record of why.
+    """
+    out: list[tuple[Project, str]] = []
+    seen: set[int] = set()
+    for g in grants:
+        code = g.project.strip().upper().replace(" ", "-")
+        pr = (await session.execute(
+            select(Project).where(Project.code == code))).scalar_one_or_none()
+        role = await effective_role(session, actor, pr.id) if pr else None
+        if pr is None or role is None:
+            # 404 and not 403, matching require_project: confirming that a
+            # project exists to someone with no access is itself disclosure.
+            raise HTTPException(404, f"no project {g.project!r}")
+        if ROLE_ORDER[role] < ROLE_ORDER["admin"]:
+            raise HTTPException(
+                403, f"admin required on {pr.code} to grant access; you have {role}")
+        if pr.id in seen:
+            raise HTTPException(422, f"{pr.code} is listed twice")
+        seen.add(pr.id)
+        out.append((pr, g.role))
+    return out
+
+
+@router.post("/users/invite", response_model=UserInvited, status_code=201)
+async def invite_user(body: UserInvite, actor: User = Depends(get_current_user),
+                      session: AsyncSession = Depends(get_session)):
+    """Create an account from an email address and invite its owner to it.
+
+    Who may call this:
+
+      site admin      anyone, with or without project grants.
+      project admin   only together with at least one grant on a project
+                      they administer. They can already grant any existing
+                      account access to their own projects, so the power
+                      added is "bring someone new in", not "reach a project
+                      I could not reach" — and an account with no grant at
+                      all is a site-wide object, which stays site-admin work.
+
+    Collisions are refused, never merged. Attaching an invitation to an
+    account that already exists would mail a working sign-in link for
+    somebody else's access to whoever was named on this form.
+    """
+    email = (body.email or "").strip().lower()
+    if not _EMAIL.match(email):
+        raise HTTPException(422, "a valid email address is required")
+    if not actor.is_site_admin and not body.grants:
+        raise HTTPException(
+            403, "only a site administrator may create an account with no project grant")
+
+    grants = await _resolve_grants(session, actor, body.grants)
+
+    cfg = await load_all(session)
+    if not cfg.get("smtp.host") and not body.password:
+        raise HTTPException(
+            409, "no invitation can be sent because SMTP is not configured — "
+                 "set a password for this account, or configure email in Site Config")
+
+    # Address collision. Almost always an admin re-inviting somebody who is
+    # already here; point them at the button that does that rather than
+    # creating a second account for one mailbox.
+    taken = (await session.execute(select(User).where(
+        func.lower(User.email) == email))).scalar_one_or_none()
+    if taken:
+        raise HTTPException(
+            409, f"{email} already belongs to {taken.username!r} — use Invite on "
+                 f"that account to send them a fresh sign-in link")
+
+    derived = username_from_email(email)
+    username = _clean_username(body.username) if body.username else derived
+    clash = (await session.execute(
+        select(User).where(User.username == username))).scalar_one_or_none()
+    if clash:
+        hint = await _free_username(session, username)
+        raise HTTPException(
+            409, f"the username {username!r} is already taken by another account"
+                 + (f"; choose a different one, for example {hint!r}" if hint else ""))
+
+    u = User(username=username, email=email, full_name=body.full_name or None,
+             password_hash=hash_password(body.password) if body.password else None)
+    session.add(u)
+    try:
+        await session.commit()
+    except IntegrityError:
+        # Two invitations raced onto the same name. The unique index is the
+        # real guard; the lookup above is only the friendly path.
+        await session.rollback()
+        raise HTTPException(409, f"user {username!r} already exists")
+
+    acls = [ProjectACL(project_id=pr.id, user_id=u.id, role=role)
+            for pr, role in grants]
+    if acls:
+        # No upsert dance: the account was created a moment ago, so it
+        # cannot already hold a grant on anything.
+        session.add_all(acls)
+        await session.commit()
+        for (pr, role), a in zip(grants, acls):
+            await broker.publish("acl", action="grant", project=pr.code)
+            await slack.announce(session, pr, slack.user_joined(u.username, role))
+
+    if body.password:
+        result_ok, detail = False, "account created with a password; no invitation sent"
+    else:
+        r = await deliver_invite(session, u, cfg)
+        result_ok, detail = r.ok, r.detail
+
+    # Re-select so `groups` is loaded; see create_user for why touching it
+    # from inside Pydantic on a fresh instance blows up.
+    u = (await session.execute(select(User).where(User.id == u.id))).scalar_one()
+    await broker.publish("users", action="create")
+    return UserInvited(
+        user=UserOut.model_validate(u), invited=result_ok, detail=detail,
+        grants=[AclOut(id=a.id, project_code=pr.code, role=a.role,
+                       username=u.username)
+                for (pr, _role), a in zip(grants, acls)])
 
 
 @router.patch("/users/{username}", response_model=UserOut)

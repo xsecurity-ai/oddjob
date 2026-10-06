@@ -1,8 +1,7 @@
 import { useState } from 'react'
 import {
-  Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle,
-  Divider, IconButton, MenuItem, Paper, Select, Stack, TextField, Tooltip,
-  Typography, alpha,
+  Alert, Box, Button, Chip, Divider, IconButton, MenuItem, Paper, Select,
+  Stack, Tooltip, Typography, alpha,
 } from '@mui/material'
 import DeleteIcon from '@mui/icons-material/DeleteOutline'
 import PersonAddIcon from '@mui/icons-material/PersonAddAlt'
@@ -11,6 +10,7 @@ import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { neon, glow } from '../theme'
 import { sorted, sortedStrings } from '../lib/sortOptions'
+import { NewUserDialog, ROLES } from '../components/NewUserDialog'
 
 /**
  * Two audiences, one screen, scoped by what you actually hold:
@@ -21,8 +21,12 @@ import { sorted, sortedStrings } from '../lib/sortOptions'
  *                   account list, only the picker (username and name), and
  *                   the server enforces both — this component hides what it
  *                   cannot use rather than being the thing that protects it.
+ *
+ * Both can bring somebody new in, and the same rule applies to the new
+ * account's grants as to anyone else's: only on a project you administer.
+ * `adminProjects` is what the dialog offers; `invite_user` on the server is
+ * what decides.
  */
-const ROLES = ['readonly', 'user', 'admin'] as const
 const ROLE_COLOUR: Record<string, string> = {
   admin: neon.pink, user: neon.cyan, readonly: neon.muted,
 }
@@ -205,16 +209,28 @@ export function UsersView() {
 
         {/* ---------------- project membership ---------------- */}
         <Card title="Project membership" action={
-          <Select size="small" value={project} onChange={(e) => setProject(e.target.value)}
-            displayEmpty sx={{ minWidth: 190, height: 30, fontSize: 12, color: neon.cyan,
-              '.MuiOutlinedInput-notchedOutline': { borderColor: alpha(neon.cyan, 0.4) } }}>
-            {sortedStrings(isSiteAdmin ? Object.keys(me?.projects ?? {}) : adminProjects).map((c) => (
-              <MenuItem key={c} value={c} sx={{ fontSize: 12 }}>{c}</MenuItem>
-            ))}
-            {!isSiteAdmin && adminProjects.length === 0 && (
-              <MenuItem value="" sx={{ fontSize: 12 }}>no projects you administer</MenuItem>
+          <Stack direction="row" spacing={1} alignItems="center">
+            {/* A project admin has no Accounts card to hold the button, but
+                the server lets them invite someone as long as the new
+                account lands on a project they administer. */}
+            {!isSiteAdmin && adminProjects.length > 0 && (
+              <Button size="small" variant="outlined" startIcon={<PersonAddIcon />}
+                onClick={() => setNewUser(true)}
+                sx={{ color: neon.green, borderColor: alpha(neon.green, 0.5), fontSize: 11 }}>
+                New user
+              </Button>
             )}
-          </Select>
+            <Select size="small" value={project} onChange={(e) => setProject(e.target.value)}
+              displayEmpty sx={{ minWidth: 190, height: 30, fontSize: 12, color: neon.cyan,
+                '.MuiOutlinedInput-notchedOutline': { borderColor: alpha(neon.cyan, 0.4) } }}>
+              {sortedStrings(isSiteAdmin ? Object.keys(me?.projects ?? {}) : adminProjects).map((c) => (
+                <MenuItem key={c} value={c} sx={{ fontSize: 12 }}>{c}</MenuItem>
+              ))}
+              {!isSiteAdmin && adminProjects.length === 0 && (
+                <MenuItem value="" sx={{ fontSize: 12 }}>no projects you administer</MenuItem>
+              )}
+            </Select>
+          </Stack>
         }>
           {!project ? (
             <Typography sx={{ fontSize: 12.5, color: neon.muted }}>
@@ -281,9 +297,22 @@ export function UsersView() {
         </Card>
       </Stack>
 
-      {newUser && <NewUserDialog onClose={() => setNewUser(false)}
-                                 onDone={() => { setNewUser(false); refresh() }}
-                                 onError={fail} />}
+      {newUser && (
+        <NewUserDialog
+          projects={adminProjects}
+          // Mirrors the server: a site admin may create a floating account,
+          // a project admin may only bring someone onto their own project.
+          requireGrant={!isSiteAdmin}
+          onClose={() => setNewUser(false)}
+          onDone={(text) => {
+            setNewUser(false)
+            // The server's own sentence, not a cheerful substitute: it says
+            // whether the invitation actually went out, and "account created
+            // but the mail failed" must not read as a clean success.
+            setMsg({ kind: 'ok', text })
+            refresh()
+          }} />
+      )}
     </Box>
   )
 }
@@ -293,54 +322,3 @@ const chip = (c: string, a = 0.14) => ({
   border: `1px solid ${alpha(c, 0.5)}`,
 })
 
-function NewUserDialog({ onClose, onDone, onError }: {
-  onClose: () => void; onDone: () => void; onError: (e: unknown) => void
-}) {
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
-  const [email, setEmail] = useState('')
-  const [fullName, setFullName] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  const submit = async () => {
-    setBusy(true)
-    try {
-      await api.createUser({ username, password, email: email || undefined,
-                             full_name: fullName || undefined })
-      onDone()
-    } catch (e) { onError(e) } finally { setBusy(false) }
-  }
-
-  return (
-    <Dialog open onClose={onClose} maxWidth="xs" fullWidth
-      slotProps={{ paper: { sx: { backgroundColor: alpha(neon.paper, 0.97),
-        backgroundImage: 'none', border: `1px solid ${alpha(neon.cyan, 0.45)}` } } }}>
-      <DialogTitle sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 13,
-                         letterSpacing: '0.14em', color: neon.cyan }}>NEW USER</DialogTitle>
-      <DialogContent>
-        <Stack spacing={2} sx={{ mt: 0.5 }}>
-          <TextField size="small" label="Username" value={username} required
-            onChange={(e) => setUsername(e.target.value)}
-            slotProps={{ htmlInput: { autoCapitalize: 'none' } }} />
-          <TextField size="small" label="Full name" value={fullName}
-            onChange={(e) => setFullName(e.target.value)} />
-          <TextField size="small" label="Email" type="email" value={email}
-            onChange={(e) => setEmail(e.target.value)} />
-          <TextField size="small" label="Password" type="password" value={password} required
-            onChange={(e) => setPassword(e.target.value)}
-            helperText="At least 8 characters. The user can change it from their profile." />
-          <Typography sx={{ fontSize: 10.5, color: alpha(neon.muted, 0.85) }}>
-            A new account joins no groups and no projects. Grant it access below once created.
-          </Typography>
-        </Stack>
-      </DialogContent>
-      <DialogActions sx={{ px: 3, pb: 2 }}>
-        <Button onClick={onClose} sx={{ color: neon.muted }}>Cancel</Button>
-        <Button onClick={submit} variant="outlined" disabled={busy || !username || password.length < 8}
-          sx={{ color: neon.cyan, borderColor: alpha(neon.cyan, 0.6) }}>
-          {busy ? '…' : 'Create'}
-        </Button>
-      </DialogActions>
-    </Dialog>
-  )
-}
