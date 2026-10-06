@@ -724,5 +724,48 @@ me = next((a for a in (rows or []) if a["id"] == AB), {})
 check("once idle and stale, it is offline again",
       me.get("status") == "offline", str(me.get("status")))
 
+
+print("== completed and failed counts ==")
+st, enc = call("/api/agents?project=AGENT", "POST", {"name": "counter"},
+               token=admin)
+AC, KC = enc["agent"]["id"], enc["callback_key"]
+call("/api/agents/register", "POST",
+     {"platform": "linux", "arch": "amd64"}, key=KC)
+
+
+def run_one(status):
+    st, t = call(f"/api/agents/{AC}/tasks?project=AGENT", "POST",
+                 {"kind": "nslookup", "args": {"targets": ["x.example"]}},
+                 token=admin)
+    call("/api/agents/heartbeat", "POST", {}, key=KC)
+    call(f"/api/agents/tasks/{t['id']}/result", "POST",
+         {"status": status, "output": "[]", "exit_code": 0 if status == "done" else 1},
+         key=KC)
+
+
+for _ in range(3):
+    run_one("done")
+for _ in range(2):
+    run_one("failed")
+
+st, rows = call("/api/agents?project=AGENT", token=admin)
+me = next((a for a in (rows or []) if a["id"] == AC), {})
+check("completed counts only what succeeded", me.get("completed_tasks") == 3,
+      str(me.get("completed_tasks")))
+check("and failures are counted separately, not folded in",
+      me.get("failed_tasks") == 2, str(me.get("failed_tasks")))
+# An agent that has completed nothing and failed everything is broken,
+# and a column showing only successes would render it as merely idle.
+check("the two are distinguishable, so a broken agent is visible",
+      me.get("completed_tasks") != me.get("failed_tasks"),
+      f"{me.get('completed_tasks')} / {me.get('failed_tasks')}")
+st, fresh = call("/api/agents?project=AGENT", "POST", {"name": "never-run"},
+                 token=admin)
+st, rows = call("/api/agents?project=AGENT", token=admin)
+nr = next((a for a in (rows or []) if a["id"] == fresh["agent"]["id"]), {})
+check("an agent that has run nothing counts nothing",
+      nr.get("completed_tasks") == 0 and nr.get("failed_tasks") == 0,
+      f"{nr.get('completed_tasks')} / {nr.get('failed_tasks')}")
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

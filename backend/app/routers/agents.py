@@ -108,6 +108,12 @@ class AgentOut(BaseModel):
     #: watching a scan wants to know something is happening, and
     #: "queued" does not say that.
     running_tasks: int = 0
+    #: Finished successfully.
+    completed_tasks: int = 0
+    #: Finished and did not. Reported alongside, because an agent that
+    #: has completed nothing and failed forty is broken, and a column
+    #: showing only successes would render it as merely idle.
+    failed_tasks: int = 0
     connection_mode: str = "callback"
     target_os: str | None = None
     #: Whether the agent has completed the identity exchange. Until it
@@ -250,7 +256,8 @@ def _jlist(raw: str | None) -> list[str]:
 
 
 def _agent_out(a: Agent, code: str, queued: int = 0,
-               running: int = 0) -> AgentOut:
+               running: int = 0, completed: int = 0,
+               failed: int = 0) -> AgentOut:
     return AgentOut(
         id=a.id, project_code=code, name=a.name, status=a.status,
         platform=a.platform, arch=a.arch, version=a.version,
@@ -258,6 +265,7 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         call_in_url=a.call_in_url, last_seen=a.last_seen, last_ip=a.last_ip,
         outbound_ip=a.outbound_ip, interfaces=_jlist(a.interfaces),
         queued_tasks=queued, running_tasks=running,
+        completed_tasks=completed, failed_tasks=failed,
         connection_mode=a.connection_mode, target_os=a.target_os,
         priority=a.priority, regions=sorted(_regions_of(a)),
         has_identity=bool(a.public_key),
@@ -637,7 +645,8 @@ async def list_agents(project: str | None = Query(None),
             select(AgentTask.agent_id, AgentTask.status,
                    func.count(AgentTask.id))
             .where(AgentTask.project_id == pr.id,
-                   AgentTask.status.in_(("queued", "claimed", "running")))
+                   AgentTask.status.in_(("queued", "claimed", "running",
+                                         "done", "failed")))
             .group_by(AgentTask.agent_id, AgentTask.status))).all()}
 
     out = []
@@ -646,7 +655,10 @@ async def list_agents(project: str | None = Query(None),
         # operator is waiting on it, which is what the column means.
         running = counts.get((a.id, "running"), 0) + counts.get((a.id, "claimed"), 0)
         a.status = _stale(a, running)
-        out.append(_agent_out(a, pr.code, counts.get((a.id, "queued"), 0), running))
+        out.append(_agent_out(
+            a, pr.code, counts.get((a.id, "queued"), 0), running,
+            completed=counts.get((a.id, "done"), 0),
+            failed=counts.get((a.id, "failed"), 0)))
     return out
 
 

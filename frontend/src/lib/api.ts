@@ -283,6 +283,11 @@ export interface JawsAgent {
   queued_tasks: number
   /** Taken by the agent and in flight, as distinct from waiting. */
   running_tasks: number
+  /** Finished successfully. */
+  completed_tasks: number
+  /** Finished and did not. An agent with no completions and forty
+   *  failures is broken, not idle. */
+  failed_tasks: number
   connection_mode: string
   target_os: string | null
   priority: number

@@ -476,6 +476,34 @@ export function JawsView({ project }: { project: string | null }) {
       ),
     },
     {
+      field: 'completed_tasks', headerName: 'Completed', width: 116,
+      renderCell: (p) => {
+        const done = p.value as number
+        const failed = p.row.failed_tasks
+        if (!done && !failed) {
+          return <Box component="span" sx={{ color: alpha(neon.muted, 0.4) }}>—</Box>
+        }
+        return (
+          <Stack direction="row" spacing={0.7} alignItems="baseline">
+            <Box sx={{ color: done ? neon.green : alpha(neon.muted, 0.5),
+                       fontWeight: done ? 600 : 400 }}>
+              {done}
+            </Box>
+            {failed > 0 && (
+              // Shown next to the successes, not hidden. An agent with
+              // nothing completed and a column of failures reads as
+              // idle unless the failures are on screen beside them.
+              <Tooltip title={`${failed} task(s) failed on this agent`}>
+                <Box sx={{ color: neon.red, fontSize: 11.5 }}>
+                  &minus;{failed}
+                </Box>
+              </Tooltip>
+            )}
+          </Stack>
+        )
+      },
+    },
+    {
       field: 'privileged', headerName: 'Raw sockets', width: 118,
       renderCell: (p) => {
         if (!p.row.hostname) {
