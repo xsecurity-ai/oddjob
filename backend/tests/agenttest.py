@@ -274,6 +274,90 @@ st, q = call("/api/agents/queue?project=AGENT", token=admin)
 check("so it is gone from the queue",
       DT not in [x["id"] for x in (q or [])], str(q)[:120])
 
+print("== a failed task goes back in the queue, twice ==")
+st, en5 = call("/api/agents?project=AGENT", "POST",
+               {"name": "flaky", "target_os": "linux"}, token=admin)
+FID = ((en5 or {}).get("agent") or {}).get("id")
+FKEY = (en5 or {}).get("callback_key")
+st, ft = call(f"/api/agents/{FID}/tasks?project=AGENT", "POST",
+              {"kind": "nslookup", "args": {"targets": ["flap.example"]}},
+              token=admin)
+FT = (ft or {}).get("id")
+
+
+def fail_once(note="the resolver timed out"):
+    call("/api/agents/heartbeat", "POST",
+         {"ready": True, "running_tasks": []}, key=FKEY)
+    return call(f"/api/agents/tasks/{FT}/result", "POST",
+                {"status": "failed", "output": "", "stderr": "",
+                 "summary": "failed", "exit_code": 1, "error": note},
+                key=FKEY)
+
+
+call("/api/agents/heartbeat", "POST", {"ready": True, "running_tasks": []},
+     key=FKEY)
+fail_once()
+st, rows = call("/api/agents/tasks?project=AGENT", token=admin)
+row = next((r for r in (rows or []) if r["id"] == FT), {})
+check("the first failure puts it back in the queue",
+      row.get("state") == "awaiting", str(row)[:160])
+check("counted as an attempt", row.get("attempts") == 1, str(row.get("attempts")))
+check("with a note saying what happened and that it was requeued",
+      "requeued" in (row.get("notes") or ""), str(row.get("notes"))[:120])
+check("and back in the POOL, not on the agent that just failed it",
+      row.get("agent_id") is None, str(row.get("agent_id")))
+
+fail_once()
+row = next((r for r in call("/api/agents/tasks?project=AGENT", token=admin)[1]
+            if r["id"] == FT), {})
+check("the second failure requeues it too", row.get("state") == "awaiting",
+      str(row)[:140])
+check("attempt two", row.get("attempts") == 2, str(row.get("attempts")))
+
+fail_once()
+row = next((r for r in call("/api/agents/tasks?project=AGENT", token=admin)[1]
+            if r["id"] == FT), {})
+check("the third failure stops: two retries, then it waits for a person",
+      row.get("state") == "failed", str(row)[:140])
+check("and says so rather than just going quiet",
+      "restart it by hand" in (row.get("notes") or ""),
+      str(row.get("notes"))[:160])
+
+print("-- a wrong request is not retried at all --")
+st, bt = call(f"/api/agents/{FID}/tasks?project=AGENT", "POST",
+              {"kind": "amass", "args": {"domain": "a.example"}}, token=admin)
+BT = (bt or {}).get("id")
+call("/api/agents/heartbeat", "POST", {"ready": True, "running_tasks": []},
+     key=FKEY)
+call(f"/api/agents/tasks/{BT}/result", "POST",
+     {"status": "failed", "output": "", "stderr": "", "summary": "failed",
+      "exit_code": 1, "error": "amass takes one domain per task; got 3"},
+     key=FKEY)
+row = next((r for r in call("/api/agents/tasks?project=AGENT", token=admin)[1]
+            if r["id"] == BT), {})
+# Retrying this somewhere else produces the same answer, more slowly.
+check("a failure about the request fails immediately",
+      row.get("state") == "failed", str(row)[:140])
+check("without burning a retry", row.get("attempts") == 1,
+      str(row.get("attempts")))
+check("and says it was not retryable",
+      "not retryable" in (row.get("notes") or ""), str(row.get("notes"))[:140])
+
+print("-- restarting one by hand --")
+st, back = call(f"/api/agents/tasks/{FT}/retry?project=AGENT", "POST", {}, token=admin)
+check("a failed task can be restarted", st == 200, f"status={st} {str(back)[:110]}")
+check("it is awaiting again", (back or {}).get("state") == "awaiting",
+      str(back)[:120])
+check("the counter resets — a person has judged it worth another go",
+      (back or {}).get("attempts") == 0, str((back or {}).get("attempts")))
+check("and the note keeps what went before",
+      "previously" in ((back or {}).get("notes") or ""),
+      str((back or {}).get("notes"))[:140])
+st, err = call(f"/api/agents/tasks/{FT}/retry?project=AGENT", "POST", {}, token=admin)
+check("restarting one that is already queued is refused", st == 409,
+      f"status={st}")
+call(f"/api/agents/{FID}/kill?project=AGENT", "POST", {}, token=admin)
+
 print("== the queue can be looked at and taken back out ==")
 st, t3 = call(f"/api/agents/tasks?project=AGENT", "POST",
               {"kind": "amass", "args": {"domain": "queued.example"}},
@@ -398,11 +482,23 @@ st, bad = call(f"/api/agents/tasks/{T3}/result", "POST",
 check("a failed result is accepted and kept", st == 200, f"status={st}")
 check("a failed result is not imported as a clean empty scan",
       not (bad or {}).get("imported"), str(bad)[:140])
-st, lst = call(f"/api/agents/{AID}/tasks?project=AGENT", token=admin)
+# The first failure sends it back to the POOL, so it is deliberately no
+# longer on the agent that failed it — which is where this used to look
+# for it. The project-wide list is the one that can see a pooled task.
+st, lst = call("/api/agents/tasks?project=AGENT", token=admin)
 row = next((t for t in (lst or []) if t["id"] == T3), {})
 check("and the failure is visible with its reason",
-      row.get("status") == "failed" and "-F" in (row.get("error") or ""),
-      f"{row.get('status')} / {str(row.get('error'))[:60]}")
+      "-F" in (row.get("notes") or ""), str(row.get("notes"))[:90])
+check("it went back in the queue rather than stopping on one failure",
+      row.get("state") == "awaiting" and row.get("agent_id") is None,
+      f"{row.get('state')} agent={row.get('agent_id')}")
+# Worth naming: a flag conflict fails identically on every agent, so
+# these two retries are spent for nothing. The bound exists because the
+# difference between "this agent" and "this request" is not reliably
+# visible from here, and spending two is the price of not needing to
+# classify every tool's argument errors.
+check("and is counted so it cannot go round forever",
+      row.get("attempts") == 1, str(row.get("attempts")))
 
 
 print("== Ed25519 identity ==")
@@ -941,12 +1037,25 @@ call("/api/agents/register", "POST",
 
 
 def run_one(status):
+    """Run one task to a settled state, so the counts have something to
+    count.
+
+    A retryable failure now goes back in the queue and belongs to no
+    agent while it waits, so it would not be counted against this one
+    — correctly. This test is about the counts, so it uses a failure
+    that sticks on the first attempt; the requeue path is covered
+    above, on its own.
+    """
     st, t = call(f"/api/agents/{AC}/tasks?project=AGENT", "POST",
                  {"kind": "nslookup", "args": {"targets": ["x.example"]}},
                  token=admin)
-    call("/api/agents/heartbeat", "POST", {}, key=KC)
+    call("/api/agents/heartbeat", "POST", {"ready": True, "running_tasks": []},
+         key=KC)
     call(f"/api/agents/tasks/{t['id']}/result", "POST",
-         {"status": status, "output": "[]", "exit_code": 0 if status == "done" else 1},
+         {"status": status, "output": "[]",
+          "exit_code": 0 if status == "done" else 1,
+          "error": None if status == "done"
+                   else "refused by the project's scope at dispatch: test"},
          key=KC)
 
 

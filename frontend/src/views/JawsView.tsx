@@ -17,6 +17,7 @@ import {
 import { useAuth } from '../lib/auth'
 import { DataTable } from '../components/DataTable'
 import { JawsQueueDialog } from '../components/JawsQueueDialog'
+import { JawsTasksTable } from '../components/JawsTasksTable'
 import { neon, glow } from '../theme'
 
 const STATUS_COLOUR: Record<string, string> = {
@@ -889,6 +890,18 @@ export function JawsView({ project }: { project: string | null }) {
           </Stack>
         }
       />
+
+      {/* Under the fleet, because the question it answers comes second:
+          what have I got, then what is it doing. */}
+      <Box sx={{ mt: 3 }}>
+        <Typography sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 12,
+                          letterSpacing: '0.14em', textTransform: 'uppercase',
+                          color: neon.cyan, textShadow: glow(neon.cyan, 0.4),
+                          mb: 1 }}>
+          Tasks
+        </Typography>
+        <JawsTasksTable project={project} />
+      </Box>
 
       {wizard && (
         <DeployWizard project={project} onClose={() => setWizard(false)} />

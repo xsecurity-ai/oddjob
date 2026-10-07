@@ -1232,6 +1232,16 @@ class AgentTask(Base, TimestampMixin):
 
     kind: Mapped[str] = mapped_column(String(32), index=True)
     args: Mapped[str | None] = mapped_column(Text)              # JSON
+    #: How many times an agent has tried and failed this.
+    #:
+    #: A failure is usually about the agent or the moment, not the
+    #: request — a container that died mid-scan, a resolver that timed
+    #: out, a host that was unreachable for a minute — so the task goes
+    #: back in the queue for somebody else to try. Bounded, because a
+    #: request that is simply wrong fails identically on every agent
+    #: and an unbounded retry would grind the queue on it forever.
+    attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0")
     status: Mapped[str] = mapped_column(
         String(16), default="queued", server_default="queued", index=True)
 

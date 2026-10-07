@@ -291,6 +291,31 @@ export interface UnknownHost {
 export interface HostDecision { action: 'add' | 'map' | 'reject'; target?: string }
 
 /** A Jaws instance. Bound to exactly one project, for its whole life. */
+/** A task as the tasks table shows it. Distinct from `JawsTask`,
+ *  which is the per-agent record: this one carries the pooled tasks
+ *  no agent owns, and the words an operator reads rather than the
+ *  words the column stores. */
+export interface JawsTaskRow {
+  id: number
+  kind: string
+  subject: string
+  /** awaiting | in progress | complete | failed. What an operator
+   *  reading a table means by the stored queued/claimed/running
+   *  /done/failed. */
+  state: string
+  raw_status: string
+  agent_id: number | null
+  agent_name: string | null
+  attempts: number
+  created_at: string | null
+  started_at: string | null
+  finished_at: string | null
+  /** Why it failed, or why it went back in the queue. Empty on a task
+   *  that behaved. */
+  notes: string | null
+  requested_by: string | null
+}
+
 export interface JawsAgent {
   id: number
   project_code: string
@@ -761,6 +786,18 @@ export const api = {
   rejectDomains: (project: string, ids: number[]) =>
     req<{ rejected: string[] }>('/api/domains/candidates/reject' + qs({ project }),
       { method: 'POST', body: JSON.stringify({ ids }) }),
+
+  /** Every task on the engagement, newest first. The per-agent list
+   *  answers "what has this scanner done"; this answers "what is
+   *  happening here", which is the question with a queue in it. */
+  jawsTasks: (project: string) =>
+    req<JawsTaskRow[]>('/api/agents/tasks' + qs({ project })),
+
+  /** Put a failed task back in the queue by hand. The automatic retry
+   *  stops after two; this is what happens once a person has looked. */
+  retryJawsTask: (project: string, id: number) =>
+    req<JawsTaskRow>(`/api/agents/tasks/${id}/retry` + qs({ project }),
+                  { method: 'POST' }),
 
   /** Everything waiting to run on this project, oldest first — the
    *  pool and work addressed to one agent that has not taken it. */

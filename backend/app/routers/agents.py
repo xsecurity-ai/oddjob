@@ -370,6 +370,38 @@ def _stale(a: Agent, in_flight: int = 0) -> str:
 SCOPED_KINDS = tuple(k for k in TASK_KINDS if k not in ("install",))
 
 
+#: How many times a failed task goes back in the queue before it waits
+#: for a person.
+#:
+#: Two. Most failures are about the agent or the moment — a container
+#: that died mid-scan, a resolver that timed out, a host unreachable
+#: for a minute — and another agent will simply succeed. The other
+#: kind fails identically everywhere, and the difference between them
+#: is not reliably visible from here, so the count is what stops a bad
+#: task grinding the queue forever. After that it is failed and stays
+#: failed until somebody restarts it, because at that point the thing
+#: that needs looking at is the task, not the fleet.
+MAX_RETRIES = 2
+
+#: Failures that say something about the REQUEST rather than the run.
+#: Retrying these on another agent produces the same result, more
+#: slowly, twice.
+_PERMANENT = (
+    "refused by the project's scope",
+    "out of scope",
+    "unknown task kind",
+    "not installable",
+    "takes one domain per task",
+    "takes one url per task",
+    "is an ip address",
+)
+
+
+def _retryable(error: str) -> bool:
+    low = (error or "").lower()
+    return not any(p in low for p in _PERMANENT)
+
+
 #: Task kinds whose output is a list of hostnames rather than a scan
 #: file. These do not go through the file importers — there is nothing
 #: to parse a format out of — so they get their own path below.
@@ -1407,6 +1439,116 @@ async def list_queue(limit: int = Query(200, le=1000),
     return out
 
 
+class TaskRow(BaseModel):
+    """One task, as the tasks table on the Jaws page shows it."""
+    id: int
+    kind: str
+    subject: str
+    #: awaiting | in progress | complete | failed. The stored words are
+    #: queued/claimed/running/done/failed; these are what an operator
+    #: reading a table means by them.
+    state: str
+    raw_status: str
+    agent_id: int | None = None
+    agent_name: str | None = None
+    attempts: int = 0
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    #: Why it failed, or why it went back in the queue. The one column
+    #: that is empty on a task that behaved.
+    notes: str | None = None
+    requested_by: str | None = None
+
+
+#: Stored status -> what the table says. `claimed` is "in progress":
+#: an agent has it and the operator is waiting on it, which is what
+#: they mean, and a separate word for "taken but not yet started"
+#: would be a distinction nobody is acting on.
+_STATE = {"queued": "awaiting", "claimed": "in progress",
+          "running": "in progress", "done": "complete", "failed": "failed"}
+
+
+@router.get("/tasks", response_model=list[TaskRow])
+async def list_project_tasks(limit: int = Query(500, ge=1, le=5000),
+                             pr: Project = Depends(require_project("readonly")),
+                             _: User = Depends(get_current_user),
+                             session: AsyncSession = Depends(get_session)):
+    """Every task on this engagement, newest first.
+
+    The per-agent list answers "what has this scanner done"; this
+    answers "what is happening on this engagement", which is the
+    question with a queue in it. Includes tasks no agent ever took,
+    which the per-agent view by definition cannot.
+    """
+    rows = (await session.execute(
+        select(AgentTask).where(AgentTask.project_id == pr.id)
+        .order_by(AgentTask.id.desc()).limit(limit))).scalars().all()
+    names = {a.id: a.name for a in (await session.execute(
+        select(Agent).where(Agent.project_id == pr.id))).scalars()}
+    who = {u.id: u.username for u in (await session.execute(
+        select(User).where(User.id.in_(
+            {t.requested_by for t in rows if t.requested_by})))).scalars()} \
+        if rows else {}
+    out = []
+    for t in rows:
+        args = json.loads(t.args) if t.args else {}
+        out.append(TaskRow(
+            id=t.id, kind=t.kind, subject=_subject(t.kind, args),
+            state=_STATE.get(t.status, t.status), raw_status=t.status,
+            agent_id=t.agent_id,
+            agent_name=names.get(t.agent_id) if t.agent_id else None,
+            attempts=t.attempts or 0,
+            created_at=t.created_at, started_at=t.started_at,
+            finished_at=t.finished_at, notes=t.error,
+            requested_by=who.get(t.requested_by)))
+    return out
+
+
+@router.post("/tasks/{task_id}/retry", response_model=TaskRow)
+async def retry_task(task_id: int,
+                     pr: Project = Depends(require_project("user")),
+                     user: User = Depends(get_current_user),
+                     session: AsyncSession = Depends(get_session)):
+    """Put a failed task back in the queue by hand.
+
+    The automatic retry stops after two, because a request that is
+    simply wrong fails the same way on every agent and would otherwise
+    grind the queue. This is the other side of that: once somebody has
+    looked at why, they can send it round again. The counter resets —
+    they have made a judgement the counter was standing in for.
+
+    Only a failed task. One that is queued is already going to run,
+    and one in flight would then exist twice.
+    """
+    t = await session.get(AgentTask, task_id)
+    if t is None or t.project_id != pr.id:
+        raise HTTPException(404, "no such task")
+    if t.status != "failed":
+        raise HTTPException(
+            409, f"task {task_id} is {_STATE.get(t.status, t.status)}, not "
+                 f"failed. Only a failed task can be restarted — this one is "
+                 f"either going to run or running now.")
+    was = t.error
+    t.status = "queued"
+    t.agent_id = None
+    t.attempts = 0
+    t.claimed_at = t.started_at = t.finished_at = None
+    t.output = t.stderr = t.summary = None
+    t.exit_code = None
+    t.error = f"restarted by {user.username}; previously: {was or 'failed'}"[:4000]
+    await session.commit()
+    await audit.record(session, "ui", "jaws.task.retry", user=user,
+                       project_code=pr.code,
+                       detail=f"restarted {t.kind} task {t.id}", commit=True)
+    await broker.publish("agents", action="task", project=pr.code)
+    return TaskRow(
+        id=t.id, kind=t.kind,
+        subject=_subject(t.kind, json.loads(t.args) if t.args else {}),
+        state="awaiting", raw_status="queued", attempts=0,
+        created_at=t.created_at, notes=t.error)
+
+
 @router.delete("/tasks/{task_id}", status_code=204)
 async def cancel_task(task_id: int,
                       pr: Project = Depends(require_project("user")),
@@ -1892,11 +2034,36 @@ async def submit_result(task_id: int, body: ResultIn,
     if t is None or t.agent_id != a.id:
         raise HTTPException(404, "no such task for this agent")
 
-    t.status = "done" if body.status == "done" else "failed"
     t.output, t.stderr = body.output, body.stderr
     t.summary, t.exit_code, t.error = body.summary, body.exit_code, body.error
-    t.finished_at = datetime.now(timezone.utc)
-    a.last_seen = t.finished_at
+    now = datetime.now(timezone.utc)
+    a.last_seen = now
+
+    requeued = False
+    if body.status == "done":
+        t.status = "done"
+        t.finished_at = now
+    else:
+        t.attempts = (t.attempts or 0) + 1
+        if t.attempts <= MAX_RETRIES and _retryable(body.error or ""):
+            # Back in the queue, and back in the POOL: the agent that
+            # just failed is the least likely to succeed, and leaving
+            # it addressed there is how a broken host retries its own
+            # failure twice more. An operator who addressed it on
+            # purpose keeps that; a pooled task stays pooled.
+            t.status = "queued"
+            t.agent_id = None
+            t.claimed_at = t.started_at = t.finished_at = None
+            t.error = (f"attempt {t.attempts} on {a.name} failed, requeued: "
+                       f"{(body.error or body.summary or 'no reason given')}")[:4000]
+            requeued = True
+        else:
+            t.status = "failed"
+            t.finished_at = now
+            why = ("not retryable" if not _retryable(body.error or "")
+                   else f"{t.attempts} attempts")
+            t.error = (f"{(body.error or body.summary or 'failed')} "
+                       f"[{why}; restart it by hand to try again]")[:4000]
     # The agent authenticates by key, not as a person, so the actor is
     # the agent's own name -- which is the honest answer to "who sent
     # this" and the one worth having when a result looks wrong.
@@ -1905,6 +2072,8 @@ async def submit_result(task_id: int, body: ResultIn,
                        project_code=(await session.get(Project, t.project_id)).code
                        if t.project_id else None,
                        detail=f"task {t.id} {t.status}"
+                              + (f" (requeued, attempt {t.attempts})"
+                                 if requeued else "")
                               + (f" exit={t.exit_code}" if t.exit_code is not None else "")
                               + (f" import={t.import_as}" if t.import_as else ""))
     await session.commit()
