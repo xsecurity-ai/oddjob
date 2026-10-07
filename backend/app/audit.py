@@ -80,10 +80,16 @@ def for_log(raw) -> str:
     Applied at the logging site rather than at each caller, because the
     callers are the part that keeps changing.
     """
-    s = str(raw)
-    out = "".join(ch if ch.isprintable() else "\\x%02x" % ord(ch)
-                  for ch in s)
-    return out[:200]
+    # The two line terminators go first and explicitly. A comprehension
+    # over str.isprintable() removes them just as thoroughly, but static
+    # analysis cannot see that it does — and a sanitiser a scanner
+    # cannot recognise means a real alert on every future caller, which
+    # is how a scanner gets ignored.
+    s = str(raw).replace("\r", "\\r").replace("\n", "\\n")
+    # Everything else unprintable — escapes, nulls, the terminal control
+    # characters that rewrite a line already on screen.
+    s = "".join(ch if ch.isprintable() else "\\x%02x" % ord(ch) for ch in s)
+    return s[:200]
 
 
 def scrub_path(raw: str) -> str:
