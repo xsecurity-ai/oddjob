@@ -729,6 +729,23 @@ export const api = {
     req<{ rejected: string[] }>('/api/domains/candidates/reject' + qs({ project }),
       { method: 'POST', body: JSON.stringify({ ids }) }),
 
+  /** Everything waiting to run on this project, oldest first — the
+   *  pool and work addressed to one agent that has not taken it. */
+  jawsQueue: (project: string) => req<Array<{
+    id: number; kind: string; subject: string
+    args: Record<string, unknown>
+    agent_id: number | null; agent_name: string | null
+    region: string | null; requested_by: string | null
+    created_at: string | null; status: string
+  }>>('/api/agents/queue' + qs({ project })),
+
+  /** Take a queued task back out. Refused once an agent has it: the
+   *  scan is already running and deleting the row would only lose the
+   *  result. */
+  cancelJawsTask: (project: string, id: number) =>
+    req<void>(`/api/agents/tasks/${id}` + qs({ project }),
+              { method: 'DELETE' }),
+
   agentStatus: (project: string) =>
     req<AgentStatus>('/api/agent/status' + qs({ project })),
   agentChat: (project: string, message: string, history: unknown[]) =>

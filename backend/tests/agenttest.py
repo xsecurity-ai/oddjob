@@ -130,6 +130,78 @@ st, hb2 = call("/api/agents/heartbeat", "POST", {}, key=KEY)
 check("a claimed task is not handed out twice",
       st == 200 and not (hb2 or {}).get("task"), str(hb2)[:140])
 
+print("== the queue is held until the agent says it is ready ==")
+# Agents beat throughout a scan now, so a beat is not a request for
+# work. A second task must stay in the queue while the first is out.
+st, t2 = call(f"/api/agents/{AID}/tasks?project=AGENT", "POST",
+              {"kind": "nslookup", "args": {"targets": ["example.org"]}},
+              token=admin)
+T2 = (t2 or {}).get("id")
+check("a second task is queued", st == 201, f"status={st}")
+
+st, hb3 = call("/api/agents/heartbeat", "POST",
+               {"ready": False, "running_task": TID}, key=KEY)
+check("an agent that says it is busy is given nothing",
+      st == 200 and not (hb3 or {}).get("task"), str(hb3)[:140])
+check("and is told what it is still holding",
+      TID in ((hb3 or {}).get("holding") or []), str(hb3)[:140])
+
+st, agl = call(f"/api/agents?project=AGENT", token=admin)
+me = next((x for x in agl if x["id"] == AID), {})
+check("the second task shows as queued against it",
+      me.get("queued_tasks") == 1, str(me.get("queued_tasks")))
+check("while the first shows as in flight",
+      me.get("running_tasks") == 1, str(me.get("running_tasks")))
+
+# An old agent sends no body at all. It must not be handed a second
+# task either, or the guard would be opt-in by the thing it guards.
+st, hb4 = call("/api/agents/heartbeat", "POST", {}, key=KEY)
+check("an agent that says nothing is still held, not trusted",
+      st == 200 and not (hb4 or {}).get("task"), str(hb4)[:140])
+
+st, _ = call(f"/api/agents/tasks/{TID}/result", "POST",
+             {"status": "done", "output": "{}", "stderr": "",
+              "summary": "done", "exit_code": 0}, key=KEY)
+st, hb5 = call("/api/agents/heartbeat", "POST", {"ready": True}, key=KEY)
+check("once the first is reported, the next is handed over",
+      (hb5 or {}).get("task", {}).get("id") == T2, str(hb5)[:140])
+st, _ = call(f"/api/agents/tasks/{T2}/result", "POST",
+             {"status": "done", "output": "[]", "stderr": "",
+              "summary": "done", "exit_code": 0}, key=KEY)
+
+print("== the queue can be looked at and taken back out ==")
+st, t3 = call(f"/api/agents/tasks?project=AGENT", "POST",
+              {"kind": "amass", "args": {"domain": "queued.example"}},
+              token=admin)
+T3 = (t3 or {}).get("id")
+check("a pooled task is queued", st == 201, f"status={st} {str(t3)[:110]}")
+
+st, queue = call("/api/agents/queue?project=AGENT", token=admin)
+check("the queue lists it", st == 200
+      and T3 in [q["id"] for q in (queue or [])], str(queue)[:160])
+row = next((q for q in (queue or []) if q["id"] == T3), {})
+check("saying what it will act on, not just its kind",
+      row.get("subject") == "queued.example", str(row)[:160])
+check("and that no agent owns it yet",
+      row.get("agent_id") is None and row.get("agent_name") is None, str(row)[:160])
+check("and who asked for it", row.get("requested_by") == "root", str(row)[:160])
+
+st, _ = call(f"/api/agents/tasks/{T3}?project=AGENT", "DELETE", token=admin)
+check("a queued task can be cancelled", st == 204, f"status={st}")
+st, queue = call("/api/agents/queue?project=AGENT", token=admin)
+check("and leaves the queue", T3 not in [q["id"] for q in (queue or [])],
+      str(queue)[:140])
+
+# Deleting a row would not stop a scan that is already running on
+# somebody's network — it would only lose the result when it reports.
+st, err = call(f"/api/agents/tasks/{TID}?project=AGENT", "DELETE", token=admin)
+check("a task an agent already holds is not cancellable", st == 409,
+      f"status={st}")
+check("and says to kill the agent instead",
+      "kill the agent" in str(err).lower(), str(err)[:160])
+st, _ = call("/api/agents/tasks/999999?project=AGENT", "DELETE", token=admin)
+check("an unknown task is 404", st == 404, f"status={st}")
+
 print("== result delivery ==")
 st, _ = call(f"/api/agents/tasks/{TID}/start", "POST", {}, key=KEY)
 check("task marked running", st == 200, f"status={st}")
@@ -388,11 +460,41 @@ for nm, prio, regions in (("tokyo", 50, "jp"), ("dublin", 10, "eu"),
     fleet[nm] = {"id": e["agent"]["id"], "priv": pv}
 
 
-def beat(nm):
+#: What each agent in the fleet is still holding, so `beat` can model a
+#: real one. An agent reports its result and THEN asks for more; the
+#: server holds the queue until it does, so a harness that only ever
+#: beats would be testing a client that does not exist.
+holding: dict[str, int] = {}
+
+
+def finish(nm, status="done", output="[]"):
+    """Report whatever this agent is holding, as the real one would."""
+    tid = holding.pop(nm, None)
+    if tid is None:
+        return
     a = fleet[nm]
-    return raw("/api/agents/heartbeat", "POST", {},
-               headers=signed(a["priv"], a["id"], "POST",
-                              "/api/agents/heartbeat", json.dumps({}).encode()))
+    path = f"/api/agents/tasks/{tid}/result"
+    body = {"status": status, "output": output, "stderr": "",
+            "summary": "done", "exit_code": 0}
+    raw(path, "POST", body,
+        headers=signed(a["priv"], a["id"], "POST", path,
+                       json.dumps(body).encode()))
+
+
+def beat(nm, ready=True):
+    """Check in, having first reported anything outstanding."""
+    if ready:
+        finish(nm)
+    a = fleet[nm]
+    payload = {"ready": ready, "running_task": holding.get(nm, 0)}
+    st, hb = raw("/api/agents/heartbeat", "POST", payload,
+                 headers=signed(a["priv"], a["id"], "POST",
+                                "/api/agents/heartbeat",
+                                json.dumps(payload).encode()))
+    got = ((hb or {}).get("task") or {}).get("id")
+    if got:
+        holding[nm] = got
+    return st, hb
 
 
 def pooled(kind="nslookup", region=None, targets=("a.example",)):

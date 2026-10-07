@@ -245,11 +245,28 @@ func (c *Client) Register(ctx context.Context, r RegisterReq) (*RegisterResp, er
 	return &out, nil
 }
 
-func (c *Client) Heartbeat(ctx context.Context) (*HeartbeatResp, error) {
+// HeartbeatReq is what the agent says about itself when it checks in.
+//
+// It beats while it is WORKING as well as while it is idle — a scan can
+// run for the better part of an hour, and an agent that goes quiet for
+// that long is indistinguishable from one that died. So the beat cannot
+// also mean "give me work": readiness is stated here instead.
+type HeartbeatReq struct {
+	// Ready is false while a task is executing. The server holds the
+	// queue until it is true, so nothing is handed to an agent that is
+	// still busy with the last thing.
+	Ready bool `json:"ready"`
+	// RunningTask is what it is working on, 0 when idle. Lets the
+	// server tell "still going" from "died and came back", which are
+	// the same silence from the outside.
+	RunningTask int `json:"running_task,omitempty"`
+}
+
+func (c *Client) Heartbeat(ctx context.Context, req HeartbeatReq) (*HeartbeatResp, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var out HeartbeatResp
-	if err := c.do(ctx, http.MethodPost, "/api/agents/heartbeat", nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/api/agents/heartbeat", req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

@@ -59,6 +59,17 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 #: moment should not light up the console.
 OFFLINE_AFTER = timedelta(seconds=90)
 
+#: How long a task an agent is no longer working on stays claimed
+#: before it goes back in the queue.
+#:
+#: Generous on purpose. The only thing that must not happen is racing a
+#: result that is still in flight into a second run of the same scan
+#: against the client's estate, and ten minutes is far longer than any
+#: result POST while being far shorter than an engagement. A task
+#: stranded in `claimed` is otherwise stranded for good: nothing else
+#: reaps them.
+ABANDON_AFTER = timedelta(minutes=10)
+
 #: What an agent may be asked to install. An open-ended "install this
 #: package" instruction from the server is remote code execution with
 #: extra steps, and the agent runs privileged. The server can authorise
@@ -298,10 +309,12 @@ def _task_out(t: AgentTask, code: str) -> TaskOut:
 def _stale(a: Agent, in_flight: int = 0) -> str:
     """Offline is an observation, disabled is a decision, busy is neither.
 
-    `busy` exists because the agent runs one task at a time and does
-    not heartbeat while it is running one. A scan lasting longer than
-    OFFLINE_AFTER therefore made a perfectly healthy agent read as
-    offline — which is wrong on the screen and worse in `primary`
+    `busy` is "connected and working". Agents now beat throughout a
+    scan, so this is observed rather than inferred — but the inference
+    is kept as the fallback, because it is also what covers an agent
+    whose beats are being dropped mid-scan. Before either existed, a
+    scan lasting longer than OFFLINE_AFTER made a perfectly healthy
+    agent read as offline: wrong on the screen, and worse in `primary`
     routing, where it looked like the primary had died and handed the
     engagement to a standby in the middle of its scan.
 
@@ -1263,6 +1276,110 @@ async def create_pooled_task(body: TaskIn,
     return _task_out(t, pr.code)
 
 
+class QueuedOut(BaseModel):
+    """One waiting task, as the queue panel shows it."""
+    id: int
+    kind: str
+    #: What it will act on, shortened. The whole point of opening the
+    #: queue is to find the one submission that should not be there,
+    #: and "amass" twelve times over does not let anyone do that.
+    subject: str
+    args: dict = {}
+    #: None means the project pool: no agent owns it yet.
+    agent_id: int | None = None
+    agent_name: str | None = None
+    region: str | None = None
+    requested_by: str | None = None
+    created_at: datetime | None = None
+    #: queued everywhere here, but kept explicit so the panel can show
+    #: a task that started between the click and the render.
+    status: str = "queued"
+
+
+def _subject(kind: str, args: dict) -> str:
+    """The one phrase that says what a task is for."""
+    for key in ("domain", "url", "host"):
+        if args.get(key):
+            return str(args[key])
+    for key in ("targets", "domains", "urls"):
+        v = args.get(key)
+        if isinstance(v, list) and v:
+            head = ", ".join(str(x) for x in v[:3])
+            return head + (f" and {len(v) - 3} more" if len(v) > 3 else "")
+    if kind == "install":
+        return ", ".join(str(x) for x in (args.get("tools") or [])) or "tools"
+    return "—"
+
+
+@router.get("/queue", response_model=list[QueuedOut])
+async def list_queue(limit: int = Query(200, le=1000),
+                     pr: Project = Depends(require_project("readonly")),
+                     _: User = Depends(get_current_user),
+                     session: AsyncSession = Depends(get_session)):
+    """Everything waiting to run on this project, oldest first.
+
+    Both kinds of waiting: the project pool, which belongs to no agent
+    yet, and work addressed to one agent that has not picked it up. A
+    panel that showed only the pool would leave an operator unable to
+    find the task they actually want to cancel.
+
+    Oldest first, because that is the order it will run in and the
+    question is usually "what is in front of mine".
+    """
+    rows = (await session.execute(
+        select(AgentTask).where(AgentTask.project_id == pr.id,
+                                AgentTask.status == "queued")
+        .order_by(AgentTask.id).limit(limit))).scalars().all()
+    names = {a.id: a.name for a in (await session.execute(
+        select(Agent).where(Agent.project_id == pr.id))).scalars()}
+    who = {u.id: u.username for u in (await session.execute(
+        select(User).where(User.id.in_(
+            {t.requested_by for t in rows if t.requested_by}))))
+        .scalars()} if rows else {}
+    out = []
+    for t in rows:
+        args = json.loads(t.args) if t.args else {}
+        out.append(QueuedOut(
+            id=t.id, kind=t.kind, subject=_subject(t.kind, args),
+            args=args, agent_id=t.agent_id,
+            agent_name=names.get(t.agent_id) if t.agent_id else None,
+            region=t.region, requested_by=who.get(t.requested_by),
+            created_at=t.created_at, status=t.status))
+    return out
+
+
+@router.delete("/tasks/{task_id}", status_code=204)
+async def cancel_task(task_id: int,
+                      pr: Project = Depends(require_project("user")),
+                      user: User = Depends(get_current_user),
+                      session: AsyncSession = Depends(get_session)):
+    """Take a task back out of the queue.
+
+    Only while it is still waiting. A task an agent has already claimed
+    is running on somebody's network, and deleting the row here would
+    not stop it — it would only throw away the record of the scan that
+    is happening, and lose its result when it reports. Killing the
+    agent is the way to stop work that has started, and it says so.
+    """
+    t = await session.get(AgentTask, task_id)
+    if t is None or t.project_id != pr.id:
+        raise HTTPException(404, "no such task")
+    if t.status != "queued":
+        raise HTTPException(
+            409, f"task {task_id} is {t.status}, not queued. Deleting it here "
+                 f"would not stop the scan — it is already running on the "
+                 f"agent — and the result would be lost when it reports. "
+                 f"Kill the agent to stop work that has started.")
+    subject = _subject(t.kind, json.loads(t.args) if t.args else {})
+    await session.delete(t)
+    await session.commit()
+    await audit.record(session, "ui", "jaws.task.cancel", user=user,
+                       project_code=pr.code,
+                       detail=f"cancelled queued {t.kind} on {subject}",
+                       commit=True)
+    await broker.publish("agents", action="task", project=pr.code)
+
+
 @router.get("/{agent_id}/tasks", response_model=list[TaskOut])
 async def list_tasks(agent_id: int, limit: int = Query(50, le=500),
                      pr: Project = Depends(require_project("readonly")),
@@ -1462,14 +1579,44 @@ async def register(body: RegisterIn, request: Request,
                      else "privileged")}
 
 
+class HeartbeatIn(BaseModel):
+    """What the agent says about itself when it checks in.
+
+    Optional in full: an older agent sends an empty body, and the
+    fallback below infers the same thing from what it is holding. A
+    field here is the agent's own statement and is believed over the
+    inference, because it is the only one of the two that cannot be
+    stale.
+    """
+    #: False while a task is executing. The queue is held until true.
+    ready: bool | None = None
+    #: What it is working on, 0/None when idle.
+    running_task: int | None = None
+
+
 @router.post("/heartbeat", response_model=dict)
-async def heartbeat(request: Request, a: Agent = Depends(agent_even_if_killed),
+async def heartbeat(request: Request, body: HeartbeatIn | None = None,
+                    a: Agent = Depends(agent_even_if_killed),
                     session: AsyncSession = Depends(get_session)):
     """Keepalive, and the poll that hands out work.
 
-    One task at a time. An agent that grabbed ten and died would strand
-    all ten in `claimed`, and the scans this runs are long enough that
-    pipelining buys nothing.
+    **One task at a time, and the queue is held here.** The agent beats
+    throughout a scan, not only between scans — a 45-minute enumeration
+    used to mean 45 minutes of silence, which is indistinguishable from
+    having died — so a beat does NOT mean "give me work". Readiness is
+    stated in the body, and nothing is dispatched until it is true.
+
+    That used to be an emergent property of the client: the server
+    handed work to anyone who asked and trusted a sequential agent not
+    to ask twice. It is an invariant the server holds now, so a second
+    process, a modified agent or a replayed request cannot take work
+    this one is still running.
+
+    Stranded work is self-healing for the same reason. An agent that
+    checks in ready while the server still has a task against it did
+    not survive to finish that task, so after a grace period it goes
+    back in the queue rather than sitting in `claimed` for the rest of
+    the engagement with nothing left to complete it.
     """
     a.last_seen = datetime.now(timezone.utc)
     a.last_ip = request.client.host if request.client else None
@@ -1509,6 +1656,60 @@ async def heartbeat(request: Request, a: Agent = Depends(agent_even_if_killed),
         task.status = "failed"
         task.error = f"refused by the project's scope at dispatch: {why}"
         task.finished_at = datetime.now(timezone.utc)
+
+    # What this agent is already holding. Anything here means the last
+    # dispatch has not come back.
+    held = (await session.execute(
+        select(AgentTask).where(AgentTask.agent_id == a.id,
+                                AgentTask.status.in_(("claimed", "running")))
+        .order_by(AgentTask.id))).scalars().all()
+    # The agent's own word on whether it wants work. It beats while it
+    # is working, so the beat alone no longer implies readiness.
+    said = body.ready if body is not None else None
+    doing = (body.running_task or 0) if body is not None else 0
+
+    if held:
+        now = datetime.now(timezone.utc)
+        released = 0
+        for h in held:
+            if doing and h.id == doing:
+                # It says it is running exactly this. Nothing to decide.
+                continue
+            since = _aware(h.started_at or h.claimed_at)
+            if since is None or (now - since) < ABANDON_AFTER:
+                # Inside the grace window. Usually a result POST still
+                # in flight on another connection, which must not be
+                # raced into a duplicate run.
+                continue
+            if said is False and not doing:
+                # Busy, but will not say with what. An older agent, so
+                # the claim is left alone rather than raced.
+                continue
+            h.status = "queued"
+            h.agent_id = None
+            h.claimed_at = h.started_at = None
+            h.error = (f"released after {int(ABANDON_AFTER.total_seconds())}s: "
+                       f"{a.name} checked in "
+                       + ("ready for work" if said else "without it")
+                       + " while still holding this, so it did not survive "
+                         "to finish it")
+            released += 1
+        if released:
+            log.warning("released %d abandoned task(s) from %s", released, a.name)
+            await session.commit()
+        live = [h.id for h in held if h.status in ("claimed", "running")]
+        if live:
+            # Still holding something. Hand out nothing — the queue
+            # waits here until this agent reports back.
+            await session.commit()
+            return {"ok": True, "task": None, "holding": live}
+
+    if said is False:
+        # Working on something this server has no record of. Believed:
+        # it is the one that knows, and handing it a second task would
+        # be the thing this guard exists to prevent.
+        await session.commit()
+        return {"ok": True, "task": None, "holding": [doing] if doing else []}
 
     # Work addressed to this agent by name comes first: the operator
     # chose it, and a routing policy should not second-guess that.

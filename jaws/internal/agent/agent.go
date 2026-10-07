@@ -283,7 +283,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 		a.drain(ctx)
 
-		resp, err := a.cli.Heartbeat(ctx)
+		resp, err := a.beat(ctx)
 		if err != nil {
 			// Keep beating. A server restart or a brief network outage
 			// must not end the agent — it is typically on a host nobody
@@ -302,8 +302,60 @@ func (a *Agent) Run(ctx context.Context) error {
 		if resp.Task == nil {
 			continue
 		}
-		a.execute(ctx, resp.Task)
+		a.runWithHeartbeat(ctx, resp.Task)
 	}
+}
+
+// beat checks in and reports what this agent is doing.
+//
+// State is read from the agent rather than passed in, so the beats
+// sent while working and the one sent from the idle loop cannot
+// disagree about what this agent is doing.
+func (a *Agent) beat(ctx context.Context) (*client.HeartbeatResp, error) {
+	a.mu.Lock()
+	busy, id := a.busy, a.current
+	a.mu.Unlock()
+	return a.cli.Heartbeat(ctx, client.HeartbeatReq{
+		Ready: !busy, RunningTask: id,
+	})
+}
+
+// runWithHeartbeat executes a task while continuing to check in.
+//
+// A scan can run for the better part of an hour. Going quiet for that
+// long is indistinguishable from having died, which is why the server
+// had to infer `busy` from the fact that a task was claimed — an
+// inference that was wrong whenever a claim was stranded. Beating
+// throughout means the agent says what is true instead.
+//
+// The beats carry Ready=false, so none of them can be answered with
+// more work: the queue is held server-side until this returns.
+func (a *Agent) runWithHeartbeat(ctx context.Context, t *client.Task) {
+	// `busy` and `current` are set by execute() itself, which is the
+	// one writer; this only has to keep beating while it runs.
+	done := make(chan struct{})
+	go func() {
+		tick := time.NewTicker(a.cfg.Heartbeat)
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				if _, err := a.beat(ctx); err != nil {
+					// Logged, never fatal: losing a beat must not
+					// interrupt a scan that is part-way through the
+					// client's estate.
+					log.Printf("heartbeat while running %d: %v", t.ID, err)
+				}
+			}
+		}
+	}()
+	defer close(done)
+
+	a.execute(ctx, t)
 }
 
 func (a *Agent) registerWithRetry(ctx context.Context) error {

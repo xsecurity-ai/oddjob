@@ -16,6 +16,7 @@ import {
 } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { DataTable } from '../components/DataTable'
+import { JawsQueueDialog } from '../components/JawsQueueDialog'
 import { neon, glow } from '../theme'
 
 const STATUS_COLOUR: Record<string, string> = {
@@ -278,10 +279,13 @@ function Routing({ project, routing }:
   { project: string; routing: JawsRouting | undefined }) {
   const qc = useQueryClient()
   const { canWrite } = useAuth()
+  const [queueOpen, setQueueOpen] = useState(false)
   const set = useMutation({
     mutationFn: (mode: string) => api.setJawsRouting(project, mode),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['jaws-routing', project] }),
   })
+  // After the hooks: the early return below is conditional and moving
+  // a hook above it would change the order between renders.
   if (!routing) return null
   return (
     <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1.5 }}>
@@ -303,14 +307,26 @@ function Routing({ project, routing }:
         {routing.mode === 'geo' &&
           'Pooled tasks run on an agent serving their region, or wait.'}
       </Box>
-      {routing.unassigned_tasks > 0 && (
-        <Tooltip title="Queued for the project rather than for one agent, so it belongs to none of them yet and cannot show in a per-agent column. The routing mode decides who takes it when one next asks for work.">
-          <Chip size="small"
-            label={`${routing.unassigned_tasks} waiting for an agent`}
-            sx={{ height: 21, fontSize: 11, fontWeight: 600,
-                  color: neon.yellow, bgcolor: alpha(neon.yellow, 0.16),
-                  border: `1px solid ${alpha(neon.yellow, 0.5)}` }} />
-        </Tooltip>
+      {/* Always shown, including at zero. The queue depth is the
+          number an operator checks to know whether a submission landed,
+          and a chip that only appears when work is waiting cannot
+          answer "did anything queue?" — absence looked identical to
+          never having rendered. */}
+      <Tooltip title={routing.unassigned_tasks > 0
+        ? 'Open the queue: Oddjob holds these until an agent reports it is ready, and anything not yet started can be taken back out.'
+        : 'Nothing waiting for the pool. Open it to see work addressed to one agent that has not been picked up.'}>
+        <Chip size="small" clickable onClick={() => setQueueOpen(true)}
+          label={`${routing.unassigned_tasks} queued`}
+          sx={{ height: 21, fontSize: 11, fontWeight: 600,
+                color: routing.unassigned_tasks > 0 ? neon.yellow : neon.muted,
+                bgcolor: alpha(routing.unassigned_tasks > 0
+                               ? neon.yellow : neon.muted, 0.14),
+                border: `1px solid ${alpha(routing.unassigned_tasks > 0
+                                           ? neon.yellow : neon.muted, 0.45)}`,
+                '&:hover': { bgcolor: alpha(neon.yellow, 0.26) } }} />
+      </Tooltip>
+      {queueOpen && (
+        <JawsQueueDialog project={project} onClose={() => setQueueOpen(false)} />
       )}
       {routing.unassigned_tasks > 0 && routing.eligible === 0 && (
         // Waiting work and nobody able to take it is the one case
