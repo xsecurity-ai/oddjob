@@ -340,7 +340,13 @@ check("and is in the trail, not only on the surviving target",
       es and "198.51.100.9" in (es[0]["detail"] or ""), str(es)[:180])
 
 print("\n== settings record the key, never the value ==")
-SECRET = "xoxb-this-must-never-be-logged"
+# Short on purpose. The repo's own secret scanner matches
+# `xoxb-[A-Za-z0-9-]{20,}`, and a longer fake here fails that check —
+# correctly: a scanner that can tell this from a real token could be
+# told the same thing by somebody committing a real one. What the test
+# needs is a value it can search the audit log for, not a realistic
+# length.
+SECRET = "xoxb-never-logged"
 call("/api/settings", "PATCH", {"values": {"slack.bot_token": SECRET}},
      token=admin)
 es = entries("ui", "settings.update")
