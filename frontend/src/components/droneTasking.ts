@@ -137,20 +137,18 @@ export async function queueEach(
   project: string, choice: AgentChoice, kind: string, subjects: string[],
   extra: Record<string, unknown>, region: string,
 ): Promise<{ ids: number[]; failed: Array<{ subject: string; why: string }> }> {
-  const ids: number[] = []
-  const failed: Array<{ subject: string; why: string }> = []
-  for (const subject of subjects) {
-    try {
-      const t = await queue(project, choice, kind,
-                            { ...extra, targets: [subject] }, region)
-      ids.push(t.id)
-    } catch (e) {
-      // One target out of scope must not cost the other thirty-nine.
-      // Collected and named at the end rather than aborting the run.
-      failed.push({ subject, why: e instanceof Error ? e.message : String(e) })
-    }
+  // One request, N tasks. This looped and POSTed once per subject,
+  // which is fine for a dozen ranges and is 1,738 sequential requests
+  // for a reverse-lookup sweep — a minute of waiting, and a minute of
+  // load, for work the server does in one statement.
+  const r = await api.queueTasksBulk(project, kind, subjects, extra,
+                                     choice, region.trim() || undefined)
+  // One target out of scope must not cost the rest, so refusals come
+  // back named rather than as a thrown error.
+  return {
+    ids: r.ids,
+    failed: Object.entries(r.refused).map(([subject, why]) => ({ subject, why })),
   }
-  return { ids, failed }
 }
 
 // ------------------------------------------------------------- nmap

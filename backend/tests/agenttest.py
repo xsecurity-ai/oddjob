@@ -274,6 +274,87 @@ st, q = call("/api/agents/queue?project=AGENT", token=admin)
 check("so it is gone from the queue",
       DT not in [x["id"] for x in (q or [])], str(q)[:120])
 
+print("== one task per target, created in one request ==")
+# A single task holding 1,738 names is one unit of work: one Drone does
+# all of it, a failure anywhere loses the lot, and the queue depth says
+# 1 when there are 1,738 things to do.
+st, r = call("/api/agents/tasks/bulk?project=AGENT", "POST",
+             {"kind": "nslookup",
+              "subjects": ["a.example", "b.example", "c.example",
+                           "a.example"]},   # the duplicate is dropped
+             token=admin)
+check("a bulk create is accepted", st == 201, f"status={st} {str(r)[:120]}")
+check("one task per target, deduplicated",
+      (r or {}).get("queued") == 3, str(r)[:140])
+
+st, rows = call("/api/agents/tasks?project=AGENT", token=admin)
+mine = [x for x in (rows or []) if x["id"] in set((r or {}).get("ids", []))]
+check("each task carries exactly one target",
+      all(x["subject"] in ("a.example", "b.example", "c.example") for x in mine)
+      and len(mine) == 3, str([x["subject"] for x in mine]))
+check("and they are pooled, so the fleet can share them",
+      all(x["agent_id"] is None for x in mine), str(mine)[:140])
+
+# One target out of scope is not a reason to refuse the other 1,737.
+call("/api/projects", "POST",
+     {"code": "BULKSCOPE", "name": "Bulk scope",
+      "scope": ["10.9.0.0/24", "!10.9.0.5"]}, token=admin)
+st, r = call("/api/agents/tasks/bulk?project=BULKSCOPE", "POST",
+             {"kind": "nmap", "subjects": ["10.9.0.4", "10.9.0.5", "10.9.0.6"]},
+             token=admin)
+check("the in-scope targets are queued", (r or {}).get("queued") == 2, str(r)[:140])
+check("and the excluded one is refused by name, not as an error",
+      "10.9.0.5" in ((r or {}).get("refused") or {}), str(r)[:180])
+
+st, r = call("/api/agents/tasks/bulk?project=AGENT", "POST",
+             {"kind": "nonsense", "subjects": ["a.example"]}, token=admin)
+check("an unknown kind is still refused", st == 422, f"status={st}")
+st, r = call("/api/agents/tasks/bulk?project=AGENT", "POST",
+             {"kind": "install", "subjects": ["nmap"]}, token=admin)
+check("install is not a per-subject kind", st == 422, f"status={st}")
+
+print("== reverse lookups are handed the names to resolve ==")
+# DNS cannot be asked which names point at an address, only where a
+# given name points. So the server supplies the project's own names and
+# the agent keeps the ones that land on the address. Attached when the
+# task is HANDED OUT, not when it is queued: one task per address means
+# storing the same list once per task otherwise.
+st, en8 = call("/api/agents?project=AGENT", "POST",
+               {"name": "revlookup", "target_os": "linux"}, token=admin)
+RID = ((en8 or {}).get("agent") or {}).get("id")
+RKEY = (en8 or {}).get("callback_key")
+call("/api/agents/register", "POST", {"platform": "linux", "arch": "amd64"},
+     key=RKEY)
+call("/api/targets?project=AGENT", "POST",
+     {"host": "known-one.acme.example"}, token=admin)
+call("/api/targets?project=AGENT", "POST",
+     {"host": "known-two.acme.example"}, token=admin)
+
+st, rt = call(f"/api/agents/{RID}/tasks?project=AGENT", "POST",
+              {"kind": "reverse_ip", "args": {"targets": ["198.51.100.77"]}},
+              token=admin)
+RT = (rt or {}).get("id")
+check("a reverse lookup is queued", st == 201, f"status={st}")
+
+st, stored = call(f"/api/agents/{RID}/tasks?project=AGENT", token=admin)
+row = next((x for x in (stored or []) if x["id"] == RT), {})
+check("the stored arguments do NOT carry the candidate list",
+      "candidates" not in (row.get("args") or {}), str(row.get("args"))[:120])
+
+st, hb = call("/api/agents/heartbeat", "POST",
+              {"ready": True, "running_tasks": [], "slots_free": 2,
+               "capacity": 2}, key=RKEY)
+handed = next((t for t in (hb or {}).get("tasks", []) if t["id"] == RT), {})
+cands = (handed.get("args") or {}).get("candidates") or []
+check("but the agent is handed them when it takes the task",
+      len(cands) >= 2, f"{len(cands)} candidate(s)")
+check("and they are the project's own names",
+      "known-one.acme.example" in cands and "known-two.acme.example" in cands,
+      str(cands[:4]))
+check("addresses are not offered as names to resolve",
+      not any(c.replace(".", "").isdigit() for c in cands), str(cands[:4]))
+call(f"/api/agents/{RID}/kill?project=AGENT", "POST", {}, token=admin)
+
 print("== an agent is not given work it cannot run ==")
 st, tl = call("/api/agents/tools", token=admin)
 check("the required tool list is published", st == 200

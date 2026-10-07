@@ -561,29 +561,21 @@ async def _assert_task_in_scope(session: AsyncSession, pr: Project,
 MAX_REVERSE_CANDIDATES = 1500
 
 
-async def _enrich(session: AsyncSession, pr: Project, kind: str,
-                  args: dict) -> dict:
-    """Fill in arguments the caller should not have to assemble.
+async def _candidates(session: AsyncSession, project_id: int) -> list[str]:
+    """Names to resolve when answering "what else is at this address".
 
-    `reverse_ip` is the one that needs it. DNS cannot be asked which
-    names point at an address — only where a given name points — so
-    the only way to answer the real question without handing the
-    client's addresses to a third party is to resolve names we already
-    know and keep the ones that land there. The project is where those
-    names live, so the server supplies them rather than every caller
-    building the same list.
+    Attached when the task is HANDED OUT, not when it is queued.
+    Queue-time was fine while one task carried four hundred addresses;
+    one task per address means the same fifteen hundred names would be
+    written into the arguments column fifteen hundred times over. The
+    list is also fresher this way — a name added between queueing and
+    dispatch is one the lookup can now confirm.
     """
-    if kind != "reverse_ip" or args.get("candidates"):
-        return args
     rows = (await session.execute(
-        select(Target.host).where(Target.project_id == pr.id)
+        select(Target.host).where(Target.project_id == project_id)
         .limit(MAX_REVERSE_CANDIDATES * 2))).scalars().all()
-    names = [h for h in rows if h and not _looks_like_ip(h)]
-    if names:
-        out = dict(args)
-        out["candidates"] = sorted(set(names))[:MAX_REVERSE_CANDIDATES]
-        return out
-    return args
+    names = {h for h in rows if h and not _looks_like_ip(h)}
+    return sorted(names)[:MAX_REVERSE_CANDIDATES]
 
 
 def _looks_like_ip(value: str) -> bool:
@@ -1340,8 +1332,7 @@ async def create_task(agent_id: int, body: TaskIn,
 
     t = AgentTask(agent_id=a.id, project_id=pr.id, requested_by=user.id,
                   kind=body.kind,
-                  args=json.dumps(await _enrich(session, pr, body.kind,
-                                                body.args or {})),
+                  args=json.dumps(body.args or {}),
                   region=(body.region or "").strip().lower() or None,
                   import_as=body.import_as or TASK_KINDS.get(body.kind),
                   status="queued")
@@ -1387,6 +1378,87 @@ async def set_routing(body: RoutingIn,
     return await read_routing(pr=pr, _=_, session=session)
 
 
+class BulkTaskIn(BaseModel):
+    """One task per subject, created in one request."""
+    kind: str
+    #: One task is made for each of these, with `targets` set to it.
+    subjects: list[str] = Field(min_length=1, max_length=5000)
+    #: Everything else the tasks share — ports, flags, mode.
+    args: dict = {}
+    #: Address them all to one agent, or leave null for the pool.
+    agent_id: int | None = None
+    region: str | None = None
+
+
+@router.post("/tasks/bulk", response_model=dict, status_code=201)
+async def create_tasks_bulk(body: BulkTaskIn,
+                            pr: Project = Depends(require_project("user")),
+                            user: User = Depends(get_current_user),
+                            session: AsyncSession = Depends(get_session)):
+    """One task per subject, in a single round trip.
+
+    Splitting work into one task per target is what lets the fleet
+    share it, lets one failure stay one failure, and makes the queue
+    depth mean "how many targets are left". Doing that from the client
+    meant one POST per target — 1,738 sequential requests for a
+    reverse-lookup sweep, which is a minute of waiting and a minute of
+    load for work the server can do in one statement.
+
+    Scope is checked per subject. One target being out of scope is not
+    a reason to refuse the other 1,737, so the refusals come back named
+    rather than as an error.
+    """
+    if body.kind not in TASK_KINDS:
+        raise HTTPException(
+            422, f"unknown task kind {body.kind!r}. Known: "
+                 f"{', '.join(sorted(TASK_KINDS))}")
+    if body.kind == "install":
+        raise HTTPException(
+            422, "install is addressed to one agent and takes a tool list, "
+                 "not a subject per task")
+
+    agent = None
+    if body.agent_id is not None:
+        agent = await session.get(Agent, body.agent_id)
+        if agent is None or agent.project_id != pr.id:
+            raise HTTPException(404, "no such agent")
+
+    idx = await index_for(session, pr.id)
+    region = (body.region or "").strip().lower() or None
+    created: list[int] = []
+    refused: dict[str, str] = {}
+    seen: set[str] = set()
+
+    for raw in body.subjects:
+        subject = (raw or "").strip()
+        if not subject or subject in seen:
+            continue
+        seen.add(subject)
+        ruling = idx.check(subject)
+        if not ruling.allowed:
+            refused[subject] = ruling.reason
+            continue
+        t = AgentTask(
+            agent_id=agent.id if agent else None, project_id=pr.id,
+            requested_by=user.id, kind=body.kind,
+            args=json.dumps({**body.args, "targets": [subject]}),
+            region=region,
+            import_as=TASK_KINDS.get(body.kind), status="queued")
+        session.add(t)
+        await session.flush()
+        created.append(t.id)
+
+    await session.commit()
+    await broker.publish("agents", action="task", project=pr.code)
+    await audit.record(session, "ui", f"{body.kind}.bulk", user=user,
+                       project_code=pr.code,
+                       detail=f"queued {len(created)} {body.kind} task(s), one "
+                              f"per target"
+                              + (f"; {len(refused)} refused" if refused else ""),
+                       commit=True)
+    return {"ids": created, "refused": refused, "queued": len(created)}
+
+
 @router.post("/tasks", response_model=TaskOut, status_code=201)
 async def create_pooled_task(body: TaskIn,
                              pr: Project = Depends(require_project("user")),
@@ -1418,8 +1490,7 @@ async def create_pooled_task(body: TaskIn,
 
     t = AgentTask(agent_id=None, project_id=pr.id, requested_by=user.id,
                   kind=body.kind,
-                  args=json.dumps(await _enrich(session, pr, body.kind,
-                                                body.args or {})),
+                  args=json.dumps(body.args or {}),
                   region=(body.region or "").strip().lower() or None,
                   import_as=body.import_as or TASK_KINDS.get(body.kind),
                   status="queued")
@@ -2088,11 +2159,18 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
 
     now = datetime.now(timezone.utc)
     out = []
+    _reverse_candidates: list[str] | None = None
     for t in chosen:
         t.status = "claimed"
         t.claimed_at = now
-        out.append({"id": t.id, "kind": t.kind,
-                    "args": json.loads(t.args) if t.args else {}})
+        targs = json.loads(t.args) if t.args else {}
+        if t.kind == "reverse_ip" and not targs.get("candidates"):
+            # Filled in here rather than stored per task. See _candidates.
+            if _reverse_candidates is None:
+                _reverse_candidates = await _candidates(session, a.project_id)
+            if _reverse_candidates:
+                targs = {**targs, "candidates": _reverse_candidates}
+        out.append({"id": t.id, "kind": t.kind, "args": targs})
     await session.commit()
     # `task` singular is kept alongside `tasks`: an agent built before
     # this reads only the first field and would otherwise be handed
