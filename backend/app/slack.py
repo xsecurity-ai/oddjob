@@ -258,24 +258,57 @@ async def find_user(token: str, handle: str,
                   f"the workspace first")
 
 
+#: C public, G legacy private, D a DM. The `conversations.*` family resolves
+#: ids ONLY: handed a name it answers `channel_not_found`, which reads as "your
+#: channel is missing" and sends you looking for the wrong thing entirely.
+#: `targets_for` deals in NAMES, because a name is what a human configures and
+#: what `chat.postMessage` happens to accept, so the translation belongs here --
+#: at the one call that cannot work without an id.
+CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]{6,}$")
+
+
+async def resolve_channel(token: str, channel: str) -> tuple[str | None, str]:
+    """An id for `channel`, which may already be one. -> (id, error)."""
+    name = (channel or "").strip().lstrip("#")
+    if not name:
+        return None, "no channel configured"
+    if CHANNEL_ID_RE.match(name):
+        return name, ""
+    found, err = await list_channels(token)
+    if found is None:
+        return None, err
+    cid = found.get(name)
+    if not cid:
+        # Deliberately Slack's own word: it is what the caller would have
+        # seen anyway, and it is accurate -- no channel by that name here.
+        return None, "channel_not_found"
+    return cid, ""
+
+
 async def invite_to_channel(token: str, channel: str,
                             user_id: str) -> Posted:
     """Add one person to one channel.
+
+    `channel` may be a name or an id; `conversations.invite` accepts an
+    id only, so a name is resolved first.
 
     `already_in_channel` is a success: the state we wanted is the
     state we have, and reporting it as an error would make a repeat
     confirmation look broken.
     """
+    cid, rerr = await resolve_channel(token, channel)
+    if not cid:
+        return Posted(ok=False, error=rerr[:300])
     try:
         d = await _call(token, "conversations.invite",
-                        {"channel": channel, "users": user_id})
+                        {"channel": cid, "users": user_id})
     except Exception as e:                       # noqa: BLE001
         return Posted(ok=False, error=f"{type(e).__name__}: {e}"[:300])
     if d.get("ok"):
-        return Posted(ok=True, channel=channel)
+        return Posted(ok=True, channel=cid)
     err = str(d.get("error") or "")
     if err in ("already_in_channel", "cant_invite_self"):
-        return Posted(ok=True, channel=channel)
+        return Posted(ok=True, channel=cid)
     return Posted(ok=False, error=err[:300])
 
 

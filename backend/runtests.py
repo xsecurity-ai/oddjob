@@ -46,6 +46,7 @@ SUITES = [
     ("tests/enumeratetest.py", TMP / "ms-enum.db"),
     ("tests/scopetest.py",     TMP / "ms-scope.db"),
     ("tests/mergetest.py",     TMP / "ms-merge.db"),
+    ("tests/audittest.py",     TMP / "ms-audit.db"),
 ]
 
 

@@ -447,12 +447,39 @@ check("and the engagement start is announced into it",
       sent("Engagement started") is not None,
       str([p.get("text") for p in POSTED])[:160])
 
+# `ensure_channel` treats `name_taken` as success, which is right for
+# it and wrong as the whole story: without a check before anything is
+# written, a second engagement whose codename collides quietly starts
+# posting ITS findings into the FIRST one's channel. Refused up front,
+# so the dialog comes back with the name still in it.
+st, r = call("/api/projects", "POST",
+             {"code": "AUTOCH2", "name": "Same op again", "codename": "BEACON"},
+             token=admin)
+check("a second engagement cannot take a channel that already exists",
+      st == 409, f"{st} {str(r)[:90]}")
+check("and is told Slack is the thing in the way",
+      "slack is in use" in str((r or {}).get("detail", "")).lower(), str(r)[:150])
+check("naming the channel it collided with",
+      "eng-beacon" in str((r or {}).get("detail", "")), str(r)[:150])
+st_gone, _ = call("/api/projects/AUTOCH2", token=admin)
+check("and the refused engagement is not half-created",
+      st_gone == 404, f"status={st_gone}")
+
 call("/api/settings", "PATCH",
      {"values": {"slack.auto_create_channel": False}}, token=admin)
 CREATED.clear()
 st, r = call("/api/projects", "POST",
              {"code": "NOCH", "name": "No channel", "codename": "QUIET"}, token=admin)
 check("with the setting off, no channel is created", CREATED == [], str(CREATED))
+
+# The collision check is asked only about channels we would have made.
+# With auto-create off, a channel that is already there is the normal
+# arrangement -- it is how an engagement posts into one somebody made
+# by hand -- and refusing it would break that outright.
+st, r = call("/api/projects", "POST",
+             {"code": "REUSE", "name": "Reuse", "codename": "BEACON"}, token=admin)
+check("with the setting off, an existing channel is reused, not refused",
+      st == 201, f"{st} {str(r)[:90]}")
 
 
 print("\n== the slack-handle prompt endpoints are actually reachable ==")
@@ -511,6 +538,15 @@ print("\n== a handle is given once per workspace, not once per project ==")
 # how a prompt becomes something people dismiss without reading.
 call("/api/projects", "POST", {"code": "WSA", "name": "Workspace A"}, token=admin)
 call("/api/projects", "POST", {"code": "WSB", "name": "Workspace B"}, token=admin)
+# Both engagements post into channels that have to EXIST. Adopting
+# someone resolves the channel by NAME and then invites them by id,
+# because `conversations.invite` takes an id and nothing else, so a
+# workspace that has never heard of #eng-wsb cannot add anyone to it.
+# Registering them here is what a real workspace would look like; the
+# fake's `conversations.invite` still answers ok to anything, so without
+# this the check passed against a channel that was never created.
+CHANNELS.setdefault("eng-wsa", "C900")
+CHANNELS.setdefault("eng-wsb", "C901")
 call("/api/users", "POST", {"username": "wsu", "password": "wsu-password-123"},
      token=admin)
 for p in ("WSA", "WSB"):

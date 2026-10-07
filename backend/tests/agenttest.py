@@ -424,7 +424,7 @@ st, r = call("/api/agents/routing?project=AGENT", "PUT", {"mode": "primary"},
              token=admin)
 check("mode switches to primary", st == 200 and r["mode"] == "primary", str(r)[:90])
 check("the lowest priority agent is primary",
-      r["current_primary_name"] == "dublin", str(r)[:140])
+      str(r["current_primary_name"]).startswith("dublin-"), str(r)[:140])
 
 st, t = pooled()
 st, hb = beat("tokyo")
@@ -439,7 +439,7 @@ st, _ = call(f"/api/agents/{fleet['dublin']['id']}/kill?project=AGENT", "POST",
 beat("virginia"); beat("tokyo")
 st, r = call("/api/agents/routing?project=AGENT", token=admin)
 check("killing the primary elects the next by priority, with nothing stored",
-      r["current_primary_name"] == "virginia", str(r)[:140])
+      str(r["current_primary_name"]).startswith("virginia-"), str(r)[:140])
 st, t = pooled()
 st, hb = beat("virginia")
 check("and the new primary picks up the work",
@@ -790,7 +790,7 @@ st, again = call(f"/api/agents/{AR}/reenroll?project=AGENT", "POST", {},
 check("re-enrolling issues a fresh token", st == 200 and
       bool((again or {}).get("enroll_token")), f"status={st}")
 check("the agent keeps its name and its record",
-      (again or {}).get("agent", {}).get("name") == "rotate-me",
+      str((again or {}).get("agent", {}).get("name")).startswith("rotate-me-"),
       str((again or {}).get("agent", {}).get("name")))
 check("and is no longer holding an identity",
       (again or {}).get("agent", {}).get("has_identity") is False,
@@ -824,6 +824,57 @@ st, _ = call(f"/api/agents/{AR}/reenroll?project=AGENT", "POST", {}, token=rtok
              if "rtok" in dir() else None)
 check("re-enrolling needs admin, not merely write access",
       st in (401, 403), f"status={st}")
+
+print("\n== enrolment appends a discriminator to the name ==")
+# Two machines are called `kodi` and whoever names the second has no way
+# to know the first exists. The case this was written for is worse: an
+# agent deleted server-side whose container heartbeats forever, with a
+# later agent holding the same name -- the logs then read as ONE agent
+# intermittently failing auth rather than as two, one of them an orphan.
+import re as _re
+st, e1 = call("/api/agents?project=AGENT", "POST",
+              {"name": "kodi", "connection_mode": "callback"}, token=admin)
+st2, e2 = call("/api/agents?project=AGENT", "POST",
+               {"name": "kodi", "connection_mode": "callback"}, token=admin)
+n1 = (e1 or {}).get("agent", {}).get("name", "")
+n2 = (e2 or {}).get("agent", {}).get("name", "")
+check("the name gains a 6-character suffix",
+      bool(_re.fullmatch(r"kodi-[a-z0-9]{6}", n1)), n1)
+check("drawn from [a-z0-9] only",
+      bool(_re.fullmatch(r"kodi-[a-z0-9]{6}", n2)), n2)
+check("two agents enrolled under one name do not collide", n1 != n2, f"{n1} {n2}")
+
+# A rename is the operator's decision and is taken EXACTLY as typed.
+# The suffix exists for the name nobody chose; re-imposing it on one
+# somebody did choose would be the tool arguing with its operator.
+rid = (e2 or {}).get("agent", {}).get("id")
+st, ren = call(f"/api/agents/{rid}?project=AGENT", "PATCH",
+               {"name": "scanner"}, token=admin)
+check("a manual rename is honoured exactly, with no suffix added",
+      (ren or {}).get("name") == "scanner", str((ren or {}).get("name")))
+
+st, ren2 = call(f"/api/agents/{rid}?project=AGENT", "PATCH",
+                {"name": "  spaced out  "}, token=admin)
+check("and is trimmed but not otherwise rewritten",
+      (ren2 or {}).get("name") == "spaced out", str((ren2 or {}).get("name")))
+
+st, ren3 = call(f"/api/agents/{rid}?project=AGENT", "PATCH",
+                {"name": "scanner-aaaaaa"}, token=admin)
+check("a name that looks like a suffixed one is kept as typed",
+      (ren3 or {}).get("name") == "scanner-aaaaaa", str((ren3 or {}).get("name")))
+
+# An empty rename is "no change", not "erase the name" -- an agent with
+# no name cannot be told apart from another in any list it appears in.
+st, ren4 = call(f"/api/agents/{rid}?project=AGENT", "PATCH",
+                {"name": "   "}, token=admin)
+check("an all-whitespace rename leaves the name alone",
+      (ren4 or {}).get("name") == "scanner-aaaaaa", str((ren4 or {}).get("name")))
+
+st, ren5 = call(f"/api/agents/{rid}?project=AGENT", "PATCH",
+                {"name": "x" * 400}, token=admin)
+check("an overlong name is bounded rather than erroring",
+      st == 200 and len((ren5 or {}).get("name", "")) <= 128,
+      f"status={st} len={len((ren5 or {}).get('name',''))}")
 
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

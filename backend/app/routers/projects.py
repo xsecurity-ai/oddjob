@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import audit
 from ..db import get_session
 from ..events import broker
 from .. import slack
@@ -238,14 +239,44 @@ async def create_project(body: ProjectCreateFull,
     base = body.model_dump(exclude={"code", "scope", "contacts", "members",
                                     "slack_token", "slack_channel",
                                     "slack_delivery", "slack_private"})
+    # Named after the operation when there is one: the existing
+    # channels are called after the codename, not the client code.
+    channel = channel_for(body.codename or code,
+                          str(cfg.get("slack.channel_prefix") or ""),
+                          body.slack_channel)
+
+    # A channel that is already there belongs to an engagement that
+    # already happened, and `ensure_channel` treats `name_taken` as
+    # success -- so without this, a colliding operation name quietly
+    # starts posting THIS customer's findings into the PREVIOUS
+    # customer's channel. Refuse before anything is written, so the
+    # dialog comes back with the name still in it to be changed.
+    #
+    # Only asked when the channel is one we would have created. With
+    # auto-create off, a channel that exists is the normal arrangement
+    # -- it is how notifications reach an existing channel -- and
+    # refusing it would break that entirely.
+    #
+    # Only a positive answer refuses. Slack being unreachable must not
+    # stop an engagement from being created, for the same reason the
+    # creation further down is never fatal, so an inconclusive lookup
+    # lets it through.
+    if channel and bool(cfg.get("slack.auto_create_channel", False)):
+        probe = str(cfg.get("slack.bot_token") or "").strip()
+        if delivery != "site" and body.slack_token:
+            probe = body.slack_token
+        if probe:
+            existing, _ = await slack.list_channels(probe)
+            if existing is not None and channel in existing:
+                raise HTTPException(
+                    409, f"slack is in use: #{channel} already exists in the "
+                         f"workspace. Choose a different operation name, or "
+                         f"set the channel explicitly to reuse it.")
+
     pr = Project(
         **base, code=code,
         slack_token=body.slack_token or None,
-        # Named after the operation when there is one: the existing
-        # channels are called after the codename, not the client code.
-        slack_channel=channel_for(body.codename or code,
-                                  str(cfg.get("slack.channel_prefix") or ""),
-                                  body.slack_channel),
+        slack_channel=channel,
         slack_delivery=delivery,
         slack_private=body.slack_private)
     session.add(pr)
@@ -279,6 +310,11 @@ async def create_project(body: ProjectCreateFull,
                 continue
             session.add(ProjectACL(project_id=pr.id, user_id=u.id, role=role))
 
+    await audit.record(session, "ui", "project.create", user=user,
+                       project_code=pr.code,
+                       detail=f"{pr.name!r}"
+                              + (f" for {pr.client}" if pr.client else "")
+                              + (f", channel #{channel}" if channel else ""))
     await session.commit()
     await broker.publish("projects", action="create", project=pr.code)
 
@@ -304,6 +340,15 @@ async def create_project(body: ProjectCreateFull,
                        if pr.slack_private is None else bool(pr.slack_private))
             made = await slack.ensure_channel(token, pr.slack_channel, private)
             if made.ok:
+                # Creating it IS the verification -- Slack just handed over
+                # the id -- so record it here exactly as the settings path
+                # does. Dropping it left the row reading "never checked"
+                # and, worse, left every later invite with only a NAME to
+                # work with, which conversations.invite rejects.
+                pr.slack_channel_id = made.channel
+                pr.slack_channel_checked_at = utcnow()
+                pr.slack_channel_error = None
+                await session.commit()
                 await slack.announce(
                     session, pr,
                     slack.engagement_started(pr.codename or pr.code))
@@ -801,7 +846,7 @@ async def deletion_preview(pr: Project = Depends(require_project("admin")),
 async def delete_project(project: str, confirm: str = Query(
                              "", description="must equal the project code"),
                          pr: Project = Depends(require_project("admin")),
-                         _: User = Depends(get_current_user),
+                         user: User = Depends(get_current_user),
                          session: AsyncSession = Depends(get_session)):
     """Delete the project and everything in it.
 
@@ -818,9 +863,22 @@ async def delete_project(project: str, confirm: str = Query(
                  f"credential and agent in it, and cannot be undone. Repeat "
                  f"with confirm={pr.code} to proceed. "
                  f"GET /api/projects/{pr.code}/deletion lists what goes.")
-    code = pr.code
+    code, pname = pr.code, pr.name
+    # Counted BEFORE the delete, because afterwards there is nothing to
+    # count. This is the only surviving record that the engagement ever
+    # existed: everything else — targets, findings, its timeline — goes
+    # with it, so an entry saying merely "a project was deleted" would
+    # leave nobody able to say which one or how much was in it.
+    row = (await session.execute(
+        _counts_query().where(Project.id == pr.id))).first()
+    lost = (f"{row[1]} targets, {row[2]} services, {row[3]} findings, "
+            f"{row[4]} PoCs") if row else "counts unavailable"
     await session.delete(pr)
     await session.commit()
+    await audit.record(session, "ui", "project.delete", user=user,
+                       project_code=code,
+                       detail=f"deleted {code} ({pname}) with {lost}",
+                       commit=True)
     await broker.publish("projects", action="delete", project=code)
 
 
@@ -1021,7 +1079,9 @@ async def refresh_slack_channels(
 @router.put("/{project}/slack", response_model=SlackConfigOut)
 async def write_slack_config(body: SlackConfigIn,
                              pr: Project = Depends(require_project("admin")),
-                             _: User = Depends(get_current_user),
+                             # Was `_`; named now so the audit entry can
+                             # say who moved the destination.
+                             user: User = Depends(get_current_user),
                              session: AsyncSession = Depends(get_session)):
     """Set where this engagement posts, and optionally create it.
 
@@ -1047,6 +1107,11 @@ async def write_slack_config(body: SlackConfigIn,
     if (body.channel is not None or body.token is not None
             or body.delivery is not None):
         _forget_channel(pr)
+    await audit.record(session, "ui", "project.slack", user=user,
+                       project_code=pr.code,
+                       detail=f"delivery={pr.slack_delivery} "
+                              f"channel=#{pr.slack_channel or '-'} "
+                              f"token={'set' if pr.slack_token else 'site'}")
     await session.commit()
     await session.refresh(pr)
 

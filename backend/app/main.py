@@ -1,6 +1,7 @@
 """Oddjob API."""
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,7 +16,7 @@ from .db import DB_PATH, init_db
 from .agentseal import AgentSeal
 from .gatekeeper import (FORBIDDEN_HTML, Gatekeeper, NOT_FOUND_HTML,
                          wants_html)
-from .routers import (agents, actions, agent, auth, bulk, credentials, domains,
+from .routers import (agents, actions, agent, audit, auth, bulk, credentials, domains,
                       enumerate as enumerate_routes, explore,
                       index as api_index, rest,
                       findings, google, magic, meta, projects, reports, scans,
@@ -57,6 +58,52 @@ async def lifespan(app: FastAPI):
     # switched on.
     from .slack_socket import worker as slack_worker
     slack_worker.start()
+
+    # The audit table grows with TRAFFIC, not with the engagement, so it
+    # is the one table that needs sweeping rather than keeping. Once at
+    # startup, then daily -- a long-lived process would otherwise never
+    # sweep at all, and the window would quietly mean nothing.
+    from . import audit as _audit
+    from .db import SessionLocal as _Sess
+    from .db import display_url as _display_url
+
+    async def _audit_retention():
+        while True:
+            try:
+                async with _Sess() as s:
+                    days = await _audit.retain_days(s)
+                    n = await _audit.prune(s, days)
+                    if n:
+                        print(f"audit: removed {n} expired entr"
+                              f"{'y' if n == 1 else 'ies'}")
+                        # Recorded, because a gap in an audit trail that
+                        # nothing explains is indistinguishable from one
+                        # somebody made. The entry naming the sweep is
+                        # written after it, so it survives its own run.
+                        await _audit.record(
+                            s, "backend", "audit.prune",
+                            detail=f"removed {n} entries older than "
+                                   f"{days} days", commit=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:               # noqa: BLE001
+                # Never fatal: losing the sweep costs disk, losing the
+                # process costs the engagement.
+                print(f"audit: retention sweep failed: {e}")
+            await asyncio.sleep(24 * 60 * 60)
+
+    audit_task = asyncio.create_task(_audit_retention())
+
+    # A restart is the explanation for a lot of things an operator will
+    # otherwise spend an hour on — a gap in the log, an agent that went
+    # quiet, a setting that reverted. One line costs nothing.
+    try:
+        async with _Sess() as s:
+            await _audit.record(s, "backend", "server.start",
+                                detail=f"db {_display_url()}",
+                                commit=True)
+    except Exception as e:                       # noqa: BLE001
+        print(f"audit: could not record startup: {e}")
     # display_url(), not DB_PATH: DB_PATH is the SQLite file path and is
     # computed whether or not SQLite is in use, so this line claimed the
     # app was on SQLite while it was actually talking to Postgres. The
@@ -64,6 +111,7 @@ async def lifespan(app: FastAPI):
     from .db import display_url
     print(f"Oddjob API ready — db: {display_url()}")
     yield
+    audit_task.cancel()
     await worker.stop()
     await slack_worker.stop()
 
@@ -82,6 +130,7 @@ app = FastAPI(
 )
 
 from . import headers as _headers      # noqa: E402
+from .audit import AuditTrail         # noqa: E402
 
 # ORDER. `add_middleware` prepends, so the LAST one added is the
 # outermost and therefore the last to touch a response on the way out.
@@ -123,12 +172,20 @@ app.add_middleware(
 # Added last, so it is outermost and nothing escapes without it.
 app.add_middleware(_headers.SecurityHeaders)
 
+# Outside Gatekeeper on purpose, so a REFUSED request is recorded as
+# well: a run of 401s from an address nobody recognises is the entry
+# most worth having, and a middleware inside the gate never sees one.
+# It is inside SecurityHeaders only because it must not be the thing
+# that stops a response being stamped.
+app.add_middleware(AuditTrail)
+
 for r in (auth.router, google.router, magic.router, projects.router, targets.router,
           services.router, findings.router, credentials.router,
           explore.router, actions.router, settings.router, bulk.router,
           scans.router, web.router, domains.router, agent.router,
           rest.router, api_index.router, agents.router, enumerate_routes.router,
           reports.router,
+          audit.router,
           meta.router):
     app.include_router(r)
 

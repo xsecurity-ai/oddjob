@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import re
 import secrets
 import time
 from urllib.parse import urlsplit
@@ -39,6 +40,7 @@ from pydantic import AliasChoices, BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import audit
 from ..db import get_session
 from ..events import broker
 from ..models import Agent, AgentTask, Project, Setting, Target, User
@@ -632,6 +634,40 @@ async def _project_code(session: AsyncSession, project_id: int) -> str:
 
 
 # ------------------------------------------------------ operator routes
+#: [a-z0-9]. No uppercase and no punctuation: the name turns up in
+#: container names, log lines and `jaws:<name>` audit actors, and a
+#: character that needs quoting in one of those is a character that
+#: eventually gets mangled in another.
+_SUFFIX_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
+_SUFFIX_RE = re.compile(r"-[a-z0-9]{6}$")
+
+
+def _new_suffix() -> str:
+    # `secrets` rather than `random`: this is not a secret, but it is an
+    # identifier that must not collide, and a seeded PRNG across two
+    # processes enrolling at once is exactly how it would.
+    return "".join(secrets.choice(_SUFFIX_CHARS) for _ in range(6))
+
+
+def unique_agent_name(raw: str) -> str:
+    """`kodi` -> `kodi-a3f9k2`.
+
+    Two machines are called `kodi`, and an operator naming the second
+    one has no way to know the first exists. Worse is the case this was
+    actually written for: an agent is deleted server-side while its
+    container keeps heartbeating forever, and a later agent takes the
+    same name -- so the logs read as one agent that intermittently
+    fails authentication rather than as two agents, one of them an
+    orphan.
+
+    Applied at ENROLMENT only. A rename is taken exactly as typed --
+    see the note there -- so this is about the name nobody chose, not
+    about overruling the one somebody did.
+    """
+    base = _SUFFIX_RE.sub("", (raw or "").strip())[:120] or "jaws"
+    return f"{base}-{_new_suffix()}"
+
+
 @router.post("", response_model=AgentEnrolled, status_code=201)
 async def enroll(body: EnrollIn, project: str = Query(...),
                 pr: Project = Depends(require_project("admin")),
@@ -654,12 +690,16 @@ async def enroll(body: EnrollIn, project: str = Query(...),
     ci_raw, ci_hash = new_agent_key()
     tok_raw, tok_hash = new_agent_key()
     expires = datetime.now(timezone.utc) + ENROLL_TTL
-    a = Agent(project_id=pr.id, name=body.name.strip(),
+    a = Agent(project_id=pr.id, name=unique_agent_name(body.name),
               callback_key_hash=cb_hash, call_in_key_hash=ci_hash,
               enroll_token_hash=tok_hash, enroll_expires_at=expires,
               connection_mode=body.connection_mode, target_os=body.target_os,
               notes=body.notes, status="offline")
     session.add(a)
+    await audit.record(session, "ui", "jaws.create", user=user,
+                       project_code=pr.code,
+                       detail=f"{a.name!r} mode={a.connection_mode} "
+                              f"os={a.target_os or 'any'}")
     await session.commit()
     await session.refresh(a)
     await broker.publish("agents", action="enroll", project=pr.code)
@@ -718,7 +758,15 @@ async def set_agent(agent_id: int, body: AgentPatch | None = None,
         a.status = "offline" if enabled else "disabled"
     if body is not None:
         if body.name is not None:
-            a.name = body.name.strip() or a.name
+            # Taken verbatim. The suffix belongs to ENROLMENT, where
+            # the name is generated and nobody is watching; a person
+            # typing a name into the dialog has decided what they want
+            # it called, and re-imposing a discriminator there would be
+            # the tool arguing with its operator. Collisions become
+            # possible again at that point, which is the operator's
+            # call to make. Bounded only so a long paste cannot exceed
+            # the column and turn a rename into a 500.
+            a.name = body.name.strip()[:128] or a.name
         if body.priority is not None:
             a.priority = body.priority
         if body.regions is not None:
@@ -947,7 +995,7 @@ async def reenroll_agent(agent_id: int,
 @router.post("/{agent_id}/kill", response_model=AgentOut)
 async def kill_agent(agent_id: int,
                      pr: Project = Depends(require_project("admin")),
-                     _: User = Depends(get_current_user),
+                     user: User = Depends(get_current_user),
                      session: AsyncSession = Depends(get_session)):
     """Stop an agent, without losing what it found.
 
@@ -979,9 +1027,16 @@ async def kill_agent(agent_id: int,
         cancelled += 1
     await session.commit()
     await session.refresh(a)
-    # Not written to the timeline: an Event hangs off a target, and an
-    # agent is not one. Inventing a target_id to get a line in the log
-    # would put a false entry on a real host.
+    # Not the per-target timeline: an Event hangs off a target and an
+    # agent is not one, so inventing a target_id to get a line would
+    # put a false entry on a real host. The audit trail is keyed on
+    # time rather than on an asset, which is the right shape for this.
+    await audit.record(session, "ui", "jaws.kill", user=user,
+                       project_code=pr.code,
+                       detail=f"killed {a.name}"
+                              + (f", cancelled {cancelled} queued task(s)"
+                                 if cancelled else ""),
+                       commit=True)
     await broker.publish("agents", action="killed", project=pr.code)
     return _agent_out(a, pr.code)
 
@@ -1280,6 +1335,16 @@ async def claim_identity(body: IdentityIn,
     _, server_pub = await server_identity(session)
     _, server_kex_pub = await server_kex(session)
     code = await _project_code(session, match.project_id)
+    # The moment a scanner gains a credential against this
+    # installation. Source `jaws`, not `ui`: no person is on the other
+    # end of this request, and attributing it to one would be a lie
+    # about who did it. The key itself is never recorded — only that
+    # one was accepted, and for which agent.
+    await audit.record(
+        session, "jaws", "jaws.enroll", username=f"jaws:{match.name}",
+        project_code=code,
+        detail=f"{match.name} enrolled an identity"
+               + (" with key agreement" if match.kex_public_key else ""))
     await session.commit()
     await broker.publish("agents", action="identity", project=code)
     return {"ok": True, "agent_id": match.id, "project": code,
@@ -1455,6 +1520,16 @@ async def submit_result(task_id: int, body: ResultIn,
     t.summary, t.exit_code, t.error = body.summary, body.exit_code, body.error
     t.finished_at = datetime.now(timezone.utc)
     a.last_seen = t.finished_at
+    # The agent authenticates by key, not as a person, so the actor is
+    # the agent's own name -- which is the honest answer to "who sent
+    # this" and the one worth having when a result looks wrong.
+    await audit.record(session, "jaws", "jaws.result",
+                       username=f"jaws:{a.name}",
+                       project_code=(await session.get(Project, t.project_id)).code
+                       if t.project_id else None,
+                       detail=f"task {t.id} {t.status}"
+                              + (f" exit={t.exit_code}" if t.exit_code is not None else "")
+                              + (f" import={t.import_as}" if t.import_as else ""))
     await session.commit()
 
     imported = None

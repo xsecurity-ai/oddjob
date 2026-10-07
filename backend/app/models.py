@@ -1235,3 +1235,70 @@ class AgentTask(Base, TimestampMixin):
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# ========================================================== audit trail
+#: Where an entry came from. Kept as a small closed set because the log
+#: is read by filtering it, and a free-form origin string turns that
+#: into guesswork about spelling.
+AUDIT_SOURCES = (
+    "middleware",   # an HTTP request, recorded by the AuditTrail middleware
+    "ui",           # a deliberate action a person took in the SPA
+    "jaws",         # a scanner enrolling, calling in, or returning results
+    "backend",      # the server acting on its own: retention, workers, startup
+)
+
+
+class AuditEvent(Base):
+    """One thing that happened, for the site admin to read later.
+
+    Deliberately NOT `Event`, which is the per-target engagement
+    narrative and is scoped to one asset. This answers a different
+    question -- "who did what to this installation, and from where" --
+    and so it is keyed on time rather than on a target, and survives the
+    deletion of everything it refers to.
+
+    **`username` is denormalised on purpose.** `user_id` is a nullable
+    FK so a deleted account does not drag its history out of the table,
+    but an audit entry that cannot say who acted is not an audit entry.
+    The name is therefore copied in at write time and never resolved
+    through the relationship afterwards.
+
+    **Nothing secret may be written here.** Site admins can read every
+    row, so a token that reaches this table is a token disclosed to all
+    of them. `audit.scrub_path` exists because magic-link sign-in
+    tokens travel in the URL PATH, and recording a request verbatim
+    would hand one admin another user's account. Bodies, headers and
+    cookies are never recorded at all.
+    """
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        # The log is almost always read newest-first, optionally narrowed
+        # to one origin. `id` rides along in the first index so that
+        # entries written inside the same clock tick still come back in a
+        # stable order rather than shuffling between pages.
+        Index("ix_audit_at_id", "at", "id"),
+        Index("ix_audit_source_at", "source", "at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True)
+    source: Mapped[str] = mapped_column(String(16), index=True)
+    #: A short stable verb: `request`, `project.create`, `jaws.enroll`.
+    #: Dotted rather than prose so it can be filtered on.
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    username: Mapped[str | None] = mapped_column(String(128), index=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
+    ip: Mapped[str | None] = mapped_column(String(64))
+    method: Mapped[str | None] = mapped_column(String(8))
+    #: Scrubbed before it arrives. Never the query string.
+    path: Mapped[str | None] = mapped_column(String(512))
+    status: Mapped[int | None] = mapped_column(Integer)
+    ms: Mapped[int | None] = mapped_column(Integer)
+    #: Which engagement it concerned, when that is knowable. A code
+    #: rather than an FK, for the same reason as `username`.
+    project_code: Mapped[str | None] = mapped_column(String(64), index=True)
+    #: One human-readable line. Never a request body.
+    detail: Mapped[str | None] = mapped_column(Text)

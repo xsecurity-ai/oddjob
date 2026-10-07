@@ -131,6 +131,7 @@ async def get_current_user(request: Request,
             await session.commit()
             u = await session.get(User, k.user_id)
             if u and u.is_active:
+                request.state.auth_user = u      # see the note below
                 return u
             break
         raise HTTPException(401, "invalid or revoked api key")
@@ -141,6 +142,11 @@ async def get_current_user(request: Request,
     u = await session.get(User, int(payload.get("sub", 0)))
     if not u or not u.is_active:
         raise HTTPException(401, "user not found or disabled")
+    # The audit middleware runs outside the gate and so has no way to
+    # name who acted. Stamping it here costs nothing and is the only way
+    # an API-key caller gets a name in the log without an argon2 verify
+    # on every single request purely to write it down.
+    request.state.auth_user = u
     return u
 
 

@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..headers import cookies_secure
+from .. import audit
 from ..db import get_session
 from ..events import broker
 from .. import slack
@@ -89,7 +90,17 @@ async def login(body: LoginRequest, response: Response,
         # are real and how they authenticate.
         if not u or not u.password_hash:
             hash_password(body.password)
+        # The username as TYPED, which is the whole value of the entry:
+        # a run of failures against one real account reads differently
+        # from a spray across names that do not exist. Never the
+        # password, and never a hint about which of the two was wrong —
+        # the reply does not distinguish them and neither does this.
+        await audit.record(
+            session, "ui", "auth.login.fail",
+            username=body.username.strip().lower()[:128],
+            detail="rejected", commit=True)
         raise HTTPException(401, "invalid username or password")
+    await audit.record(session, "ui", "auth.login", user=u, commit=True)
     token = create_access_token(u)
     response.set_cookie(
         COOKIE, token, httponly=True, samesite="lax",
@@ -571,6 +582,8 @@ async def list_acl(project: str, pr: Project = Depends(require_project("admin"))
 @router.post("/projects/{project}/acl", response_model=AclOut, status_code=201)
 async def grant(project: str, body: AclGrant,
                 pr: Project = Depends(require_project("admin")),
+                # Named only so the audit entry can say WHO granted it.
+                user: User = Depends(get_current_user),
                 session: AsyncSession = Depends(get_session)):
     if bool(body.username) == bool(body.group):
         raise HTTPException(422, "give exactly one of username or group")
@@ -596,6 +609,9 @@ async def grant(project: str, body: AclGrant,
         acl = ProjectACL(project_id=pr.id, user_id=u.id if u else None,
                          group_id=g.id if g else None, role=body.role)
         session.add(acl)
+    await audit.record(
+        session, "ui", "project.member", user=user, project_code=pr.code,
+        detail=f"{u.username if u else 'group:' + g.name} -> {acl.role}")
     await session.commit()
     await broker.publish("acl", action="grant", project=pr.code)
     await slack.announce(session, pr, slack.user_joined(

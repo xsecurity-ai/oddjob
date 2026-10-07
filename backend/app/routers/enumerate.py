@@ -39,6 +39,7 @@ from ..events import broker
 from ..hosts import InvalidHost, validate_host
 from ..models import AgentTask, Project, ProjectScope, Target, User
 from ..security import get_current_user, require_project
+from .. import audit
 from .. import merge as merge_mod
 from ..timeline import record
 
@@ -399,6 +400,13 @@ async def merge_targets(body: MergeIn, host: str = Query(...),
     summary = merge_mod.describe(done)
     await record(session, dst.id, "change", summary.split("\n")[0],
                  detail=summary, actor=user, source="merge")
+    # Also in the audit trail, not only on the surviving target's
+    # timeline: a merge deletes a row, and the timeline that would have
+    # explained it went with it. The installation-level log is the only
+    # place that still names what was absorbed.
+    await audit.record(session, "ui", "target.merge", user=user,
+                       project_code=pr.code,
+                       detail=summary.replace("\n", "; ")[:4000])
     await session.commit()
     await broker.publish("targets", action="merge", host=dst.host,
                          project=pr.code)

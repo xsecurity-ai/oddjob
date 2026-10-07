@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import audit
 from ..db import get_session
 from ..events import broker
 from ..dsn import is_masked
@@ -232,6 +233,14 @@ async def write_settings(body: SettingsPatch, user: User = Depends(require_site_
         else:
             row.value, row.updated_by = stored, user.id
 
+    # The KEYS that changed, never the values. Site settings are where
+    # the bot tokens and the DSN live, and this table is readable by
+    # every site admin — "slack.bot_token was changed" is the audit
+    # fact; what it was changed to is a credential.
+    await audit.record(
+        session, "ui", "settings.update", user=user,
+        detail=("changed: " + ", ".join(sorted(body.values))
+                if body.values else "no keys changed"))
     await session.commit()
     # base_url, the allowed origins and the HSTS policy all feed the
     # security headers; recompute rather than making them need a restart.
