@@ -9,14 +9,14 @@ Two views of one query, at the paths an operator will reach for:
 Each origin is also addressable on its own, so the common narrowing is
 a URL rather than a query someone has to remember the spelling of:
 
-  /audit/jaws/log        /audit/jaws/json
+  /audit/drone/log        /audit/drone/json
   /audit/ui/log          /audit/ui/json
   /audit/middleware/log  /audit/middleware/json
   /audit/backend/log     /audit/backend/json
 
 Same handlers, same filters; the path simply pins `source`. An unknown
 origin is a 404 that NAMES the valid ones, rather than an empty page --
-`/audit/jaws-agent/log` returning nothing looks exactly like a quiet
+`/audit/drone-agent/log` returning nothing looks exactly like a quiet
 day, which is the wrong thing for an audit tool to imply.
 
 Site admin only, and not negotiable: the trail names who was where, so
@@ -97,7 +97,7 @@ def _narrow(f: dict, origin: str) -> dict:
     let one name be both a path and a query param.
 
     A path segment is the more specific statement of intent: nobody
-    types /audit/jaws/log meaning "and also show me the UI entries".
+    types /audit/drone/log meaning "and also show me the UI entries".
     """
     if origin not in AUDIT_SOURCES:
         raise HTTPException(

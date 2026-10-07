@@ -633,7 +633,7 @@ check("an empty submission is 422", st == 422, f"status={st}")
 
 print("\n== every page the app routes is a page the server will serve ==")
 # Two copies of one list: SPA_ROUTES in app/main.py and GLOBAL ∪ SCOPED
-# in frontend/src/lib/route.ts. They drifted — `jaws` and `settings`
+# in frontend/src/lib/route.ts. They drifted — `drone` and `settings`
 # were added to the app and not to the server, so those pages worked
 # when navigated to and 404'd on refresh or from a pasted link. Checked
 # here because the next view will be added in one place too.
@@ -669,7 +669,7 @@ if _route_ts.exists():
           not _extra, f"server serves the app for: {sorted(_extra)}")
 
     # The one that was actually reported.
-    _req = urllib.request.Request(BASE + "/jaws")
+    _req = urllib.request.Request(BASE + "/drones")
     _req.add_header("Accept", "text/html")
     _req.add_header("Authorization", f"Bearer {admin}")
     try:
@@ -677,7 +677,7 @@ if _route_ts.exists():
             _st = _x.status
     except urllib.error.HTTPError as _e:
         _st = _e.code
-    check("/jaws is served rather than 404", _st == 200, f"status={_st}")
+    check("/drones is served rather than 404", _st == 200, f"status={_st}")
 else:
     check("route.ts was found to compare against", False, str(_route_ts))
 

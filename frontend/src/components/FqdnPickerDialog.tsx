@@ -441,7 +441,7 @@ export function FqdnPickerDialog({ project, rows, loading, error, auto,
           )}
 
           <Alert severity="info" variant="outlined" sx={{ fontSize: 11.5 }}>
-            Built from the output of finished Jaws lookups. A result with
+            Built from the output of finished Drone lookups. A result with
             exactly one answer is applied straight away; one with several is
             a question, and one with none is recorded below as a lookup that
             ran and came back empty — not as an address with no name.

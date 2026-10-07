@@ -290,12 +290,12 @@ export interface UnknownHost {
 }
 export interface HostDecision { action: 'add' | 'map' | 'reject'; target?: string }
 
-/** A Jaws instance. Bound to exactly one project, for its whole life. */
-/** A task as the tasks table shows it. Distinct from `JawsTask`,
+/** A Drone instance. Bound to exactly one project, for its whole life. */
+/** A task as the tasks table shows it. Distinct from `DroneTask`,
  *  which is the per-agent record: this one carries the pooled tasks
  *  no agent owns, and the words an operator reads rather than the
  *  words the column stores. */
-export interface JawsTaskRow {
+export interface DroneTaskRow {
   id: number
   kind: string
   subject: string
@@ -316,7 +316,7 @@ export interface JawsTaskRow {
   requested_by: string | null
 }
 
-export interface JawsAgent {
+export interface DroneAgent {
   id: number
   project_code: string
   name: string
@@ -368,7 +368,7 @@ export interface JawsAgent {
 }
 /** Shown once, at enrollment. None of it is recoverable afterwards. */
 export interface AgentEnrolled {
-  agent: JawsAgent
+  agent: DroneAgent
   callback_key: string
   call_in_key: string
   /** One-time. The agent trades it for a keypair it generates itself. */
@@ -378,7 +378,7 @@ export interface AgentEnrolled {
    *  take tasking from this instance. */
   server_public_key: string
 }
-export interface JawsRouting {
+export interface DroneRouting {
   mode: 'mesh' | 'primary' | 'geo'
   /** Who is serving right now in primary mode. Derived from live
    *  heartbeats — an observation, not a setting. */
@@ -391,7 +391,7 @@ export interface JawsRouting {
    *  the two is what runs. */
   max_parallel: number
 }
-export interface JawsTask {
+export interface DroneTask {
   id: number
   agent_id: number
   project_code: string
@@ -407,7 +407,7 @@ export interface JawsTask {
   started_at: string | null
   finished_at: string | null
 }
-export const JAWS_KINDS = ['nmap', 'masscan', 'amass', 'gobuster', 'nuclei',
+export const DRONE_KINDS = ['nmap', 'masscan', 'amass', 'gobuster', 'nuclei',
   'httpx', 'nslookup', 'reverse_ip'] as const
 export interface WebPacket {
   id: number; url: string; method: string | null; status_code: number | null
@@ -785,7 +785,7 @@ export const api = {
     }
   },
 
-  /** Hand domains to a Jaws agent to actually enumerate, and let the
+  /** Hand domains to a Drone agent to actually enumerate, and let the
    *  results file themselves as targets when they come back. Accepts a
    *  pasted list: newlines, commas, schemes and wildcards are all
    *  tolerated and normalised server-side. */
@@ -809,18 +809,18 @@ export const api = {
   /** Every task on the engagement, newest first. The per-agent list
    *  answers "what has this scanner done"; this answers "what is
    *  happening here", which is the question with a queue in it. */
-  jawsTasks: (project: string) =>
-    req<JawsTaskRow[]>('/api/agents/tasks' + qs({ project })),
+  droneTasks: (project: string) =>
+    req<DroneTaskRow[]>('/api/agents/tasks' + qs({ project })),
 
   /** Put a failed task back in the queue by hand. The automatic retry
    *  stops after two; this is what happens once a person has looked. */
-  retryJawsTask: (project: string, id: number) =>
-    req<JawsTaskRow>(`/api/agents/tasks/${id}/retry` + qs({ project }),
+  retryDroneTask: (project: string, id: number) =>
+    req<DroneTaskRow>(`/api/agents/tasks/${id}/retry` + qs({ project }),
                   { method: 'POST' }),
 
   /** Everything waiting to run on this project, oldest first — the
    *  pool and work addressed to one agent that has not taken it. */
-  jawsQueue: (project: string) => req<Array<{
+  droneQueue: (project: string) => req<Array<{
     id: number; kind: string; subject: string
     args: Record<string, unknown>
     agent_id: number | null; agent_name: string | null
@@ -831,7 +831,7 @@ export const api = {
   /** Take a queued task back out. Refused once an agent has it: the
    *  scan is already running and deleting the row would only lose the
    *  result. */
-  cancelJawsTask: (project: string, id: number) =>
+  cancelDroneTask: (project: string, id: number) =>
     req<void>(`/api/agents/tasks/${id}` + qs({ project }),
               { method: 'DELETE' }),
 
@@ -976,10 +976,10 @@ export const api = {
     req<Target>(`/api/targets/${encodeURIComponent(project)}/${encodeURIComponent(host)}`,
       { method: 'PATCH', body: JSON.stringify(body) }),
 
-  // Jaws agents. Every call is project-scoped because an agent is:
+  // Drone agents. Every call is project-scoped because an agent is:
   // enrolled into one project, tasked only from that project, and its
   // results import only there.
-  agents: (project: string) => req<JawsAgent[]>('/api/agents' + qs({ project })),
+  agents: (project: string) => req<DroneAgent[]>('/api/agents' + qs({ project })),
   enrollAgent: (project: string, body: {
     name: string; connection_mode?: string; target_os?: string; notes?: string
   }) =>
@@ -991,7 +991,7 @@ export const api = {
   patchAgent: (project: string, id: number, body: {
     name?: string; priority?: number; regions?: string; notes?: string
   }) =>
-    req<JawsAgent>(`/api/agents/${id}` + qs({ project }),
+    req<DroneAgent>(`/api/agents/${id}` + qs({ project }),
       { method: 'PATCH', body: JSON.stringify(body) }),
   /** Rotate an agent's keys, keeping its record and history.
    *
@@ -1000,7 +1000,7 @@ export const api = {
    *  the agent is dead until someone redeems the returned token on
    *  the host. The response says what to do there. */
   reenrollAgent: (project: string, id: number) => req<{
-    agent: JawsAgent
+    agent: DroneAgent
     enroll_token: string
     enroll_expires_at: string
     server_public_key: string
@@ -1011,42 +1011,42 @@ export const api = {
   /** Stop it. Keeps the agent and everything it found; see the backend
    *  route for why this is not a delete. */
   killAgent: (project: string, id: number) =>
-    req<JawsAgent>(`/api/agents/${id}/kill` + qs({ project }), { method: 'POST' }),
+    req<DroneAgent>(`/api/agents/${id}/kill` + qs({ project }), { method: 'POST' }),
   deleteAgent: (project: string, id: number) =>
     req<void>(`/api/agents/${id}` + qs({ project }), { method: 'DELETE' }),
 
-  jawsDownloads: () => req<{
+  droneDownloads: () => req<{
     builds: Array<{ os: string; arch: string; name: string
                     available: boolean; bytes: number }>
     any: boolean
   }>('/api/agents/downloads'),
   /** The binary itself is a normal authenticated GET; the cookie goes
    *  with it, so a plain link works and the browser streams it. */
-  jawsDownloadUrl: (goos: string, arch: string) =>
+  droneDownloadUrl: (goos: string, arch: string) =>
     `/api/agents/download/${encodeURIComponent(goos)}/${encodeURIComponent(arch)}`,
   reachAgent: (project: string, id: number) =>
     req<{ ok: boolean; detail: string; status: Record<string, unknown> | null }>(
       `/api/agents/${id}/reach` + qs({ project }), { method: 'POST' }),
 
-  jawsRouting: (project: string) =>
-    req<JawsRouting>('/api/agents/routing' + qs({ project })),
+  droneRouting: (project: string) =>
+    req<DroneRouting>('/api/agents/routing' + qs({ project })),
   /** Either field alone: changing the parallelism must not require
    *  restating the routing mode. */
-  setJawsRouting: (project: string,
+  setDroneRouting: (project: string,
                    body: { mode?: string; max_parallel?: number }) =>
-    req<JawsRouting>('/api/agents/routing' + qs({ project }),
+    req<DroneRouting>('/api/agents/routing' + qs({ project }),
       { method: 'PUT', body: JSON.stringify(body) }),
   /** Queue for the project rather than a named agent, so the routing
-   *  mode decides which Jaws runs it. */
+   *  mode decides which Drone runs it. */
   queuePooledTask: (project: string, kind: string,
                     args: Record<string, unknown>, region?: string) =>
-    req<JawsTask>('/api/agents/tasks' + qs({ project }),
+    req<DroneTask>('/api/agents/tasks' + qs({ project }),
       { method: 'POST', body: JSON.stringify({ kind, args, region }) }),
 
   agentTasks: (project: string, id: number, limit = 50) =>
-    req<JawsTask[]>(`/api/agents/${id}/tasks` + qs({ project, limit })),
+    req<DroneTask[]>(`/api/agents/${id}/tasks` + qs({ project, limit })),
   queueTask: (project: string, id: number, kind: string, args: Record<string, unknown>) =>
-    req<JawsTask>(`/api/agents/${id}/tasks` + qs({ project }),
+    req<DroneTask>(`/api/agents/${id}/tasks` + qs({ project }),
       { method: 'POST', body: JSON.stringify({ kind, args }) }),
   // The step that makes a scan count: a result arrives with no operator
   // attached, so anything the project has not seen is surveyed and
@@ -1139,7 +1139,7 @@ export const api = {
   // that does not merge. Consumers derive them with
   // `Awaited<ReturnType<typeof api.enumeratePending>>[number]`.
 
-  /** Finished Jaws lookups whose answer the inventory does not carry yet.
+  /** Finished Drone lookups whose answer the inventory does not carry yet.
    *
    *  The raw task output is not on TaskOut and should not be — the agent
    *  list would then haul every scan's output — so the server reads it

@@ -349,7 +349,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
         except ValueError:
             return {}
 
-    async def list_jaws(**_) -> dict:
+    async def list_drone(**_) -> dict:
         """The agents deployed on this engagement."""
         if pid is None:
             return {"error": "listing agents needs one engagement in view"}
@@ -377,11 +377,11 @@ def build(session: AsyncSession, project: Project | None, user: User,
         return {"agents": out, "count": len(out)}
 
     reads = [
-        Tool("list_jaws",
-             "Jaws agents on this engagement: where each is deployed, "
+        Tool("list_drone",
+             "Drone agents on this engagement: where each is deployed, "
              "whether it can raw-socket scan, what tools it has, and what "
              "it is working on.",
-             _obj({}), list_jaws),
+             _obj({}), list_drone),
         Tool("list_projects",
              "The engagements you can see, with a target count for each. "
              "Use this first when asked about more than one engagement, or "
@@ -489,8 +489,8 @@ def build(session: AsyncSession, project: Project | None, user: User,
         await session.commit()
         return {"ok": True, "host": t.host, "title": title}
 
-    # ------------------------------------------------------ jaws writes
-    async def task_jaws(kind: str, targets: str, agent: str = "",
+    # ------------------------------------------------------ drone writes
+    async def task_drone(kind: str, targets: str, agent: str = "",
                         ports: str = "", region: str = "") -> dict:
         """Queue work for an agent, or for the project's pool."""
         from ..routers.agents import TASK_KINDS
@@ -505,7 +505,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
             # a privileged process inside a client network is not
             # something to do because a sentence asked for it.
             return {"error": f"{kind} is not available through the "
-                             f"assistant; queue it yourself from the Jaws "
+                             f"assistant; queue it yourself from the Drone "
                              f"page, where the allowlist and the agent are "
                              f"both in front of you"}
         hosts = [t for t in re.split(r"[\s,]+", targets or "") if t]
@@ -525,7 +525,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
         args: dict = {"targets": hosts}
         if ports.strip():
             args["ports"] = ports.strip()
-        # Same gate as the Jaws page, reached the same way. A scan the
+        # Same gate as the Drone page, reached the same way. A scan the
         # operator could not queue by hand must not become queueable by
         # asking for it in a sentence.
         idx = await index_for(session, pid)
@@ -548,7 +548,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
                                "the project pool — routing will pick an agent",
                 "note": "queued; results import when the agent reports back"}
 
-    async def jaws_task_status(task_id: int) -> dict:
+    async def drone_task_status(task_id: int) -> dict:
         if pid is None:
             return {"error": "needs one engagement in view"}
         t = await session.get(AgentTask, int(task_id))
@@ -568,7 +568,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
                 "unknown_hosts": [u.get("host") for u in
                                   (imp or {}).get("unknown_hosts", [])]}
 
-    async def enroll_jaws(name: str, target_os: str = "linux",
+    async def enroll_drone(name: str, target_os: str = "linux",
                          connection_mode: str = "callback") -> dict:
         """Create an agent and return what the operator must run."""
         from ..routers.agents import ENROLL_TTL, server_identity
@@ -580,7 +580,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
             # commands on a machine and send their output here. A
             # contributor asking nicely is not the same as an admin
             # deciding.
-            return {"error": "enrolling a Jaws is an admin action on this "
+            return {"error": "enrolling a Drone is an admin action on this "
                              "project; ask someone with that role"}
         if target_os not in ("linux", "darwin", "windows"):
             return {"error": "target_os is linux, darwin or windows"}
@@ -607,7 +607,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
             # that it will not be shown again.
             "enroll_token": tok_raw,
             "expires_at": expires.isoformat(),
-            "run": (f"jaws run --server <this oddjob url> "
+            "run": (f"drone run --server <this oddjob url> "
                     f"--enroll {tok_raw} --name {a.name}"),
             "note": ("this token is shown once and is good for a short "
                      "while; the agent trades it for a keypair it makes "
@@ -617,8 +617,8 @@ def build(session: AsyncSession, project: Project | None, user: User,
         }
 
     return reads + [
-        Tool("task_jaws",
-             "Queue a scan on a Jaws agent. Name an agent to pin the work "
+        Tool("task_drone",
+             "Queue a scan on a Drone agent. Name an agent to pin the work "
              "to it, or leave it out to let the project's routing choose. "
              "Results import automatically when the agent reports back.",
              _obj({"kind": {"type": "string",
@@ -632,21 +632,21 @@ def build(session: AsyncSession, project: Project | None, user: User,
                              "description": "agent name; omit for the pool"},
                    "ports": {"type": "string"},
                    "region": {"type": "string"}},
-                  ["kind", "targets"]), task_jaws, writes=True),
-        Tool("jaws_task_status",
-             "How a queued Jaws task is getting on, and whether its results "
+                  ["kind", "targets"]), task_drone, writes=True),
+        Tool("drone_task_status",
+             "How a queued Drone task is getting on, and whether its results "
              "are waiting on a decision about unknown hosts.",
              _obj({"task_id": {"type": "integer"}}, ["task_id"]),
-             jaws_task_status),
-        Tool("enroll_jaws",
-             "Create a new Jaws agent for this engagement and return the "
+             drone_task_status),
+        Tool("enroll_drone",
+             "Create a new Drone agent for this engagement and return the "
              "one-time command to run on the host. Admin only.",
              _obj({"name": {"type": "string"},
                    "target_os": {"type": "string",
                                  "enum": ["linux", "darwin", "windows"]},
                    "connection_mode": {"type": "string",
                                        "enum": ["callback", "call_in"]}},
-                  ["name"]), enroll_jaws, writes=True),
+                  ["name"]), enroll_drone, writes=True),
         Tool("add_note", "Append a note to a host's timeline.",
              _obj({"host": {"type": "string"}, "note": {"type": "string"}},
                   ["host", "note"]), add_note, writes=True),

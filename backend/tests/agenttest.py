@@ -1,4 +1,4 @@
-"""Jaws agent enrollment, tasking, result delivery and adjudication.
+"""Drone agent enrollment, tasking, result delivery and adjudication.
 
 The shape under test is the one an agent actually walks: enroll from the
 UI, register with the key, heartbeat until a task is handed over, mark it
@@ -32,7 +32,7 @@ def call(p, m="GET", b=None, token=None, key=None):
     if b is not None:
         r.data = json.dumps(b).encode(); r.add_header("Content-Type", "application/json")
     if token: r.add_header("Authorization", f"Bearer {token}")
-    if key: r.add_header("X-Jaws-Key", key)
+    if key: r.add_header("X-Drone-Key", key)
     try:
         with urllib.request.urlopen(r, timeout=60) as x:
             raw = x.read(); return x.status, (json.loads(raw) if raw else None)
@@ -593,9 +593,9 @@ def signed(priv, agent_id, method, path, body: bytes):
     ts, nonce = str(int(time.time())), secrets.token_urlsafe(12)
     msg = "\n".join([method.upper(), path,
                      hashlib.sha256(body or b"").hexdigest(), ts, nonce]).encode()
-    return {"X-Jaws-Agent": str(agent_id), "X-Jaws-Timestamp": ts,
-            "X-Jaws-Nonce": nonce,
-            "X-Jaws-Signature": base64.b64encode(priv.sign(msg)).decode()}
+    return {"X-Drone-Agent": str(agent_id), "X-Drone-Timestamp": ts,
+            "X-Drone-Nonce": nonce,
+            "X-Drone-Signature": base64.b64encode(priv.sign(msg)).decode()}
 
 
 def raw(path, method="GET", body=None, headers=None):
@@ -682,7 +682,7 @@ check("a signature is bound to the path it was made for", st == 401,
       f"status={st}")
 
 old = signed(priv, A2, "POST", "/api/agents/heartbeat", json.dumps({}).encode())
-old["X-Jaws-Timestamp"] = str(int(time.time()) - 4000)
+old["X-Drone-Timestamp"] = str(int(time.time()) - 4000)
 st, _ = raw("/api/agents/heartbeat", "POST", {}, headers=old)
 check("a stale timestamp is refused", st == 401, f"status={st}")
 
@@ -948,7 +948,7 @@ def derive(priv, peer_pub_b64):
                       fromlist=["X25519PublicKey"]).X25519PublicKey
     secret = priv.exchange(peer.from_public_bytes(_b64.b64decode(peer_pub_b64)))
     return HKDF(algorithm=_hashes.SHA256(), length=32, salt=None,
-                info=b"oddjob/jaws seal v1").derive(secret)
+                info=b"oddjob/drone seal v1").derive(secret)
 
 
 def binding(direction, aid, method, path, ts, nonce):
@@ -985,19 +985,19 @@ def sealed_call(path, body, method="POST", aid=None, key=None, bind_path=None):
     wire = env.encode()
     msg = "\n".join([method.upper(), path,
                       hashlib.sha256(wire).hexdigest(), ts, nonce]).encode()
-    h = {"X-Jaws-Agent": str(aid), "X-Jaws-Timestamp": ts,
-         "X-Jaws-Nonce": nonce,
-         "X-Jaws-Signature": _b64.b64encode(spriv3.sign(msg)).decode(),
-         "X-Jaws-Sealed": "v1"}
+    h = {"X-Drone-Agent": str(aid), "X-Drone-Timestamp": ts,
+         "X-Drone-Nonce": nonce,
+         "X-Drone-Signature": _b64.b64encode(spriv3.sign(msg)).decode(),
+         "X-Drone-Sealed": "v1"}
     r = urllib.request.Request(BASE + path, method=method, data=wire)
     r.add_header("Content-Type", "application/json")
     for k, v in h.items():
         r.add_header(k, v)
     try:
         with urllib.request.urlopen(r, timeout=60) as x:
-            return x.status, x.read(), x.headers.get("X-Jaws-Sealed"), ts, nonce
+            return x.status, x.read(), x.headers.get("X-Drone-Sealed"), ts, nonce
     except urllib.error.HTTPError as e:
-        return e.code, e.read(), e.headers.get("X-Jaws-Sealed"), ts, nonce
+        return e.code, e.read(), e.headers.get("X-Drone-Sealed"), ts, nonce
 
 
 st, body3, sealhdr, ts3, nonce3 = sealed_call("/api/agents/heartbeat", {})

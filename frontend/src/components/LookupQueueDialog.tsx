@@ -1,5 +1,5 @@
 /**
- * Queue a DNS lookup on a Jaws agent — address to name, or name to
+ * Queue a DNS lookup on a Drone agent — address to name, or name to
  * address — and say where the answer will come from.
  *
  * Reverse lookup is not just PTR. The agent asks a third-party reverse-IP
@@ -15,7 +15,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query'
 import { neon } from '../theme'
 import { AgentChooser, Caveat, EnumerateDialog, FleetNotice } from './EnumerateBits'
-import { needsRegion, queue, useFleet, type AgentChoice } from './jawsTasking'
+import { needsRegion, queue, useFleet, type AgentChoice } from './droneTasking'
 
 export type LookupKind = 'reverse_ip' | 'nslookup'
 

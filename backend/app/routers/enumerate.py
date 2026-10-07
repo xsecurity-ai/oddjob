@@ -1,4 +1,4 @@
-"""Turning Jaws lookups back into inventory, and naming what has not been scanned.
+"""Turning Drone lookups back into inventory, and naming what has not been scanned.
 
 Two questions the Targets page asks that nothing could answer.
 
@@ -293,7 +293,7 @@ async def _decide_others(session: AsyncSession, pr: Project, user: User,
                      detail=(f"{body.value} answers to this name as well as "
                              f"to the one chosen. Nothing has been probed at "
                              f"it — it is a lead, added deliberately."),
-                     actor=user, source="jaws:reverse_ip")
+                     actor=user, source="drone:reverse_ip")
         added.append(n)
 
     for n in sorted(want_add | want_deny):
@@ -370,7 +370,7 @@ async def resolve(body: ResolveIn, project: str = Query(...),
         t.host = name
         await record(session, t.id, "change",
                      f"named {name} from a reverse lookup on {was}",
-                     actor=user, source="jaws:reverse_ip")
+                     actor=user, source="drone:reverse_ip")
 
         # The names not chosen. Recorded as their own entry rather than
         # folded into the line above, because this is a finding about
@@ -397,7 +397,7 @@ async def resolve(body: ResolveIn, project: str = Query(...),
                         "each is a lead and none is in scope merely because "
                         "it appeared here:\n\n"
                         + "\n".join(shown) + more),
-                actor=user, source="jaws:reverse_ip")
+                actor=user, source="drone:reverse_ip")
     elif body.field == "ip_address":
         if not _is_ip(value):
             raise HTTPException(422, f"{value!r} is not an IP address")
@@ -405,7 +405,7 @@ async def resolve(body: ResolveIn, project: str = Query(...),
         t.ip_address = value
         await record(session, t.id, "change",
                      f"ip_address: {was} → {value} (forward lookup)",
-                     actor=user, source="jaws:nslookup")
+                     actor=user, source="drone:nslookup")
     else:
         raise HTTPException(422, "field is host or ip_address")
 

@@ -175,8 +175,8 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-  jaws:
-    name: jaws builds for every target
+  drone:
+    name: drone builds for every target
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -184,10 +184,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-          cache-dependency-path: jaws/go.sum
+          cache-dependency-path: drone/go.sum
 
       - name: Formatted
-        working-directory: jaws
+        working-directory: drone
         run: |
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
@@ -195,11 +195,11 @@ jobs:
           fi
 
       - name: Vet
-        working-directory: jaws
+        working-directory: drone
         run: go vet ./...
 
       - name: Tests
-        working-directory: jaws
+        working-directory: drone
         run: go test -race ./...
 
       # The agent is only useful if it reaches the host it is needed
@@ -207,18 +207,18 @@ jobs:
       # stops compiling is found here rather than at the point someone
       # needs a Windows binary.
       - name: Cross-compile every release target
-        working-directory: jaws
+        working-directory: drone
         run: make release
 
       # The agent image is how most people will actually deploy this,
       # and it has already hidden one bug the binaries could not: file
       # capabilities that are present and not effective.
       - name: The agent image builds and can raw-socket
-        working-directory: jaws
+        working-directory: drone
         run: |
-          docker build -q -t jaws-agent .
+          docker build -q -t drone-agent .
           docker run --rm --cap-drop=ALL --cap-add=NET_RAW --cap-add=NET_ADMIN \
-            jaws-agent check > /tmp/check.json || true
+            drone-agent check > /tmp/check.json || true
           cat /tmp/check.json
           python3 - <<'EOF'
           import json
@@ -231,15 +231,15 @@ jobs:
           EOF
 
       - name: The binaries are static
-        working-directory: jaws
+        working-directory: drone
         run: |
           # A dynamically linked agent fails on the older glibc it will
           # meet in the field, which is exactly where it cannot be
           # debugged.
-          if file dist/jaws-linux-amd64 | grep -q 'dynamically linked'; then
-            file dist/jaws-linux-amd64; exit 1
+          if file dist/drone-linux-amd64 | grep -q 'dynamically linked'; then
+            file dist/drone-linux-amd64; exit 1
           fi
-          ./dist/jaws-linux-amd64 version
+          ./dist/drone-linux-amd64 version
 
   docker:
     name: image builds and the stack comes up

@@ -70,7 +70,7 @@ class Project(Base, TimestampMixin):
     #: channels and the operators are all named after.
     codename: Mapped[str | None] = mapped_column(String(64), index=True)
 
-    #: How work is spread when a project has more than one Jaws.
+    #: How work is spread when a project has more than one Drone.
     #:
     #: mesh    — any online agent takes the next task. Whoever asks
     #:           first gets it, which balances by capacity for free:
@@ -86,7 +86,7 @@ class Project(Base, TimestampMixin):
     #:           not looked up: resolving a target address to a country
     #:           would mean sending the client's addresses to a
     #:           third-party geolocation service.
-    jaws_mode: Mapped[str] = mapped_column(
+    drone_mode: Mapped[str] = mapped_column(
         String(16), default="mesh", server_default="mesh")
     #: How many tasks one agent may run at once on this engagement.
     #:
@@ -96,7 +96,7 @@ class Project(Base, TimestampMixin):
     #: operator's half of that: an engagement running against a
     #: fragile estate wants a small number regardless of how much
     #: machine the scanner has under it.
-    jaws_max_parallel: Mapped[int] = mapped_column(
+    drone_max_parallel: Mapped[int] = mapped_column(
         Integer, default=5, server_default="5")
     name: Mapped[str] = mapped_column(String(255))
     client: Mapped[str | None] = mapped_column(String(255))
@@ -1076,7 +1076,7 @@ class ImportJob(Base, TimestampMixin):
 
 
 class Agent(Base, TimestampMixin):
-    """A Jaws instance: a scanner the server tasks and talks to.
+    """A Drone instance: a scanner the server tasks and talks to.
 
     Two keys, because the two directions are not the same trust. The
     agent proves itself to the server with `callback_key` on every
@@ -1277,7 +1277,7 @@ class AgentTask(Base, TimestampMixin):
 AUDIT_SOURCES = (
     "middleware",   # an HTTP request, recorded by the AuditTrail middleware
     "ui",           # a deliberate action a person took in the SPA
-    "jaws",         # a scanner enrolling, calling in, or returning results
+    "drone",         # a scanner enrolling, calling in, or returning results
     "backend",      # the server acting on its own: retention, workers, startup
 )
 
@@ -1318,7 +1318,7 @@ class AuditEvent(Base):
     at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True)
     source: Mapped[str] = mapped_column(String(16), index=True)
-    #: A short stable verb: `request`, `project.create`, `jaws.enroll`.
+    #: A short stable verb: `request`, `project.create`, `drone.enroll`.
     #: Dotted rather than prose so it can be filtered on.
     action: Mapped[str] = mapped_column(String(64), index=True)
     username: Mapped[str | None] = mapped_column(String(128), index=True)

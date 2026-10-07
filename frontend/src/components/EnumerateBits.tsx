@@ -2,7 +2,7 @@
  * The furniture every enumeration dialog needs: the same shell, the
  * same agent chooser, and one place that says what the fleet can do.
  *
- * Split out because three dialogs asking "which Jaws, and can it
+ * Split out because three dialogs asking "which Drone, and can it
  * actually run this?" in three slightly different ways is how one of
  * them ends up quietly omitting the raw-sockets caveat.
  */
@@ -12,7 +12,7 @@ import {
   Typography, alpha,
 } from '@mui/material'
 import { neon, glow } from '../theme'
-import { isLive, needsRegion, type AgentChoice, type Fleet } from './jawsTasking'
+import { isLive, needsRegion, type AgentChoice, type Fleet } from './droneTasking'
 
 export const paperSx = (accent: string) => ({
   backgroundColor: alpha(neon.paper, 0.97), backgroundImage: 'none',
@@ -80,7 +80,7 @@ export function EnumerateDialog({ accent, title, open, onClose, children }: {
  * `blocked` is an error because nothing will run; `caution` is a
  * warning because something will, later. The difference matters more
  * than it looks: a queued task with no agent behind it reads on the
- * Jaws page exactly like one that is running.
+ * Drone page exactly like one that is running.
  */
 export function FleetNotice({ fleet }: { fleet: Fleet }) {
   if (fleet.loading) return null
@@ -117,7 +117,7 @@ export function AgentChooser({ fleet, value, onChange, region, onRegion }: {
         value={value === null ? 'pool' : String(value)}
         onChange={(e) => onChange(e.target.value === 'pool' ? null : Number(e.target.value))}
         helperText={value === null
-          ? `Project pool — ${mode} routing decides which Jaws takes it.`
+          ? `Project pool — ${mode} routing decides which Drone takes it.`
           : 'Addressed to this agent. The routing policy does not override it.'}>
         <MenuItem value="pool">Any available agent (project pool)</MenuItem>
         {fleet.agents.map((a) => (

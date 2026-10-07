@@ -63,7 +63,7 @@ _SECRET_PREFIXES = (
 #: this is the backstop: long opaque segments, and the two key formats
 #: this application issues.
 _SECRETISH = re.compile(
-    r"^(?:jaws_[A-Za-z0-9_\-]+"          # agent keys
+    r"^(?:drone_[A-Za-z0-9_\-]+"          # agent keys
     r"|ojk_[A-Za-z0-9_\-]+"              # api keys
     r"|[A-Za-z0-9_\-]{24,})$"            # any long opaque blob
 )

@@ -39,7 +39,7 @@ SPEC = [
     {"key": "audit.retain_days", "group": "Site",
      "label": "Audit retention (days)", "type": "number", "default": 7,
      "help": "How long /audit/<type>/<format> keeps entries, where type is "
-             "ui, backend, middleware or jaws. This table grows with "
+             "ui, backend, middleware or drone. This table grows with "
              "traffic rather than with the engagement, so it is swept at "
              "startup and once a day. 0 or less is treated as the default "
              "rather than as 'keep nothing' — a window of zero would "

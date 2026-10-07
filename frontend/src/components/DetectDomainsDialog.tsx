@@ -6,7 +6,7 @@ import {
   Typography, alpha,
 } from '@mui/material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { isLive } from './jawsTasking'
+import { isLive } from './droneTasking'
 import { api, type DomainCandidate, type DetectResult } from '../lib/api'
 import { neon, glow } from '../theme'
 
@@ -169,7 +169,7 @@ export function DetectDomainsDialog({ project, onClose, seed = [],
    *  scanner go and look. Nothing to triage afterwards — a name a tool
    *  resolved is a finding, so it becomes a target when the task
    *  reports back. */
-  const sendToJaws = async () => {
+  const sendToDrone = async () => {
     const list = parseDomains(domain)
     if (!list.length) return
     setBusy(true); setErr(null); setQueued(null)
@@ -226,9 +226,9 @@ export function DetectDomainsDialog({ project, onClose, seed = [],
   const noAgents = live
     ? ''
     : (agents.data ?? []).length
-      ? 'Every Jaws agent on this project is offline, so there is nothing '
+      ? 'Every Drone agent on this project is offline, so there is nothing '
         + 'to run the enumeration.'
-      : 'No Jaws agent is enrolled on this project. Add one under Jaws.'
+      : 'No Drone agent is enrolled on this project. Add one under Drone.'
   const candidates = result?.candidates ?? []
   const allPicked = candidates.length > 0 && picked.size === candidates.length
 
@@ -301,18 +301,18 @@ export function DetectDomainsDialog({ project, onClose, seed = [],
                 have an agent actually look. */}
             <Tooltip title={noAgents
               ? noAgents
-              : 'Hand these to a Jaws agent to enumerate for real. Names '
+              : 'Hand these to a Drone agent to enumerate for real. Names '
                 + 'that come back are resolved, so they are filed as '
                 + 'targets automatically — nothing to triage.'}>
               <span>
                 <Button variant="contained" disableElevation
                   disabled={busy || !typed.length || !!noAgents}
-                  onClick={sendToJaws}
+                  onClick={sendToDrone}
                   sx={{ mt: 0.3, bgcolor: alpha(neon.pink, 0.22),
                         color: neon.pink,
                         border: `1px solid ${alpha(neon.pink, 0.6)}`,
                         '&:hover': { bgcolor: alpha(neon.pink, 0.3) } }}>
-                  Send to Jaws
+                  Send to Drone
                 </Button>
               </span>
             </Tooltip>

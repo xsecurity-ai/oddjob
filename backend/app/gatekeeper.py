@@ -59,7 +59,7 @@ PUBLIC_PREFIX = (
     "/api/auth/magic/",    # redeeming a link arrives with no session yet
 )
 
-# Jaws agents. NOT unauthenticated — they authenticate with an agent key,
+# Drone agents. NOT unauthenticated — they authenticate with an agent key,
 # which this middleware knows nothing about, so the route's own dependency
 # has to be the thing that checks. Matched exactly rather than by a
 # "/api/agents/tasks/" prefix: under a prefix, every route later added

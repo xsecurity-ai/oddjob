@@ -227,7 +227,7 @@ if _DIST.is_dir():
     #: same URL works whether you paste it into a tab or into curl.
     #:
     #: This MUST match GLOBAL ∪ SCOPED in frontend/src/lib/route.ts. It is
-    #: a second copy of a list that lives there, and it drifted: `jaws`
+    #: a second copy of a list that lives there, and it drifted: `drone`
     #: and `settings` were added to the app and not here, so every deep
     #: link and every refresh on those pages answered 404 while the page
     #: worked perfectly if you navigated to it. `webtest.py` reads the
@@ -235,7 +235,7 @@ if _DIST.is_dir():
     #: added will be added in one place again.
     SPA_ROUTES = ("projects", "targets", "services", "web", "vulns",
                   "credentials", "reports", "import", "config", "users",
-                  "profile", "jaws", "settings")
+                  "profile", "drones", "settings")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(request: Request, full_path: str):

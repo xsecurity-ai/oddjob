@@ -250,7 +250,7 @@ if DB and _pathlib.Path(DB).exists():
 print("\n== each origin is addressable on its own ==")
 # The common narrowing, as a URL rather than a query whose spelling has
 # to be remembered. Same handlers, same filters; the path pins `source`.
-for origin in ("middleware", "ui", "jaws", "backend"):
+for origin in ("middleware", "ui", "drone", "backend"):
     st, j = call(f"/audit/{origin}/json?limit=200", token=admin)
     check(f"/audit/{origin}/json answers", st == 200, f"status={st}")
     check(f"/audit/{origin}/json returns only {origin}",
@@ -267,19 +267,19 @@ for origin in ("middleware", "ui", "jaws", "backend"):
 # The path is the more specific statement of intent, so it wins. A
 # query that disagreed used to be the kind of thing that silently
 # returned the wrong rows.
-st, j = call("/audit/jaws/json?source=ui&limit=50", token=admin)
+st, j = call("/audit/drone/json?source=ui&limit=50", token=admin)
 check("the path beats a contradicting ?source=",
-      all(e["source"] == "jaws" for e in (j or {}).get("entries", []))
-      and (j or {}).get("source") == "jaws", str(j)[:140])
+      all(e["source"] == "drone" for e in (j or {}).get("entries", []))
+      and (j or {}).get("source") == "drone", str(j)[:140])
 
 # An empty page for a typo looks exactly like a quiet day, which is the
 # wrong thing for an audit tool to imply.
-st, r = call("/audit/jaws-agent/json", token=admin)
+st, r = call("/audit/drone-agent/json", token=admin)
 check("an unknown origin is a 404, not an empty page", st == 404, f"status={st}")
 check("and the 404 names the valid origins",
-      all(w in str(r) for w in ("middleware", "ui", "jaws", "backend")), str(r)[:170])
+      all(w in str(r) for w in ("middleware", "ui", "drone", "backend")), str(r)[:170])
 
-st, r = call("/audit/jaws/json")
+st, r = call("/audit/drone/json")
 check("the per-origin routes are admin-only too", st in (401, 403), f"status={st}")
 st, r = call("/audit/ui/json", token=plain)
 check("and refuse an ordinary user", st == 403, f"status={st}")
@@ -293,7 +293,7 @@ check("and says what it does not record",
 print("\n== every documented type answers in both formats ==")
 # The contract is /audit/$type/$format for four types and two formats.
 # A combination that 404s is a documented URL that does not exist.
-for t in ("ui", "backend", "middleware", "jaws"):
+for t in ("ui", "backend", "middleware", "drone"):
     st, _ = call(f"/audit/{t}/json", token=admin)
     check(f"/audit/{t}/json", st == 200, f"status={st}")
     st, b = call(f"/audit/{t}/log", token=admin, raw=True)

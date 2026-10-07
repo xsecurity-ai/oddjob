@@ -17,7 +17,7 @@ is enforced is the list of callers of this file:
     routers/agents.py       create_task, create_pooled_task, heartbeat hand-out
     routers/web.py          replay (the one route that sends live traffic)
     routers/actions.py      request_action (active probes)
-    agent/tools.py          add_target, task_jaws
+    agent/tools.py          add_target, task_drone
 
 Reads are deliberately NOT gated. Looking at a host the project already
 has is not touching it, and hiding existing rows because a list changed
@@ -82,8 +82,8 @@ async def assert_allowed(session: AsyncSession, project_id: int, host: str,
         raise refuse(ruling, what)
 
 
-# ---------------------------------------------------------------- jaws
-#: Where a task's targets live in its args. Jaws runners take `targets`;
+# ---------------------------------------------------------------- drone
+#: Where a task's targets live in its args. Drone runners take `targets`;
 #: the rest is defensive — a kind added later that names its hosts
 #: differently must not silently become an ungated path.
 TARGET_KEYS = ("targets", "target", "hosts", "host", "url", "urls")
@@ -115,7 +115,7 @@ def task_hosts(args: dict | None) -> list[str]:
 def as_host(raw: str) -> str:
     """The host part of a task target, for a scope question.
 
-    A Jaws target may be written as a URL or as host:port — both are
+    A Drone target may be written as a URL or as host:port — both are
     things nmap and httpx accept — so the rest is stripped. A CIDR keeps
     its prefix; `_probes` deals with ranges.
     """

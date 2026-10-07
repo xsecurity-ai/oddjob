@@ -1,6 +1,6 @@
-"""Jaws agents: enrollment, the task queue, and results coming home.
+"""Drone agents: enrollment, the task queue, and results coming home.
 
-**The agent dials out.** Jaws opens a websocket to the server and keeps
+**The agent dials out.** Drone opens a websocket to the server and keeps
 it open; the server never has to reach it. That is what makes it work
 from a client's network, behind NAT, with nothing listening. The
 reverse path — the server calling into the agent — exists for waking
@@ -166,9 +166,9 @@ class AgentOut(BaseModel):
 class AgentEnrolled(BaseModel):
     """Returned once, at enrollment. None of this is recoverable later."""
     agent: AgentOut
-    callback_key: str = Field(description="Give this to Jaws. It authenticates "
+    callback_key: str = Field(description="Give this to Drone. It authenticates "
                                           "the agent to the server.")
-    call_in_key: str = Field(description="Jaws requires this on inbound calls, "
+    call_in_key: str = Field(description="Drone requires this on inbound calls, "
                                          "so the agent can tell the server from "
                                          "anyone else who finds the port.")
     enroll_token: str = Field(
@@ -196,7 +196,7 @@ class EnrollIn(BaseModel):
 
 
 class RegisterIn(BaseModel):
-    """What Jaws reports about itself when it connects."""
+    """What Drone reports about itself when it connects."""
     platform: str | None = None
     arch: str | None = None
     version: str | None = None
@@ -595,7 +595,7 @@ def _looks_like_ip(value: str) -> bool:
 
 
 # ---------------------------------------------------------- dispatching
-JAWS_MODES = ("mesh", "primary", "geo")
+DRONE_MODES = ("mesh", "primary", "geo")
 
 
 def _regions_of(a: Agent) -> set[str]:
@@ -637,7 +637,7 @@ async def _may_claim(session: AsyncSession, project: Project, agent: Agent,
     newly-arrived agent change the answer without anything having to
     re-plan.
     """
-    mode = (project.jaws_mode or "mesh").lower()
+    mode = (project.drone_mode or "mesh").lower()
 
     if mode == "geo":
         want = (task.region or "").strip().lower()
@@ -784,7 +784,7 @@ async def _resolve_agent(request: Request, session: AsyncSession,
     auth = request.headers.get("Authorization", "")
     key = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     if not key:
-        key = request.headers.get("X-Jaws-Key", "").strip()
+        key = request.headers.get("X-Drone-Key", "").strip()
     if not key:
         raise HTTPException(401, "no agent key supplied")
     for a in (await session.execute(select(Agent))).scalars():
@@ -839,7 +839,7 @@ async def _project_code(session: AsyncSession, project_id: int) -> str:
 
 # ------------------------------------------------------ operator routes
 #: [a-z0-9]. No uppercase and no punctuation: the name turns up in
-#: container names, log lines and `jaws:<name>` audit actors, and a
+#: container names, log lines and `drone:<name>` audit actors, and a
 #: character that needs quoting in one of those is a character that
 #: eventually gets mangled in another.
 _SUFFIX_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -868,7 +868,7 @@ def unique_agent_name(raw: str) -> str:
     see the note there -- so this is about the name nobody chose, not
     about overruling the one somebody did.
     """
-    base = _SUFFIX_RE.sub("", (raw or "").strip())[:120] or "jaws"
+    base = _SUFFIX_RE.sub("", (raw or "").strip())[:120] or "drone"
     return f"{base}-{_new_suffix()}"
 
 
@@ -900,7 +900,7 @@ async def enroll(body: EnrollIn, project: str = Query(...),
               connection_mode=body.connection_mode, target_os=body.target_os,
               notes=body.notes, status="offline")
     session.add(a)
-    await audit.record(session, "ui", "jaws.create", user=user,
+    await audit.record(session, "ui", "drone.create", user=user,
                        project_code=pr.code,
                        detail=f"{a.name!r} mode={a.connection_mode} "
                               f"os={a.target_os or 'any'}")
@@ -947,7 +947,7 @@ async def list_agents(project: str | None = Query(None),
             .order_by(AgentTask.id))).scalars():
         in_flight.setdefault(t.agent_id, []).append(t)
 
-    ceiling = max(1, int(pr.jaws_max_parallel or 5))
+    ceiling = max(1, int(pr.drone_max_parallel or 5))
     out = []
     for a in rows:
         # Claimed counts as in flight: the agent has taken it and the
@@ -1003,23 +1003,23 @@ async def set_agent(agent_id: int, body: AgentPatch | None = None,
 #: Where the built agent binaries are looked for, in order. The image
 #: builds them into the first; a development checkout has them in the
 #: second after `make release`.
-JAWS_DIRS = (
-    Path("/app/jaws-dist"),
-    Path(__file__).resolve().parents[3] / "jaws" / "dist",
+DRONE_DIRS = (
+    Path("/app/drone-dist"),
+    Path(__file__).resolve().parents[3] / "drone" / "dist",
 )
 
-JAWS_BINARIES = {
-    ("linux", "amd64"): "jaws-linux-amd64",
-    ("linux", "arm64"): "jaws-linux-arm64",
-    ("darwin", "amd64"): "jaws-darwin-amd64",
-    ("darwin", "arm64"): "jaws-darwin-arm64",
-    ("windows", "amd64"): "jaws-windows-amd64.exe",
-    ("windows", "arm64"): "jaws-windows-arm64.exe",
+DRONE_BINARIES = {
+    ("linux", "amd64"): "drone-linux-amd64",
+    ("linux", "arm64"): "drone-linux-arm64",
+    ("darwin", "amd64"): "drone-darwin-amd64",
+    ("darwin", "arm64"): "drone-darwin-arm64",
+    ("windows", "amd64"): "drone-windows-amd64.exe",
+    ("windows", "arm64"): "drone-windows-arm64.exe",
 }
 
 
-def _jaws_binary(name: str) -> Path | None:
-    for d in JAWS_DIRS:
+def _drone_binary(name: str) -> Path | None:
+    for d in DRONE_DIRS:
         p = d / name
         # resolve() then check containment: the name comes from a fixed
         # table rather than the caller, but a path join that can be
@@ -1042,8 +1042,8 @@ async def list_downloads(_: User = Depends(get_current_user)):
     bug rather than a missing build.
     """
     out = []
-    for (goos, arch), name in sorted(JAWS_BINARIES.items()):
-        p = _jaws_binary(name)
+    for (goos, arch), name in sorted(DRONE_BINARIES.items()):
+        p = _drone_binary(name)
         out.append({"os": goos, "arch": arch, "name": name,
                     "available": p is not None,
                     "bytes": p.stat().st_size if p else 0})
@@ -1060,17 +1060,17 @@ async def download_agent(goos: str, arch: str,
     but an unauthenticated endpoint serving an executable from the
     engagement's own server is a thing worth not having.
     """
-    name = JAWS_BINARIES.get((goos.lower(), arch.lower()))
+    name = DRONE_BINARIES.get((goos.lower(), arch.lower()))
     if name is None:
         raise HTTPException(
             404, f"no build for {goos}/{arch}. Available: "
-                 f"{', '.join(f'{o}/{a}' for o, a in sorted(JAWS_BINARIES))}")
-    p = _jaws_binary(name)
+                 f"{', '.join(f'{o}/{a}' for o, a in sorted(DRONE_BINARIES))}")
+    p = _drone_binary(name)
     if p is None:
         raise HTTPException(
             503, f"this Oddjob has no {goos}/{arch} agent binary. They are "
                  f"built into the image; in a development checkout run "
-                 f"`make release` in jaws/.")
+                 f"`make release` in drone/.")
     return FileResponse(p, filename=name,
                         media_type="application/octet-stream")
 
@@ -1114,9 +1114,9 @@ async def reach_agent(agent_id: int,
     ts = str(int(time.time()))
     nonce = secrets.token_urlsafe(12)
     headers = {
-        "X-Jaws-Timestamp": ts,
-        "X-Jaws-Nonce": nonce,
-        "X-Jaws-Signature": agentcrypto.sign(priv, "POST", path, b"", ts, nonce),
+        "X-Drone-Timestamp": ts,
+        "X-Drone-Nonce": nonce,
+        "X-Drone-Signature": agentcrypto.sign(priv, "POST", path, b"", ts, nonce),
         "Content-Type": "application/json",
     }
     try:
@@ -1263,7 +1263,7 @@ async def kill_agent(agent_id: int,
     # agent is not one, so inventing a target_id to get a line would
     # put a false entry on a real host. The audit trail is keyed on
     # time rather than on an asset, which is the right shape for this.
-    await audit.record(session, "ui", "jaws.kill", user=user,
+    await audit.record(session, "ui", "drone.kill", user=user,
                        project_code=pr.code,
                        detail=f"killed {a.name}"
                               + (f", cancelled {cancelled} queued task(s)"
@@ -1362,9 +1362,9 @@ async def read_routing(pr: Project = Depends(require_project("readonly")),
             AgentTask.project_id == pr.id, AgentTask.agent_id.is_(None),
             AgentTask.status == "queued"))).scalar_one()
     first = eligible[0] if eligible else None
-    mode = (pr.jaws_mode or "mesh").lower()
+    mode = (pr.drone_mode or "mesh").lower()
     return RoutingOut(
-        mode=mode, max_parallel=max(1, int(pr.jaws_max_parallel or 5)),
+        mode=mode, max_parallel=max(1, int(pr.drone_max_parallel or 5)),
         current_primary=first.id if (mode == "primary" and first) else None,
         current_primary_name=first.name if (mode == "primary" and first) else None,
         eligible=len(eligible), unassigned_tasks=pending)
@@ -1377,11 +1377,11 @@ async def set_routing(body: RoutingIn,
                       session: AsyncSession = Depends(get_session)):
     if body.mode is not None:
         mode = (body.mode or "").strip().lower()
-        if mode not in JAWS_MODES:
-            raise HTTPException(422, f"mode is one of {', '.join(JAWS_MODES)}")
-        pr.jaws_mode = mode
+        if mode not in DRONE_MODES:
+            raise HTTPException(422, f"mode is one of {', '.join(DRONE_MODES)}")
+        pr.drone_mode = mode
     if body.max_parallel is not None:
-        pr.jaws_max_parallel = int(body.max_parallel)
+        pr.drone_max_parallel = int(body.max_parallel)
     await session.commit()
     await broker.publish("agents", action="routing", project=pr.code)
     return await read_routing(pr=pr, _=_, session=session)
@@ -1408,7 +1408,7 @@ async def create_pooled_task(body: TaskIn,
         raise HTTPException(
             422, "install is addressed to one agent, not to the pool — "
                  "queue it against the agent you mean to change")
-    if (pr.jaws_mode or "mesh").lower() == "geo" and not (body.region or "").strip():
+    if (pr.drone_mode or "mesh").lower() == "geo" and not (body.region or "").strip():
         # Better refused than silently run from wherever answered first,
         # which is the thing geo mode exists to prevent.
         raise HTTPException(
@@ -1467,7 +1467,7 @@ def _subject(kind: str, args: dict) -> str:
 
 @router.get("/tools", response_model=dict)
 async def required_tools(_: User = Depends(get_current_user)):
-    """What a Jaws is expected to have, and what each one is for.
+    """What a Drone is expected to have, and what each one is for.
 
     One list, here. The agent installs exactly these at startup and
     reports what it could not get; the dispatcher reads that to avoid
@@ -1522,7 +1522,7 @@ async def list_queue(limit: int = Query(200, le=1000),
 
 
 class TaskRow(BaseModel):
-    """One task, as the tasks table on the Jaws page shows it."""
+    """One task, as the tasks table on the Drone page shows it."""
     id: int
     kind: str
     subject: str
@@ -1620,7 +1620,7 @@ async def retry_task(task_id: int,
     t.exit_code = None
     t.error = f"restarted by {user.username}; previously: {was or 'failed'}"[:4000]
     await session.commit()
-    await audit.record(session, "ui", "jaws.task.retry", user=user,
+    await audit.record(session, "ui", "drone.task.retry", user=user,
                        project_code=pr.code,
                        detail=f"restarted {t.kind} task {t.id}", commit=True)
     await broker.publish("agents", action="task", project=pr.code)
@@ -1656,7 +1656,7 @@ async def cancel_task(task_id: int,
     subject = _subject(t.kind, json.loads(t.args) if t.args else {})
     await session.delete(t)
     await session.commit()
-    await audit.record(session, "ui", "jaws.task.cancel", user=user,
+    await audit.record(session, "ui", "drone.task.cancel", user=user,
                        project_code=pr.code,
                        detail=f"cancelled queued {t.kind} on {subject}",
                        commit=True)
@@ -1718,7 +1718,7 @@ async def import_task_result(agent_id: int, task_id: int,
     from .scans import _run
     a = await session.get(Agent, agent_id)
     res = await _run(session, pr, t.output, t.import_as,
-                     f"jaws:{a.name if a else agent_id}",
+                     f"drone:{a.name if a else agent_id}",
                      mode=body.mode,
                      decisions={k: v for k, v in body.decisions.items()})
     t.import_result = res.model_dump_json()
@@ -1806,12 +1806,12 @@ async def claim_identity(body: IdentityIn,
     _, server_kex_pub = await server_kex(session)
     code = await _project_code(session, match.project_id)
     # The moment a scanner gains a credential against this
-    # installation. Source `jaws`, not `ui`: no person is on the other
+    # installation. Source `drone`, not `ui`: no person is on the other
     # end of this request, and attributing it to one would be a lie
     # about who did it. The key itself is never recorded — only that
     # one was accepted, and for which agent.
     await audit.record(
-        session, "jaws", "jaws.enroll", username=f"jaws:{match.name}",
+        session, "drone", "drone.enroll", username=f"drone:{match.name}",
         project_code=code,
         detail=f"{match.name} enrolled an identity"
                + (" with key agreement" if match.kex_public_key else ""))
@@ -1831,7 +1831,7 @@ async def claim_identity(body: IdentityIn,
 async def register(body: RegisterIn, request: Request,
                    a: Agent = Depends(agent_even_if_killed),
                    session: AsyncSession = Depends(get_session)):
-    """Jaws announcing itself. Idempotent: it runs on every reconnect."""
+    """Drone announcing itself. Idempotent: it runs on every reconnect."""
     a.platform, a.arch = body.platform, body.arch
     a.version, a.hostname = body.version, body.hostname
     a.privileged = bool(body.privileged)
@@ -1976,7 +1976,7 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
     # reports nothing is read as one at a time, which is what every
     # agent did before any of this existed.
     pr_obj = await session.get(Project, a.project_id)
-    ceiling = max(1, int(getattr(pr_obj, "jaws_max_parallel", 5) or 5))
+    ceiling = max(1, int(getattr(pr_obj, "drone_max_parallel", 5) or 5))
     if body is not None and body.capacity is not None:
         a.capacity = max(1, int(body.capacity))
     if body is not None and body.capacity_reason:
@@ -2165,8 +2165,8 @@ async def submit_result(task_id: int, body: ResultIn,
     # The agent authenticates by key, not as a person, so the actor is
     # the agent's own name -- which is the honest answer to "who sent
     # this" and the one worth having when a result looks wrong.
-    await audit.record(session, "jaws", "jaws.result",
-                       username=f"jaws:{a.name}",
+    await audit.record(session, "drone", "drone.result",
+                       username=f"drone:{a.name}",
                        project_code=(await session.get(Project, t.project_id)).code
                        if t.project_id else None,
                        detail=f"task {t.id} {t.status}"
@@ -2184,7 +2184,7 @@ async def submit_result(task_id: int, body: ResultIn,
     if t.status == "done" and t.kind in NAME_KINDS and (t.output or "").strip():
         pr = await session.get(Project, t.project_id)
         try:
-            imported = await _import_names(session, pr, t, actor=f"jaws:{a.name}")
+            imported = await _import_names(session, pr, t, actor=f"drone:{a.name}")
             t.import_result = json.dumps(imported)
             await session.commit()
         except Exception as e:                   # noqa: BLE001
@@ -2198,7 +2198,7 @@ async def submit_result(task_id: int, body: ResultIn,
         from .scans import _run
         try:
             res = await _run(session, pr, t.output, t.import_as,
-                             f"jaws:{a.name}", mode="strict", decisions={})
+                             f"drone:{a.name}", mode="strict", decisions={})
             imported = json.loads(res.model_dump_json())
             t.import_result = json.dumps(imported)
             await session.commit()

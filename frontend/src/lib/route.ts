@@ -41,7 +41,7 @@ const GLOBAL = new Set(['projects', 'config', 'users', 'profile'])
  *  per-project copy of the deployment settings, and `/config` is already
  *  that page. */
 const SCOPED = new Set(['targets', 'services', 'web', 'vulns', 'credentials',
-                        'reports', 'jaws', 'import', 'settings'])
+                        'reports', 'drones', 'import', 'settings'])
 
 /** Where a bare `/` lands. The project list, not targets-across-
  *  everything: with no project chosen, "which engagement" is the

@@ -36,7 +36,7 @@ import {
 } from './EnumerateBits'
 import {
   needsRegion, queueEach, rawSockets, useFleet, type AgentChoice,
-} from './jawsTasking'
+} from './droneTasking'
 
 /** Above this, a discovery sweep is a decision rather than a click. */
 const LARGE = 4096

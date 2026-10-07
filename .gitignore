@@ -40,8 +40,8 @@ recon/
 # out of a commit and only CI noticed, because a local build still had
 # the file on disk. Un-ignoring a path inside an ignored directory needs
 # the directory itself re-included, not just the files under it.
-!jaws/internal/recon/
-!jaws/internal/recon/**
+!drone/internal/recon/
+!drone/internal/recon/**
 
 # Reports, which are client deliverables.
 *.docx
@@ -72,5 +72,5 @@ __pycache__/
 
 # `make build` writes the host binary into the source tree. It is
 # 7 MB of build output and it got committed once by `git add -A`.
-/jaws/jaws
-/jaws/jaws.exe
+/drone/drone
+/drone/drone.exe

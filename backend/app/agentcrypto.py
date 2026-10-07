@@ -1,4 +1,4 @@
-"""Mutual Ed25519 identity for Jaws agents.
+"""Mutual Ed25519 identity for Drone agents.
 
 A bearer key proves only that the caller read a secret from somewhere.
 Copy it off the agent's disk and you are the agent; copy it out of the
@@ -49,10 +49,10 @@ CLOCK_SKEW = 300
 #: Settings key holding this instance's private identity.
 SERVER_KEY_SETTING = "agent_server_identity"
 
-SIG_HEADER = "X-Jaws-Signature"
-AGENT_HEADER = "X-Jaws-Agent"
-TS_HEADER = "X-Jaws-Timestamp"
-NONCE_HEADER = "X-Jaws-Nonce"
+SIG_HEADER = "X-Drone-Signature"
+AGENT_HEADER = "X-Drone-Agent"
+TS_HEADER = "X-Drone-Timestamp"
+NONCE_HEADER = "X-Drone-Nonce"
 
 
 # --------------------------------------------------------- confidentiality
@@ -85,7 +85,7 @@ SEAL_VERSION = "v1"
 #: Settings key holding this instance's X25519 private half.
 SERVER_KEX_SETTING = "agent_server_kex"
 
-SEALED_HEADER = "X-Jaws-Sealed"
+SEALED_HEADER = "X-Drone-Sealed"
 
 
 def b64(raw: bytes) -> str:
@@ -144,7 +144,7 @@ def shared_key(private_b64: str, peer_public_b64: str) -> bytes:
     peer = X25519PublicKey.from_public_bytes(unb64(peer_public_b64))
     secret = priv.exchange(peer)
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
-                info=f"oddjob/jaws seal {SEAL_VERSION}".encode()).derive(secret)
+                info=f"oddjob/drone seal {SEAL_VERSION}".encode()).derive(secret)
 
 
 def channel_binding(direction: str, agent_id: int, method: str, path: str,

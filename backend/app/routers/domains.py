@@ -331,7 +331,7 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
                             pr: Project = Depends(require_project("user")),
                             user: User = Depends(get_current_user),
                             session: AsyncSession = Depends(get_session)):
-    """Hand a list of domains to Jaws, and file what comes back.
+    """Hand a list of domains to Drone, and file what comes back.
 
     The difference from `/detect` is what produces the names. Detection
     extrapolates from patterns the estate already shows and produces
@@ -365,7 +365,7 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
         # Refused rather than queued. Work accepted with nothing to run
         # it sits looking submitted, which reads as a broken scan.
         raise HTTPException(
-            409, "no Jaws agent is online for this project, so there is "
+            409, "no Drone agent is online for this project, so there is "
                  "nothing to run the enumeration. Bring one up and submit "
                  "again.")
 

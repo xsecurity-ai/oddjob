@@ -38,7 +38,7 @@ import { SiteConfigView } from './views/SiteConfigView'
 import { WebView } from './views/WebView'
 import { ImportView } from './views/ImportView'
 import { ReportsView } from './views/ReportsView'
-import { JawsView } from './views/JawsView'
+import { DronesView } from './views/DronesView'
 import { ProjectConfigView } from './views/ProjectConfigView'
 import { useHostModal } from './components/HostModal'
 import { AgentPanel } from './components/AgentPanel'
@@ -267,7 +267,7 @@ export default function App() {
     // Its own entry, directly below Reports rather than nested inside
     // it. Nesting cost a click to reach a view an operator checks while
     // a scan is running, and hid it entirely until Reports was open.
-    { key: 'jaws', label: 'Jaws', icon: <MemoryIcon fontSize="small" /> },
+    { key: 'drones', label: 'Drones', icon: <MemoryIcon fontSize="small" /> },
     // No sidebar entry for Project Config: it is reached from the edit
     // button on its own row in Projects, which is where you already are
     // when you want it. The route still resolves, so existing links and
@@ -305,7 +305,7 @@ export default function App() {
     web: <WebView project={scope} />,
     import: <ImportView project={project === ALL ? null : project} />,
     reports: <ReportsView project={project === ALL ? null : project} />,
-    jaws: <JawsView project={project === ALL ? null : project} />,
+    drones: <DronesView project={project === ALL ? null : project} />,
     settings: <ProjectConfigView project={project === ALL ? null : project} />,
     config: <SiteConfigView />,
     users: <UsersView />,

@@ -7,7 +7,7 @@ because the paths that ARE checked make people believe the rest are too.
 
 So this suite does not only assert that `scope.check()` returns the right
 word. It drives each writing path over HTTP — add a target, bulk load,
-import a scan, queue a Jaws task, hand that task to an agent — and
+import a scan, queue a Drone task, hand that task to an agent — and
 asserts the refusal lands there.
 
 Four rules are load-bearing and each has its own section:
@@ -41,7 +41,7 @@ def call(p, m="GET", b=None, token=None, key=None):
     if b is not None:
         r.data = json.dumps(b).encode(); r.add_header("Content-Type", "application/json")
     if token: r.add_header("Authorization", f"Bearer {token}")
-    if key: r.add_header("X-Jaws-Key", key)
+    if key: r.add_header("X-Drone-Key", key)
     try:
         with urllib.request.urlopen(r, timeout=60) as x:
             raw = x.read(); return x.status, (json.loads(raw) if raw else None)
@@ -250,61 +250,61 @@ check("and the refusal says the country is undetermined, not that it is wrong",
       "no country is declared" in str(r), str(r)[:200])
 
 
-# ===================================================== Jaws tasking
-print("\n== Jaws tasking is gated, at queue time and at hand-out ==")
-project("JAWSX")
-add_scope("JAWSX", lines=["203.0.113.0/24"])
-add_scope("JAWSX", lines=["203.0.113.5"], included=False)
-st, en = call("/api/agents?project=JAWSX", "POST", {"name": "a1"}, token=admin)
+# ===================================================== Drone tasking
+print("\n== Drone tasking is gated, at queue time and at hand-out ==")
+project("DRONEX")
+add_scope("DRONEX", lines=["203.0.113.0/24"])
+add_scope("DRONEX", lines=["203.0.113.5"], included=False)
+st, en = call("/api/agents?project=DRONEX", "POST", {"name": "a1"}, token=admin)
 AID = ((en or {}).get("agent") or {}).get("id")
 KEY = (en or {}).get("callback_key")
 call("/api/agents/register", "POST", {"platform": "linux"}, key=KEY)
 
-st, r = call(f"/api/agents/{AID}/tasks?project=JAWSX", "POST",
+st, r = call(f"/api/agents/{AID}/tasks?project=DRONEX", "POST",
              {"kind": "nmap", "args": {"targets": ["203.0.113.5"]}}, token=admin)
 check("a task naming a barred host is refused", st == 403, f"status={st}")
 check("and says which host and which entry", "203.0.113.5" in str(r), str(r)[:170])
 
-st, r = call(f"/api/agents/{AID}/tasks?project=JAWSX", "POST",
+st, r = call(f"/api/agents/{AID}/tasks?project=DRONEX", "POST",
              {"kind": "nmap",
               "args": {"targets": ["203.0.113.4", "203.0.113.5"]}}, token=admin)
 check("one barred host refuses the whole task, not just that entry",
       st == 403, f"status={st}")
 
-st, r = call(f"/api/agents/{AID}/tasks?project=JAWSX", "POST",
+st, r = call(f"/api/agents/{AID}/tasks?project=DRONEX", "POST",
              {"kind": "nmap", "args": {"targets": ["198.51.100.1"]}}, token=admin)
 check("a task outside the in-scope list is refused too", st == 422, f"status={st}")
 
-st, r = call("/api/agents/tasks?project=JAWSX", "POST",
+st, r = call("/api/agents/tasks?project=DRONEX", "POST",
              {"kind": "masscan", "args": {"targets": ["203.0.113.5"]}}, token=admin)
 check("the pooled queue is gated identically — it is the same packets",
       st == 403, f"status={st}")
 
-st, r = call(f"/api/agents/{AID}/tasks?project=JAWSX", "POST",
+st, r = call(f"/api/agents/{AID}/tasks?project=DRONEX", "POST",
              {"kind": "nmap", "args": {"targets": ["203.0.113.9"]}}, token=admin)
 check("an in-scope task is queued", st == 201, f"status={st} {str(r)[:120]}")
 TASK = (r or {}).get("id")
 
 # A URL-shaped target still has to pass: httpx and gospider take them.
-st, r = call(f"/api/agents/{AID}/tasks?project=JAWSX", "POST",
+st, r = call(f"/api/agents/{AID}/tasks?project=DRONEX", "POST",
              {"kind": "httpx", "args": {"targets": ["https://203.0.113.5:8443/x"]}},
              token=admin)
 check("a target written as a URL is still resolved to its host and barred",
       st == 403, f"status={st}")
 
 # A range whose edges are in scope passes; one whose edges are not does not.
-st, r = call(f"/api/agents/{AID}/tasks?project=JAWSX", "POST",
+st, r = call(f"/api/agents/{AID}/tasks?project=DRONEX", "POST",
              {"kind": "masscan", "args": {"targets": ["198.51.100.0/24"]}},
              token=admin)
 check("a CIDR argument outside the list is refused", st == 422, f"status={st}")
 
 print("\n-- the list can move while a task is queued --")
-add_scope("JAWSX", lines=["203.0.113.9"], included=False)
+add_scope("DRONEX", lines=["203.0.113.9"], included=False)
 st, hb = call("/api/agents/heartbeat", "POST", {}, key=KEY)
 check("heartbeat is answered", st == 200, f"status={st}")
 check("the now-barred task is NOT handed over",
       (hb or {}).get("task") is None, str(hb)[:160])
-st, tasks = call(f"/api/agents/{AID}/tasks?project=JAWSX", token=admin)
+st, tasks = call(f"/api/agents/{AID}/tasks?project=DRONEX", token=admin)
 row = next((t for t in (tasks or []) if t["id"] == TASK), None)
 check("it is failed with the reason, not left queued forever",
       row and row["status"] == "failed" and "scope" in (row["error"] or ""),

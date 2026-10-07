@@ -1,7 +1,7 @@
 """Turning finished lookups into inventory, and spotting unscanned ranges.
 
 `/api/enumerate` derives its state rather than storing it: a pending
-choice is a completed Jaws lookup whose answer the target does not yet
+choice is a completed Drone lookup whose answer the target does not yet
 carry. That is cheap and needs no table, but it means the behaviour is
 entirely emergent — answering a choice has to make it disappear on its
 own, and a stale lookup must not be able to overwrite a newer one.
@@ -35,7 +35,7 @@ def call(p, m="GET", b=None, token=None, key=None):
         r.data = json.dumps(b).encode()
         r.add_header("Content-Type", "application/json")
     if token: r.add_header("Authorization", f"Bearer {token}")
-    if key: r.add_header("X-Jaws-Key", key)
+    if key: r.add_header("X-Drone-Key", key)
     try:
         with urllib.request.urlopen(r, timeout=60) as x:
             raw = x.read(); return x.status, (json.loads(raw) if raw else None)
@@ -50,7 +50,7 @@ admin = call("/api/auth/setup", "POST",
 call("/api/projects", "POST", {"code": "ENUM", "name": "Enumerate"}, token=admin)
 
 # An agent to own the lookups. Results are posted as a real agent would,
-# because the whole point is that `pending` reads what Jaws actually
+# because the whole point is that `pending` reads what Drone actually
 # sends back rather than a shape invented for the test.
 st, en = call("/api/agents?project=ENUM", "POST", {"name": "scanner"}, token=admin)
 KEY, AID = en["callback_key"], en["agent"]["id"]

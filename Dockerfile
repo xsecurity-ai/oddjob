@@ -19,8 +19,8 @@ COPY frontend/ ./
 RUN npm run build
 
 
-# --------------------------------------------------------- jaws agents
-# The agent binaries the UI hands out when deploying a Jaws. Built here
+# -------------------------------------------------------- drone agents
+# The agent binaries the UI hands out when deploying a Drone. Built here
 # so an operator can download one from the Oddjob they are already
 # logged into, rather than being sent to find a release elsewhere and
 # having to trust whatever they find.
@@ -28,21 +28,21 @@ RUN npm run build
 # All six targets, because the host an agent is needed on is whatever
 # the client has. Static (CGO_ENABLED=0) so they run on the older glibc
 # they will meet in the field.
-FROM golang:1.26-alpine AS jaws
-WORKDIR /build/jaws
+FROM golang:1.26-alpine AS drone
+WORKDIR /build/drone
 
-COPY jaws/go.mod jaws/go.sum ./
+COPY drone/go.mod drone/go.sum ./
 RUN go mod download
 
-COPY jaws/ ./
+COPY drone/ ./
 RUN set -eu; \
     for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 \
              windows/amd64 windows/arm64; do \
       os="${t%/*}"; arch="${t#*/}"; \
-      out="dist/jaws-$os-$arch"; \
+      out="dist/drone-$os-$arch"; \
       [ "$os" = windows ] && out="$out.exe"; \
       CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-        go build -trimpath -ldflags "-s -w" -o "$out" ./cmd/jaws; \
+        go build -trimpath -ldflags "-s -w" -o "$out" ./cmd/drone; \
     done; \
     ls -l dist/
 
@@ -86,7 +86,7 @@ ENV PYTHONUNBUFFERED=1 \
 COPY --from=deps --chown=oddjob:oddjob /opt/venv /opt/venv
 COPY --chown=oddjob:oddjob backend/ /app/backend/
 COPY --from=ui --chown=oddjob:oddjob /build/frontend/dist /app/frontend/dist
-COPY --from=jaws --chown=oddjob:oddjob /build/jaws/dist /app/jaws-dist
+COPY --from=drone --chown=oddjob:oddjob /build/drone/dist /app/drone-dist
 COPY --chown=oddjob:oddjob docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # `data` holds the session-signing key, which has to outlive the

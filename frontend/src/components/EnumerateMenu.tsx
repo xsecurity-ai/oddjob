@@ -55,10 +55,10 @@ function Blocked({ label, why, icon }: {
 export function noAgentReason(live: number, enrolled: number): string {
   if (live > 0) return ''
   if (!enrolled) {
-    return 'No Jaws agent is enrolled on this project, so there is '
-         + 'nothing to run the scan. Add one under Jaws.'
+    return 'No Drone agent is enrolled on this project, so there is '
+         + 'nothing to run the scan. Add one under Drone.'
   }
-  return `All ${enrolled} Jaws agent${enrolled === 1 ? '' : 's'} on this `
+  return `All ${enrolled} Drone agent${enrolled === 1 ? '' : 's'} on this `
        + `project ${enrolled === 1 ? 'is' : 'are'} offline. Work queued now `
        + `would sit unclaimed until one comes back.`
 }
