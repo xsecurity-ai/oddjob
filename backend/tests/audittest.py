@@ -383,4 +383,25 @@ check("attributed to no person, because none was involved",
       all(e["username"] is None for e in es if e["action"] == "server.start"),
       str(es)[:160])
 
+print("\n== a logged value cannot forge a log line ==")
+# This is the audit log. A newline in a logged field lets a caller
+# invent an entry nobody wrote, and a forged entry here is not cosmetic
+# -- it is evidence. Sanitised at the logging site, because the callers
+# are the part that keeps changing.
+from app.audit import for_log                                    # noqa: E402
+
+_forged = "scan\n2026-01-01 12:00:00 INFO  authorised by root"
+check("a newline cannot start a second line",
+      "\n" not in for_log(_forged), repr(for_log(_forged))[:90])
+check("and the text is still readable, not dropped",
+      "authorised by root" in for_log(_forged), repr(for_log(_forged))[:90])
+for _ch, _name in [("\r", "carriage return"), ("\x1b", "escape"),
+                   ("\x00", "null")]:
+    check(f"a {_name} is escaped", _ch not in for_log(f"a{_ch}b"),
+          repr(for_log(f"a{_ch}b")))
+check("ordinary text is left alone", for_log("nmap.bulk") == "nmap.bulk",
+      for_log("nmap.bulk"))
+check("and it is bounded, so one field cannot flood the log",
+      len(for_log("x" * 5000)) <= 200, str(len(for_log("x" * 5000))))
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

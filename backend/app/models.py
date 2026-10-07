@@ -1375,7 +1375,13 @@ class Exploit(Base):
     #: Exploit-DB marks which entries somebody actually ran. An
     #: unverified entry is a lead; a verified one is a lead that worked
     #: once, for somebody, somewhere.
-    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    #:
+    #: `server_default` as well as `default`, to match the migration and
+    #: because a bulk insert that bypasses the ORM must not be able to
+    #: leave this NULL — an unknown here reads as "not verified", which
+    #: is the safe direction, but only if the column enforces it.
+    verified: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False)
     #: CVE ids this entry cites, comma separated. The join between the
     #: two halves of this table pair.
     cves: Mapped[str | None] = mapped_column(Text, index=True)
