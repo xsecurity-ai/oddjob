@@ -14,6 +14,13 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    # Hold a new release for a week before offering it. The window
+    # a malicious publish is live before it is caught and yanked is
+    # usually hours; opening the PR immediately is how it gets
+    # merged inside that window. Security advisories are exempt and
+    # still arrive at once.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     groups:
       backend-minor-and-patch:
@@ -27,6 +34,13 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    # Hold a new release for a week before offering it. The window
+    # a malicious publish is live before it is caught and yanked is
+    # usually hours; opening the PR immediately is how it gets
+    # merged inside that window. Security advisories are exempt and
+    # still arrive at once.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     groups:
       # MUI first: a dependency goes to the FIRST group it matches, and
@@ -54,6 +68,13 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    # Hold a new release for a week before offering it. The window
+    # a malicious publish is live before it is caught and yanked is
+    # usually hours; opening the PR immediately is how it gets
+    # merged inside that window. Security advisories are exempt and
+    # still arrive at once.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 3
     groups:
       actions:
@@ -61,3 +82,21 @@ updates:
     labels: [dependencies, ci]
     commit-message:
       prefix: "deps(ci)"
+
+  # The agent's Go module. It was missing entirely — the one component
+  # that runs on someone else's network had no dependency updates at
+  # all, which is the opposite of the order you would choose.
+  - package-ecosystem: gomod
+    directory: /drone
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    groups:
+      drone-minor-and-patch:
+        update-types: [minor, patch]
+    labels: [dependencies, drone]
+    commit-message:
+      prefix: "deps(drone)"

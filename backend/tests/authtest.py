@@ -656,4 +656,24 @@ check("a readonly member cannot create accounts at all",
 st, r = call("/api/users/invite", "POST", {"email": "anon@acme.example"})
 check("and no credential at all is 401", st == 401, f"status={st}")
 
+print("\n== sign-in cannot be turned into an open redirect ==")
+# `next` is where the browser lands after Google sign-in. It used to be
+# accepted on `startswith("/")` alone, and `//evil.com` satisfies that
+# — a browser resolves a protocol-relative URL as a different ORIGIN.
+# The attack is not a stolen cookie, it is credibility: the victim
+# follows a link to the real site, sees a genuine Google consent
+# screen, and lands on the attacker's.
+from app.routers.google import safe_next
+
+for _bad in ("//evil.example", "///evil.example", "https://evil.example",
+             "http://evil.example", "/\\evil.example", "\\\\evil.example",
+             "evil.example", "", "   ", "/ok\r\nLocation: //evil.example"):
+    check(f"{_bad!r} does not escape the site", safe_next(_bad) == "/",
+          f"-> {safe_next(_bad)!r}")
+
+for _good in ("/", "/projects/ACME", "/projects/ACME/targets?q=a#b",
+              "/a/b/c"):
+    check(f"{_good!r} is kept", safe_next(_good) == _good,
+          f"-> {safe_next(_good)!r}")
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
