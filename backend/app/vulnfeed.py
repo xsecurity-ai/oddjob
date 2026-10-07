@@ -39,7 +39,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import CveRecord, Exploit, FeedState
@@ -477,6 +477,58 @@ def version_matches(cpe: str, version: str | None) -> bool:
     return match_kind(cpe, version) is not None
 
 
+def version_candidates(version: str | None) -> list[str]:
+    """The forms of a version worth comparing a CPE against.
+
+    A banner and a CPE do not spell the same release the same way.
+    OpenSSH reports `8.2p1`, and NVD records
+    `cpe:2.3:a:openbsd:openssh:8.2:p1:*` — the patch level lives in the
+    CPE's *update* segment, which is a different field. Comparing the
+    banner string to the version segment therefore never matches, and
+    every OpenSSH lookup silently returned product-level hits only.
+
+    Also trims a packager's suffix: Debian and Ubuntu ship
+    `1.18.0-6ubuntu14`, and nobody files a CVE against that.
+
+    Scanned rather than matched with a regular expression, deliberately.
+    This runs on a version string taken from a service banner, which is
+    whatever a remote host chose to send us — `[a-z]+\\d*$` against a
+    few hundred kilobytes of 'a' is quadratic, and the host on the other
+    end picks the input. Backward scans are linear and cannot be made
+    to behave badly.
+    """
+    v = (version or "").strip()
+    if not v:
+        return []
+    # A version is short. Anything longer came from a banner that is not
+    # really a version, and bounding it keeps the LIKE built from it
+    # bounded too.
+    v = v[:64]
+    out = [v]
+
+    def add(candidate: str) -> None:
+        candidate = candidate.strip(".-_")
+        if candidate and candidate not in out:
+            out.append(candidate)
+
+    # 1.18.0-6ubuntu14 -> 1.18.0
+    cuts = [i for i in (v.find(c) for c in "-+~") if i > 0]
+    if cuts:
+        add(v[:min(cuts)])
+
+    # A trailing letter run, with optional digits after it:
+    # 8.2p1 -> 8.2, and 1.0.2k -> 1.0.2.
+    end = len(v)
+    while end > 0 and v[end - 1].isdigit():
+        end -= 1
+    start = end
+    while start > 0 and v[start - 1].isalpha():
+        start -= 1
+    if start < end:                     # there was a letter run
+        add(v[:start])
+    return out
+
+
 def match_kind(cpe: str, version: str | None) -> str | None:
     """How a CPE matched: `exact`, `any-version`, or None for no match.
 
@@ -493,7 +545,7 @@ def match_kind(cpe: str, version: str | None) -> str | None:
         return "any-version"
     if not version:
         return None
-    return "exact" if cpe_ver == version.strip() else None
+    return "exact" if cpe_ver in version_candidates(version) else None
 
 
 async def leads_for_service(session: AsyncSession, product: str | None,
@@ -507,6 +559,14 @@ async def leads_for_service(session: AsyncSession, product: str | None,
     reports the same version as an unpatched one. Nothing here has been
     confirmed against the host — confirming it is the engagement.
     """
+    # Normalised once, here. `version` of "   " is truthy, so a guard
+    # written as `if version:` runs the version-specific branch and then
+    # builds an or_() out of an empty candidate list — a deprecation
+    # today and an error in a later SQLAlchemy. Asking the candidate
+    # list whether there is a version to match on cannot drift from
+    # what the matching actually uses.
+    versions = version_candidates(version)
+
     terms = product_terms(product, name, banner)
     if not terms:
         return {"terms": [], "exploits": [], "cves": [],
@@ -516,7 +576,30 @@ async def leads_for_service(session: AsyncSession, product: str | None,
     cves: list[dict] = []
     seen_cve: set[str] = set()
     for term in terms:
-        rows = (await session.execute(
+        rows: list[CveRecord] = []
+        if versions:
+            # Fetch the version-specific ones FIRST, and by name.
+            #
+            # Ordering the whole candidate set by score and taking the
+            # top few looks reasonable and is quietly wrong: 507 Apache
+            # CVEs score 9.8 or above, so the one CVE whose CPE actually
+            # names 2.4.49 never entered the window, and sorting
+            # afterwards cannot surface a row that was never fetched.
+            # Asking the database for the version is the only way to be
+            # sure the exact match is in the running at all.
+            # Every spelling of the version, for the same reason
+            # match_kind accepts more than one: searching only the
+            # banner's own string misses the CPE that records it
+            # differently, which is most of them.
+            rows += (await session.execute(
+                select(CveRecord)
+                .where(CveRecord.products.is_not(None),
+                       CveRecord.products.like(f"%{term}%"),
+                       or_(*[CveRecord.cpes.like(f"%:{v}:%")
+                             for v in versions]))
+                .order_by(CveRecord.cvss_score.desc().nullslast())
+                .limit(limit * 2))).scalars().all()
+        rows += (await session.execute(
             select(CveRecord)
             .where(CveRecord.products.is_not(None),
                    CveRecord.products.like(f"%{term}%"))

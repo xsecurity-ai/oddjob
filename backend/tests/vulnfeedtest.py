@@ -278,5 +278,53 @@ check("at a boundary that actually completed",
       and _dt.fromisoformat(_cursor) <= _dt.now(_tz.utc),
       f"cursor={_cursor}")
 
+print("\n== a banner and a CPE spell a version differently ==")
+# OpenSSH reports 8.2p1; NVD records the patch level in the CPE's
+# separate `update` segment, as cpe:...:openssh:8.2:p1:*. Comparing the
+# banner string to the version segment therefore never matched, and
+# every OpenSSH lookup silently returned product-level hits only --
+# which reads as "nothing specific is known", the most reassuring
+# possible way to be wrong.
+from app.vulnfeed import version_candidates as _vc                  # noqa: E402
+
+check("a patch-suffixed version also tries its base",
+      _vc("8.2p1") == ["8.2p1", "8.2"], str(_vc("8.2p1")))
+check("a packager's suffix is trimmed",
+      "1.18.0" in _vc("1.18.0-6ubuntu14"), str(_vc("1.18.0-6ubuntu14")))
+check("a lettered release tries its base too",
+      "1.0.2" in _vc("1.0.2k"), str(_vc("1.0.2k")))
+check("an ordinary version is left alone",
+      _vc("2.4.49") == ["2.4.49"], str(_vc("2.4.49")))
+check("and nothing in means nothing out", _vc("") == [], str(_vc("")))
+
+_openssh = "cpe:2.3:a:openbsd:openssh:8.2:*:*:*:*:*:*:*"
+check("so the CPE NVD actually publishes matches the banner",
+      match_kind(_openssh, "8.2p1") == "exact",
+      str(match_kind(_openssh, "8.2p1")))
+check("without making every version match",
+      match_kind(_openssh, "9.1p1") is None,
+      str(match_kind(_openssh, "9.1p1")))
+
+# The version comes off a service banner, which is whatever the remote
+# host decided to send. The regex this replaced was quadratic against
+# 'a'*n + '!': 16ms at 2k characters, 16.7 SECONDS at 64k. The host that
+# chooses the input is the host being scanned, which is the whole threat
+# model of a tool like this.
+import time as _time                                                # noqa: E402
+
+_t0 = _time.perf_counter()
+_vc("a" * 60000 + "!")
+_elapsed = _time.perf_counter() - _t0
+check("a hostile banner cannot stall the version parser",
+      _elapsed < 0.1, f"{_elapsed*1000:.0f}ms for 60k characters")
+check("and an over-long version is bounded rather than carried whole",
+      all(len(x) <= 64 for x in _vc("9" * 5000)), str(len(_vc("9"*5000)[0])))
+
+# "   " is truthy, so `if version:` took the version-specific path and
+# then built an or_() from an empty list -- deprecated now, an error in
+# a later SQLAlchemy.
+check("a blank version yields no candidates to build a query from",
+      _vc("   ") == [], str(_vc("   ")))
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 _sys.exit(1 if fail else 0)
