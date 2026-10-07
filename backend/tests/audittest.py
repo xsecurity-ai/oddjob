@@ -340,7 +340,13 @@ check("and is in the trail, not only on the surviving target",
       es and "198.51.100.9" in (es[0]["detail"] or ""), str(es)[:180])
 
 print("\n== settings record the key, never the value ==")
-SECRET = "xoxb-this-must-never-be-logged"
+# Short on purpose. The repo's own secret scanner matches
+# `xoxb-[A-Za-z0-9-]{20,}`, and a longer fake here fails that check —
+# correctly: a scanner that can tell this from a real token could be
+# told the same thing by somebody committing a real one. What the test
+# needs is a value it can search the audit log for, not a realistic
+# length.
+SECRET = "xoxb-never-logged"
 call("/api/settings", "PATCH", {"values": {"slack.bot_token": SECRET}},
      token=admin)
 es = entries("ui", "settings.update")
@@ -376,5 +382,26 @@ check("startup is in the trail",
 check("attributed to no person, because none was involved",
       all(e["username"] is None for e in es if e["action"] == "server.start"),
       str(es)[:160])
+
+print("\n== a logged value cannot forge a log line ==")
+# This is the audit log. A newline in a logged field lets a caller
+# invent an entry nobody wrote, and a forged entry here is not cosmetic
+# -- it is evidence. Sanitised at the logging site, because the callers
+# are the part that keeps changing.
+from app.audit import for_log                                    # noqa: E402
+
+_forged = "scan\n2026-01-01 12:00:00 INFO  authorised by root"
+check("a newline cannot start a second line",
+      "\n" not in for_log(_forged), repr(for_log(_forged))[:90])
+check("and the text is still readable, not dropped",
+      "authorised by root" in for_log(_forged), repr(for_log(_forged))[:90])
+for _ch, _name in [("\r", "carriage return"), ("\x1b", "escape"),
+                   ("\x00", "null")]:
+    check(f"a {_name} is escaped", _ch not in for_log(f"a{_ch}b"),
+          repr(for_log(f"a{_ch}b")))
+check("ordinary text is left alone", for_log("nmap.bulk") == "nmap.bulk",
+      for_log("nmap.bulk"))
+check("and it is bounded, so one field cannot flood the log",
+      len(for_log("x" * 5000)) <= 200, str(len(for_log("x" * 5000))))
 
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

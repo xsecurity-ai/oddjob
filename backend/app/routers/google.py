@@ -86,6 +86,33 @@ async def status(session: AsyncSession = Depends(get_session)):
     return GoogleStatus(enabled=why is None, reason=why)
 
 
+def safe_next(raw: str) -> str:
+    r"""A path on this site to return to after sign-in, or "/".
+
+    `startswith("/")` is not enough, which is what this used to do.
+    `//evil.com` starts with a slash and a browser resolves it as
+    `https://evil.com` — a protocol-relative URL. That made the
+    sign-in flow an open redirect: send someone
+    `/api/auth/google/start?next=//evil.com`, they authenticate
+    against the real site, and land on the attacker's, having just
+    been shown a genuine Google consent screen. The cookie is not
+    leaked, but the credibility is.
+
+    Backslashes are rejected too: some browsers normalise `\` to `/`
+    before resolving, so `/\evil.com` is the same attack with a
+    different spelling. So is a control character, which can be used
+    to break the Location header.
+    """
+    v = (raw or "/").strip()
+    if (not v.startswith("/")          # must be site-relative
+            or v.startswith("//")      # protocol-relative
+            or v.startswith("/\\")     # ...and its backslash spelling
+            or "\\" in v
+            or any(c < " " or c == "\x7f" for c in v)):
+        return "/"
+    return v
+
+
 @router.get("/start")
 async def start(response: Response, next: str = Query("/", description="path to return to"),
                 session: AsyncSession = Depends(get_session)):
@@ -100,7 +127,7 @@ async def start(response: Response, next: str = Query("/", description="path to 
     client_id, _secret, redirect_uri = await creds(session)
     nonce = secrets.token_urlsafe(16)
     now = datetime.now(timezone.utc)
-    state = jwt.encode({"n": nonce, "next": next if next.startswith("/") else "/",
+    state = jwt.encode({"n": nonce, "next": safe_next(next),
                         "exp": now + timedelta(seconds=STATE_TTL)},
                        SECRET, algorithm=ALGO)
     params = {
@@ -213,7 +240,11 @@ async def callback(request: Request, code: str | None = None, state: str | None 
     if created:
         await broker.publish("users", action="register", via="google")
 
-    r = RedirectResponse(st.get("next", "/"), status_code=303)
+    # Checked again on the way out. The state is signed, so this should
+    # already be safe — but a redirect is the last thing that happens
+    # before the user leaves, and validating it in one place only means
+    # a second way into this dict becomes a second open redirect.
+    r = RedirectResponse(safe_next(st.get("next", "/")), status_code=303)
     r.set_cookie(COOKIE, create_access_token(u), httponly=True, samesite="lax",
                  max_age=TOKEN_TTL_HOURS * 3600, secure=cookies_secure())
     r.delete_cookie(STATE_COOKIE)

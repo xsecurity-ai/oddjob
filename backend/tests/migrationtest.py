@@ -94,6 +94,19 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the startup drift check passes against it", r.returncode == 0,
           (r.stderr or "")[-300:] if r.returncode else "")
 
+    # `alembic check` compares the models against the schema the
+    # migrations actually build. The startup check above does not catch
+    # a differently-NAMED index, which is how a migration creating
+    # ix_cve_modified shipped against models declaring index=True
+    # (ix_cve_records_modified): every suite passed locally and CI
+    # failed, which is the feedback loop backwards.
+    print("\n== the models and the migrations agree ==")
+    r = subprocess.run([sys.executable, "-m", "alembic", "check"],
+                       cwd=BACKEND, env=env,
+                       capture_output=True, text=True, timeout=300)
+    check("alembic check finds no undeclared drift", r.returncode == 0,
+          ((r.stdout or "") + (r.stderr or ""))[-400:] if r.returncode else "")
+
     print("\n== downgrading the newest migration is reversible ==")
     r = subprocess.run([sys.executable, "-m", "alembic", "downgrade", "-1"],
                        cwd=BACKEND, env=env,

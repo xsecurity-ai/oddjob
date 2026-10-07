@@ -36,6 +36,19 @@ SPEC = [
      "help": "Empty means nothing may frame this app, which is the right "
              "answer unless you are embedding it. Set an origin to permit "
              "one."},
+    {"key": "vulnfeed.enabled", "group": "Site",
+     "label": "Keep exploit and CVE data current", "type": "bool",
+     "default": False,
+     "help": "Syncs Exploit-DB and NVD into this database daily, so a "
+             "version can be matched against public exploits WITHOUT "
+             "sending that version to anybody. Off by default because the "
+             "first NVD sync fetches about 290,000 records and some "
+             "deployments have no outbound internet at all."},
+    {"key": "vulnfeed.nvd_api_key", "group": "Site",
+     "label": "NVD API key", "type": "secret",
+     "help": "Optional, and free from nvd.nist.gov. Without one NVD allows "
+             "5 requests per 30 seconds, which makes a first sync take "
+             "hours; with one it allows 50."},
     {"key": "audit.retain_days", "group": "Site",
      "label": "Audit retention (days)", "type": "number", "default": 7,
      "help": "How long /audit/<type>/<format> keeps entries, where type is "

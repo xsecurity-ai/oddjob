@@ -88,6 +88,23 @@ VOLUME ["/var/lib/drone/work"]
 WORKDIR /var/lib/drone
 ENV DRONE_WORKDIR=/var/lib/drone/work
 
+# Runs as root, deliberately, and this is the reasoning rather than an
+# oversight.
+#
+# SYN scanning, OS fingerprinting and masscan need CAP_NET_RAW. The
+# first version of this file set file capabilities on the binaries with
+# setcap and dropped to a non-root user — and it did not work: file
+# capabilities are not honoured through a Docker exec, so the process
+# started with CapEff 0 and every privileged scan failed at runtime
+# instead of at build time.
+#
+# What actually constrains this container is the RUN invocation, not a
+# USER line: `--cap-drop=ALL --cap-add=NET_RAW --cap-add=NET_ADMIN`
+# leaves root holding two capabilities out of about forty. See the
+# README and docker-compose.yml, which both do this.
+#
+# nosemgrep: missing-user, missing-user-entrypoint
+#
 # No default server or key: an agent that starts without being told
 # where to report is not useful, and baking either into an image that
 # gets copied between engagements is how one client's agent ends up

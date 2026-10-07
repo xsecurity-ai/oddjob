@@ -274,6 +274,138 @@ st, q = call("/api/agents/queue?project=AGENT", token=admin)
 check("so it is gone from the queue",
       DT not in [x["id"] for x in (q or [])], str(q)[:120])
 
+print("== one task per target, created in one request ==")
+# A single task holding 1,738 names is one unit of work: one Drone does
+# all of it, a failure anywhere loses the lot, and the queue depth says
+# 1 when there are 1,738 things to do.
+st, r = call("/api/agents/tasks/bulk?project=AGENT", "POST",
+             {"kind": "nslookup",
+              "subjects": ["a.example", "b.example", "c.example",
+                           "a.example"]},   # the duplicate is dropped
+             token=admin)
+check("a bulk create is accepted", st == 201, f"status={st} {str(r)[:120]}")
+check("one task per target, deduplicated",
+      (r or {}).get("queued") == 3, str(r)[:140])
+
+st, rows = call("/api/agents/tasks?project=AGENT", token=admin)
+mine = [x for x in (rows or []) if x["id"] in set((r or {}).get("ids", []))]
+check("each task carries exactly one target",
+      all(x["subject"] in ("a.example", "b.example", "c.example") for x in mine)
+      and len(mine) == 3, str([x["subject"] for x in mine]))
+check("and they are pooled, so the fleet can share them",
+      all(x["agent_id"] is None for x in mine), str(mine)[:140])
+
+# One target out of scope is not a reason to refuse the other 1,737.
+call("/api/projects", "POST",
+     {"code": "BULKSCOPE", "name": "Bulk scope",
+      "scope": ["10.9.0.0/24", "!10.9.0.5"]}, token=admin)
+st, r = call("/api/agents/tasks/bulk?project=BULKSCOPE", "POST",
+             {"kind": "nmap", "subjects": ["10.9.0.4", "10.9.0.5", "10.9.0.6"]},
+             token=admin)
+check("the in-scope targets are queued", (r or {}).get("queued") == 2, str(r)[:140])
+check("and the excluded one is refused by name, not as an error",
+      "10.9.0.5" in ((r or {}).get("refused") or {}), str(r)[:180])
+
+st, r = call("/api/agents/tasks/bulk?project=AGENT", "POST",
+             {"kind": "nonsense", "subjects": ["a.example"]}, token=admin)
+check("an unknown kind is still refused", st == 422, f"status={st}")
+st, r = call("/api/agents/tasks/bulk?project=AGENT", "POST",
+             {"kind": "install", "subjects": ["nmap"]}, token=admin)
+check("install is not a per-subject kind", st == 422, f"status={st}")
+
+print("== queuing work shows up on the target's own timeline ==")
+# A target's timeline is meant to be the whole story of what was done
+# to that host. It had the results and not the asking, so "was this
+# ever scanned, and with what?" could only be answered from the task
+# table by someone who knew to look there.
+call("/api/projects", "POST",
+     {"code": "TLINE", "name": "Timeline"}, token=admin)
+call("/api/targets?project=TLINE", "POST",
+     {"host": "timeline.acme.example"}, token=admin)
+st, _ = call("/api/agents/tasks?project=TLINE", "POST",
+             {"kind": "nmap", "args": {"targets": ["timeline.acme.example"],
+                                       "ports": "80,443"}}, token=admin)
+check("the task is queued", st == 201, f"status={st}")
+
+st, tl = call("/api/targets/TLINE/timeline.acme.example/timeline", token=admin)
+evs = tl if isinstance(tl, list) else (tl or {}).get("items", [])
+blob = json.dumps(evs)
+check("the target's timeline records it", "nmap queued" in blob, blob[:200])
+check("with the ports it will actually use", "80,443" in blob, blob[:200])
+check("and that no Drone owns it yet", "project pool" in blob, blob[:200])
+check("attributed to whoever asked", "root" in blob, blob[:160])
+
+# Recorded at QUEUE time: a scan that was started and never came back
+# is exactly the case where you want to know it was started.
+st, rows = call("/api/agents/tasks?project=TLINE", token=admin)
+mine = [r for r in (rows or []) if r["subject"] == "timeline.acme.example"]
+check("while the task itself is still only queued",
+      mine and mine[0]["state"] == "awaiting", str(mine)[:120])
+
+# Bulk goes on each target's own timeline, not one shared entry.
+for h in ("bulk-a.acme.example", "bulk-b.acme.example"):
+    call("/api/targets?project=TLINE", "POST", {"host": h}, token=admin)
+call("/api/agents/tasks/bulk?project=TLINE", "POST",
+     {"kind": "nslookup",
+      "subjects": ["bulk-a.acme.example", "bulk-b.acme.example"]},
+     token=admin)
+for h in ("bulk-a.acme.example", "bulk-b.acme.example"):
+    st, tl = call(f"/api/targets/TLINE/{h}/timeline", token=admin)
+    evs = tl if isinstance(tl, list) else (tl or {}).get("items", [])
+    check(f"{h} has its own entry",
+          "nslookup queued" in json.dumps(evs), json.dumps(evs)[:120])
+
+# A task against something the project does not hold has no timeline
+# to write to, and inventing one would be inventing a target.
+before = call("/api/targets?project=TLINE&page_size=500", token=admin)[1]["total"]
+call("/api/agents/tasks?project=TLINE", "POST",
+     {"kind": "nmap", "args": {"targets": ["203.0.113.0/24"]}}, token=admin)
+after = call("/api/targets?project=TLINE&page_size=500", token=admin)[1]["total"]
+check("a task against a range invents no target", before == after,
+      f"{before} -> {after}")
+
+print("== reverse lookups are handed the names to resolve ==")
+# DNS cannot be asked which names point at an address, only where a
+# given name points. So the server supplies the project's own names and
+# the agent keeps the ones that land on the address. Attached when the
+# task is HANDED OUT, not when it is queued: one task per address means
+# storing the same list once per task otherwise.
+st, en8 = call("/api/agents?project=AGENT", "POST",
+               {"name": "revlookup", "target_os": "linux"}, token=admin)
+RID = ((en8 or {}).get("agent") or {}).get("id")
+RKEY = (en8 or {}).get("callback_key")
+call("/api/agents/register", "POST", {"platform": "linux", "arch": "amd64"},
+     key=RKEY)
+call("/api/targets?project=AGENT", "POST",
+     {"host": "known-one.acme.example"}, token=admin)
+call("/api/targets?project=AGENT", "POST",
+     {"host": "known-two.acme.example"}, token=admin)
+
+st, rt = call(f"/api/agents/{RID}/tasks?project=AGENT", "POST",
+              {"kind": "reverse_ip", "args": {"targets": ["198.51.100.77"]}},
+              token=admin)
+RT = (rt or {}).get("id")
+check("a reverse lookup is queued", st == 201, f"status={st}")
+
+st, stored = call(f"/api/agents/{RID}/tasks?project=AGENT", token=admin)
+row = next((x for x in (stored or []) if x["id"] == RT), {})
+check("the stored arguments do NOT carry the candidate list",
+      "candidates" not in (row.get("args") or {}), str(row.get("args"))[:120])
+
+st, hb = call("/api/agents/heartbeat", "POST",
+              {"ready": True, "running_tasks": [], "slots_free": 2,
+               "capacity": 2}, key=RKEY)
+handed = next((t for t in (hb or {}).get("tasks", []) if t["id"] == RT), {})
+cands = (handed.get("args") or {}).get("candidates") or []
+check("but the agent is handed them when it takes the task",
+      len(cands) >= 2, f"{len(cands)} candidate(s)")
+check("and they are the project's own names",
+      "known-one.acme.example" in cands and "known-two.acme.example" in cands,
+      str(cands[:4]))
+check("addresses are not offered as names to resolve",
+      not any(c.replace(".", "").isdigit() for c in cands), str(cands[:4]))
+call(f"/api/agents/{RID}/kill?project=AGENT", "POST", {}, token=admin)
+
 print("== an agent is not given work it cannot run ==")
 st, tl = call("/api/agents/tools", token=admin)
 check("the required tool list is published", st == 200
@@ -905,6 +1037,107 @@ check("a project they cannot read is still 404, not 403", st == 404,
 check("writes are off when no single project is in view",
       (wide or {}).get("allow_writes") is False,
       str((wide or {}).get("allow_writes")))
+
+print("== read-only tools are available in read-only mode ==")
+# These four only read, and they are the ones an analyst actually asks
+# for: what is worth attacking, what runs PHP, what has a public
+# exploit. Registering them after the allow_writes gate left every one
+# of them unreachable in the mode the agent runs in by default, which
+# is the mode nearly every deployment uses.
+import asyncio as _aio                                           # noqa: E402
+from app.agent.tools import build as _build                      # noqa: E402
+from app.db import SessionLocal as _SL                           # noqa: E402
+from app.models import Project as _P, User as _U                 # noqa: E402
+from sqlalchemy import select as _sel                            # noqa: E402
+
+_READ_ONLY = ["rank_targets", "find_by_technology", "exploit_leads",
+              "search_exploits", "get_host", "host_timeline"]
+
+
+async def _names(allow_writes):
+    async with _SL() as s:
+        pr = (await s.execute(_sel(_P).limit(1))).scalars().first()
+        u = (await s.execute(_sel(_U).limit(1))).scalars().first()
+        return {t.name: t for t in _build(s, pr, u, allow_writes)}
+
+
+_ro = _aio.run(_names(False))
+_rw = _aio.run(_names(True))
+for _n in _READ_ONLY:
+    check(f"{_n} is available without writes", _n in _ro,
+          f"only in write mode" if _n in _rw else "missing entirely")
+check("no read-only tool is marked as writing",
+      all(getattr(_ro[n], "writes", False) is False for n in _ro), "")
+check("and enabling writes only ever adds tools",
+      set(_ro).issubset(set(_rw)), str(set(_ro) - set(_rw)))
+check("writes really do add the mutating ones",
+      {"add_note", "add_target", "add_finding"}.issubset(set(_rw)),
+      str(sorted(set(_rw) - set(_ro))))
+
+print("== the assistant can task enumeration, but previews first ==")
+# A sweep is hundreds of tasks against a client's estate. "Have a look
+# at the web hosts" is a sentence, not an authorisation, so the tool
+# returns a plan and queues nothing until it is called again with
+# confirm=true. The preview is also the only guard on a project whose
+# scope index is not loaded, where every host passes the scope gate.
+from app.models import AgentTask as _AT                          # noqa: E402
+from sqlalchemy import func as _func                             # noqa: E402
+
+_HOSTS = "alpha-one.example.com alpha-two.example.com"
+
+
+async def _enum(**kw):
+    async with _SL() as s:
+        pr = (await s.execute(_sel(_P).limit(1))).scalars().first()
+        u = (await s.execute(_sel(_U).limit(1))).scalars().first()
+        tool = {t.name: t for t in _build(s, pr, u, True)}["enumerate_drones"]
+        before = (await s.execute(_sel(_func.count()).select_from(_AT)
+                                  .where(_AT.project_id == pr.id))).scalar_one()
+        out = await tool.fn(**kw)
+        after = (await s.execute(_sel(_func.count()).select_from(_AT)
+                                 .where(_AT.project_id == pr.id))).scalar_one()
+        return out, after - before
+
+
+_prev, _made = _aio.run(_enum(kind="nslookup", select="hosts", hosts=_HOSTS))
+check("a preview says what it would do", _prev.get("preview") is True,
+      str(_prev)[:120])
+check("names the hosts", sorted(_prev.get("hosts", [])) ==
+      ["alpha-one.example.com", "alpha-two.example.com"], str(_prev.get("hosts")))
+check("and queues absolutely nothing", _made == 0, f"created {_made} task(s)")
+
+_done, _made2 = _aio.run(_enum(kind="nslookup", select="hosts", hosts=_HOSTS,
+                               confirm=True))
+check("confirm=true queues", _done.get("queued") == 2, str(_done)[:140])
+check("as one task per host, not one task holding both", _made2 == 2,
+      f"created {_made2} task(s) for 2 hosts")
+
+# Installing software on, or running commands through, a privileged
+# process inside a client network is not something a sentence should be
+# able to start, however the sentence is phrased.
+for _k in ("shell", "install"):
+    _r, _n = _aio.run(_enum(kind=_k, select="hosts", hosts=_HOSTS,
+                            confirm=True))
+    check(f"{_k} is refused even with confirm", "error" in _r and _n == 0,
+          str(_r)[:100])
+
+_r, _n = _aio.run(_enum(kind="nmap", select="everything"))
+check("an unknown selection lists the real ones",
+      "selections" in _r and "unscanned" in _r.get("selections", {}),
+      str(_r)[:120])
+
+# A project holds assets that are not network hosts -- an S3 ARN, a
+# cloud resource id. Pointing a scanner at one burns a task to produce
+# an error, and dropping them silently hides that the asset is covered
+# by nothing.
+_r, _n = _aio.run(_enum(kind="nmap", select="hosts",
+                        hosts="good.example.com arn:aws:s3:::a-bucket"))
+check("things that are not network hosts are dropped",
+      _r.get("hosts") == ["good.example.com"], str(_r.get("hosts")))
+check("and said out loud rather than quietly removed",
+      _r.get("not_network_count") == 1
+      and "arn:aws:s3:::a-bucket" in _r.get("not_network_hosts", {}),
+      str(_r.get("not_network_hosts")))
 
 print("== agent binaries ==")
 st, dl = call("/api/agents/downloads", token=admin)

@@ -69,6 +69,29 @@ _SECRETISH = re.compile(
 )
 
 
+def for_log(raw) -> str:
+    """One line, safe to concatenate into a log.
+
+    A newline in a logged value lets a caller forge log entries: put
+    `\\n2026-01-01 INFO authorised` in a field and the log grows a line
+    nobody wrote. This is the audit log, so a forged entry is not a
+    cosmetic problem — it is evidence.
+
+    Applied at the logging site rather than at each caller, because the
+    callers are the part that keeps changing.
+    """
+    # The two line terminators go first and explicitly. A comprehension
+    # over str.isprintable() removes them just as thoroughly, but static
+    # analysis cannot see that it does — and a sanitiser a scanner
+    # cannot recognise means a real alert on every future caller, which
+    # is how a scanner gets ignored.
+    s = str(raw).replace("\r", "\\r").replace("\n", "\\n")
+    # Everything else unprintable — escapes, nulls, the terminal control
+    # characters that rewrite a line already on screen.
+    s = "".join(ch if ch.isprintable() else "\\x%02x" % ord(ch) for ch in s)
+    return s[:200]
+
+
 def scrub_path(raw: str) -> str:
     """A path safe to store. Never includes the query string.
 
@@ -126,7 +149,8 @@ async def record(session, source: str, action: str, *,
         if commit:
             await session.commit()
     except Exception:                            # noqa: BLE001
-        log.exception("could not write audit entry %s/%s", source, action)
+        log.exception("could not write audit entry %s/%s",
+                      for_log(source), for_log(action))
 
 
 async def prune(session, days: int | None = None) -> int:
@@ -214,5 +238,5 @@ class AuditTrail(BaseHTTPMiddleware):
                     method=request.method, path=path,
                     status=response.status_code, ms=elapsed, commit=True)
         except Exception:                        # noqa: BLE001
-            log.exception("audit middleware could not record %s", path)
+            log.exception("audit middleware could not record %s", for_log(path))
         return response

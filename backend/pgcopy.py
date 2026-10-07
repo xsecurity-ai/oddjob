@@ -223,7 +223,6 @@ def _resync_sequences(engine, tables) -> None:
     and then the very first insert fails on a duplicate key because the
     sequence still starts at 1.
     """
-    from sqlalchemy import text
     fixed = 0
     with Session(engine) as s:
         for table in tables:
@@ -237,12 +236,18 @@ def _resync_sequences(engine, tables) -> None:
             # pg_get_serial_sequence resolves the real sequence name rather
             # than assuming the <table>_<col>_seq convention, which breaks
             # on a renamed table.
+            # Through `func` rather than text(): these are PostgreSQL
+            # catalog functions with no ORM representation, but they do
+            # not need hand-written SQL to call — and going through the
+            # expression language means the arguments are bound by
+            # SQLAlchemy rather than by a dictionary that has to match
+            # placeholders by name.
             seq = s.execute(
-                text("SELECT pg_get_serial_sequence(:t, :c)"),
-                {"t": table.name, "c": col.name}).scalar()
+                select(func.pg_get_serial_sequence(table.name, col.name))
+            ).scalar()
             if not seq:
                 continue
-            s.execute(text("SELECT setval(:s, :v)"), {"s": seq, "v": int(top)})
+            s.execute(select(func.setval(seq, int(top))))
             fixed += 1
         s.commit()
     print(f"re-synced {fixed} sequence(s)")

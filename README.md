@@ -166,6 +166,58 @@ routing policies and region configuration are all in the
 
 ---
 
+## Driving it from outside: the MCP server
+
+Oddjob ships an MCP server, so a model in Claude Code, Claude Desktop or
+anything else that speaks MCP can read and write the engagement
+directly — "what do we know about web01", "file this finding", "import
+this nmap XML" — without a human copying data between windows.
+
+```bash
+# Mint a key in the UI (Profile → API keys), or:
+curl -X POST 'http://127.0.0.1:8000/api/auth/keys?name=mcp' \
+     -H "Authorization: Bearer <jwt>"
+
+# Register it with Claude Code
+claude mcp add oddjob --env ODDJOB_API_KEY=ojk_... -- \
+    uv --directory /path/to/oddjob/backend run python oddjob_mcp.py
+```
+
+**It is a thin client over the HTTP API, not a second way into the
+database.** Every call carries the API key, so the server applies
+exactly the same per-project ACL it applies to the browser. An MCP
+server talking straight to SQLite would silently bypass the whole
+authorisation model — which is the obvious way to build one, and wrong.
+
+The key's ACL is the boundary. A key with `readonly` on one engagement
+can read that engagement and nothing else, whatever the model is asked
+to do.
+
+| | |
+|---|---|
+| **Read** | `list_projects` `list_targets` `get_target` `list_ports` `list_services` `list_vulns` `target_timeline` `stats` `whoami` `import_formats` |
+| **Exploits** | `search_exploits` `service_leads` `get_cve` `feed_status` |
+| **Write** | `create_project` `set_target_flags` `add_target_note` `bulk_import` `import_report` `import_nmap` |
+
+The exploit tools match against Oddjob's own copy of Exploit-DB and NVD,
+so a lookup tells nobody what the client runs — see
+[Exploits and CVEs](#exploits-and-cves-held-locally). `service_leads`
+takes a product and version and has no host parameter, which is the
+boundary rather than a convention. Read `version_match` on each result
+before believing it, and `feed_status` before believing an empty one.
+
+### Two agents, and they are not the same thing
+
+| | runs | reaches | used for |
+|---|---|---|---|
+| **MCP server** | wherever your MCP client runs | Oddjob's HTTP API | driving the engagement from your editor |
+| **In-platform agent** | inside Oddjob | its own database, and Drones | answering questions in the UI and over Slack |
+
+The in-platform agent is configured in Site Config and is read-only
+unless writes are explicitly enabled. See [The agent](#the-agent).
+
+---
+
 ## What Oddjob does with the data
 
 - **Import** nmap, masscan, Nessus, Metasploit, Burp (issues *and* proxy
@@ -244,6 +296,89 @@ another's data.
 
 Socket Mode means the app opens the connection outward, so nothing has to
 be exposed to the internet.
+
+### Tasking Drones from the assistant
+
+With writes enabled, the agent can queue enumeration itself — including
+sweeps across the project's own inventory, rather than hosts you type in:
+
+```
+"run httpx over everything we have not scanned yet"
+"nuclei the web hosts, through tokyo-01"
+"nslookup every name we know"
+```
+
+It picks hosts by selection — `all`, `unscanned`, `web`, `hacked`,
+`technology`, or an explicit list — and creates **one task per host**, so
+the fleet shares the work and one failure stays one failure.
+
+**It shows you the plan and queues nothing until you say go.** A sweep is
+hundreds of tasks against someone's estate, and "have a look at the web
+hosts" is a sentence, not an authorisation. The preview names the hosts,
+the count, what scope refused and what is not a network host at all; only
+a second, explicit confirmation queues it.
+
+Three things it will not do, whatever it is asked:
+
+- **`shell` and `install` are never queued by the assistant.** Running
+  commands on, or installing software onto, a privileged process inside
+  a client's network belongs on the Drone page, where the allowlist and
+  the agent are both in front of you.
+- **It cannot reach past the scope gate.** Tasking goes through the same
+  check as the Drone page, because a scan you could not queue by hand
+  must not become queueable by asking for it in a sentence.
+- **It will not silently skip things.** Assets that are not network
+  hosts — an S3 ARN, a cloud resource id — are dropped and *named*.
+  "Queued 1,700 of your 1,738" is how you notice thirty-eight assets are
+  covered by nothing.
+
+## Exploits and CVEs, held locally
+
+Oddjob keeps its own copy of Exploit-DB and the NVD CVE list, and does
+all matching against those tables.
+
+**The point is that the client's inventory never leaves the building.**
+Asking a third-party API "anything for Apache 2.4.49?" on behalf of a
+host tells that third party what your client runs, when you looked, and
+— over enough queries — the shape of their estate. A local copy answers
+the same question and tells nobody.
+
+```bash
+# Site Config → Vulnerability feeds → Sync now, or:
+curl -XPOST -H "Authorization: Bearer $KEY" \
+     "$ODDJOB/api/vulnfeeds/sync?source=all"
+
+curl -H "Authorization: Bearer $KEY" \
+     "$ODDJOB/api/vulnfeeds/leads?product=Apache+httpd&version=2.4.49"
+```
+
+Exploit-DB is a single file and syncs in seconds. NVD is ~300k records;
+the first run walks back to 2002 in resumable chunks and later runs are
+incremental. Both refresh daily. An NVD API key in Site Config takes the
+rate limit from 5 requests per 30s to 50 — worth having for the first
+sync, optional after.
+
+The lookup routes take **a product and version, never a host**. That is
+the boundary, and it is enforced by the API shape rather than by
+convention.
+
+Three things the results are careful about, because a vulnerability feed
+is unusually easy to over-read:
+
+| the result says | it means |
+|---|---|
+| `exact` | a CPE names this exact version |
+| `product only` | the CPE covers every version — not evidence about yours |
+| `unknown` | NVD has not analysed this CVE yet, so it cannot be matched either way |
+
+Every response carries the feed's age alongside it, because "no known
+exploits" from a feed synced this morning and the same answer from one
+that has never run are different claims. A feed that has never synced
+says so rather than returning a confident empty list.
+
+These are **leads, not findings**: a banner is often wrong, and a patched
+host reports the same version as an unpatched one. Confirming them
+against the target is the engagement.
 
 ## Tests
 

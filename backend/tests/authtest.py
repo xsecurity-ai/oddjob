@@ -306,7 +306,7 @@ check("API responses are not cached",
 # Directory traversal out of the built-SPA static fallback.
 #
 # The SPA catch-all serves any real file it finds under frontend/dist so
-# that /favicon.svg and friends work. It used to do that with a bare
+# that /favicon.ico and friends work. It used to do that with a bare
 # `_DIST / full_path`, which is not containment: an absolute right-hand
 # side replaces the base outright and ".." walks out of it. Signed in as
 # an ordinary user this returned app/main.py and the entire SQLite
@@ -338,7 +338,7 @@ def wire(path, hdrs=None):
 _auth = {"Authorization": f"Bearer {admin}"}
 
 check("the raw-socket helper reaches the app at all",
-      wire("/favicon.svg", _auth)[0] == 200)
+      wire("/favicon.ico", _auth)[0] == 200)
 
 ESCAPES = [
     "/../package.json",
@@ -369,8 +369,9 @@ for _p in ("/../../backend/oddjob.db", "/../package.json"):
 
 # The assets the fallback exists to serve must keep working, including
 # without a session -- the sign-in page renders them.
-for _p, _ct in (("/favicon.svg", b"svg"), ("/favicon.ico", b"icon"),
-                ("/favicon-32.png", b"png"), ("/apple-touch-icon.png", b"png")):
+for _p, _ct in (("/favicon.ico", b"icon"), ("/favicon-32.png", b"png"),
+                ("/icon-192.png", b"png"),
+                ("/apple-touch-icon.png", b"png")):
     _st, _body = wire(_p)
     check(f"{_p} serves to a signed-out browser", _st == 200 and len(_body) > 100,
           f"status {_st}, {len(_body)}b")
@@ -654,5 +655,25 @@ check("a readonly member cannot create accounts at all",
 
 st, r = call("/api/users/invite", "POST", {"email": "anon@acme.example"})
 check("and no credential at all is 401", st == 401, f"status={st}")
+
+print("\n== sign-in cannot be turned into an open redirect ==")
+# `next` is where the browser lands after Google sign-in. It used to be
+# accepted on `startswith("/")` alone, and `//evil.com` satisfies that
+# — a browser resolves a protocol-relative URL as a different ORIGIN.
+# The attack is not a stolen cookie, it is credibility: the victim
+# follows a link to the real site, sees a genuine Google consent
+# screen, and lands on the attacker's.
+from app.routers.google import safe_next
+
+for _bad in ("//evil.example", "///evil.example", "https://evil.example",
+             "http://evil.example", "/\\evil.example", "\\\\evil.example",
+             "evil.example", "", "   ", "/ok\r\nLocation: //evil.example"):
+    check(f"{_bad!r} does not escape the site", safe_next(_bad) == "/",
+          f"-> {safe_next(_bad)!r}")
+
+for _good in ("/", "/projects/ACME", "/projects/ACME/targets?q=a#b",
+              "/a/b/c"):
+    check(f"{_good!r} is kept", safe_next(_good) == _good,
+          f"-> {safe_next(_good)!r}")
 
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

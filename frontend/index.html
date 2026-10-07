@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <title>Oddjob</title>
-    <!-- SVG first for browsers that take it, .ico as the fallback every
-         browser understands. `sizes="any"` on the .ico stops Chrome
-         preferring it over the SVG. -->
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <!-- The mark is pixel art, so there is no SVG: an SVG of it would
+         either be a traced approximation or a PNG in a wrapper. The
+         .ico carries 16 through 256 so the browser, the tab bar and a
+         desktop shortcut each pick a size that was rendered for them
+         rather than scaling one. -->
     <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
+    <link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <meta name="theme-color" content="#1a1028" />
   </head>

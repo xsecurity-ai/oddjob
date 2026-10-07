@@ -47,6 +47,7 @@ SUITES = [
     ("tests/scopetest.py",     TMP / "ms-scope.db"),
     ("tests/mergetest.py",     TMP / "ms-merge.db"),
     ("tests/audittest.py",     TMP / "ms-audit.db"),
+    ("tests/vulnfeedtest.py",  TMP / "ms-vuln.db"),
 ]
 
 
@@ -148,6 +149,22 @@ def main() -> int:
     only = sys.argv[1:]
     tp = tf = 0
     bad: list[str] = []
+
+    # A filter that matches nothing used to print "0 passed, 0 failed"
+    # and exit 0, so a mistyped suite name was indistinguishable from a
+    # clean run — including in CI, where nobody reads the zero.
+    if only:
+        known = {"migrationtest", "migrationtest.py"}
+        for suite, _ in SUITES:
+            n = suite.rsplit("/", 1)[-1]
+            known |= {n, n.removesuffix(".py")}
+        unknown = [a for a in only if a not in known]
+        if unknown:
+            print(f"no such suite: {', '.join(unknown)}")
+            print("available: " + ", ".join(
+                sorted(s.rsplit('/', 1)[-1].removesuffix('.py')
+                       for s in [x[0] for x in SUITES]) + ["migrationtest"]))
+            return 2
 
     # Runs first and without a server: if the migrations do not build the
     # models, every suite below is testing a schema no deployment will have.

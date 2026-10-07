@@ -15,7 +15,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query'
 import { neon } from '../theme'
 import { AgentChooser, Caveat, EnumerateDialog, FleetNotice } from './EnumerateBits'
-import { needsRegion, queue, useFleet, type AgentChoice } from './droneTasking'
+import { needsRegion, queueEach, useFleet, type AgentChoice } from './droneTasking'
 
 export type LookupKind = 'reverse_ip' | 'nslookup'
 
@@ -56,12 +56,25 @@ export function LookupQueueDialog({ project, kind, subjects, onClose,
   const run = async () => {
     setBusy(true); setErr(null)
     try {
-      const t = await queue(project, agent, kind, { targets: list }, region)
-      const msg = `Queued as task ${t.id} over ${list.length} `
-              + `${reverse ? 'address' : 'name'}${list.length === 1 ? '' : 'es'}. `
-              + `Results appear on this page as "choices waiting" once the `
-              + `agent reports back — nothing is written to the inventory `
+      // One task per subject. A single task holding 1,738 names is one
+      // unit of work: one Drone does all of it while the rest of the
+      // fleet idles, a failure anywhere loses the lot, and the only
+      // progress visible is "running" until every last one is done.
+      const { ids, failed } = await queueEach(project, agent, kind, list,
+                                              {}, region)
+      if (!ids.length) {
+        setErr(`Nothing was queued. ${failed[0]?.why ?? ''}`)
+        return
+      }
+      const noun = `${reverse ? 'address' : 'name'}${ids.length === 1 ? '' : 'es'}`
+      const msg = `Queued ${ids.length} task${ids.length === 1 ? '' : 's'}, one `
+              + `per ${reverse ? 'address' : 'name'}, over ${ids.length} ${noun}. `
+              + `Results appear on this page as "choices waiting" as each `
+              + `Drone reports back — nothing is written to the inventory `
               + `until you pick.`
+              + (failed.length
+                 ? ` ${failed.length} refused: ${failed[0].subject} — ${failed[0].why}`
+                 : '')
       if (onQueued) onQueued(msg); else setDone(msg)
       await qc.invalidateQueries({ queryKey: ['agents'] })
     } catch (e) {

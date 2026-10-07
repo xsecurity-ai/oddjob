@@ -20,17 +20,23 @@ an agent reading them is being fed untrusted input all day.
 """
 from __future__ import annotations
 
+import collections
 import json
 from datetime import datetime, timezone
 import re
 from typing import Any, Callable
 
 from sqlalchemy import false as sa_false, func, or_, select, true as sa_true, distinct
+#: `select` is also the name of a tool parameter (which hosts to pick),
+#: and a tool's parameter names are part of its API — renaming it to
+#: dodge the shadowing would make the schema worse to read.
+from sqlalchemy import select as select_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..domains import registrable
 from ..hosts import InvalidHost, validate_host
 from ..models import (ROLE_ORDER, Agent, AgentTask, Credential, DomainCandidate,
+                      Event, Exploit,
                       Implant, Poc, Project,
                       Service, Target, User, Vuln, WebAddress)
 from ..scopegate import check_task_targets, index_for
@@ -175,19 +181,251 @@ def build(session: AsyncSession, project: Project | None, user: User,
         urls = (await session.execute(
             select(WebAddress.url, WebAddress.status_code, WebAddress.title)
             .where(WebAddress.target_id == t.id).limit(100))).all()
+        # What has already been done to it, which is the half of the
+        # context that stops the same scan being queued twice.
+        events = (await session.execute(
+            select(Event).where(Event.target_id == t.id)
+            .order_by(Event.at.desc()).limit(15))).scalars().all()
+        creds = int((await session.execute(
+            select(func.count()).select_from(Credential)
+            .where(Credential.target_id == t.id))).scalar_one())
+
+        # Is it even allowed to be touched? Asked here rather than
+        # discovered when a task is refused: an agent deciding what to
+        # do next should know the answer before it proposes anything.
+        idx = await index_for(session, t.project_id)
+        ruling = idx.check(t.host)
+
+        # What is NOT known. The most useful thing to tell something
+        # about to act, and the thing an inventory record never says:
+        # every field it holds is a fact, and the gaps are silent.
+        gaps = []
+        if t.ip_address is None and t.kind == "host":
+            gaps.append("no address resolved for this name")
+        if t.alive is None:
+            gaps.append("never probed — liveness is unknown, not false")
+        if not svcs:
+            gaps.append("no ports recorded; nothing has been scanned here")
+        if t.os is None:
+            gaps.append("no OS identified")
+        if svcs and not any(s.product for s in svcs):
+            gaps.append("ports are known but no versions — a -sV pass "
+                        "would make exploit matching possible")
+
         return {
             "host": t.host, "ip": t.ip_address, "alive": t.alive,
+            "kind": t.kind, "provider": t.provider,
             "compromised": t.hacked, "os": t.os, "os_accuracy": t.os_accuracy,
             "notes": t.notes,
+            # product and version, not just the service name: "http" is
+            # not actionable and "Apache 2.4.49" is.
             "services": [{"port": s.port, "protocol": s.protocol, "state": s.state,
-                          "service": s.name, "banner": s.banner} for s in svcs],
+                          "service": s.name, "product": s.product,
+                          "version": s.version, "banner": s.banner}
+                         for s in svcs],
             "findings": [{"title": v.title, "severity": v.severity,
                           "status": v.status, "port": v.port} for v in vulns],
             "implants": [{"framework": i.framework, "id": i.implant_id,
                           "user": i.user, "integrity": i.integrity} for i in imps],
             "web_addresses": [{"url": u, "status": sc, "title": ti}
                               for u, sc, ti in urls],
+            "credentials_held": creds,
+            "in_scope": ruling.allowed,
+            "scope_reason": None if ruling.allowed else ruling.reason,
+            "recent_activity": [{"at": e.at.isoformat() if e.at else None,
+                                 "kind": e.kind, "summary": e.summary,
+                                 "actor": e.actor} for e in events],
+            "not_known": gaps,
         }
+
+    async def rank_targets(limit: int = 10) -> dict:
+        """Which hosts are worth going after first, and WHY.
+
+        Ranked, not scored into a single number nobody can argue with:
+        the reasons are returned so an operator can disagree with the
+        order. A host at the top because it has one critical finding is
+        a different proposition from one there because it exposes
+        fifteen unversioned services, and collapsing both into "87"
+        hides exactly the thing being decided.
+        """
+        tsel = select(Target)
+        if project:
+            tsel = tsel.where(Target.project_id == project.id)
+        rows = (await session.execute(tsel)).scalars().all()
+        if not rows:
+            return {"targets": [], "note": "this engagement has no targets yet"}
+
+        ids = [t.id for t in rows]
+        svc = {}
+        for sv in (await session.execute(
+                select(Service).where(Service.target_id.in_(ids)))).scalars():
+            svc.setdefault(sv.target_id, []).append(sv)
+        vul = {}
+        for v in (await session.execute(
+                select(Vuln).where(Vuln.target_id.in_(ids)))).scalars():
+            vul.setdefault(v.target_id, []).append(v)
+
+        WEIGHT = {"critical": 100, "high": 40, "medium": 10, "low": 2, "info": 0}
+        out = []
+        for t in rows:
+            vs, ss = vul.get(t.id, []), svc.get(t.id, [])
+            score, why = 0, []
+            for sev, n in sorted(collections.Counter(
+                    (v.severity or "info").lower() for v in vs).items()):
+                score += WEIGHT.get(sev, 0) * n
+                if WEIGHT.get(sev, 0):
+                    why.append(f"{n} {sev} finding{'' if n == 1 else 's'}")
+            if t.hacked:
+                # Already in. Ranked high because it is a foothold, and
+                # said plainly so nobody reads it as "still to do".
+                score += 60
+                why.append("already compromised — this is a foothold, not a target")
+            remote = [x for x in ss if x.port in (21, 22, 23, 445, 3389, 5985, 1433,
+                                                  3306, 5432, 6379, 27017)]
+            if remote:
+                score += 8 * len(remote)
+                why.append("remote-access or database ports: "
+                           + ", ".join(f"{x.port}/{x.protocol}" for x in remote[:6]))
+            versioned = [x for x in ss if x.product and x.version]
+            if versioned:
+                score += 3 * len(versioned)
+                why.append(f"{len(versioned)} service(s) with an identified "
+                           f"version, which is what exploit matching needs")
+            if ss and not versioned:
+                why.append("ports open but unversioned — a -sV pass would "
+                           "say more than this ranking can")
+            if not ss:
+                why.append("nothing scanned here yet, so this ranking knows "
+                           "almost nothing about it")
+            out.append({"host": t.host, "ip": t.ip_address, "score": score,
+                        "compromised": t.hacked, "open_ports": len(ss),
+                        "findings": len(vs), "why": why})
+        out.sort(key=lambda r: (-r["score"], r["host"]))
+        return {"targets": out[:max(1, min(limit, 100))],
+                "ranked_of": len(out),
+                "caveat": "Ordered by what this engagement has RECORDED. A "
+                          "host nothing has scanned scores low because it is "
+                          "unknown, not because it is safe."}
+
+    async def find_by_technology(technology: str, limit: int = 50) -> dict:
+        """Hosts running a given technology — php, wordpress, nginx, jboss.
+
+        Matched against the service product, version and banner, and
+        against captured page titles and URLs, because which of those
+        carries the evidence depends entirely on the tool that found it.
+        """
+        q = (technology or "").strip().lower()
+        if not q:
+            return {"error": "give a technology to look for, e.g. 'php'"}
+        like = f"%{q}%"
+
+        tsel = select(Target)
+        if project:
+            tsel = tsel.where(Target.project_id == project.id)
+        rows = {t.id: t for t in (await session.execute(tsel)).scalars()}
+        if not rows:
+            return {"hosts": [], "technology": q}
+
+        hits: dict[int, list[str]] = {}
+        for sv in (await session.execute(
+                select(Service).where(
+                    Service.target_id.in_(list(rows)),
+                    or_(func.lower(Service.product).like(like),
+                        func.lower(Service.name).like(like),
+                        func.lower(Service.version).like(like),
+                        func.lower(Service.banner).like(like))))).scalars():
+            hits.setdefault(sv.target_id, []).append(
+                f"{sv.port}/{sv.protocol}: "
+                + " ".join(x for x in (sv.product, sv.version) if x)
+                  or (sv.name or "service"))
+        for w in (await session.execute(
+                select(WebAddress).where(
+                    WebAddress.target_id.in_(list(rows)),
+                    or_(func.lower(WebAddress.url).like(like),
+                        func.lower(WebAddress.title).like(like),
+                        func.lower(WebAddress.server).like(like))))).scalars():
+            hits.setdefault(w.target_id, []).append(
+                f"web: {w.url}" + (f" ({w.title})" if w.title else ""))
+
+        out = [{"host": rows[tid].host, "ip": rows[tid].ip_address,
+                "evidence": ev[:8]}
+               for tid, ev in hits.items() if tid in rows]
+        out.sort(key=lambda r: r["host"])
+        return {"technology": q, "hosts": out[:max(1, min(limit, 500))],
+                "matched": len(out),
+                "caveat": "Found in what has been RECORDED. A host running "
+                          "this and never scanned does not appear."}
+
+    async def exploit_leads(host: str = "", product: str = "",
+                            version: str = "", limit: int = 15) -> dict:
+        """Public exploits and CVEs that might apply.
+
+        Give a host and every service it exposes is looked up, or give
+        a product and version directly.
+
+        Matched against a LOCAL copy of Exploit-DB and NVD. Nothing
+        about the target is sent anywhere to answer this — which is the
+        point: asking a third-party API "anything for Apache 2.4.49?"
+        on behalf of a host tells them the client runs it.
+        """
+        from .. import vulnfeed
+        feeds = await vulnfeed.status(session)
+
+        if product or version:
+            out = await vulnfeed.leads_for_service(
+                session, product or None, version or None, limit=limit)
+            return {"product": product, "version": version, **out}
+
+        if not host:
+            return {"error": "give a host, or a product and version"}
+        t = await _target(host)
+        if t is None:
+            return {"error": f"no target {host!r} here"}
+        svcs = (await session.execute(
+            select(Service).where(Service.target_id == t.id)
+            .order_by(Service.port))).scalars().all()
+        if not svcs:
+            return {"host": t.host, "services": [], "feeds": feeds,
+                    "note": "no ports recorded for this host, so there is "
+                            "nothing to match on. That is a gap in what has "
+                            "been scanned, not an absence of exposure."}
+
+        per = []
+        for sv in svcs:
+            r = await vulnfeed.leads_for_service(
+                session, sv.product, sv.version, sv.name, sv.banner,
+                limit=limit)
+            per.append({"port": sv.port, "protocol": sv.protocol,
+                        "product": sv.product, "version": sv.version,
+                        "cves": r["cves"], "exploits": r["exploits"],
+                        "searched_for": r["terms"]})
+        return {
+            "host": t.host, "ip": t.ip_address, "services": per,
+            "feeds": feeds,
+            "caveat": "Leads, not findings. A patched host reports the same "
+                      "version as an unpatched one, banners are frequently "
+                      "wrong, and CPE version matching is approximate. "
+                      "Confirming any of this against the target is the "
+                      "engagement, not this list.",
+        }
+
+    async def search_exploits(query: str, limit: int = 25) -> dict:
+        """`searchsploit`, against the local Exploit-DB copy."""
+        from .. import vulnfeed
+        q = (query or "").strip()
+        if len(q) < 2:
+            return {"error": "give something to search for"}
+        rows = (await session.execute(
+            select(Exploit).where(Exploit.title.ilike(f"%{q}%"))
+            .order_by(Exploit.verified.desc(), Exploit.id.desc())
+            .limit(max(1, min(limit, 200))))).scalars().all()
+        return {"query": q,
+                "results": [{"edb_id": e.id, "title": e.title, "type": e.type,
+                             "platform": e.platform, "verified": e.verified,
+                             "published": e.published, "path": e.path,
+                             "cves": (e.cves or "").split(",") if e.cves else []}
+                            for e in rows],
+                "feeds": await vulnfeed.status(session)}
 
     async def list_findings(severity: str = "", search: str = "",
                             host: str = "", limit: int = 50) -> dict:
@@ -430,6 +668,31 @@ def build(session: AsyncSession, project: Project | None, user: User,
              "no lookups; every result is a hypothesis.",
              _obj({"domain": {"type": "string"}, "limit": {"type": "integer"}},
                   ["domain"]), suggest_domains),
+        Tool("rank_targets",
+             "Which hosts are worth going after first, with the reason for "
+             "each. Ranked rather than scored: the reasons come back so the "
+             "order can be argued with.",
+             _obj({"limit": {"type": "integer"}}), rank_targets),
+        Tool("find_by_technology",
+             "Hosts running a given technology — php, wordpress, nginx, "
+             "jboss. Matches service product, version and banner, and "
+             "captured page titles and URLs.",
+             _obj({"technology": {"type": "string",
+                                  "description": "e.g. php, wordpress, nginx"},
+                   "limit": {"type": "integer"}}, ["technology"]),
+             find_by_technology),
+        Tool("exploit_leads",
+             "Public exploits and CVEs that might apply to a host's "
+             "services, or to a product and version. Matched against a "
+             "local copy — nothing about the target is sent anywhere.",
+             _obj({"host": {"type": "string"},
+                   "product": {"type": "string"},
+                   "version": {"type": "string"},
+                   "limit": {"type": "integer"}}), exploit_leads),
+        Tool("search_exploits",
+             "searchsploit, against the local Exploit-DB copy.",
+             _obj({"query": {"type": "string"}, "limit": {"type": "integer"}},
+                  ["query"]), search_exploits),
     ]
     if not allow_writes:
         return reads
@@ -548,6 +811,176 @@ def build(session: AsyncSession, project: Project | None, user: User,
                                "the project pool — routing will pick an agent",
                 "note": "queued; results import when the agent reports back"}
 
+    #: What `select` accepts, and what each one means. Kept beside the
+    #: tool rather than in the description so the error can list them.
+    _SELECTORS = {
+        "all": "every target in the project",
+        "unscanned": "targets with no recorded ports — the actual gap",
+        "web": "targets with a recorded web address or an http/https port",
+        "hacked": "targets already marked compromised",
+        "technology": "targets matching `technology`, e.g. php",
+        "hosts": "exactly the hosts given in `hosts`",
+    }
+
+    async def enumerate_drones(kind: str, select: str = "unscanned",
+                               technology: str = "", hosts: str = "",
+                               ports: str = "", agent: str = "",
+                               region: str = "", limit: int = 500,
+                               confirm: bool = False) -> dict:
+        """Queue enumeration across the project's own targets.
+
+        One task per host, so the fleet shares the work, one failure
+        stays one failure, and the queue depth means "how many hosts are
+        left". Picks the hosts from what the project already knows
+        rather than making you list them.
+
+        **Previews unless `confirm` is true.** A sweep is hundreds of
+        tasks against a client's estate, and "have a look at the web
+        hosts" is not a sentence that should start one on its own. The
+        preview says exactly which hosts, how many, and what scope
+        refused, so the decision is made against the list and not the
+        adjective.
+        """
+        from ..routers.agents import TASK_KINDS, queue_per_host
+        if pid is None or project is None:
+            return {"error": "tasking needs one engagement in view"}
+        if not allow_writes:
+            return {"error": "this assistant is read-only; enable writes in "
+                             "Site Config to let it queue work"}
+
+        kind = (kind or "").strip().lower()
+        if kind not in TASK_KINDS:
+            return {"error": f"unknown task {kind!r}. Known: "
+                             f"{', '.join(sorted(TASK_KINDS))}"}
+        if kind in ("install", "shell"):
+            # Installing software on, or running commands on, a
+            # privileged process inside a client network is not
+            # something to do because a sentence asked for it.
+            return {"error": f"{kind} is never queued by the assistant. It "
+                             f"belongs on the Drone page, where the allowlist "
+                             f"and the agent are both in front of you"}
+
+        sel = (select or "").strip().lower()
+        if sel not in _SELECTORS:
+            return {"error": f"unknown selection {sel!r}",
+                    "selections": _SELECTORS}
+
+        # ------------------------------------------------ choose hosts
+        chosen_hosts: list[str] = []
+        if sel == "hosts":
+            chosen_hosts = [h for h in re.split(r"[\s,]+", hosts or "") if h]
+            if not chosen_hosts:
+                return {"error": "select='hosts' needs a list in `hosts`"}
+        elif sel == "technology":
+            if not technology.strip():
+                return {"error": "select='technology' needs `technology`, "
+                                 "e.g. php"}
+            found = await find_by_technology(technology, limit=limit)
+            chosen_hosts = [h["host"] for h in found.get("hosts", [])]
+        else:
+            tsel = select_(Target).where(Target.project_id == pid)
+            if sel == "hacked":
+                tsel = tsel.where(Target.hacked.is_(True))
+            targets = (await session.execute(tsel)).scalars().all()
+            if sel in ("unscanned", "web"):
+                with_ports: set[int] = set()
+                for sv in (await session.execute(
+                        select_(Service.target_id, Service.port, Service.name)
+                        .where(Service.target_id.in_(
+                            [t.id for t in targets] or [0])))).all():
+                    with_ports.add(sv[0])
+                if sel == "unscanned":
+                    targets = [t for t in targets if t.id not in with_ports]
+                else:
+                    webbed = {w.target_id for w in (await session.execute(
+                        select_(WebAddress).where(WebAddress.target_id.in_(
+                            [t.id for t in targets] or [0])))).scalars()}
+                    http = {sv[0] for sv in (await session.execute(
+                        select_(Service.target_id, Service.port, Service.name)
+                        .where(Service.target_id.in_(
+                            [t.id for t in targets] or [0])))).all()
+                        if sv[1] in (80, 443, 8080, 8443, 8000)
+                        or "http" in (sv[2] or "")}
+                    targets = [t for t in targets
+                               if t.id in webbed or t.id in http]
+            chosen_hosts = [t.host for t in targets]
+
+        # A project's inventory holds more than network hosts — an S3
+        # ARN, a mobile package name, a cloud resource id. Those are
+        # worth recording and cannot be scanned, and a scanner pointed
+        # at one burns a task to produce an error. Dropped here, and
+        # reported rather than quietly removed: "I queued 1,700 of your
+        # 1,738" is a fact the operator needs in order to notice that
+        # thirty-eight assets are being covered by nothing at all.
+        unscannable: dict[str, str] = {}
+        scannable: list[str] = []
+        for h in chosen_hosts:
+            try:
+                scannable.append(validate_host(h))
+            except InvalidHost as e:
+                unscannable[h] = str(e)
+        chosen_hosts = scannable
+
+        chosen_hosts = chosen_hosts[:max(1, min(int(limit or 500), 5000))]
+        if not chosen_hosts:
+            return {"queued": 0, "hosts": [],
+                    "not_network_hosts": unscannable,
+                    "note": f"nothing matched {sel!r} that can be scanned. "
+                            f"That is a statement about what this project has "
+                            f"recorded, not about what exists out there."}
+
+        # --------------------------------------------- who runs it
+        chosen_agent = None
+        if agent.strip():
+            chosen_agent = (await session.execute(
+                select_(Agent).where(Agent.project_id == pid,
+                                     Agent.name == agent.strip()))).scalar_one_or_none()
+            if chosen_agent is None:
+                return {"error": f"no agent named {agent!r} on {project.code}"}
+            if chosen_agent.status == "disabled":
+                return {"error": f"{chosen_agent.name} has been killed"}
+
+        args: dict = {}
+        if ports.strip():
+            args["ports"] = ports.strip()
+
+        # ------------------------------------------------- preview
+        if not confirm:
+            idx = await index_for(session, pid)
+            allowed, refused = [], {}
+            for h in chosen_hosts:
+                r = idx.check(h)
+                (allowed.append(h) if r.allowed
+                 else refused.update({h: r.reason}))
+            return {
+                "preview": True,
+                "kind": kind, "selection": sel,
+                "would_queue": len(allowed),
+                "one_task_per_host": True,
+                "hosts": allowed[:25],
+                "more": max(0, len(allowed) - 25),
+                "refused_by_scope": dict(list(refused.items())[:25]),
+                "refused_count": len(refused),
+                "not_network_hosts": dict(list(unscannable.items())[:10]),
+                "not_network_count": len(unscannable),
+                "assigned_to": chosen_agent.name if chosen_agent
+                               else "the project pool",
+                "next": "call again with confirm=true to queue this",
+            }
+
+        res = await queue_per_host(session, project, kind, chosen_hosts, args,
+                                   user, chosen_agent,
+                                   (region or "").strip().lower() or None,
+                                   source="agent")
+        return {"ok": True, "kind": kind, "selection": sel,
+                "queued": res["queued"], "task_ids": res["ids"][:25],
+                "refused_by_scope": res["refused"],
+                "not_network_hosts": dict(list(unscannable.items())[:10]),
+                "not_network_count": len(unscannable),
+                "assigned_to": chosen_agent.name if chosen_agent
+                               else "the project pool — routing will pick",
+                "note": "one task per host; results import as each reports back"}
+
     async def drone_task_status(task_id: int) -> dict:
         if pid is None:
             return {"error": "needs one engagement in view"}
@@ -633,6 +1066,32 @@ def build(session: AsyncSession, project: Project | None, user: User,
                    "ports": {"type": "string"},
                    "region": {"type": "string"}},
                   ["kind", "targets"]), task_drone, writes=True),
+        Tool("enumerate_drones",
+             "Queue enumeration across the project's own targets — one "
+             "task per host, picked by selection rather than listed by "
+             "hand: all, unscanned, web, hacked, technology, or an "
+             "explicit host list. PREVIEWS by default; pass confirm=true "
+             "to actually queue. Use this for a sweep, and task_drone for "
+             "one specific scan.",
+             _obj({"kind": {"type": "string",
+                            "description": "nmap, masscan, amass, gobuster, "
+                                           "gospider, nuclei, httpx, "
+                                           "nslookup, reverse_ip"},
+                   "select": {"type": "string",
+                              "description": "all | unscanned | web | hacked "
+                                             "| technology | hosts"},
+                   "technology": {"type": "string",
+                                  "description": "with select=technology"},
+                   "hosts": {"type": "string",
+                             "description": "with select=hosts"},
+                   "ports": {"type": "string"},
+                   "agent": {"type": "string",
+                             "description": "agent name; omit for the pool"},
+                   "region": {"type": "string"},
+                   "limit": {"type": "integer"},
+                   "confirm": {"type": "boolean",
+                               "description": "false previews, true queues"}},
+                  ["kind"]), enumerate_drones, writes=True),
         Tool("drone_task_status",
              "How a queued Drone task is getting on, and whether its results "
              "are waiting on a decision about unknown hosts.",

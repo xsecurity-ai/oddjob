@@ -1036,6 +1036,21 @@ export const api = {
                    body: { mode?: string; max_parallel?: number }) =>
     req<DroneRouting>('/api/agents/routing' + qs({ project }),
       { method: 'PUT', body: JSON.stringify(body) }),
+  /** One task per subject, created server-side in one request.
+   *
+   *  The client used to POST once per subject, which is 1,738 requests
+   *  for a reverse-lookup sweep. Scope is checked per subject and the
+   *  refusals come back named: one target being out of scope is not a
+   *  reason to refuse the rest. */
+  queueTasksBulk: (project: string, kind: string, subjects: string[],
+                   args: Record<string, unknown> = {},
+                   agentId: number | null = null, region?: string) =>
+    req<{ ids: number[]; refused: Record<string, string>; queued: number }>(
+      '/api/agents/tasks/bulk' + qs({ project }),
+      { method: 'POST',
+        body: JSON.stringify({ kind, subjects, args, agent_id: agentId,
+                               region: region || undefined }) }),
+
   /** Queue for the project rather than a named agent, so the routing
    *  mode decides which Drone runs it. */
   queuePooledTask: (project: string, kind: string,

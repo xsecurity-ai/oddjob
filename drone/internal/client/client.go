@@ -35,7 +35,21 @@ func (c *Client) UseIdentity(id *identity.Identity) { c.id = id }
 func New(base, key string, insecure bool) *Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	if insecure {
-		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 — opt-in, see config
+		// Opt-in, and never the default. Worth being precise about what
+		// it does and does not give up: the body is sealed end-to-end
+		// under a key only this agent and its Oddjob hold, and the
+		// server is authenticated by a pinned Ed25519 identity, so
+		// skipping certificate verification costs the transport's
+		// opinion of who the peer is — not the agent's.
+		//
+		// MinVersion is set explicitly because replacing TLSClientConfig
+		// discards whatever the cloned default transport had. Go's own
+		// client default is already 1.2; writing it down means a future
+		// edit to this struct cannot silently allow 1.0.
+		tr.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true, // #nosec G402 — opt-in, see config
+			MinVersion:         tls.VersionTLS12,
+		}
 	}
 	return &Client{
 		base: strings.TrimRight(base, "/"),

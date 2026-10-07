@@ -130,7 +130,13 @@ async def get_target(project: str, host: str) -> Any:
                      params={"project": project, "host": host, "limit": 1000})
     return {
         "target": detail,
-        "services": [{k: s.get(k) for k in ("port", "protocol", "state", "name", "banner")}
+        # product and version are carried deliberately: they are what
+        # service_leads matches on, and without them the obvious next
+        # question — "is anything known about what this is running?" —
+        # needs another round trip to find out what it is running.
+        "services": [{k: s.get(k) for k in ("port", "protocol", "state",
+                                            "name", "product", "version",
+                                            "banner")}
                      for s in svc.get("items", [])],
         "vulns": [{k: v.get(k) for k in ("title", "severity", "status", "port", "external_id")}
                   for v in vul.get("items", [])],
@@ -318,6 +324,56 @@ async def stats(project: str | None = None) -> Any:
 async def whoami() -> Any:
     """The account this key belongs to, and your role on each project."""
     return await _req("GET", "/api/auth/me")
+
+
+@mcp.tool()
+async def search_exploits(query: str, limit: int = 25) -> Any:
+    """searchsploit, against Oddjob's local Exploit-DB copy.
+
+    Matched locally. Nothing about the engagement leaves the deployment
+    to answer this — which is the point, because asking a third party
+    "anything for Apache 2.4.49?" on behalf of a host tells them the
+    client runs it.
+    """
+    return await _req("GET", "/api/vulnfeeds/search",
+                      params={"q": query, "limit": limit})
+
+
+@mcp.tool()
+async def service_leads(product: str = "", version: str = "",
+                        name: str = "", banner: str = "",
+                        limit: int = 25) -> Any:
+    """Public exploits and CVEs that might apply to one piece of software.
+
+    Takes the SOFTWARE, never a host — that is the boundary, and it is
+    why there is no host parameter to pass one through.
+
+    Read `version_match` on every CVE before believing it: `exact` means
+    a CPE names this version, `product only` means the CPE covers every
+    version and is not evidence about yours, and `unknown` means NVD has
+    not analysed it yet. Leads, not findings.
+    """
+    return await _req("GET", "/api/vulnfeeds/leads",
+                      params={"product": product, "version": version,
+                              "name": name, "banner": banner,
+                              "limit": limit})
+
+
+@mcp.tool()
+async def get_cve(cve_id: str) -> Any:
+    """One CVE: score, vector, summary, and any local exploits citing it."""
+    return await _req("GET", f"/api/vulnfeeds/cve/{cve_id}")
+
+
+@mcp.tool()
+async def feed_status() -> Any:
+    """How current the exploit and CVE data is.
+
+    Worth reading before trusting an empty result. "No known exploits"
+    from a feed synced this morning and from one that has never run are
+    different claims, and only this says which you are looking at.
+    """
+    return await _req("GET", "/api/vulnfeeds/status")
 
 
 if __name__ == "__main__":

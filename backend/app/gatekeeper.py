@@ -32,7 +32,8 @@ from .security import API_KEY_PREFIX, COOKIE, decode_token
 
 # Paths served to anyone, because the login screen cannot render without them.
 PUBLIC_EXACT = {
-    "/", "/index.html", "/favicon.ico", "/favicon.svg", "/favicon-32.png",
+    "/", "/index.html", "/favicon.ico", "/favicon-32.png",
+    "/icon-192.png", "/icon-512.png",
     "/apple-touch-icon.png", "/vite.svg", "/robots.txt",
     "/manifest.webmanifest",
     # Sign-in. /setup is the bootstrap the user explicitly excepted: it is the
