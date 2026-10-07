@@ -313,6 +313,57 @@ st, r = call("/api/agents/tasks/bulk?project=AGENT", "POST",
              {"kind": "install", "subjects": ["nmap"]}, token=admin)
 check("install is not a per-subject kind", st == 422, f"status={st}")
 
+print("== queuing work shows up on the target's own timeline ==")
+# A target's timeline is meant to be the whole story of what was done
+# to that host. It had the results and not the asking, so "was this
+# ever scanned, and with what?" could only be answered from the task
+# table by someone who knew to look there.
+call("/api/projects", "POST",
+     {"code": "TLINE", "name": "Timeline"}, token=admin)
+call("/api/targets?project=TLINE", "POST",
+     {"host": "timeline.acme.example"}, token=admin)
+st, _ = call("/api/agents/tasks?project=TLINE", "POST",
+             {"kind": "nmap", "args": {"targets": ["timeline.acme.example"],
+                                       "ports": "80,443"}}, token=admin)
+check("the task is queued", st == 201, f"status={st}")
+
+st, tl = call("/api/targets/TLINE/timeline.acme.example/timeline", token=admin)
+evs = tl if isinstance(tl, list) else (tl or {}).get("items", [])
+blob = json.dumps(evs)
+check("the target's timeline records it", "nmap queued" in blob, blob[:200])
+check("with the ports it will actually use", "80,443" in blob, blob[:200])
+check("and that no Drone owns it yet", "project pool" in blob, blob[:200])
+check("attributed to whoever asked", "root" in blob, blob[:160])
+
+# Recorded at QUEUE time: a scan that was started and never came back
+# is exactly the case where you want to know it was started.
+st, rows = call("/api/agents/tasks?project=TLINE", token=admin)
+mine = [r for r in (rows or []) if r["subject"] == "timeline.acme.example"]
+check("while the task itself is still only queued",
+      mine and mine[0]["state"] == "awaiting", str(mine)[:120])
+
+# Bulk goes on each target's own timeline, not one shared entry.
+for h in ("bulk-a.acme.example", "bulk-b.acme.example"):
+    call("/api/targets?project=TLINE", "POST", {"host": h}, token=admin)
+call("/api/agents/tasks/bulk?project=TLINE", "POST",
+     {"kind": "nslookup",
+      "subjects": ["bulk-a.acme.example", "bulk-b.acme.example"]},
+     token=admin)
+for h in ("bulk-a.acme.example", "bulk-b.acme.example"):
+    st, tl = call(f"/api/targets/TLINE/{h}/timeline", token=admin)
+    evs = tl if isinstance(tl, list) else (tl or {}).get("items", [])
+    check(f"{h} has its own entry",
+          "nslookup queued" in json.dumps(evs), json.dumps(evs)[:120])
+
+# A task against something the project does not hold has no timeline
+# to write to, and inventing one would be inventing a target.
+before = call("/api/targets?project=TLINE&page_size=500", token=admin)[1]["total"]
+call("/api/agents/tasks?project=TLINE", "POST",
+     {"kind": "nmap", "args": {"targets": ["203.0.113.0/24"]}}, token=admin)
+after = call("/api/targets?project=TLINE&page_size=500", token=admin)[1]["total"]
+check("a task against a range invents no target", before == after,
+      f"{before} -> {after}")
+
 print("== reverse lookups are handed the names to resolve ==")
 # DNS cannot be asked which names point at an address, only where a
 # given name points. So the server supplies the project's own names and

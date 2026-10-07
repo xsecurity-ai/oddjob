@@ -561,6 +561,60 @@ async def _assert_task_in_scope(session: AsyncSession, pr: Project,
 MAX_REVERSE_CANDIDATES = 1500
 
 
+async def _record_tasking(session: AsyncSession, pr: Project, kind: str,
+                          args: dict, user: User, agent: Agent | None,
+                          task_id: int | None = None) -> None:
+    """Note on each target's timeline that work was queued against it.
+
+    A target's timeline is meant to be the whole story of what was done
+    to that host. It had the results — a service found, a name
+    resolved, a finding filed — and not the asking, so "was this ever
+    scanned, and with what?" could only be answered from the task
+    table, by someone who knew to look there and could match a target
+    to a row in an arguments blob.
+
+    Recorded at queue time rather than on completion, deliberately: a
+    scan that was started and never came back is the case where you
+    most want to know it was started.
+
+    Only targets the project actually holds. A task against a CIDR or a
+    name not in the inventory has no timeline to write to, and
+    inventing a row for one would be inventing a target.
+    """
+    subjects = [str(t).strip() for t in (args.get("targets") or []) if str(t).strip()]
+    if not subjects:
+        return
+    rows = (await session.execute(
+        select(Target).where(Target.project_id == pr.id,
+                             Target.host.in_(subjects)))).scalars().all()
+    if not rows:
+        return
+
+    # What it will actually do, in the words of the thing being run.
+    bits = []
+    if args.get("ports"):
+        bits.append(f"ports {args['ports']}")
+    for key in ("mode", "profile", "wordlist", "rate"):
+        if args.get(key):
+            bits.append(f"{key} {args[key]}")
+    if args.get("scripts"):
+        bits.append("with NSE scripts")
+    where = f" on {agent.name}" if agent else " (project pool)"
+    detail = ", ".join(bits) or None
+
+    for t in rows:
+        await record(
+            session, t.id, "scan",
+            f"{kind} queued{where}" + (f" — {detail}" if detail else ""),
+            detail=(f"Task {task_id} queued by {user.username}. "
+                    if task_id else f"Queued by {user.username}. ")
+                   + (f"Arguments: {detail}. " if detail else "")
+                   + ("Addressed to this Drone." if agent
+                      else "Pooled, so the project's routing decides which "
+                           "Drone takes it."),
+            actor=user, source=f"drone:{kind}")
+
+
 async def _candidates(session: AsyncSession, project_id: int) -> list[str]:
     """Names to resolve when answering "what else is at this address".
 
@@ -1337,6 +1391,9 @@ async def create_task(agent_id: int, body: TaskIn,
                   import_as=body.import_as or TASK_KINDS.get(body.kind),
                   status="queued")
     session.add(t)
+    await session.flush()
+    await _record_tasking(session, pr, body.kind, body.args or {}, user,
+                          a, t.id)
     await session.commit()
     await session.refresh(t)
     await broker.publish("agents", action="task", project=pr.code)
@@ -1446,6 +1503,9 @@ async def create_tasks_bulk(body: BulkTaskIn,
             import_as=TASK_KINDS.get(body.kind), status="queued")
         session.add(t)
         await session.flush()
+        await _record_tasking(session, pr, body.kind,
+                              {**body.args, "targets": [subject]}, user,
+                              agent, t.id)
         created.append(t.id)
 
     await session.commit()
@@ -1495,6 +1555,9 @@ async def create_pooled_task(body: TaskIn,
                   import_as=body.import_as or TASK_KINDS.get(body.kind),
                   status="queued")
     session.add(t)
+    await session.flush()
+    await _record_tasking(session, pr, body.kind, body.args or {}, user,
+                          None, t.id)
     await session.commit()
     await session.refresh(t)
     await broker.publish("agents", action="task", project=pr.code)
