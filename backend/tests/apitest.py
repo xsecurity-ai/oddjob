@@ -140,6 +140,18 @@ check("SSE event received", len(events) > before, f"{len(events)-before} new eve
 if len(events) > before:
     print("   last event:", events[-1][:120])
 
+print("\n== health reports connection-pool state ==")
+# Not an assertion about SSE: FastAPI has released dependencies before
+# sending the response since 0.106, so a stream does not hold its
+# session. This is here because the number is the only way to see a
+# process hoarding connections — a stale server left running after a
+# restart, or a transaction nobody closed — which otherwise presents as
+# the database being slow.
+st, h = call("/api/health")
+check("health is served", st == 200 and h.get("ok") is True, str(h)[:80])
+check("and reports the pool", isinstance(h.get("db_pool"), dict)
+      and "checked_out" in h["db_pool"], str(h.get("db_pool")))
+
 print("\n== cascade delete ==")
 st, _ = call("/api/targets/APITEST/web01.example.com", "DELETE")
 check("delete 204", st == 204, f"status={st}")

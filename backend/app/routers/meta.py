@@ -18,7 +18,24 @@ router = APIRouter(prefix="/api", tags=["meta"])
 @router.get("/health")
 async def health(session: AsyncSession = Depends(get_session)):
     await session.execute(select(1))
-    return {"ok": True, "sse_subscribers": broker.subscriber_count}
+    out = {"ok": True, "sse_subscribers": broker.subscriber_count}
+    # Connections checked out of the pool. Worth a line because the
+    # failure it reveals is otherwise invisible and gets blamed on the
+    # database: a process holding connections it is not using — an
+    # abandoned transaction, or an older server still running after a
+    # restart — starves the pool and pins Postgres's xmin horizon, so
+    # VACUUM stops reclaiming dead rows across the whole database.
+    try:
+        from ..db import engine
+        pool = engine.pool
+        out["db_pool"] = {"checked_out": pool.checkedout(),
+                          "in_pool": pool.checkedin()}
+    except Exception:                                      # noqa: BLE001
+        # Pool introspection is not part of any API contract, and a
+        # health check that fails because a counter moved is worse than
+        # no counter.
+        pass
+    return out
 
 
 @router.get("/stats", response_model=Stats)
