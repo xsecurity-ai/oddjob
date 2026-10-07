@@ -27,6 +27,10 @@ import re
 from typing import Any, Callable
 
 from sqlalchemy import false as sa_false, func, or_, select, true as sa_true, distinct
+#: `select` is also the name of a tool parameter (which hosts to pick),
+#: and a tool's parameter names are part of its API — renaming it to
+#: dodge the shadowing would make the schema worse to read.
+from sqlalchemy import select as select_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..domains import registrable
@@ -807,6 +811,176 @@ def build(session: AsyncSession, project: Project | None, user: User,
                                "the project pool — routing will pick an agent",
                 "note": "queued; results import when the agent reports back"}
 
+    #: What `select` accepts, and what each one means. Kept beside the
+    #: tool rather than in the description so the error can list them.
+    _SELECTORS = {
+        "all": "every target in the project",
+        "unscanned": "targets with no recorded ports — the actual gap",
+        "web": "targets with a recorded web address or an http/https port",
+        "hacked": "targets already marked compromised",
+        "technology": "targets matching `technology`, e.g. php",
+        "hosts": "exactly the hosts given in `hosts`",
+    }
+
+    async def enumerate_drones(kind: str, select: str = "unscanned",
+                               technology: str = "", hosts: str = "",
+                               ports: str = "", agent: str = "",
+                               region: str = "", limit: int = 500,
+                               confirm: bool = False) -> dict:
+        """Queue enumeration across the project's own targets.
+
+        One task per host, so the fleet shares the work, one failure
+        stays one failure, and the queue depth means "how many hosts are
+        left". Picks the hosts from what the project already knows
+        rather than making you list them.
+
+        **Previews unless `confirm` is true.** A sweep is hundreds of
+        tasks against a client's estate, and "have a look at the web
+        hosts" is not a sentence that should start one on its own. The
+        preview says exactly which hosts, how many, and what scope
+        refused, so the decision is made against the list and not the
+        adjective.
+        """
+        from ..routers.agents import TASK_KINDS, queue_per_host
+        if pid is None or project is None:
+            return {"error": "tasking needs one engagement in view"}
+        if not allow_writes:
+            return {"error": "this assistant is read-only; enable writes in "
+                             "Site Config to let it queue work"}
+
+        kind = (kind or "").strip().lower()
+        if kind not in TASK_KINDS:
+            return {"error": f"unknown task {kind!r}. Known: "
+                             f"{', '.join(sorted(TASK_KINDS))}"}
+        if kind in ("install", "shell"):
+            # Installing software on, or running commands on, a
+            # privileged process inside a client network is not
+            # something to do because a sentence asked for it.
+            return {"error": f"{kind} is never queued by the assistant. It "
+                             f"belongs on the Drone page, where the allowlist "
+                             f"and the agent are both in front of you"}
+
+        sel = (select or "").strip().lower()
+        if sel not in _SELECTORS:
+            return {"error": f"unknown selection {sel!r}",
+                    "selections": _SELECTORS}
+
+        # ------------------------------------------------ choose hosts
+        chosen_hosts: list[str] = []
+        if sel == "hosts":
+            chosen_hosts = [h for h in re.split(r"[\s,]+", hosts or "") if h]
+            if not chosen_hosts:
+                return {"error": "select='hosts' needs a list in `hosts`"}
+        elif sel == "technology":
+            if not technology.strip():
+                return {"error": "select='technology' needs `technology`, "
+                                 "e.g. php"}
+            found = await find_by_technology(technology, limit=limit)
+            chosen_hosts = [h["host"] for h in found.get("hosts", [])]
+        else:
+            tsel = select_(Target).where(Target.project_id == pid)
+            if sel == "hacked":
+                tsel = tsel.where(Target.hacked.is_(True))
+            targets = (await session.execute(tsel)).scalars().all()
+            if sel in ("unscanned", "web"):
+                with_ports: set[int] = set()
+                for sv in (await session.execute(
+                        select_(Service.target_id, Service.port, Service.name)
+                        .where(Service.target_id.in_(
+                            [t.id for t in targets] or [0])))).all():
+                    with_ports.add(sv[0])
+                if sel == "unscanned":
+                    targets = [t for t in targets if t.id not in with_ports]
+                else:
+                    webbed = {w.target_id for w in (await session.execute(
+                        select_(WebAddress).where(WebAddress.target_id.in_(
+                            [t.id for t in targets] or [0])))).scalars()}
+                    http = {sv[0] for sv in (await session.execute(
+                        select_(Service.target_id, Service.port, Service.name)
+                        .where(Service.target_id.in_(
+                            [t.id for t in targets] or [0])))).all()
+                        if sv[1] in (80, 443, 8080, 8443, 8000)
+                        or "http" in (sv[2] or "")}
+                    targets = [t for t in targets
+                               if t.id in webbed or t.id in http]
+            chosen_hosts = [t.host for t in targets]
+
+        # A project's inventory holds more than network hosts — an S3
+        # ARN, a mobile package name, a cloud resource id. Those are
+        # worth recording and cannot be scanned, and a scanner pointed
+        # at one burns a task to produce an error. Dropped here, and
+        # reported rather than quietly removed: "I queued 1,700 of your
+        # 1,738" is a fact the operator needs in order to notice that
+        # thirty-eight assets are being covered by nothing at all.
+        unscannable: dict[str, str] = {}
+        scannable: list[str] = []
+        for h in chosen_hosts:
+            try:
+                scannable.append(validate_host(h))
+            except InvalidHost as e:
+                unscannable[h] = str(e)
+        chosen_hosts = scannable
+
+        chosen_hosts = chosen_hosts[:max(1, min(int(limit or 500), 5000))]
+        if not chosen_hosts:
+            return {"queued": 0, "hosts": [],
+                    "not_network_hosts": unscannable,
+                    "note": f"nothing matched {sel!r} that can be scanned. "
+                            f"That is a statement about what this project has "
+                            f"recorded, not about what exists out there."}
+
+        # --------------------------------------------- who runs it
+        chosen_agent = None
+        if agent.strip():
+            chosen_agent = (await session.execute(
+                select_(Agent).where(Agent.project_id == pid,
+                                     Agent.name == agent.strip()))).scalar_one_or_none()
+            if chosen_agent is None:
+                return {"error": f"no agent named {agent!r} on {project.code}"}
+            if chosen_agent.status == "disabled":
+                return {"error": f"{chosen_agent.name} has been killed"}
+
+        args: dict = {}
+        if ports.strip():
+            args["ports"] = ports.strip()
+
+        # ------------------------------------------------- preview
+        if not confirm:
+            idx = await index_for(session, pid)
+            allowed, refused = [], {}
+            for h in chosen_hosts:
+                r = idx.check(h)
+                (allowed.append(h) if r.allowed
+                 else refused.update({h: r.reason}))
+            return {
+                "preview": True,
+                "kind": kind, "selection": sel,
+                "would_queue": len(allowed),
+                "one_task_per_host": True,
+                "hosts": allowed[:25],
+                "more": max(0, len(allowed) - 25),
+                "refused_by_scope": dict(list(refused.items())[:25]),
+                "refused_count": len(refused),
+                "not_network_hosts": dict(list(unscannable.items())[:10]),
+                "not_network_count": len(unscannable),
+                "assigned_to": chosen_agent.name if chosen_agent
+                               else "the project pool",
+                "next": "call again with confirm=true to queue this",
+            }
+
+        res = await queue_per_host(session, project, kind, chosen_hosts, args,
+                                   user, chosen_agent,
+                                   (region or "").strip().lower() or None,
+                                   source="agent")
+        return {"ok": True, "kind": kind, "selection": sel,
+                "queued": res["queued"], "task_ids": res["ids"][:25],
+                "refused_by_scope": res["refused"],
+                "not_network_hosts": dict(list(unscannable.items())[:10]),
+                "not_network_count": len(unscannable),
+                "assigned_to": chosen_agent.name if chosen_agent
+                               else "the project pool — routing will pick",
+                "note": "one task per host; results import as each reports back"}
+
     async def drone_task_status(task_id: int) -> dict:
         if pid is None:
             return {"error": "needs one engagement in view"}
@@ -892,6 +1066,32 @@ def build(session: AsyncSession, project: Project | None, user: User,
                    "ports": {"type": "string"},
                    "region": {"type": "string"}},
                   ["kind", "targets"]), task_drone, writes=True),
+        Tool("enumerate_drones",
+             "Queue enumeration across the project's own targets — one "
+             "task per host, picked by selection rather than listed by "
+             "hand: all, unscanned, web, hacked, technology, or an "
+             "explicit host list. PREVIEWS by default; pass confirm=true "
+             "to actually queue. Use this for a sweep, and task_drone for "
+             "one specific scan.",
+             _obj({"kind": {"type": "string",
+                            "description": "nmap, masscan, amass, gobuster, "
+                                           "gospider, nuclei, httpx, "
+                                           "nslookup, reverse_ip"},
+                   "select": {"type": "string",
+                              "description": "all | unscanned | web | hacked "
+                                             "| technology | hosts"},
+                   "technology": {"type": "string",
+                                  "description": "with select=technology"},
+                   "hosts": {"type": "string",
+                             "description": "with select=hosts"},
+                   "ports": {"type": "string"},
+                   "agent": {"type": "string",
+                             "description": "agent name; omit for the pool"},
+                   "region": {"type": "string"},
+                   "limit": {"type": "integer"},
+                   "confirm": {"type": "boolean",
+                               "description": "false previews, true queues"}},
+                  ["kind"]), enumerate_drones, writes=True),
         Tool("drone_task_status",
              "How a queued Drone task is getting on, and whether its results "
              "are waiting on a decision about unknown hosts.",

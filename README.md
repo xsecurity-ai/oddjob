@@ -289,6 +289,41 @@ another's data.
 Socket Mode means the app opens the connection outward, so nothing has to
 be exposed to the internet.
 
+### Tasking Drones from the assistant
+
+With writes enabled, the agent can queue enumeration itself — including
+sweeps across the project's own inventory, rather than hosts you type in:
+
+```
+"run httpx over everything we have not scanned yet"
+"nuclei the web hosts, through tokyo-01"
+"nslookup every name we know"
+```
+
+It picks hosts by selection — `all`, `unscanned`, `web`, `hacked`,
+`technology`, or an explicit list — and creates **one task per host**, so
+the fleet shares the work and one failure stays one failure.
+
+**It shows you the plan and queues nothing until you say go.** A sweep is
+hundreds of tasks against someone's estate, and "have a look at the web
+hosts" is a sentence, not an authorisation. The preview names the hosts,
+the count, what scope refused and what is not a network host at all; only
+a second, explicit confirmation queues it.
+
+Three things it will not do, whatever it is asked:
+
+- **`shell` and `install` are never queued by the assistant.** Running
+  commands on, or installing software onto, a privileged process inside
+  a client's network belongs on the Drone page, where the allowlist and
+  the agent are both in front of you.
+- **It cannot reach past the scope gate.** Tasking goes through the same
+  check as the Drone page, because a scan you could not queue by hand
+  must not become queueable by asking for it in a sentence.
+- **It will not silently skip things.** Assets that are not network
+  hosts — an S3 ARN, a cloud resource id — are dropped and *named*.
+  "Queued 1,700 of your 1,738" is how you notice thirty-eight assets are
+  covered by nothing.
+
 ## Exploits and CVEs, held locally
 
 Oddjob keeps its own copy of Exploit-DB and the NVD CVE list, and does

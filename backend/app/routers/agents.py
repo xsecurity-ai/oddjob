@@ -1447,6 +1447,60 @@ class BulkTaskIn(BaseModel):
     region: str | None = None
 
 
+async def queue_per_host(session: AsyncSession, pr: Project, kind: str,
+                         subjects: list[str], args: dict, user: User,
+                         agent: Agent | None = None,
+                         region: str | None = None,
+                         source: str = "ui") -> dict:
+    """One task per subject, scope-checked individually.
+
+    The single implementation behind both the bulk endpoint and the
+    assistant's enumerate tool. Shared deliberately: the scope gate, the
+    per-host split and the timeline record are the parts that must not
+    differ depending on whether a human clicked or a sentence asked, and
+    the surest way to keep them identical is to have one copy.
+
+    Scope is checked per subject. One target being out of scope is not a
+    reason to refuse the other 1,737, so refusals come back named.
+    """
+    idx = await index_for(session, pr.id)
+    created: list[int] = []
+    refused: dict[str, str] = {}
+    seen: set[str] = set()
+
+    for raw in subjects:
+        subject = (raw or "").strip()
+        if not subject or subject in seen:
+            continue
+        seen.add(subject)
+        ruling = idx.check(subject)
+        if not ruling.allowed:
+            refused[subject] = ruling.reason
+            continue
+        t = AgentTask(
+            agent_id=agent.id if agent else None, project_id=pr.id,
+            requested_by=user.id, kind=kind,
+            args=json.dumps({**args, "targets": [subject]}),
+            region=region,
+            import_as=TASK_KINDS.get(kind), status="queued")
+        session.add(t)
+        await session.flush()
+        await _record_tasking(session, pr, kind,
+                              {**args, "targets": [subject]}, user,
+                              agent, t.id)
+        created.append(t.id)
+
+    await session.commit()
+    await broker.publish("agents", action="task", project=pr.code)
+    await audit.record(session, source, f"{kind}.bulk", user=user,
+                       project_code=pr.code,
+                       detail=f"queued {len(created)} {kind} task(s), one "
+                              f"per target"
+                              + (f"; {len(refused)} refused" if refused else ""),
+                       commit=True)
+    return {"ids": created, "refused": refused, "queued": len(created)}
+
+
 @router.post("/tasks/bulk", response_model=dict, status_code=201)
 async def create_tasks_bulk(body: BulkTaskIn,
                             pr: Project = Depends(require_project("user")),
@@ -1460,10 +1514,6 @@ async def create_tasks_bulk(body: BulkTaskIn,
     meant one POST per target — 1,738 sequential requests for a
     reverse-lookup sweep, which is a minute of waiting and a minute of
     load for work the server can do in one statement.
-
-    Scope is checked per subject. One target being out of scope is not
-    a reason to refuse the other 1,737, so the refusals come back named
-    rather than as an error.
     """
     if body.kind not in TASK_KINDS:
         raise HTTPException(
@@ -1480,43 +1530,9 @@ async def create_tasks_bulk(body: BulkTaskIn,
         if agent is None or agent.project_id != pr.id:
             raise HTTPException(404, "no such agent")
 
-    idx = await index_for(session, pr.id)
-    region = (body.region or "").strip().lower() or None
-    created: list[int] = []
-    refused: dict[str, str] = {}
-    seen: set[str] = set()
-
-    for raw in body.subjects:
-        subject = (raw or "").strip()
-        if not subject or subject in seen:
-            continue
-        seen.add(subject)
-        ruling = idx.check(subject)
-        if not ruling.allowed:
-            refused[subject] = ruling.reason
-            continue
-        t = AgentTask(
-            agent_id=agent.id if agent else None, project_id=pr.id,
-            requested_by=user.id, kind=body.kind,
-            args=json.dumps({**body.args, "targets": [subject]}),
-            region=region,
-            import_as=TASK_KINDS.get(body.kind), status="queued")
-        session.add(t)
-        await session.flush()
-        await _record_tasking(session, pr, body.kind,
-                              {**body.args, "targets": [subject]}, user,
-                              agent, t.id)
-        created.append(t.id)
-
-    await session.commit()
-    await broker.publish("agents", action="task", project=pr.code)
-    await audit.record(session, "ui", f"{body.kind}.bulk", user=user,
-                       project_code=pr.code,
-                       detail=f"queued {len(created)} {body.kind} task(s), one "
-                              f"per target"
-                              + (f"; {len(refused)} refused" if refused else ""),
-                       commit=True)
-    return {"ids": created, "refused": refused, "queued": len(created)}
+    return await queue_per_host(
+        session, pr, body.kind, list(body.subjects), dict(body.args), user,
+        agent, (body.region or "").strip().lower() or None)
 
 
 @router.post("/tasks", response_model=TaskOut, status_code=201)

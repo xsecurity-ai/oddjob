@@ -1074,6 +1074,71 @@ check("writes really do add the mutating ones",
       {"add_note", "add_target", "add_finding"}.issubset(set(_rw)),
       str(sorted(set(_rw) - set(_ro))))
 
+print("== the assistant can task enumeration, but previews first ==")
+# A sweep is hundreds of tasks against a client's estate. "Have a look
+# at the web hosts" is a sentence, not an authorisation, so the tool
+# returns a plan and queues nothing until it is called again with
+# confirm=true. The preview is also the only guard on a project whose
+# scope index is not loaded, where every host passes the scope gate.
+from app.models import AgentTask as _AT                          # noqa: E402
+from sqlalchemy import func as _func                             # noqa: E402
+
+_HOSTS = "alpha-one.example.com alpha-two.example.com"
+
+
+async def _enum(**kw):
+    async with _SL() as s:
+        pr = (await s.execute(_sel(_P).limit(1))).scalars().first()
+        u = (await s.execute(_sel(_U).limit(1))).scalars().first()
+        tool = {t.name: t for t in _build(s, pr, u, True)}["enumerate_drones"]
+        before = (await s.execute(_sel(_func.count()).select_from(_AT)
+                                  .where(_AT.project_id == pr.id))).scalar_one()
+        out = await tool.fn(**kw)
+        after = (await s.execute(_sel(_func.count()).select_from(_AT)
+                                 .where(_AT.project_id == pr.id))).scalar_one()
+        return out, after - before
+
+
+_prev, _made = _aio.run(_enum(kind="nslookup", select="hosts", hosts=_HOSTS))
+check("a preview says what it would do", _prev.get("preview") is True,
+      str(_prev)[:120])
+check("names the hosts", sorted(_prev.get("hosts", [])) ==
+      ["alpha-one.example.com", "alpha-two.example.com"], str(_prev.get("hosts")))
+check("and queues absolutely nothing", _made == 0, f"created {_made} task(s)")
+
+_done, _made2 = _aio.run(_enum(kind="nslookup", select="hosts", hosts=_HOSTS,
+                               confirm=True))
+check("confirm=true queues", _done.get("queued") == 2, str(_done)[:140])
+check("as one task per host, not one task holding both", _made2 == 2,
+      f"created {_made2} task(s) for 2 hosts")
+
+# Installing software on, or running commands through, a privileged
+# process inside a client network is not something a sentence should be
+# able to start, however the sentence is phrased.
+for _k in ("shell", "install"):
+    _r, _n = _aio.run(_enum(kind=_k, select="hosts", hosts=_HOSTS,
+                            confirm=True))
+    check(f"{_k} is refused even with confirm", "error" in _r and _n == 0,
+          str(_r)[:100])
+
+_r, _n = _aio.run(_enum(kind="nmap", select="everything"))
+check("an unknown selection lists the real ones",
+      "selections" in _r and "unscanned" in _r.get("selections", {}),
+      str(_r)[:120])
+
+# A project holds assets that are not network hosts -- an S3 ARN, a
+# cloud resource id. Pointing a scanner at one burns a task to produce
+# an error, and dropping them silently hides that the asset is covered
+# by nothing.
+_r, _n = _aio.run(_enum(kind="nmap", select="hosts",
+                        hosts="good.example.com arn:aws:s3:::a-bucket"))
+check("things that are not network hosts are dropped",
+      _r.get("hosts") == ["good.example.com"], str(_r.get("hosts")))
+check("and said out loud rather than quietly removed",
+      _r.get("not_network_count") == 1
+      and "arn:aws:s3:::a-bucket" in _r.get("not_network_hosts", {}),
+      str(_r.get("not_network_hosts")))
+
 print("== agent binaries ==")
 st, dl = call("/api/agents/downloads", token=admin)
 check("the download list is served", st == 200 and "builds" in (dl or {}),
