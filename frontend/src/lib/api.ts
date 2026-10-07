@@ -213,6 +213,22 @@ export interface DetectResult {
   domain: string; candidates: DomainCandidate[]
   new_candidates: number; already_known: number; previously_suggested: number
   runs: number; note: string | null
+  error?: string | null
+  /** Present when auto_promote ran. Named, not counted. */
+  promoted?: string[]
+  promoted_skipped?: string[]
+  promoted_refused?: Record<string, string>
+}
+/** What /api/domains/detect actually returns: one entry per domain, so
+ *  a typo in the fourth of eight never costs you the other seven.
+ *
+ *  This shape was the bug. The client declared DetectResult and read
+ *  `.candidates` off the batch, which has no such key — so a run that
+ *  produced 200 candidates rendered as "No candidates". */
+export interface DetectBatch {
+  results: DetectResult[]
+  new_candidates: number; domains_run: number; domains_skipped: number
+  promoted: number; promoted_refused: number
 }
 export interface AgentStep {
   kind: string; text: string; tool: string | null
@@ -650,9 +666,61 @@ export const api = {
     req<DomainRoot[]>('/api/domains/roots' + qs({ project })),
   domainSearches: (project: string) =>
     req<DomainSearch[]>('/api/domains/searches' + qs({ project })),
-  detectDomains: (project: string, domain: string, force = false) =>
-    req<DetectResult>('/api/domains/detect' + qs({ project }),
-      { method: 'POST', body: JSON.stringify({ domain, force, limit: 200 }) }),
+  /** Pattern-based candidate generation. Offline — nothing is resolved
+   *  and no packets are sent; see `enumerateDomains` for the opposite.
+   *
+   *  Takes one domain or many and returns the batch flattened into a
+   *  single list, which is what every caller wants and what the old
+   *  single-result signature pretended the server already did. */
+  detectDomains: async (project: string, domains: string | string[],
+                        force = false, autoPromote = false) => {
+    const list = Array.isArray(domains) ? domains : [domains]
+    const b = await req<DetectBatch>('/api/domains/detect' + qs({ project }), {
+      method: 'POST',
+      body: JSON.stringify({ domains: list, force, limit: 200,
+                             auto_promote: autoPromote }),
+    })
+    const seen = new Set<number>()
+    const candidates: DomainCandidate[] = []
+    for (const r of b.results) {
+      for (const c of r.candidates) {
+        if (!seen.has(c.id)) { seen.add(c.id); candidates.push(c) }
+      }
+    }
+    candidates.sort((a, b2) => (b2.score ?? 0) - (a.score ?? 0))
+    const notes = b.results.filter((r) => r.note).map((r) => r.note!)
+    const errors = b.results.filter((r) => r.error)
+                            .map((r) => `${r.domain}: ${r.error}`)
+    return {
+      batch: b,
+      domain: list.length === 1 ? list[0] : `${list.length} domain(s)`,
+      candidates,
+      new_candidates: b.new_candidates,
+      already_known: b.results.reduce((n, r) => n + (r.already_known ?? 0), 0),
+      previously_suggested: b.results.reduce(
+        (n, r) => n + (r.previously_suggested ?? 0), 0),
+      runs: Math.max(0, ...b.results.map((r) => r.runs ?? 0)),
+      note: notes.length ? notes.join(' · ') : null,
+      promoted: b.results.flatMap((r) => r.promoted ?? []),
+      promoted_refused: Object.assign(
+        {}, ...b.results.map((r) => r.promoted_refused ?? {})),
+      errors,
+    }
+  },
+
+  /** Hand domains to a Jaws agent to actually enumerate, and let the
+   *  results file themselves as targets when they come back. Accepts a
+   *  pasted list: newlines, commas, schemes and wildcards are all
+   *  tolerated and normalised server-side. */
+  enumerateDomains: (project: string, domains: string,
+                     mode: 'passive' | 'active' = 'passive') =>
+    req<{
+      queued: Array<{ domain: string; task_id: number }>
+      refused: Record<string, string>
+      agents_online: number
+      mode: string
+    }>('/api/domains/enumerate' + qs({ project }),
+      { method: 'POST', body: JSON.stringify({ domains, mode }) }),
   promoteDomains: (project: string, ids: number[]) =>
     req<{ created: string[]; already_existed: string[] }>(
       '/api/domains/candidates/promote' + qs({ project }),

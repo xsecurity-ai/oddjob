@@ -8,9 +8,11 @@ than the same list with the same names in it.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,7 +20,7 @@ from .. import domains as gen
 from ..db import get_session
 from ..events import broker
 from ..hosts import InvalidHost, validate_host
-from ..models import (DomainCandidate, DomainSearch, Project, Target, User,
+from ..models import (DomainCandidate, DomainSearch, Project, ProjectScope, Target, User,
                       WebAddress)
 from ..schemas import (DetectBatch, DetectRequest, DetectResult, DomainCandidateOut,
                        DomainSearchOut, PromoteRequest)
@@ -99,17 +101,59 @@ def _names_in(text: str) -> set[str]:
 async def roots(project: str = Query(...),
                 pr: Project = Depends(require_project("readonly")),
                 session: AsyncSession = Depends(get_session)):
-    """Registrable domains already present, commonest first.
+    """Registrable domains this engagement covers, commonest first.
 
-    Drives the dialog's suggestions: the domain most worth running against
-    is usually one the estate already touches.
+    Three sources, because any one alone leaves a real engagement with
+    an empty list:
+
+      targets   what the estate already touches, commonest first. The
+                best signal, and the only one that exists mid-engagement.
+      scope     the FQDNs the engagement was authorised against. These
+                matter MOST on day one, which is exactly when there are
+                no targets yet — a fresh project used to report "no root
+                domains" while its scope named a dozen.
+      searched  anything run before. A domain someone typed by hand is
+                part of this engagement's working set even if nothing
+                under it has resolved yet.
+
+    `known_hosts` is the count from targets only, so a root that is in
+    scope and otherwise untouched still reads as 0 and sorts last
+    without being hidden.
     """
     hosts = await known_hosts(session, pr.id)
     searched = {d.lower() for d in (await session.execute(
         select(DomainSearch.domain)
         .where(DomainSearch.project_id == pr.id))).scalars().all()}
-    return [{"domain": d, "known_hosts": n, "searched": d in searched}
-            for d, n in gen.roots_in(hosts)]
+
+    counts = dict(gen.roots_in(hosts))
+    origin = {d: "targets" for d in counts}
+
+    # Both name kinds. A wildcard is stored as its own kind and is the
+    # likeliest way a whole zone gets put in scope — `*.acme.example` is
+    # exactly the entry that means "enumerate this" — so reading only
+    # `fqdn` missed the entries that matter most here.
+    for value, included in (await session.execute(
+            select(ProjectScope.value, ProjectScope.included)
+            .where(ProjectScope.project_id == pr.id,
+                   ProjectScope.kind.in_(("fqdn", "wildcard"))))).all():
+        if not included:
+            # An excluded domain is the one thing that must not be
+            # offered: generating names under it proposes work that is
+            # refused the moment anyone promotes it.
+            continue
+        r = gen.registrable((value or "").strip().lstrip("*."))
+        if r and "." in r and r not in counts:
+            counts[r] = 0
+            origin[r] = "scope"
+
+    for d in searched:
+        if d not in counts:
+            counts[d] = 0
+            origin[d] = "searched"
+
+    return [{"domain": d, "known_hosts": n, "searched": d in searched,
+             "source": origin.get(d, "targets")}
+            for d, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
 @router.post("/detect", response_model=DetectBatch)
@@ -130,8 +174,9 @@ async def detect(body: DetectRequest, project: str = Query(...),
     results: list[DetectResult] = []
     for d in wanted:
         try:
-            results.append(await _detect_one(session, pr, user, d,
-                                             body.limit, body.force))
+            results.append(await _detect_one(
+                session, pr, user, d, body.limit, body.force,
+                auto_promote=body.auto_promote, min_score=body.min_score))
         except HTTPException as e:
             results.append(DetectResult(domain=d, candidates=[], new_candidates=0,
                                         runs=0, error=str(e.detail)))
@@ -141,11 +186,15 @@ async def detect(body: DetectRequest, project: str = Query(...),
         results=results,
         new_candidates=sum(r.new_candidates for r in results),
         domains_run=sum(1 for r in results if not r.error),
-        domains_skipped=sum(1 for r in results if r.error))
+        domains_skipped=sum(1 for r in results if r.error),
+        promoted=sum(len(r.promoted) for r in results),
+        promoted_refused=sum(len(r.promoted_refused) for r in results))
 
 
 async def _detect_one(session: AsyncSession, pr: Project, user: User,
-                      domain: str, limit: int, force: bool) -> DetectResult:
+                      domain: str, limit: int, force: bool,
+                      *, auto_promote: bool = False,
+                      min_score: int = 0) -> DetectResult:
     """Generate candidate hostnames under a domain.
 
     **No lookups and no packets.** Candidates are extrapolated from what the
@@ -250,6 +299,104 @@ async def _detect_one(session: AsyncSession, pr: Project, user: User,
     )
 
 
+class EnumerateRequest(BaseModel):
+    """Domains to hand to an agent. One, several, or a pasted list."""
+    #: Free text: newlines, commas or spaces. Operators paste from a
+    #: spreadsheet, a scope document or a chat message, and making them
+    #: reformat it first is the kind of friction that gets a tool
+    #: abandoned for a terminal.
+    domains: str | list[str] = ""
+    mode: str = Field(
+        "passive",
+        description="passive sends nothing to the client's infrastructure. "
+                    "active does, and is a scope decision.")
+
+    def wanted(self) -> list[str]:
+        raw = (self.domains if isinstance(self.domains, str)
+               else "\n".join(self.domains))
+        out, seen = [], set()
+        for piece in re.split(r"[\s,;]+", raw or ""):
+            v = piece.strip().rstrip(".").lower().lstrip("*.")
+            # A pasted list routinely carries scheme and path from
+            # wherever it was copied.
+            v = re.sub(r"^[a-z]+://", "", v).split("/")[0].split("?")[0]
+            if v and v not in seen:
+                seen.add(v)
+                out.append(v)
+        return out
+
+
+@router.post("/enumerate")
+async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
+                            pr: Project = Depends(require_project("user")),
+                            user: User = Depends(get_current_user),
+                            session: AsyncSession = Depends(get_session)):
+    """Hand a list of domains to Jaws, and file what comes back.
+
+    The difference from `/detect` is what produces the names. Detection
+    extrapolates from patterns the estate already shows and produces
+    hypotheses for a person to triage. This asks an agent to actually
+    enumerate the zone, so the names come back resolved — and they are
+    filed as targets automatically when the results arrive, because a
+    name a tool found is a finding and not a suggestion.
+
+    One task per domain: amass enumerates a single zone at a time. They
+    are queued unassigned so the project's routing policy spreads them,
+    which is what makes a list of forty domains finish in parallel
+    across every agent rather than serially on one.
+    """
+    wanted = body.wanted()
+    if not wanted:
+        raise HTTPException(422, "give at least one domain")
+    if len(wanted) > 200:
+        raise HTTPException(
+            422, f"{len(wanted)} domains in one submission. Split it: each "
+                 f"becomes a task, and a queue that long buries anything "
+                 f"else this project needs to run.")
+    mode = (body.mode or "passive").strip().lower()
+    if mode not in ("passive", "active"):
+        raise HTTPException(422, "mode is passive or active")
+
+    from ..models import Agent, AgentTask
+    live = (await session.execute(
+        select(func.count(Agent.id)).where(Agent.project_id == pr.id,
+                                           Agent.status == "online"))).scalar_one()
+    if not live:
+        # Refused rather than queued. Work accepted with nothing to run
+        # it sits looking submitted, which reads as a broken scan.
+        raise HTTPException(
+            409, "no Jaws agent is online for this project, so there is "
+                 "nothing to run the enumeration. Bring one up and submit "
+                 "again.")
+
+    idx = await index_for(session, pr.id)
+    queued, refused = [], {}
+    for d in wanted:
+        if gen.is_ip(d):
+            refused[d] = "an address has no zone to enumerate"
+            continue
+        try:
+            validate_host(d)
+        except InvalidHost as e:
+            refused[d] = str(e)
+            continue
+        ruling = idx.check(d)
+        if not ruling.allowed:
+            refused[d] = ruling.reason
+            continue
+        t = AgentTask(agent_id=None, project_id=pr.id, requested_by=user.id,
+                      kind="amass",
+                      args=json.dumps({"domain": d, "mode": mode}),
+                      status="queued")
+        session.add(t)
+        await session.flush()
+        queued.append({"domain": d, "task_id": t.id})
+    await session.commit()
+    await broker.publish("agents", action="task", project=pr.code)
+    return {"queued": queued, "refused": refused, "agents_online": live,
+            "mode": mode}
+
+
 @router.get("/candidates", response_model=list[DomainCandidateOut])
 async def candidates(project: str = Query(...),
                      state: str | None = Query(None),
@@ -292,6 +439,23 @@ async def promote(body: PromoteRequest, project: str = Query(...),
     rows = (await session.execute(
         select(DomainCandidate).where(DomainCandidate.project_id == pr.id,
                                       DomainCandidate.id.in_(body.ids)))).scalars().all()
+    created, skipped, refused = await _promote_rows(session, pr, user, rows)
+    await session.commit()
+    await broker.publish("targets", action="create", project=pr.code)
+    return {"created": created, "already_existed": skipped,
+            "out_of_scope": refused}
+
+
+async def _promote_rows(session: AsyncSession, pr: Project, user: User,
+                        rows) -> tuple[list[str], list[str], dict[str, str]]:
+    """Turn candidate rows into targets. -> (created, already, refused).
+
+    Shared by the explicit promote endpoint and by `auto_promote` on
+    detection, so the automatic path cannot drift from the one a person
+    drives — in particular it cannot quietly stop checking scope.
+
+    Does not commit; the caller owns the transaction.
+    """
     created, skipped = [], []
     refused: dict[str, str] = {}
     # A candidate is a guess, so this is the one creation path where the
@@ -325,10 +489,7 @@ async def promote(body: PromoteRequest, project: str = Query(...),
                      detail=c.reason, actor=user, source=f"domains:{c.root_domain}")
         c.state, c.decided_by, c.decided_at = "accepted", user.id, now
         created.append(c.name)
-    await session.commit()
-    await broker.publish("targets", action="create", project=pr.code)
-    return {"created": created, "already_existed": skipped,
-            "out_of_scope": refused}
+    return created, skipped, refused
 
 
 @router.post("/candidates/reject")

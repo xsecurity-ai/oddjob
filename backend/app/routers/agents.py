@@ -44,6 +44,7 @@ from .. import audit
 from ..db import get_session
 from ..events import broker
 from ..models import Agent, AgentTask, Project, Setting, Target, User
+from ..hosts import validate_host
 from ..scopegate import check_task_targets, index_for, refuse
 from ..security import (get_current_user, new_agent_key, require_project,
                         verify_key)
@@ -328,6 +329,75 @@ def _stale(a: Agent, in_flight: int = 0) -> str:
 #: network without putting its hosts in `args`, this list is where it
 #: would be missed — so the extractor errs wide, see scopegate.task_hosts.
 SCOPED_KINDS = tuple(k for k in TASK_KINDS if k not in ("install",))
+
+
+#: Task kinds whose output is a list of hostnames rather than a scan
+#: file. These do not go through the file importers — there is nothing
+#: to parse a format out of — so they get their own path below.
+NAME_KINDS = ("amass",)
+
+
+async def _import_names(session: AsyncSession, pr: Project, t: AgentTask,
+                        *, actor: str) -> dict:
+    """File the names an agent discovered as targets.
+
+    Unlike `domains.detect`, which extrapolates names from patterns and
+    produces hypotheses, these were RESOLVED by a tool on an agent: the
+    name exists. So they are created rather than queued for triage —
+    which is the difference the operator means by "it found some, add
+    them".
+
+    Scope still decides. The generator is not the only thing that
+    wanders onto a neighbour's estate; a passive source will happily
+    return a name that belongs to someone else, and `index_for` is what
+    keeps it out of the inventory.
+    """
+    try:
+        payload = json.loads(t.output or "{}")
+    except json.JSONDecodeError as e:
+        return {"error": f"output was not JSON: {e}"}
+    if isinstance(payload, list):                # tolerate a bare list
+        payload = {"names": payload}
+    names = [str(n).strip().rstrip(".").lower()
+             for n in (payload.get("names") or []) if str(n).strip()]
+    domain = str(payload.get("domain") or "").strip().lower()
+
+    idx = await index_for(session, pr.id)
+    created: list[str] = []
+    existed: list[str] = []
+    refused: dict[str, str] = {}
+    seen: set[str] = set()
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        try:
+            validate_host(name)
+        except Exception:                        # noqa: BLE001
+            # A tool returning a malformed line is ordinary; it is not a
+            # reason to abandon the other four hundred.
+            refused[name] = "not a usable hostname"
+            continue
+        dup = (await session.execute(
+            select(Target).where(Target.project_id == pr.id,
+                                 Target.host == name))).scalar_one_or_none()
+        if dup is not None:
+            existed.append(name)
+            continue
+        ruling = idx.check(name)
+        if not ruling.allowed:
+            refused[name] = ruling.reason
+            continue
+        tgt = Target(project_id=pr.id, host=name, alive=None)
+        session.add(tgt)
+        await session.flush()
+        await record(session, tgt.id, "discovered",
+                     f"found by {t.kind} under {domain or 'a submitted domain'}",
+                     detail=t.summary, actor=None, source=actor)
+        created.append(name)
+    await session.commit()
+    return {"domain": domain, "found": len(seen), "created": created,
+            "already_existed": existed, "out_of_scope": refused}
 
 
 async def _assert_task_in_scope(session: AsyncSession, pr: Project,
@@ -1533,6 +1603,22 @@ async def submit_result(task_id: int, body: ResultIn,
     await session.commit()
 
     imported = None
+    # Name discovery does not go through the file importers: there is no
+    # file, only a list of names an agent resolved. Handled here so the
+    # result of asking an agent to enumerate a domain actually appears
+    # in the inventory, which is the entire reason the task was queued.
+    if t.status == "done" and t.kind in NAME_KINDS and (t.output or "").strip():
+        pr = await session.get(Project, t.project_id)
+        try:
+            imported = await _import_names(session, pr, t, actor=f"jaws:{a.name}")
+            t.import_result = json.dumps(imported)
+            await session.commit()
+        except Exception as e:                   # noqa: BLE001
+            # The names are kept on the task either way. A lookup that
+            # ran and could not be filed is still evidence.
+            t.import_result = json.dumps({"error": f"{type(e).__name__}: {e}"[:500]})
+            await session.commit()
+
     if t.status == "done" and t.import_as and (t.output or "").strip():
         pr = await session.get(Project, t.project_id)
         from .scans import _run

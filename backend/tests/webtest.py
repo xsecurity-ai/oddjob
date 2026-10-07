@@ -550,4 +550,85 @@ st, dead = call(f"/api/web/{seed2['id']}/replay", "POST",
 check("a failed connection is recorded rather than raising",
       st == 200 and (dead or {}).get("error"), f"{st} {str(dead)[:120]}")
 
+print("\n== a list, several, or one: detection takes them all at once ==")
+# The batch shape is the contract the UI reads. It returns one entry
+# per domain so a typo in the fourth of eight does not cost the other
+# seven, and a client that reads `.candidates` off the TOP level gets
+# undefined — which is exactly how a run that produced 200 candidates
+# rendered as "No candidates".
+st, b = call("/api/domains/detect?project=DOM", "POST",
+             {"domains": ["corp.com", "other.com"], "force": True},
+             token=admin)
+check("several domains run in one request", st == 200, f"status={st}")
+check("and come back one result per domain",
+      len(b.get("results", [])) == 2, str(list(b))[:120])
+check("the batch has no top-level candidates key to mislead a reader",
+      "candidates" not in b, str(list(b)))
+check("every result carries its own list",
+      all("candidates" in r for r in b["results"]), str(list(b["results"][0])))
+check("and names which domain it is for",
+      {r["domain"] for r in b["results"]} == {"corp.com", "other.com"},
+      str([r["domain"] for r in b["results"]]))
+
+st, b = call("/api/domains/detect?project=DOM", "POST",
+             {"domains": ["corp.com", "not a domain", "nope"]}, token=admin)
+check("one unusable entry does not cost the others",
+      st == 200 and b["domains_run"] >= 1 and b["domains_skipped"] == 2,
+      f'run={b.get("domains_run")} skipped={b.get("domains_skipped")}')
+check("and the bad ones say why, against themselves",
+      all(r["error"] for r in b["results"] if r["domain"] != "corp.com"),
+      str([(r["domain"], r["error"]) for r in b["results"]])[:200])
+
+print("\n== roots do not require targets ==")
+# A fresh engagement has scope and no targets, which is exactly when
+# somebody wants to enumerate. Reporting "no root domains" then is
+# reporting on the wrong thing.
+call("/api/projects", "POST", {"code": "FRESH", "name": "Fresh"}, token=admin)
+st, roots = call("/api/domains/roots?project=FRESH", token=admin)
+check("a project with nothing in it has no roots", roots == [], str(roots))
+call("/api/projects/FRESH/scope", "POST",
+     {"lines": ["*.scoped.example", "portal.other-scoped.example"]},
+     token=admin)
+st, roots = call("/api/domains/roots?project=FRESH", token=admin)
+got = {r["domain"] for r in roots}
+check("scope alone produces roots", {"scoped.example", "other-scoped.example"} <= got,
+      str(got))
+check("marked as coming from scope, not invented from targets",
+      all(r["source"] == "scope" for r in roots), str(roots)[:200])
+check("and counted honestly as zero known hosts",
+      all(r["known_hosts"] == 0 for r in roots), str(roots)[:160])
+
+st, _ = call("/api/projects/FRESH/scope", "POST",
+             {"lines": ["!excluded.example"]}, token=admin)
+st, roots = call("/api/domains/roots?project=FRESH", token=admin)
+check("an excluded domain is never offered",
+      "excluded.example" not in {r["domain"] for r in roots}, str(roots)[:200])
+
+print("\n== auto_promote files what it finds, scope permitting ==")
+st, b = call("/api/domains/detect?project=DOM", "POST",
+             {"domains": ["auto.example"], "auto_promote": True,
+              "limit": 20}, token=admin)
+r = b["results"][0]
+check("the run reports what it added, by name not by count",
+      isinstance(r.get("promoted"), list), str(r)[:140])
+if r["candidates"]:
+    check("and every promoted name became a target",
+          all(call(f"/api/targets?project=DOM&q={n}", token=admin)[1]["total"] >= 1
+              for n in r["promoted"][:3]) if r["promoted"] else True,
+          str(r["promoted"])[:120])
+
+print("\n== handing domains to an agent ==")
+# Refused rather than queued when nothing can run it: work accepted
+# with no agent sits looking submitted, which reads as a broken scan.
+st, e = call("/api/domains/enumerate?project=DOM", "POST",
+             {"domains": "corp.com"}, token=admin)
+check("with no agent online it is refused, not silently queued",
+      st == 409, f"status={st} {str(e)[:120]}")
+check("and says what to do about it",
+      "online" in str(e).lower(), str(e)[:140])
+
+st, e = call("/api/domains/enumerate?project=DOM", "POST",
+             {"domains": ""}, token=admin)
+check("an empty submission is 422", st == 422, f"status={st}")
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

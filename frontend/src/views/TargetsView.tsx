@@ -13,6 +13,7 @@ import { DetectDomainsDialog } from '../components/DetectDomainsDialog'
 import {
   EnumerateMenu, TargetRowActions, type EnumerateAction, type RowAction,
 } from '../components/EnumerateMenu'
+import { isLive } from '../components/jawsTasking'
 import {
   FqdnPickerDialog, openChoices, useAutoApplySingles,
 } from '../components/FqdnPickerDialog'
@@ -137,10 +138,10 @@ export function TargetsView({ project }: { project: string | null }) {
     queryFn: () => api.agents(project as string),
     enabled: !!project && writable,
   })
-  // `online` is the live set. A disabled agent is an operator decision
-  // and an offline one is an observation, and neither will pick work
-  // up, so both are excluded from "can this run".
-  const live = (agents.data ?? []).filter((a) => a.status === 'online')
+  // `isLive`, not `status === 'online'`: an agent part-way through a
+  // scan reports `busy`, and treating that as "not there" made this
+  // page say no agents while the Jaws page showed two working.
+  const live = (agents.data ?? []).filter(isLive)
   const enrolled = (agents.data ?? []).length
 
   const auto = useAutoApplySingles(writable ? project : null, pending.data)

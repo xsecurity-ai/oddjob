@@ -349,9 +349,15 @@ async def create_project(body: ProjectCreateFull,
                 pr.slack_channel_checked_at = utcnow()
                 pr.slack_channel_error = None
                 await session.commit()
-                await slack.announce(
-                    session, pr,
-                    slack.engagement_started(pr.codename or pr.code))
+                # A channel we just made is empty, so the first message
+                # is the one that orients whoever is added to it: what
+                # this is, who to ask, what is in scope, where to go.
+                # A channel that merely already EXISTED gets the one
+                # line -- it has history, and an opener posted into the
+                # middle of it reads as a bot that lost its place.
+                await slack.opened(session, pr, token,
+                                   made.channel or pr.slack_channel,
+                                   created=made.created)
             else:
                 log.warning("could not create #%s: %s", pr.slack_channel, made.error)
 
@@ -1130,6 +1136,10 @@ async def write_slack_config(body: SlackConfigIn,
             pr.slack_channel_checked_at = utcnow()
             pr.slack_channel_error = None
             await session.commit()
+            # Same rule as the create path: only a channel this call
+            # actually made gets an opener.
+            await slack.opened(session, pr, token,
+                               r.channel or out.channel, created=r.created)
             out = await _slack_config(session, pr)
         if not r.ok:
             # Surfaced rather than swallowed: a channel that was not

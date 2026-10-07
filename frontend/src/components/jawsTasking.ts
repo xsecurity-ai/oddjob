@@ -13,9 +13,23 @@ import { api, type JawsAgent, type JawsRouting } from '../lib/api'
 /** Where a task should go. `null` is the project pool. */
 export type AgentChoice = number | null
 
+/** Statuses that mean "connected and will pick work up".
+ *
+ *  `busy` is one of them. An agent running a task is the MOST alive
+ *  thing in the fleet — it is mid-heartbeat by definition — but it was
+ *  excluded by an `=== 'online'` check, so starting a scan made the
+ *  fleet look empty and the Targets page reported no agents while the
+ *  Jaws page showed two working. `disabled` is an operator decision and
+ *  `offline` is an observation; neither will take work. */
+export const LIVE_STATUSES = ['online', 'busy'] as const
+
+export function isLive(a: JawsAgent): boolean {
+  return (LIVE_STATUSES as readonly string[]).includes(a.status)
+}
+
 export interface Fleet {
   agents: JawsAgent[]
-  /** Heartbeating now. Only these will pick anything up promptly. */
+  /** Connected now — heartbeating or working. Only these pick work up. */
   online: JawsAgent[]
   routing: JawsRouting | null
   loading: boolean
@@ -47,7 +61,7 @@ export function useFleet(project: string | null): Fleet {
   })
 
   const list = agents.data ?? []
-  const live = list.filter((a) => a.status === 'online')
+  const live = list.filter(isLive)
   const loading = agents.isLoading || routing.isLoading
 
   let blocked: string | null = null

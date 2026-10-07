@@ -12,7 +12,7 @@ import {
   Typography, alpha,
 } from '@mui/material'
 import { neon, glow } from '../theme'
-import { needsRegion, type AgentChoice, type Fleet } from './jawsTasking'
+import { isLive, needsRegion, type AgentChoice, type Fleet } from './jawsTasking'
 
 export const paperSx = (accent: string) => ({
   backgroundColor: alpha(neon.paper, 0.97), backgroundImage: 'none',
@@ -108,7 +108,7 @@ export function AgentChooser({ fleet, value, onChange, region, onRegion }: {
             <Stack direction="row" spacing={1} alignItems="center" sx={{ width: '100%' }}>
               <Box sx={{ flex: 1 }}>{a.name}</Box>
               <Chip size="small" label={a.status}
-                sx={chipSx(a.status === 'online' ? neon.green : neon.muted)} />
+                sx={chipSx(isLive(a) ? neon.green : neon.muted)} />
               <Chip size="small" label={a.privileged ? 'raw sockets' : 'no raw sockets'}
                 sx={chipSx(a.privileged ? neon.green : neon.yellow)} />
             </Stack>

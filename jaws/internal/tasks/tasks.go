@@ -354,7 +354,13 @@ func runAmass(ctx context.Context, args map[string]any, workDir string) Result {
 	argv = append(argv, extraArgs(args)...)
 
 	r := runCmd(ctx, timeout(args, 45*time.Minute), "amass", argv...)
-	names := uniqueLines(r.stdout)
+	// amass writes prose to stdout alongside the names -- "No assets
+	// were discovered" is a sentence, not a hostname, and counting it
+	// as one reported "found 1 name(s)" for a run that found nothing.
+	// The server then has to refuse it as unparseable, which is the
+	// right outcome reached by the wrong route: the agent should not
+	// have called it a name.
+	names := hostnamesUnder(uniqueLines(r.stdout), domain)
 	return Result{
 		Status:   "done",
 		Output:   recon.JSON(map[string]any{"domain": domain, "names": names}),
@@ -621,6 +627,68 @@ func runInstall(ctx context.Context, args map[string]any, _ string) Result {
 }
 
 // --------------------------------------------------------------- util
+// hostnamesUnder keeps the lines that are actually names in the zone.
+//
+// Two filters, and the second is the one that matters: a line has to
+// LOOK like a hostname, and it has to be under the domain we asked
+// about. Tools print banners, counts, timings and apologies, and
+// anything that survives this ends up in somebody's inventory as a
+// host they will later try to scan.
+func hostnamesUnder(lines []string, domain string) []string {
+	domain = strings.ToLower(strings.Trim(strings.TrimSpace(domain), "."))
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range lines {
+		n := strings.ToLower(strings.Trim(strings.TrimSpace(l), "."))
+		// amass -nocolor still emits "name (FQDN) --> record --> value"
+		// for some sources; the name is the first field.
+		if i := strings.IndexAny(n, " \t"); i > 0 {
+			n = n[:i]
+		}
+		if n == "" || !isHostname(n) {
+			continue
+		}
+		if domain != "" && n != domain &&
+			!strings.HasSuffix(n, "."+domain) {
+			// A neighbouring zone is somebody else's estate. Dropped
+			// here rather than relied on being refused later.
+			continue
+		}
+		// Deduplicated AFTER normalising, not before: uniqueLines sees
+		// raw text, so WWW.EXAMPLE.COM and www.example.com reach here
+		// as two lines and would be counted as two names.
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out
+}
+
+// isHostname is deliberately strict: letters, digits, hyphen and dot,
+// at least one dot, no leading or trailing separator, labels within
+// length. Anything looser lets a sentence through.
+func isHostname(s string) bool {
+	if len(s) == 0 || len(s) > 253 || !strings.Contains(s, ".") {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			if !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') && c != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func uniqueLines(s string) []string {
 	seen := map[string]bool{}
 	var out []string

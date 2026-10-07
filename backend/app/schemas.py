@@ -714,6 +714,19 @@ class DetectRequest(BaseModel):
     limit: int = Field(200, ge=1, le=1000)
     force: bool = Field(
         False, description="Re-run even for domains already searched")
+    auto_promote: bool = Field(
+        False,
+        description="Create targets for the candidates found, instead of "
+                    "leaving them to be ticked one by one. Scope still "
+                    "decides: an out-of-scope name is reported, never "
+                    "created.")
+    #: Candidates below this are left for a human. The generator scores
+    #: an extrapolation by how much of the estate agrees with it, so a
+    #: low score is a name one stray host suggested.
+    min_score: int = Field(
+        0, ge=0, le=100,
+        description="With auto_promote, only create candidates scoring "
+                    "at least this")
 
     def wanted(self) -> list[str]:
         out, seen = [], set()
@@ -736,6 +749,13 @@ class DetectResult(BaseModel):
     runs: int
     note: str | None = None
     error: str | None = None
+    #: Set when auto_promote ran. Named, not counted: "12 added" with no
+    #: list is not something anyone can check.
+    promoted: list[str] = Field(default_factory=list)
+    promoted_skipped: list[str] = Field(
+        default_factory=list, description="Already targets")
+    promoted_refused: dict[str, str] = Field(
+        default_factory=dict, description="Out of scope, with the reason")
 
 
 class DetectBatch(BaseModel):
@@ -744,6 +764,8 @@ class DetectBatch(BaseModel):
     new_candidates: int = 0
     domains_run: int = 0
     domains_skipped: int = 0
+    promoted: int = 0
+    promoted_refused: int = 0
 
 
 class AgentOverride(BaseModel):
