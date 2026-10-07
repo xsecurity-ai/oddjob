@@ -169,6 +169,29 @@ st, _ = call(f"/api/agents/tasks/{T2}/result", "POST",
              {"status": "done", "output": "[]", "stderr": "",
               "summary": "done", "exit_code": 0}, key=KEY)
 
+print("== killing an agent does not strand what it was running ==")
+# A killed agent's credential is refused from that moment, so it can
+# never deliver a result. Leaving its task `running` meant a scan that
+# could not finish looked like one still in progress, for good.
+st, en2 = call("/api/agents?project=AGENT", "POST",
+               {"name": "doomed", "target_os": "linux"}, token=admin)
+DID = ((en2 or {}).get("agent") or {}).get("id")
+st, dt = call(f"/api/agents/{DID}/tasks?project=AGENT", "POST",
+              {"kind": "nslookup", "args": {"targets": ["x.example"]}},
+              token=admin)
+DT = (dt or {}).get("id")
+check("a task is queued against it", st == 201, f"status={st}")
+st, _ = call(f"/api/agents/{DID}/kill?project=AGENT", "POST", {}, token=admin)
+check("the agent is killed", st == 200, f"status={st}")
+st, tl = call(f"/api/agents/{DID}/tasks?project=AGENT", token=admin)
+row = next((x for x in (tl or []) if x["id"] == DT), {})
+check("its queued task is closed out, not left waiting",
+      row.get("status") == "failed", str(row)[:140])
+check("and says why", "killed" in str(row.get("error", "")), str(row.get("error"))[:120])
+st, q = call("/api/agents/queue?project=AGENT", token=admin)
+check("so it is gone from the queue",
+      DT not in [x["id"] for x in (q or [])], str(q)[:120])
+
 print("== the queue can be looked at and taken back out ==")
 st, t3 = call(f"/api/agents/tasks?project=AGENT", "POST",
               {"kind": "amass", "args": {"domain": "queued.example"}},

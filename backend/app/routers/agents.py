@@ -1097,17 +1097,31 @@ async def kill_agent(agent_id: int,
     if a is None or a.project_id != pr.id:
         raise HTTPException(404, "no such agent")
     a.status = "disabled"
-    # Queued work is pointless now; work already running will report
-    # back if the process is still alive, and is left alone so that
-    # result is not lost.
-    cancelled = 0
+    # Queued work is pointless now. Work already RUNNING is closed out
+    # too, which this deliberately did not do: the reasoning was that
+    # the process might still be alive and would report back. It
+    # cannot. `submit_result` authenticates with `agent_from_key`,
+    # which refuses a disabled agent, so a killed agent's result is
+    # rejected at the door — and the task sat in `running` for the rest
+    # of the engagement, inflating every count that reads it and
+    # looking to an operator like a scan still in progress.
+    cancelled = running_closed = 0
+    now = datetime.now(timezone.utc)
     for t in (await session.execute(
-            select(AgentTask).where(AgentTask.agent_id == a.id,
-                                    AgentTask.status == "queued"))).scalars():
+            select(AgentTask).where(
+                AgentTask.agent_id == a.id,
+                AgentTask.status.in_(("queued", "claimed", "running"))))).scalars():
+        was = t.status
         t.status = "failed"
-        t.error = "cancelled: the agent was killed before this task started"
-        t.finished_at = datetime.now(timezone.utc)
-        cancelled += 1
+        t.finished_at = now
+        if was == "queued":
+            t.error = "cancelled: the agent was killed before this task started"
+            cancelled += 1
+        else:
+            t.error = ("the agent was killed while this was running. Its "
+                       "credential is refused from that moment, so it could "
+                       "not have reported a result even if the scan finished.")
+            running_closed += 1
     await session.commit()
     await session.refresh(a)
     # Not the per-target timeline: an Event hangs off a target and an
@@ -1118,7 +1132,9 @@ async def kill_agent(agent_id: int,
                        project_code=pr.code,
                        detail=f"killed {a.name}"
                               + (f", cancelled {cancelled} queued task(s)"
-                                 if cancelled else ""),
+                                 if cancelled else "")
+                              + (f", closed {running_closed} in flight"
+                                 if running_closed else ""),
                        commit=True)
     await broker.publish("agents", action="killed", project=pr.code)
     return _agent_out(a, pr.code)
