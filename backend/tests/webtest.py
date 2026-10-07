@@ -631,4 +631,54 @@ st, e = call("/api/domains/enumerate?project=DOM", "POST",
              {"domains": ""}, token=admin)
 check("an empty submission is 422", st == 422, f"status={st}")
 
+print("\n== every page the app routes is a page the server will serve ==")
+# Two copies of one list: SPA_ROUTES in app/main.py and GLOBAL ∪ SCOPED
+# in frontend/src/lib/route.ts. They drifted — `jaws` and `settings`
+# were added to the app and not to the server, so those pages worked
+# when navigated to and 404'd on refresh or from a pasted link. Checked
+# here because the next view will be added in one place too.
+import re as _re
+_root = _pathlib.Path(__file__).resolve().parents[2]
+_route_ts = _root / "frontend" / "src" / "lib" / "route.ts"
+if _route_ts.exists():
+    _src = _route_ts.read_text()
+    _views = set()
+    for _name in ("GLOBAL", "SCOPED"):
+        _m = _re.search(_name + r"\s*=\s*new Set\(\[(.*?)\]\)", _src, _re.S)
+        if _m:
+            _views |= set(_re.findall(r"'([a-z-]+)'", _m.group(1)))
+    from app.main import app as _app
+    _spa = None
+    for _r in _app.routes:
+        if getattr(_r, "path", "") == "/{full_path:path}":
+            _spa = _r
+    # The tuple is a local inside the closure, so it is read from the
+    # source rather than imported: a constant that cannot be reached
+    # from outside is still a constant that has to be right.
+    _main = (_root / "backend" / "app" / "main.py").read_text()
+    _mm = _re.search(r"SPA_ROUTES = \((.*?)\)", _main, _re.S)
+    _server = set(_re.findall(r'"([a-z-]+)"', _mm.group(1))) if _mm else set()
+
+    check("the frontend's view list could be read", bool(_views), str(_views))
+    check("and the server's", bool(_server), str(_server))
+    _missing = _views - _server
+    check("every view the app routes is served on a deep link",
+          not _missing, f"server will 404 on: {sorted(_missing)}")
+    _extra = _server - _views
+    check("and the server claims no page the app cannot render",
+          not _extra, f"server serves the app for: {sorted(_extra)}")
+
+    # The one that was actually reported.
+    _req = urllib.request.Request(BASE + "/jaws")
+    _req.add_header("Accept", "text/html")
+    _req.add_header("Authorization", f"Bearer {admin}")
+    try:
+        with urllib.request.urlopen(_req, timeout=30) as _x:
+            _st = _x.status
+    except urllib.error.HTTPError as _e:
+        _st = _e.code
+    check("/jaws is served rather than 404", _st == 200, f"status={_st}")
+else:
+    check("route.ts was found to compare against", False, str(_route_ts))
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
