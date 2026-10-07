@@ -34,7 +34,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import (Boolean, CheckConstraint, Column, DateTime, ForeignKey,
+from sqlalchemy import (Boolean, CheckConstraint, Column, DateTime, Float,
+                        ForeignKey,
                         Index, Integer, String, Table, Text, UniqueConstraint)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -1335,3 +1336,100 @@ class AuditEvent(Base):
     project_code: Mapped[str | None] = mapped_column(String(64), index=True)
     #: One human-readable line. Never a request body.
     detail: Mapped[str | None] = mapped_column(Text)
+
+
+# ===================================== vulnerability intelligence
+#
+# A local copy of public exploit and CVE data, so that "is anything
+# known about Apache 2.4.49" can be answered without telling anybody
+# that a client is running Apache 2.4.49.
+#
+# That is the whole reason this is a table and not an API call. Matching
+# a version live against NVD means sending a client's software
+# inventory to a third party on every lookup, host by host. The data is
+# public and the question is not: the question names the target. So the
+# database comes here and the matching happens locally.
+
+
+class Exploit(Base):
+    """One entry from Exploit-DB, as `searchsploit` would show it."""
+    __tablename__ = "exploits"
+    __table_args__ = (
+        Index("ix_exploits_search", "platform", "type"),
+    )
+
+    #: Exploit-DB's own id, which is stable and is what an operator
+    #: quotes. Not a surrogate key: two syncs of the same row are the
+    #: same exploit.
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    title: Mapped[str] = mapped_column(Text, index=True)
+    #: Path within the exploitdb tree, e.g. `exploits/linux/remote/1234.rb`.
+    path: Mapped[str | None] = mapped_column(String(512))
+    author: Mapped[str | None] = mapped_column(String(255))
+    published: Mapped[str | None] = mapped_column(String(32))
+    #: linux, windows, php, multiple…
+    platform: Mapped[str | None] = mapped_column(String(64), index=True)
+    #: remote, local, webapps, dos…
+    type: Mapped[str | None] = mapped_column(String(32), index=True)
+    port: Mapped[int | None] = mapped_column(Integer)
+    #: Exploit-DB marks which entries somebody actually ran. An
+    #: unverified entry is a lead; a verified one is a lead that worked
+    #: once, for somebody, somewhere.
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: CVE ids this entry cites, comma separated. The join between the
+    #: two halves of this table pair.
+    cves: Mapped[str | None] = mapped_column(Text, index=True)
+
+
+class CveRecord(Base):
+    """One CVE, enough of it to decide whether to care."""
+    __tablename__ = "cve_records"
+    __table_args__ = (
+        Index("ix_cve_severity_score", "severity", "cvss_score"),
+    )
+
+    #: CVE-2021-41773. The natural key, for the same reason as above.
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    published: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    modified: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True)
+    summary: Mapped[str | None] = mapped_column(Text)
+    cvss_score: Mapped[float | None] = mapped_column(Float, index=True)
+    cvss_vector: Mapped[str | None] = mapped_column(String(128))
+    severity: Mapped[str | None] = mapped_column(String(16), index=True)
+    #: JSON list of CPE match strings. What makes version matching
+    #: possible at all, and the reason a CVE row is worth storing rather
+    #: than looked up by id on demand.
+    cpes: Mapped[str | None] = mapped_column(Text)
+    #: Lowercased "vendor product" pairs pulled out of the CPEs, for a
+    #: cheap first pass before the expensive one. A LIKE over this is
+    #: what keeps matching a 4,000-host project from being a join
+    #: against 290,000 rows per service.
+    products: Mapped[str | None] = mapped_column(Text, index=True)
+
+
+class FeedState(Base):
+    """Where each feed got to, and whether it is telling the truth.
+
+    Separate from the data so that "we have 290,000 CVEs" and "the last
+    sync failed four days ago" are both answerable. A stale feed that
+    reports nothing is the failure mode worth designing against: the
+    answer "no known exploits" is only worth having if the thing
+    answering knows how current it is.
+    """
+    __tablename__ = "feed_state"
+
+    #: exploitdb | nvd
+    source: Mapped[str] = mapped_column(String(32), primary_key=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    #: For incremental feeds: the high-water mark to resume from.
+    cursor: Mapped[str | None] = mapped_column(String(64))
+    records: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    #: Why the last attempt did not finish, or NULL when it did.
+    error: Mapped[str | None] = mapped_column(String(500))
+    #: True while a sync is running, so two do not start at once.
+    running: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false")

@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..domains import registrable
 from ..hosts import InvalidHost, validate_host
 from ..models import (ROLE_ORDER, Agent, AgentTask, Credential, DomainCandidate,
-                      Event,
+                      Event, Exploit,
                       Implant, Poc, Project,
                       Service, Target, User, Vuln, WebAddress)
 from ..scopegate import check_task_targets, index_for
@@ -351,6 +351,77 @@ def build(session: AsyncSession, project: Project | None, user: User,
                 "matched": len(out),
                 "caveat": "Found in what has been RECORDED. A host running "
                           "this and never scanned does not appear."}
+
+    async def exploit_leads(host: str = "", product: str = "",
+                            version: str = "", limit: int = 15) -> dict:
+        """Public exploits and CVEs that might apply.
+
+        Give a host and every service it exposes is looked up, or give
+        a product and version directly.
+
+        Matched against a LOCAL copy of Exploit-DB and NVD. Nothing
+        about the target is sent anywhere to answer this — which is the
+        point: asking a third-party API "anything for Apache 2.4.49?"
+        on behalf of a host tells them the client runs it.
+        """
+        from .. import vulnfeed
+        feeds = await vulnfeed.status(session)
+
+        if product or version:
+            out = await vulnfeed.leads_for_service(
+                session, product or None, version or None, limit=limit)
+            return {"product": product, "version": version, **out}
+
+        if not host:
+            return {"error": "give a host, or a product and version"}
+        t = await _target(host)
+        if t is None:
+            return {"error": f"no target {host!r} here"}
+        svcs = (await session.execute(
+            select(Service).where(Service.target_id == t.id)
+            .order_by(Service.port))).scalars().all()
+        if not svcs:
+            return {"host": t.host, "services": [], "feeds": feeds,
+                    "note": "no ports recorded for this host, so there is "
+                            "nothing to match on. That is a gap in what has "
+                            "been scanned, not an absence of exposure."}
+
+        per = []
+        for sv in svcs:
+            r = await vulnfeed.leads_for_service(
+                session, sv.product, sv.version, sv.name, sv.banner,
+                limit=limit)
+            per.append({"port": sv.port, "protocol": sv.protocol,
+                        "product": sv.product, "version": sv.version,
+                        "cves": r["cves"], "exploits": r["exploits"],
+                        "searched_for": r["terms"]})
+        return {
+            "host": t.host, "ip": t.ip_address, "services": per,
+            "feeds": feeds,
+            "caveat": "Leads, not findings. A patched host reports the same "
+                      "version as an unpatched one, banners are frequently "
+                      "wrong, and CPE version matching is approximate. "
+                      "Confirming any of this against the target is the "
+                      "engagement, not this list.",
+        }
+
+    async def search_exploits(query: str, limit: int = 25) -> dict:
+        """`searchsploit`, against the local Exploit-DB copy."""
+        from .. import vulnfeed
+        q = (query or "").strip()
+        if len(q) < 2:
+            return {"error": "give something to search for"}
+        rows = (await session.execute(
+            select(Exploit).where(Exploit.title.ilike(f"%{q}%"))
+            .order_by(Exploit.verified.desc(), Exploit.id.desc())
+            .limit(max(1, min(limit, 200))))).scalars().all()
+        return {"query": q,
+                "results": [{"edb_id": e.id, "title": e.title, "type": e.type,
+                             "platform": e.platform, "verified": e.verified,
+                             "published": e.published, "path": e.path,
+                             "cves": (e.cves or "").split(",") if e.cves else []}
+                            for e in rows],
+                "feeds": await vulnfeed.status(session)}
 
     async def list_findings(severity: str = "", search: str = "",
                             host: str = "", limit: int = 50) -> dict:
@@ -823,6 +894,18 @@ def build(session: AsyncSession, project: Project | None, user: User,
                                   "description": "e.g. php, wordpress, nginx"},
                    "limit": {"type": "integer"}}, ["technology"]),
              find_by_technology),
+        Tool("exploit_leads",
+             "Public exploits and CVEs that might apply to a host's "
+             "services, or to a product and version. Matched against a "
+             "local copy — nothing about the target is sent anywhere.",
+             _obj({"host": {"type": "string"},
+                   "product": {"type": "string"},
+                   "version": {"type": "string"},
+                   "limit": {"type": "integer"}}), exploit_leads),
+        Tool("search_exploits",
+             "searchsploit, against the local Exploit-DB copy.",
+             _obj({"query": {"type": "string"}, "limit": {"type": "integer"}},
+                  ["query"]), search_exploits),
         Tool("add_note", "Append a note to a host's timeline.",
              _obj({"host": {"type": "string"}, "note": {"type": "string"}},
                   ["host", "note"]), add_note, writes=True),

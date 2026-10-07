@@ -17,6 +17,7 @@ from .agentseal import AgentSeal
 from .gatekeeper import (FORBIDDEN_HTML, Gatekeeper, NOT_FOUND_HTML,
                          wants_html)
 from .routers import (agents, actions, agent, audit, auth, bulk, credentials, domains,
+                      vulnfeeds,
                       enumerate as enumerate_routes, explore,
                       index as api_index, rest,
                       findings, google, magic, meta, projects, reports, scans,
@@ -94,6 +95,38 @@ async def lifespan(app: FastAPI):
 
     audit_task = asyncio.create_task(_audit_retention())
 
+    # Exploit and CVE data, kept current so "is anything known about
+    # this version" can be answered without asking anybody. Off unless
+    # switched on: the first NVD sync is ~290,000 records, and plenty of
+    # deployments have no outbound internet at all.
+    async def _vulnfeeds():
+        from . import vulnfeed
+        from .routers.settings import load_all
+        # A little after start, so a restart during an engagement does
+        # not spend its first minute fetching.
+        await asyncio.sleep(90)
+        while True:
+            try:
+                async with _Sess() as s:
+                    cfg = await load_all(s)
+                    if bool(cfg.get("vulnfeed.enabled", False)):
+                        key = str(cfg.get("vulnfeed.nvd_api_key") or "").strip()
+                        r1 = await vulnfeed.sync_exploitdb(s)
+                        r2 = await vulnfeed.sync_nvd(s, key)
+                        for r in (r1, r2):
+                            if not r.get("ok"):
+                                print(f"vulnfeed: {r['source']} failed: "
+                                      f"{r.get('error')}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:                   # noqa: BLE001
+                # Never fatal. Losing a feed costs freshness, which is
+                # reported; losing the process costs the engagement.
+                print(f"vulnfeed: sync loop failed: {e}")
+            await asyncio.sleep(24 * 60 * 60)
+
+    vulnfeed_task = asyncio.create_task(_vulnfeeds())
+
     # A restart is the explanation for a lot of things an operator will
     # otherwise spend an hour on — a gap in the log, an agent that went
     # quiet, a setting that reverted. One line costs nothing.
@@ -112,6 +145,7 @@ async def lifespan(app: FastAPI):
     print(f"Oddjob API ready — db: {display_url()}")
     yield
     audit_task.cancel()
+    vulnfeed_task.cancel()
     await worker.stop()
     await slack_worker.stop()
 
@@ -186,6 +220,7 @@ for r in (auth.router, google.router, magic.router, projects.router, targets.rou
           rest.router, api_index.router, agents.router, enumerate_routes.router,
           reports.router,
           audit.router,
+          vulnfeeds.router,
           meta.router):
     app.include_router(r)
 

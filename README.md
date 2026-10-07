@@ -289,6 +289,54 @@ another's data.
 Socket Mode means the app opens the connection outward, so nothing has to
 be exposed to the internet.
 
+## Exploits and CVEs, held locally
+
+Oddjob keeps its own copy of Exploit-DB and the NVD CVE list, and does
+all matching against those tables.
+
+**The point is that the client's inventory never leaves the building.**
+Asking a third-party API "anything for Apache 2.4.49?" on behalf of a
+host tells that third party what your client runs, when you looked, and
+— over enough queries — the shape of their estate. A local copy answers
+the same question and tells nobody.
+
+```bash
+# Site Config → Vulnerability feeds → Sync now, or:
+curl -XPOST -H "Authorization: Bearer $KEY" \
+     "$ODDJOB/api/vulnfeeds/sync?source=all"
+
+curl -H "Authorization: Bearer $KEY" \
+     "$ODDJOB/api/vulnfeeds/leads?product=Apache+httpd&version=2.4.49"
+```
+
+Exploit-DB is a single file and syncs in seconds. NVD is ~300k records;
+the first run walks back to 2002 in resumable chunks and later runs are
+incremental. Both refresh daily. An NVD API key in Site Config takes the
+rate limit from 5 requests per 30s to 50 — worth having for the first
+sync, optional after.
+
+The lookup routes take **a product and version, never a host**. That is
+the boundary, and it is enforced by the API shape rather than by
+convention.
+
+Three things the results are careful about, because a vulnerability feed
+is unusually easy to over-read:
+
+| the result says | it means |
+|---|---|
+| `exact` | a CPE names this exact version |
+| `product only` | the CPE covers every version — not evidence about yours |
+| `unknown` | NVD has not analysed this CVE yet, so it cannot be matched either way |
+
+Every response carries the feed's age alongside it, because "no known
+exploits" from a feed synced this morning and the same answer from one
+that has never run are different claims. A feed that has never synced
+says so rather than returning a confident empty list.
+
+These are **leads, not findings**: a banner is often wrong, and a patched
+host reports the same version as an unpatched one. Confirming them
+against the target is the engagement.
+
 ## Tests
 
 ```bash
