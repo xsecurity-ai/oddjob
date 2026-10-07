@@ -1,5 +1,16 @@
 /**
- * Discovery over scope ranges nothing has been scanned in.
+ * Discovery over ranges, selected targets, or anything typed in.
+ *
+ * Three sources, because "scan new ranges" turned out to be one of
+ * three things an operator means by it. The uncovered-scope list is
+ * the one this started as. But a selection already made in the grid is
+ * the commonest intent — you tick six hosts and want those scanned,
+ * and being shown a list of scope ranges instead is the dialog
+ * ignoring what you just told it. And neither covers "scan this one
+ * CIDR I was handed in an email", which is why there is a box.
+ *
+ * They combine. What runs is the union of everything ticked, and the
+ * count says so before anything is queued.
  *
  * "Not covered" here means the project holds no target with an address
  * inside the range. That is a statement about our coverage and not
@@ -30,8 +41,23 @@ import {
 /** Above this, a discovery sweep is a decision rather than a click. */
 const LARGE = 4096
 
-export function ScanRangesDialog({ project, onClose }: {
-  project: string; onClose: () => void
+/** Mirrors the server's own parsing: one per line, or comma separated. */
+export function parseSubjects(raw: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const piece of (raw || '').split(/[\s,;]+/)) {
+    const v = piece.trim().toLowerCase().replace(/\.$/, '')
+    if (v && !seen.has(v)) { seen.add(v); out.push(v) }
+  }
+  return out
+}
+
+export function ScanRangesDialog({ project, selected = [], onClose }: {
+  project: string
+  /** Rows ticked in the grid behind this. When there are any, they are
+   *  what the operator meant, so they lead and start checked. */
+  selected?: Array<{ host: string; ip_address?: string | null }>
+  onClose: () => void
 }) {
   const qc = useQueryClient()
   const fleet = useFleet(project)
@@ -40,6 +66,10 @@ export function ScanRangesDialog({ project, onClose }: {
   const [tool, setTool] = useState<'masscan' | 'nmap'>('masscan')
   const [ports, setPorts] = useState('80,443,8080,8443')
   const [picked, setPicked] = useState<Set<string>>(new Set())
+  // Pre-checked: the selection is a statement of intent already made,
+  // and making it again in here would be asking twice.
+  const [useSelected, setUseSelected] = useState(selected.length > 0)
+  const [manual, setManual] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
@@ -55,6 +85,30 @@ export function ScanRangesDialog({ project, onClose }: {
 
   const chosen = useMemo(
     () => uncovered.filter((r) => picked.has(r.value)), [uncovered, picked])
+
+  // An address where there is one: a scan wants the host it can reach,
+  // and a name that has already been resolved resolves again for
+  // nothing. Where there is no address the name is used and the agent
+  // resolves it.
+  const fromSelected = useMemo(
+    () => (useSelected ? selected.map((t) => t.ip_address || t.host) : []),
+    [useSelected, selected])
+  const fromManual = useMemo(() => parseSubjects(manual), [manual])
+
+  const subjects = useMemo(() => {
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const v of [...fromSelected, ...fromManual,
+                     ...chosen.map((r) => r.value)]) {
+      if (v && !seen.has(v)) { seen.add(v); out.push(v) }
+    }
+    return out
+  }, [fromSelected, fromManual, chosen])
+
+  // Only the scope ranges carry a known address count; a typed CIDR is
+  // not expanded here. Reported as "at least", because claiming an
+  // exact figure that excludes two of the three sources would be worse
+  // than admitting the number is a floor.
   const addresses = chosen.reduce((n, r) => n + r.addresses, 0)
 
   const priv = rawSockets(fleet, agent)
@@ -63,7 +117,8 @@ export function ScanRangesDialog({ project, onClose }: {
   // agent queues a task that can only fail.
   const masscanImpossible = tool === 'masscan' && priv === false
   const regionMissing = needsRegion(fleet, agent) && !region.trim()
-  const stop = !chosen.length || !!fleet.blocked || regionMissing || masscanImpossible
+  const stop = !subjects.length || !!fleet.blocked || regionMissing
+               || masscanImpossible
 
   const toggle = (v: string) => setPicked((p) => {
     const n = new Set(p)
@@ -71,25 +126,30 @@ export function ScanRangesDialog({ project, onClose }: {
     return n
   })
 
+  const head = subjects[0] ?? '<nothing selected>'
+  const more = subjects.length > 1 ? ` …+${subjects.length - 1} more` : ''
   const argv = tool === 'masscan'
     ? `masscan -oX <task output> -p ${ports || '80,443,8080,8443'} --rate 1000 `
-      + `${chosen.length ? chosen[0].value : '<range>'}`
-      + (chosen.length > 1 ? ` …+${chosen.length - 1} more` : '')
+      + head + more
     : `nmap -oX <task output>${ports ? ` -p ${ports}` : ''} -sV`
       + (priv === true ? ' -sS' : priv === null
          ? ' [-sS if the agent has raw sockets]' : '')
-      + ` ${chosen.length ? chosen[0].value : '<range>'}`
-      + (chosen.length > 1 ? ` …+${chosen.length - 1} more` : '')
+      + ` ${head}${more}`
 
   const run = async () => {
     setBusy(true); setErr(null)
     try {
-      const args: Record<string, unknown> = { targets: chosen.map((r) => r.value) }
+      const args: Record<string, unknown> = { targets: subjects }
       if (ports.trim()) args.ports = ports.trim()
       const t = await queue(project, agent, tool, args, region)
-      setDone(`Queued as task ${t.id} over ${chosen.length} range(s), `
-              + `${addresses.toLocaleString()} addresses. Results import into `
-              + `${project} when the agent reports back.`)
+      const parts = [
+        fromSelected.length && `${fromSelected.length} selected target(s)`,
+        fromManual.length && `${fromManual.length} typed in`,
+        chosen.length && `${chosen.length} scope range(s), `
+                         + `${addresses.toLocaleString()} addresses`,
+      ].filter(Boolean)
+      setDone(`Queued as task ${t.id} over ${parts.join(' + ')}. Results `
+              + `import into ${project} when the agent reports back.`)
       await qc.invalidateQueries({ queryKey: ['agents'] })
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -113,6 +173,46 @@ export function ScanRangesDialog({ project, onClose }: {
               {(q.error as Error).message}
             </Alert>
           )}
+
+          {/* The selection leads when there is one. Being shown a list
+              of scope ranges after ticking six hosts is the dialog
+              ignoring what was just said to it. */}
+          {selected.length > 0 && (
+            <Box sx={{ border: `1px solid ${alpha(neon.cyan, 0.4)}`,
+                       borderRadius: 1, p: 1.2 }}>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Checkbox size="small" checked={useSelected}
+                  onChange={(e) => setUseSelected(e.target.checked)} />
+                <Box sx={{ flex: 1 }}>
+                  <Typography sx={{ fontSize: 12.5, color: neon.cyan }}>
+                    Scan the {selected.length} target
+                    {selected.length === 1 ? '' : 's'} selected behind this
+                  </Typography>
+                  <Typography sx={{ fontSize: 11, color: neon.muted,
+                                    fontFamily: `'Share Tech Mono', monospace`,
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap' }}>
+                    {selected.slice(0, 6).map((t) => t.ip_address || t.host)
+                            .join(', ')}
+                    {selected.length > 6 ? ` …+${selected.length - 6}` : ''}
+                  </Typography>
+                </Box>
+              </Stack>
+            </Box>
+          )}
+
+          <TextField size="small" fullWidth multiline minRows={2} maxRows={6}
+            label="Or scan these" value={manual}
+            onChange={(e) => setManual(e.target.value)}
+            placeholder={'198.51.100.0/24\n203.0.113.10\nportal.acme.example'}
+            helperText={fromManual.length
+              ? `${fromManual.length} entr${fromManual.length === 1 ? 'y' : 'ies'}`
+                + ' — addresses, CIDRs and names all work. Scope still decides.'
+              : 'Addresses, CIDRs or names. One per line or comma separated. '
+                + 'Anything out of scope is refused when it is queued.'}
+            slotProps={{ htmlInput: { style: {
+              fontFamily: `'Share Tech Mono', monospace`, fontSize: 12.5 } } }} />
 
           <Alert severity="info" variant="outlined" sx={{ fontSize: 11.5 }}>
             A range is listed as uncovered when this project holds no target

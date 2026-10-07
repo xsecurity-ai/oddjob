@@ -389,7 +389,8 @@ export function TargetsView({ project }: { project: string | null }) {
         <DetectDomainsDialog project={project} onClose={() => setDetecting(false)} />
       )}
       {scanningRanges && project && (
-        <ScanRangesDialog project={project} onClose={() => setScanningRanges(false)} />
+        <ScanRangesDialog project={project} selected={selectedRows}
+          onClose={() => setScanningRanges(false)} />
       )}
       {nmapOn && project && (
         <NmapScanDialog project={project} targets={nmapOn}
