@@ -278,6 +278,27 @@ if _DIST.is_dir():
         # index.html — a client getting HTML back from a typo'd endpoint is a
         # genuinely confusing way to debug.
         if full_path.startswith("api/"):
+            # A trailing slash is a typo, a proxy that normalises URLs,
+            # or a browser replaying a cached redirect — never a
+            # different endpoint. FastAPI redirects these itself, but
+            # this catch-all is matched first and turned them into a
+            # 404 instead, which is how `/api/agents/?project=X` came
+            # to read as "no such endpoint" while `/api/agents` worked.
+            #
+            # That failure mode is worse than it looks: a 301 cached by
+            # a browser outlives the misconfiguration that produced it,
+            # so the client keeps asking for a URL that no longer
+            # exists and no amount of fixing the server reaches it.
+            # Answering the slashed form is what actually recovers
+            # those clients.
+            #
+            # 307, not 302: the method has to survive, or an enrolment
+            # POST silently becomes a GET.
+            if full_path.endswith("/") and full_path != "api/":
+                target = "/" + full_path.rstrip("/")
+                if request.url.query:
+                    target += "?" + request.url.query
+                return RedirectResponse(target, status_code=307)
             raise HTTPException(404, f"no such endpoint: /{full_path}")
         if (asset := dist_file(full_path)) is not None:
             return FileResponse(asset)
