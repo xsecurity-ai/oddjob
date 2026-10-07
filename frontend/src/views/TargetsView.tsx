@@ -128,6 +128,21 @@ export function TargetsView({ project }: { project: string | null }) {
     queryFn: () => api.enumeratePending(project as string),
     enabled: !!project && writable,
   })
+  // Every Enumerate action is work for an agent to do. With none
+  // connected the task is queued against nothing: it sits there
+  // looking submitted and never runs, which reads as a broken scan
+  // rather than as a missing scanner. The menu says so instead.
+  const agents = useQuery({
+    queryKey: ['agents', project],
+    queryFn: () => api.agents(project as string),
+    enabled: !!project && writable,
+  })
+  // `online` is the live set. A disabled agent is an operator decision
+  // and an offline one is an observation, and neither will pick work
+  // up, so both are excluded from "can this run".
+  const live = (agents.data ?? []).filter((a) => a.status === 'online')
+  const enrolled = (agents.data ?? []).length
+
   const auto = useAutoApplySingles(writable ? project : null, pending.data)
   const choices = useMemo(() => openChoices(pending.data), [pending.data])
 
@@ -353,6 +368,8 @@ export function TargetsView({ project }: { project: string | null }) {
           hasIp={!!addressOf(p.row)}
           hasName={hasName(p.row)}
           allowed={canWrite(p.row.project_code)}
+          liveAgents={live.length}
+          enrolledAgents={enrolled}
           onPick={(a) => onRowAction(p.row, a)} />
       ),
     },
@@ -401,6 +418,8 @@ export function TargetsView({ project }: { project: string | null }) {
         extraActions={writable && project ? (
           <>
             <EnumerateMenu onPick={onEnumerate}
+              liveAgents={live.length}
+              enrolledAgents={enrolled}
               selectedCount={selected.length}
               unnamedCount={unnamed.length}
               unnamedSelectedCount={unnamedSelected.length}

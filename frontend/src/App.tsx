@@ -12,7 +12,6 @@ import KeyIcon from '@mui/icons-material/VpnKeyOutlined'
 import PublicIcon from '@mui/icons-material/PublicOutlined'
 import DescriptionIcon from '@mui/icons-material/DescriptionOutlined'
 import MemoryIcon from '@mui/icons-material/MemoryOutlined'
-import TuneIcon from '@mui/icons-material/TuneOutlined'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import SmartToyIcon from '@mui/icons-material/SmartToyOutlined'
 import PersonIcon from '@mui/icons-material/PersonOutline'
@@ -269,15 +268,14 @@ export default function App() {
     // it. Nesting cost a click to reach a view an operator checks while
     // a scan is running, and hid it entirely until Reports was open.
     { key: 'jaws', label: 'Jaws', icon: <MemoryIcon fontSize="small" /> },
-    // Project config, not site config — it is the engagement's own name,
-    // client and SCOPE. Last in the list because it is opened rarely,
-    // but in the project group rather than under Admin: the scope lists
-    // decide what every other view here is allowed to touch, and hiding
-    // that behind an admin heading would make it look optional.
-    { key: 'settings', label: 'Project Config', icon: <TuneIcon fontSize="small" /> },
-    // No sidebar entry: importing happens from the table you are
-    // already looking at (Targets, Services, Vulns), which keeps the
-    // filters you had. The route still resolves, so old links work.
+    // No sidebar entry for Project Config: it is reached from the edit
+    // button on its own row in Projects, which is where you already are
+    // when you want it. The route still resolves, so existing links and
+    // bookmarks keep working.
+    //
+    // No sidebar entry for import either: that happens from the table
+    // you are already looking at (Targets, Services, Vulns), which
+    // keeps the filters you had.
   ]
   const ADMIN_NAV = [
     ...(siteAdmin ? [{ key: 'config', label: 'Site Config',

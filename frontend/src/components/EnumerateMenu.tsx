@@ -46,10 +46,32 @@ function Blocked({ label, why, icon }: {
   )
 }
 
+/** Why nothing can be enumerated, or '' when something can.
+ *
+ *  Two different problems with two different fixes, and the tooltip has
+ *  to say which: enrolling a scanner is a different job from starting
+ *  one that already exists. "No agents" for both would send somebody to
+ *  the wrong screen. */
+export function noAgentReason(live: number, enrolled: number): string {
+  if (live > 0) return ''
+  if (!enrolled) {
+    return 'No Jaws agent is enrolled on this project, so there is '
+         + 'nothing to run the scan. Add one under Jaws.'
+  }
+  return `All ${enrolled} Jaws agent${enrolled === 1 ? '' : 's'} on this `
+       + `project ${enrolled === 1 ? 'is' : 'are'} offline. Work queued now `
+       + `would sit unclaimed until one comes back.`
+}
+
 export function EnumerateMenu({ onPick, selectedCount, unnamedCount,
                                 unnamedSelectedCount, unaddressedCount,
-                                unaddressedSelectedCount }: {
+                                unaddressedSelectedCount,
+                                liveAgents, enrolledAgents }: {
   onPick: (a: EnumerateAction) => void
+  /** Agents online now, and enrolled at all. Both, because "none
+   *  enrolled" and "all offline" need different things done about them. */
+  liveAgents: number
+  enrolledAgents: number
   selectedCount: number
   /** Targets in the project with an address and no name. */
   unnamedCount: number
@@ -62,6 +84,7 @@ export function EnumerateMenu({ onPick, selectedCount, unnamedCount,
   const [anchor, setAnchor] = useState<HTMLElement | null>(null)
   const close = () => setAnchor(null)
   const choose = (a: EnumerateAction) => { close(); onPick(a) }
+  const noAgents = noAgentReason(liveAgents, enrolledAgents)
 
   const item = (a: EnumerateAction, label: string, icon: ReactNode,
                 secondary?: string) => (
@@ -76,13 +99,19 @@ export function EnumerateMenu({ onPick, selectedCount, unnamedCount,
 
   return (
     <>
-      <Button size="small" variant="outlined"
-        startIcon={<TravelExploreIcon sx={{ fontSize: 16 }} />}
-        onClick={(e) => setAnchor(e.currentTarget)}
-        sx={{ color: neon.green, borderColor: alpha(neon.green, 0.5),
-              fontSize: 11, py: 0.3 }}>
-        Enumerate
-      </Button>
+      {/* Off at the button, not inside it. A menu whose every entry is
+          disabled is a menu that wasted the click it took to open. */}
+      <Tooltip title={noAgents || 'Find more of the estate'}>
+        <span>
+          <Button size="small" variant="outlined" disabled={!!noAgents}
+            startIcon={<TravelExploreIcon sx={{ fontSize: 16 }} />}
+            onClick={(e) => setAnchor(e.currentTarget)}
+            sx={{ color: neon.green, borderColor: alpha(neon.green, 0.5),
+                  fontSize: 11, py: 0.3 }}>
+            Enumerate
+          </Button>
+        </span>
+      </Tooltip>
       <Menu anchorEl={anchor} open={!!anchor} onClose={close}
         slotProps={{ paper: { sx: {
           backgroundColor: alpha(neon.paper, 0.98), backgroundImage: 'none',
@@ -155,17 +184,26 @@ export type RowAction = 'find-hostname' | 'find-ip' | 'nmap' | 'merge'
  * model — so the whole menu is withheld rather than shown with three
  * dead entries. The cell says why.
  */
-export function TargetRowActions({ kind, hasIp, hasName, allowed, onPick }: {
+export function TargetRowActions({ kind, hasIp, hasName, allowed,
+                                   liveAgents, enrolledAgents, onPick }: {
   kind: string
   hasIp: boolean
   /** The target is named by something other than its own address. */
   hasName: boolean
   allowed: boolean
+  liveAgents: number
+  enrolledAgents: number
   onPick: (a: RowAction) => void
 }) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null)
   const close = () => setAnchor(null)
   const choose = (a: RowAction) => { close(); onPick(a) }
+  // Only the three that are work for an agent. Combining two targets is
+  // a database operation this server does by itself, so withholding it
+  // because no scanner is connected would be withholding it for no
+  // reason — and it is the action most likely to be wanted precisely
+  // when scanning is not available.
+  const noAgents = noAgentReason(liveAgents, enrolledAgents)
 
   if (kind === 'mobile') {
     return (
@@ -194,7 +232,10 @@ export function TargetRowActions({ kind, hasIp, hasName, allowed, onPick }: {
           backgroundColor: alpha(neon.paper, 0.98), backgroundImage: 'none',
           border: `1px solid ${alpha(neon.cyan, 0.35)}`,
         } } }}>
-        {hasIp
+        {noAgents
+          ? <Blocked label="Find hostname" icon={<DnsIcon fontSize="small" />}
+              why={noAgents} />
+          : hasIp
           ? <MenuItem onClick={() => choose('find-hostname')}>
               <ListItemIcon sx={{ minWidth: 30, color: neon.green }}>
                 <DnsIcon fontSize="small" />
@@ -208,7 +249,10 @@ export function TargetRowActions({ kind, hasIp, hasName, allowed, onPick }: {
           : <Blocked label="Find hostname" icon={<DnsIcon fontSize="small" />}
               why="No address recorded for this target, so there is nothing to look up." />}
 
-        {!hasName
+        {noAgents
+          ? <Blocked label="Find IP" icon={<LanIcon fontSize="small" />}
+              why={noAgents} />
+          : !hasName
           ? <Blocked label="Find IP" icon={<LanIcon fontSize="small" />}
               why="This target is named by its address, so a forward lookup has nothing to resolve." />
           : <MenuItem onClick={() => choose('find-ip')}>
@@ -223,13 +267,16 @@ export function TargetRowActions({ kind, hasIp, hasName, allowed, onPick }: {
             </MenuItem>}
 
         <Divider sx={{ borderColor: alpha(neon.purple, 0.2) }} />
-        <MenuItem onClick={() => choose('nmap')}>
-          <ListItemIcon sx={{ minWidth: 30, color: neon.cyan }}>
-            <RadarIcon fontSize="small" />
-          </ListItemIcon>
-          <ListItemText primaryTypographyProps={{ fontSize: 13 }}
-            primary="Enumerate with nmap" />
-        </MenuItem>
+        {noAgents
+          ? <Blocked label="Enumerate with nmap"
+              icon={<RadarIcon fontSize="small" />} why={noAgents} />
+          : <MenuItem onClick={() => choose('nmap')}>
+              <ListItemIcon sx={{ minWidth: 30, color: neon.cyan }}>
+                <RadarIcon fontSize="small" />
+              </ListItemIcon>
+              <ListItemText primaryTypographyProps={{ fontSize: 13 }}
+                primary="Enumerate with nmap" />
+            </MenuItem>}
 
         <Divider sx={{ borderColor: alpha(neon.purple, 0.2) }} />
         <MenuItem onClick={() => choose('merge')}>
