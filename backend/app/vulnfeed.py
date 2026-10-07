@@ -290,6 +290,10 @@ async def sync_nvd(session: AsyncSession, api_key: str = "",
     written = 0
     pages = 0
     requests = 0
+    # Bound before the try: the failure path reads them, and a crash
+    # early enough to leave them unset is exactly when it runs.
+    windows: list[tuple[datetime, datetime]] = []
+    resume_from: datetime | None = None
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT, headers=headers) as c:
             # Chunked from the cursor, or from the epoch on a first run.
@@ -299,6 +303,14 @@ async def sync_nvd(session: AsyncSession, api_key: str = "",
             # rejects outright — which would wedge every later sync.
             windows = _nvd_windows(since - timedelta(minutes=5) if since
                                    else NVD_EPOCH, now)
+
+            # The boundary every window before this one is known to be
+            # complete through. Parked on the failure path below, so a
+            # dropped connection costs the window in flight rather than
+            # the whole run. A first sync is hours long; discarding all
+            # of it for one failed DNS lookup means that on a flaky
+            # connection it never completes at all.
+            resume_from = windows[0][0] if windows else None
 
             for w_start, w_end in windows:
                 offset = 0
@@ -355,6 +367,9 @@ async def sync_nvd(session: AsyncSession, api_key: str = "",
                     offset += NVD_PAGE
                     if offset >= total or not items:
                         break
+                # Every page of this window is in. Anything that fails
+                # from here resumes at its end, not at the epoch.
+                resume_from = w_end
 
         st.cursor = now.isoformat()
         st.last_success_at = now
@@ -369,10 +384,24 @@ async def sync_nvd(session: AsyncSession, api_key: str = "",
         st = await _state(session, "nvd")
         st.running = False
         st.error = f"{type(e).__name__}: {e}"[:500]
+        # Keep the ground already covered. The rows committed before the
+        # failure are in the table whatever happens here; parking the
+        # cursor is what stops the next run fetching them all again, and
+        # re-counting is what stops `records` reporting a number the
+        # table stopped matching several thousand rows ago.
+        try:
+            if (resume_from is not None and windows
+                    and resume_from > windows[0][0]):
+                st.cursor = resume_from.isoformat()
+            st.records = await _count_cves(session)
+        except Exception:                        # noqa: BLE001
+            # Best effort. The error above is the thing worth reporting.
+            pass
         await session.commit()
         log.warning("nvd sync failed: %s", e)
         return {"source": "nvd", "ok": False, "error": st.error,
-                "written": written}
+                "written": written,
+                "resume_from": st.cursor}
 
 
 # -------------------------------------------------------------- status

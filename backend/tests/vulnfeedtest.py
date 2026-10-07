@@ -211,5 +211,72 @@ check("but a wildcard still counts as a match, so the lead is not dropped",
 check("a malformed CPE matches nothing", match_kind("cpe:2.3:a", "1.0") is None,
       str(match_kind("cpe:2.3:a", "1.0")))
 
+print("\n== a failed sync keeps the ground it covered ==")
+# A first NVD sync is hours long. Losing all of it to one dropped DNS
+# lookup means that on a flaky connection it never finishes at all --
+# which is how this was found: a real sync died at 21,545 records and
+# parked no cursor, so the next run would have started again at 2002.
+import asyncio as _aio                                           # noqa: E402
+from datetime import datetime as _dt, timezone as _tz            # noqa: E402
+import app.vulnfeed as _vf                                       # noqa: E402
+from app.db import SessionLocal as _SL                           # noqa: E402
+
+
+async def _failing_sync():
+    """Let three windows land, then fail the way a dropped link does."""
+    calls = {"n": 0}
+
+    class _Resp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"vulnerabilities": [], "totalResults": 0}
+
+    class _Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, params=None):
+            calls["n"] += 1
+            if calls["n"] > 3:
+                raise ConnectionError("nodename nor servname provided")
+            return _Resp()
+
+    # Patch the delay constant, not asyncio.sleep: _vf.asyncio is the
+    # one shared module object, so replacing its sleep replaces it for
+    # everything in the process -- including the replacement, which then
+    # calls itself.
+    real_client, real_delay = _vf.httpx.AsyncClient, _vf.NVD_DELAY_NO_KEY
+    _vf.httpx.AsyncClient = lambda *a, **k: _Client()
+    _vf.NVD_DELAY_NO_KEY = 0
+    try:
+        async with _SL() as s:
+            st = await _vf._state(s, "nvd")
+            st.cursor = None
+            st.error = None
+            await s.commit()
+            r = await _vf.sync_nvd(s, api_key="")
+            st = await _vf._state(s, "nvd")
+            return r, st.cursor, st.error, st.running
+    finally:
+        _vf.httpx.AsyncClient, _vf.NVD_DELAY_NO_KEY = real_client, real_delay
+
+
+_res, _cursor, _err, _running = _aio.run(_failing_sync())
+check("a sync that dies reports failure rather than success",
+      _res.get("ok") is False, str(_res)[:120])
+check("and records why", "nodename" in (_err or ""), str(_err)[:120])
+check("and clears the running flag, so the next run is not locked out",
+      _running is False, str(_running))
+check("and parks a cursor past the epoch, so the work already done "
+      "is not repeated",
+      _cursor is not None and _dt.fromisoformat(_cursor) > _vf.NVD_EPOCH,
+      f"cursor={_cursor}")
+# The resume point must be a window boundary that completed, never the
+# one that was in flight when the connection dropped -- resuming inside
+# a half-read window silently loses whatever it had not reached.
+check("at a boundary that actually completed",
+      _cursor is not None
+      and _dt.fromisoformat(_cursor) <= _dt.now(_tz.utc),
+      f"cursor={_cursor}")
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 _sys.exit(1 if fail else 0)
