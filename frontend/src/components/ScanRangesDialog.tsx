@@ -52,12 +52,16 @@ export function parseSubjects(raw: string): string[] {
   return out
 }
 
-export function ScanRangesDialog({ project, selected = [], onClose }: {
+export function ScanRangesDialog({ project, selected = [], onClose,
+                                  onQueued }: {
   project: string
   /** Rows ticked in the grid behind this. When there are any, they are
    *  what the operator meant, so they lead and start checked. */
   selected?: Array<{ host: string; ip_address?: string | null }>
   onClose: () => void
+  /** Called with the confirmation once work is queued; the parent
+   *  closes this and reports it outside the modal. */
+  onQueued?: (summary: string) => void
 }) {
   const qc = useQueryClient()
   const fleet = useFleet(project)
@@ -148,8 +152,9 @@ export function ScanRangesDialog({ project, selected = [], onClose }: {
         chosen.length && `${chosen.length} scope range(s), `
                          + `${addresses.toLocaleString()} addresses`,
       ].filter(Boolean)
-      setDone(`Queued as task ${t.id} over ${parts.join(' + ')}. Results `
-              + `import into ${project} when the agent reports back.`)
+      const msg = `Queued as task ${t.id} over ${parts.join(' + ')}. Results `
+                  + `import into ${project} when the agent reports back.`
+      if (onQueued) onQueued(msg); else setDone(msg)
       await qc.invalidateQueries({ queryKey: ['agents'] })
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))

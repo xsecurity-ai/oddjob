@@ -22,12 +22,18 @@ export type LookupKind = 'reverse_ip' | 'nslookup'
 /** How many subjects to show before the list becomes a count. */
 const SHOWN = 40
 
-export function LookupQueueDialog({ project, kind, subjects, onClose }: {
+export function LookupQueueDialog({ project, kind, subjects, onClose,
+                                   onQueued }: {
   project: string
   kind: LookupKind
   /** Addresses for reverse_ip, hostnames for nslookup. */
   subjects: string[]
   onClose: () => void
+  /** Called with the confirmation once work is queued. The parent
+   *  closes this and says so elsewhere: a modal that stays open on
+   *  success is one the operator has to dismiss before carrying on,
+   *  and the next thing they want is the table behind it. */
+  onQueued?: (summary: string) => void
 }) {
   const qc = useQueryClient()
   const fleet = useFleet(project)
@@ -51,11 +57,12 @@ export function LookupQueueDialog({ project, kind, subjects, onClose }: {
     setBusy(true); setErr(null)
     try {
       const t = await queue(project, agent, kind, { targets: list }, region)
-      setDone(`Queued as task ${t.id} over ${list.length} `
+      const msg = `Queued as task ${t.id} over ${list.length} `
               + `${reverse ? 'address' : 'name'}${list.length === 1 ? '' : 'es'}. `
               + `Results appear on this page as "choices waiting" once the `
               + `agent reports back — nothing is written to the inventory `
-              + `until you pick.`)
+              + `until you pick.`
+      if (onQueued) onQueued(msg); else setDone(msg)
       await qc.invalidateQueries({ queryKey: ['agents'] })
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))

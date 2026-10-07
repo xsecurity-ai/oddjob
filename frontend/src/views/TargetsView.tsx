@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react'
-import { Badge, Box, Button, Chip, Tooltip, alpha } from '@mui/material'
+import {
+  Alert, Badge, Box, Button, Chip, Snackbar, Tooltip, alpha,
+} from '@mui/material'
 import ScanIcon from '@mui/icons-material/RadarOutlined'
 import type { GridColDef } from '@mui/x-data-grid'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -114,6 +116,8 @@ export function TargetsView({ project }: { project: string | null }) {
   const [scanningRanges, setScanningRanges] = useState(false)
   const [nmapOn, setNmapOn] = useState<string[] | null>(null)
   const [lookup, setLookup] = useState<{ kind: LookupKind; subjects: string[] } | null>(null)
+  //: The confirmation a closed modal would otherwise have taken with it.
+  const [toast, setToast] = useState<string | null>(null)
   const [selected, setSelected] = useState<number[]>([])
 
   const { data, isLoading, error } = useQuery({
@@ -167,6 +171,16 @@ export function TargetsView({ project }: { project: string | null }) {
     // so the UI exercises live-refresh rather than faking it locally.
     onSettled: () => void qc.invalidateQueries({ queryKey: ['targets'] }),
   })
+
+  // Closing the modal and saying so outside it. A dialog that stays
+  // open on success has to be dismissed before the operator can get
+  // back to the table, which is the next thing they want; the
+  // confirmation still matters, so it is not simply dropped.
+  const queued = (summary: string) => {
+    setDetecting(false); setScanningRanges(false); setNmapOn(null)
+    setLookup(null)
+    setToast(summary)
+  }
 
   const onEnumerate = (a: EnumerateAction) => {
     if (a === 'detect-domains') setDetecting(true)
@@ -386,18 +400,39 @@ export function TargetsView({ project }: { project: string | null }) {
           candidates={rows} onClose={() => setMerging(null)} />
       )}
       {detecting && project && (
-        <DetectDomainsDialog project={project} onClose={() => setDetecting(false)} />
+        <DetectDomainsDialog project={project}
+          // Whatever was ticked in the grid, so picking an action after
+          // making a selection starts from the selection rather than
+          // from an empty box.
+          seed={selectedRows.map((t) => t.host)}
+          allHosts={rows.map((t) => t.host)}
+          onQueued={queued}
+          onClose={() => setDetecting(false)} />
       )}
       {scanningRanges && project && (
         <ScanRangesDialog project={project} selected={selectedRows}
+          onQueued={queued}
           onClose={() => setScanningRanges(false)} />
       )}
       {nmapOn && project && (
         <NmapScanDialog project={project} targets={nmapOn}
+          onQueued={queued}
           onClose={() => setNmapOn(null)} />
       )}
+      {toast && (
+        <Snackbar open autoHideDuration={9000}
+          onClose={() => setToast(null)}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
+          <Alert severity="success" variant="outlined"
+            onClose={() => setToast(null)}
+            sx={{ bgcolor: alpha(neon.paper, 0.98), fontSize: 12.5,
+                  maxWidth: 560 }}>
+            {toast}
+          </Alert>
+        </Snackbar>
+      )}
       {lookup && project && (
-        <LookupQueueDialog project={project} kind={lookup.kind}
+        <LookupQueueDialog project={project} kind={lookup.kind} onQueued={queued}
           subjects={lookup.subjects} onClose={() => setLookup(null)} />
       )}
       {picking && project && (

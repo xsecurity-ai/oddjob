@@ -688,13 +688,31 @@ export const api = {
    *  single list, which is what every caller wants and what the old
    *  single-result signature pretended the server already did. */
   detectDomains: async (project: string, domains: string | string[],
-                        force = false, autoPromote = false) => {
+                        force = false, autoPromote = false,
+                        onProgress?: (done: number, total: number) => void) => {
     const list = Array.isArray(domains) ? domains : [domains]
-    const b = await req<DetectBatch>('/api/domains/detect' + qs({ project }), {
-      method: 'POST',
-      body: JSON.stringify({ domains: list, force, limit: 200,
-                             auto_promote: autoPromote }),
-    })
+    // The endpoint takes 50 at a time. "All hosts" on a real
+    // engagement is hundreds, so the split happens here rather than by
+    // raising a server-side guard that exists for a reason.
+    const CHUNK = 50
+    const parts: DetectBatch[] = []
+    for (let i = 0; i < list.length; i += CHUNK) {
+      onProgress?.(i, list.length)
+      parts.push(await req<DetectBatch>('/api/domains/detect' + qs({ project }), {
+        method: 'POST',
+        body: JSON.stringify({ domains: list.slice(i, i + CHUNK), force,
+                               limit: 200, auto_promote: autoPromote }),
+      }))
+    }
+    onProgress?.(list.length, list.length)
+    const b: DetectBatch = {
+      results: parts.flatMap((x) => x.results),
+      new_candidates: parts.reduce((n, x) => n + x.new_candidates, 0),
+      domains_run: parts.reduce((n, x) => n + x.domains_run, 0),
+      domains_skipped: parts.reduce((n, x) => n + x.domains_skipped, 0),
+      promoted: parts.reduce((n, x) => n + (x.promoted ?? 0), 0),
+      promoted_refused: parts.reduce((n, x) => n + (x.promoted_refused ?? 0), 0),
+    }
     const seen = new Set<number>()
     const candidates: DomainCandidate[] = []
     for (const r of b.results) {

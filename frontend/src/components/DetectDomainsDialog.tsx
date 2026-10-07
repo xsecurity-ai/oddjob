@@ -42,11 +42,24 @@ export function parseDomains(raw: string): string[] {
   return out
 }
 
-export function DetectDomainsDialog({ project, onClose }: {
-  project: string; onClose: () => void
+export function DetectDomainsDialog({ project, onClose, seed = [],
+                                      allHosts = [], onQueued }: {
+  project: string
+  /** Hosts ticked in the grid behind this. Picking an action after
+   *  making a selection should start from the selection, not from an
+   *  empty box. */
+  seed?: string[]
+  /** Every host on the project, for "all hosts" below. */
+  allHosts?: string[]
+  /** Called once work is handed to an agent; the parent closes this
+   *  and reports it outside the modal. Detection itself does not use
+   *  it — it produces candidates to look at, so closing on it would
+   *  throw away the thing the operator asked for. */
+  onQueued?: (summary: string) => void
+  onClose: () => void
 }) {
   const qc = useQueryClient()
-  const [domain, setDomain] = useState('')
+  const [domain, setDomain] = useState(seed.join('\n'))
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [result, setResult] = useState<DetectResult | null>(null)
@@ -58,6 +71,9 @@ export function DetectDomainsDialog({ project, onClose }: {
   })
   const [ran, setRan] = useState<string[]>([])
   const [autoAdd, setAutoAdd] = useState(false)
+  //: Progress through a batched sweep, so a long run is visibly
+  //: running rather than apparently hung.
+  const [sweep, setSweep] = useState<{ done: number; total: number } | null>(null)
   const [queued, setQueued] =
     useState<Awaited<ReturnType<typeof api.enumerateDomains>> | null>(null)
   const [picked, setPicked] = useState<Set<number>>(new Set())
@@ -88,6 +104,31 @@ export function DetectDomainsDialog({ project, onClose }: {
    *  derivable. */
   const runAll = () => run(true, (roots.data ?? []).map((r) => r.domain))
 
+  // Every hostname on the project, not just the registrable roots.
+  // Searching under `web01.corp.com` finds names the root sweep never
+  // proposes, and detection sends nothing, so the only cost is the
+  // list getting long.
+  //
+  // Ones already searched are left out rather than re-run: that is the
+  // whole point of the memory, and a sweep that re-asked every host
+  // every time would report "nothing new" four hundred times.
+  const hostCandidates = useMemo(() => {
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const h of allHosts) {
+      const v = (h || '').trim().toLowerCase().replace(/\.$/, '')
+      // An address has no zone under it; the server refuses these
+      // individually, and filtering here keeps the count honest.
+      if (!v || !v.includes('.') || /^[0-9.]+$/.test(v) || v.includes(':')) continue
+      if (seen.has(v) || alreadySearched.has(v)) continue
+      seen.add(v)
+      out.push(v)
+    }
+    return out
+  }, [allHosts, alreadySearched])
+
+  const runAllHosts = () => run(false, hostCandidates)
+
   /** Detect against one domain, several, or every root.
    *
    *  One request, not one per domain: the endpoint takes a list and
@@ -98,7 +139,14 @@ export function DetectDomainsDialog({ project, onClose }: {
     if (!list.length) return
     setBusy(true); setErr(null)
     try {
-      const r = await api.detectDomains(project, list, force, autoAdd)
+      const r = await api.detectDomains(
+        project, list, force, autoAdd,
+        // A sweep over four hundred hostnames goes out in batches of
+        // fifty, and without this the dialog looks frozen for the
+        // length of all of them.
+        list.length > 50
+          ? (done, total) => setSweep({ done, total })
+          : undefined)
       setResult(r)
       setRan(list)
       setPicked(new Set())
@@ -112,7 +160,7 @@ export function DetectDomainsDialog({ project, onClose }: {
       if (r.promoted.length) await qc.invalidateQueries({ queryKey: ['targets'] })
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
-    } finally { setBusy(false) }
+    } finally { setBusy(false); setSweep(null) }
   }
 
   /** Hand the list to an agent and let the results file themselves.
@@ -127,6 +175,16 @@ export function DetectDomainsDialog({ project, onClose }: {
     setBusy(true); setErr(null); setQueued(null)
     try {
       const r = await api.enumerateDomains(project, domain, 'passive')
+      const bad0 = Object.keys(r.refused).length
+      if (onQueued && r.queued.length) {
+        onQueued(`Queued ${r.queued.length} enumeration`
+                 + `${r.queued.length === 1 ? '' : 's'} across `
+                 + `${r.agents_online} online agent`
+                 + `${r.agents_online === 1 ? '' : 's'}. Names found are added `
+                 + `as targets when each task reports`
+                 + (bad0 ? `. ${bad0} were refused.` : '.'))
+        return
+      }
       setQueued(r)
       const bad = Object.keys(r.refused)
       if (bad.length) {
@@ -258,6 +316,25 @@ export function DetectDomainsDialog({ project, onClose }: {
                 </Button>
               </span>
             </Tooltip>
+            <Tooltip title={hostCandidates.length
+              ? `Search under every hostname on this project that has not `
+                + `been searched before (${hostCandidates.length}). Offline, `
+                + `like the rest of detection — it extrapolates from names `
+                + `already held and sends nothing.`
+              : allHosts.length
+                ? 'Every host on this project has been searched already.'
+                : 'This project has no hosts yet.'}>
+              <span>
+                <Button variant="outlined"
+                  disabled={busy || !hostCandidates.length}
+                  onClick={runAllHosts}
+                  sx={{ mt: 0.3, color: neon.purple,
+                        borderColor: alpha(neon.purple, 0.6) }}>
+                  All hosts {hostCandidates.length
+                    ? `(${hostCandidates.length})` : ''}
+                </Button>
+              </span>
+            </Tooltip>
             <Tooltip title={(roots.data ?? []).length
               ? `Run it for every domain this project covers (${(roots.data ?? []).length}) — from its targets, its scope, and anything searched before. Generation is offline, so this costs nothing on the wire.`
               : 'Nothing to sweep: this project has no targets, no FQDNs in scope and nothing searched before. Type a domain above instead.'}>
@@ -326,7 +403,18 @@ export function DetectDomainsDialog({ project, onClose }: {
             </Alert>
           ) : null}
 
-          {busy && <LinearProgress sx={{ height: 2, bgcolor: alpha(neon.purple, 0.2),
+          {sweep && sweep.total > 0 && (
+            <Box>
+              <LinearProgress variant="determinate"
+                value={(sweep.done / sweep.total) * 100}
+                sx={{ height: 3, bgcolor: alpha(neon.purple, 0.2),
+                      '& .MuiLinearProgress-bar': { bgcolor: neon.purple } }} />
+              <Typography sx={{ fontSize: 11, color: neon.muted, mt: 0.4 }}>
+                {sweep.done} of {sweep.total} searched
+              </Typography>
+            </Box>
+          )}
+          {busy && !sweep && <LinearProgress sx={{ height: 2, bgcolor: alpha(neon.purple, 0.2),
                                          '& .MuiLinearProgress-bar': { bgcolor: neon.cyan } }} />}
 
           {result && (

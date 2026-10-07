@@ -35,11 +35,16 @@ function Flag({ text, flag }: { text: string; flag: string }) {
   )
 }
 
-export function NmapScanDialog({ project, targets, onClose }: {
+export function NmapScanDialog({ project, targets, onClose, onQueued }: {
   project: string
   /** Hosts or ranges, exactly as nmap will be given them. */
   targets: string[]
   onClose: () => void
+  /** Called with the confirmation once work is queued. The parent
+   *  closes this and says so elsewhere: a modal that stays open on
+   *  success is one the operator has to dismiss before carrying on,
+   *  and the next thing they want is the table behind it. */
+  onQueued?: (summary: string) => void
 }) {
   const qc = useQueryClient()
   const fleet = useFleet(project)
@@ -72,8 +77,9 @@ export function NmapScanDialog({ project, targets, onClose }: {
         await queue(project, agent, 'install', { tools: ['nmap'] }, region)
       }
       const t = await queue(project, agent, 'nmap', plan.args, region)
-      setDone(`Queued as task ${t.id}. It is waiting for an agent, not running `
+      const msg = (`Queued as task ${t.id}. It is waiting for an agent, not running `
               + `yet — the Jaws page shows when it starts.`)
+      if (onQueued) onQueued(msg); else setDone(msg)
       await qc.invalidateQueries({ queryKey: ['agents'] })
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
