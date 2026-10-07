@@ -1,0 +1,56 @@
+# Let Dependabot's own pull requests merge themselves, once CI agrees.
+#
+# Auto-merge does NOT skip anything: GitHub still holds the pull request
+# until every required check passes and the branch is up to date. This
+# workflow only presses the button, so the worst case is a pull request
+# that sits there, not one that lands red.
+#
+# `pull_request_target` because a workflow triggered BY Dependabot gets a
+# read-only token on `pull_request`, and enabling auto-merge is a write.
+# That trigger runs with repository write permissions, so this job must
+# never check out or execute the pull request's code -- it does neither,
+# and it should stay that way. Nothing here reads the diff.
+name: Dependabot auto-merge
+
+on: pull_request_target
+
+permissions:
+  contents: write          # to merge
+  pull-requests: write     # to enable auto-merge on the PR
+
+jobs:
+  auto-merge:
+    # Dependabot only. The actor check is what stops anyone else's pull
+    # request reaching the merge step.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: What kind of update is this
+        id: meta
+        uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2.5.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Patch and minor merge themselves. Majors wait for a person, and
+      # that is not caution for its own sake: vite 7 -> 8 broke the
+      # frontend build in this repository, because vite 8 moved to
+      # rolldown and dropped the esbuild binary a test script depended
+      # on. CI caught that one. The majors worth worrying about are the
+      # ones that pass CI and change behaviour anyway.
+      - name: Enable auto-merge for patch and minor
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Say why a major was left alone
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        run: |
+          gh pr comment "$PR_URL" --body \
+            "Left for review: this is a major version bump, and auto-merge
+          here covers patch and minor only. Merge it by hand once you are
+          happy, or comment \`@dependabot merge\` to send it through."
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
