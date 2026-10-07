@@ -116,6 +116,43 @@ export function queue(project: string, choice: AgentChoice, kind: string,
     : api.queueTask(project, choice, kind, args)
 }
 
+/**
+ * One task per subject, rather than one task holding a list.
+ *
+ * A single task with forty targets is one unit of work: one agent
+ * takes all forty and the rest of the fleet sits idle, a failure
+ * anywhere fails the lot, and the only progress visible is "running"
+ * until the whole thing is done. Split, they spread across the fleet
+ * under whatever routing the project uses, each reports on its own,
+ * and the queue depth is the number of targets left.
+ *
+ * Addressed to the pool unless an agent was chosen, so mesh can
+ * actually use the parallelism the agents advertise.
+ *
+ * Queued in order and sequentially: the server assigns ids in the
+ * order it receives them, and that is the order they run in, so a
+ * burst of concurrent POSTs would shuffle the list the operator saw.
+ */
+export async function queueEach(
+  project: string, choice: AgentChoice, kind: string, subjects: string[],
+  extra: Record<string, unknown>, region: string,
+): Promise<{ ids: number[]; failed: Array<{ subject: string; why: string }> }> {
+  const ids: number[] = []
+  const failed: Array<{ subject: string; why: string }> = []
+  for (const subject of subjects) {
+    try {
+      const t = await queue(project, choice, kind,
+                            { ...extra, targets: [subject] }, region)
+      ids.push(t.id)
+    } catch (e) {
+      // One target out of scope must not cost the other thirty-nine.
+      // Collected and named at the end rather than aborting the run.
+      failed.push({ subject, why: e instanceof Error ? e.message : String(e) })
+    }
+  }
+  return { ids, failed }
+}
+
 // ------------------------------------------------------------- nmap
 export interface NmapOptions {
   /** What the operator is asking for. Whether they get it is another
@@ -249,8 +286,11 @@ export function nmapPlan(o: NmapOptions, targets: string[],
   if (privileged === true) argv.push('-sS')
   else if (privileged === null) argv.push('[-sS if the agent has raw sockets]')
   argv.push(...extra)
-  argv.push(...(targets.length > 3
-    ? [...targets.slice(0, 3), `…+${targets.length - 3} more`] : targets))
+  // One target, because one task per target is what gets queued. The
+  // preview used to list them all on one command line, which is no
+  // longer what runs: showing `nmap … a b c` for three separate tasks
+  // would be a preview of something that never happens.
+  argv.push(targets[0] ?? '<target>')
 
   return { args, argv: argv.join(' '), warnings, blockers }
 }

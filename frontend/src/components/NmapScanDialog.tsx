@@ -20,7 +20,7 @@ import {
   AgentChooser, Argv, Caveat, EnumerateDialog, FleetNotice,
 } from './EnumerateBits'
 import {
-  NMAP_DEFAULTS, nmapPlan, queue, rawSockets, needsRegion,
+  NMAP_DEFAULTS, nmapPlan, queue, queueEach, rawSockets, needsRegion,
   useFleet, type AgentChoice, type NmapOptions,
 } from './jawsTasking'
 
@@ -76,9 +76,27 @@ export function NmapScanDialog({ project, targets, onClose, onQueued }: {
       if (o.installTools && agent !== null) {
         await queue(project, agent, 'install', { tools: ['nmap'] }, region)
       }
-      const t = await queue(project, agent, 'nmap', plan.args, region)
-      const msg = (`Queued as task ${t.id}. It is waiting for an agent, not running `
-              + `yet — the Jaws page shows when it starts.`)
+      // One task per target. Scanning twelve hosts as a single task
+      // puts all twelve on one agent and loses the lot if any part of
+      // it fails; split, they spread across the fleet and each reports
+      // on its own. `targets` is replaced per task; everything else the
+      // plan decided — ports, flags, NSE — is carried through
+      // unchanged, so what runs is still what the preview showed.
+      const { targets: _planned, ...flags } = plan.args
+      const { ids, failed } = await queueEach(project, agent, 'nmap', targets,
+                                              flags, region)
+      if (!ids.length) {
+        setErr(`Nothing was queued. ${failed[0]?.why ?? ''}`)
+        return
+      }
+      const msg = (`Queued ${ids.length} task${ids.length === 1 ? '' : 's'}, one `
+              + `per target. ${ids.length === 1 ? 'It is' : 'They are'} waiting `
+              + `for an agent, not running yet — the Jaws page shows when `
+              + `${ids.length === 1 ? 'it starts' : 'they start'}.`
+              + (failed.length
+                 ? ` ${failed.length} refused: ${failed[0].subject} — `
+                   + `${failed[0].why}`
+                 : ''))
       if (onQueued) onQueued(msg); else setDone(msg)
       await qc.invalidateQueries({ queryKey: ['agents'] })
     } catch (e) {
@@ -197,7 +215,7 @@ export function NmapScanDialog({ project, targets, onClose, onQueued }: {
             <Typography sx={{ fontSize: 10.5, color: neon.muted, mb: 0.5 }}>
               What the agent will run
             </Typography>
-            <Argv text={plan.argv} />
+            <Argv text={plan.argv} repeat={targets.length} />
           </Box>
         </Stack>
       </DialogContent>

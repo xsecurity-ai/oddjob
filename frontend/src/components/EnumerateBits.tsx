@@ -32,15 +32,32 @@ export const chipSx = (c: string) => ({
 })
 
 /** Monospace block for "this is the command that will run". */
-export function Argv({ text }: { text: string }) {
+export function Argv({ text, repeat }: { text: string
+                                         /** How many targets this will
+                                          *  be run against, one task
+                                          *  each. */
+                                         repeat?: number }) {
   return (
-    <Box sx={{
-      fontFamily: `'Share Tech Mono', monospace`, fontSize: 11.5,
-      color: neon.green, bgcolor: alpha(neon.bgDeep, 0.6),
-      border: `1px solid ${alpha(neon.green, 0.25)}`, borderRadius: 1,
-      px: 1.2, py: 0.9, overflowX: 'auto', whiteSpace: 'pre-wrap',
-      wordBreak: 'break-all',
-    }}>{text}</Box>
+    <Box>
+      <Box sx={{
+        fontFamily: `'Share Tech Mono', monospace`, fontSize: 11.5,
+        color: neon.green, bgcolor: alpha(neon.bgDeep, 0.6),
+        border: `1px solid ${alpha(neon.green, 0.25)}`, borderRadius: 1,
+        px: 1.2, py: 0.9, overflowX: 'auto', whiteSpace: 'pre-wrap',
+        wordBreak: 'break-all',
+      }}>{text}</Box>
+      {/* Said plainly rather than by listing every target on one line:
+          these go out as separate tasks, so a single command line with
+          forty arguments would be a preview of something that never
+          runs. */}
+      {repeat !== undefined && repeat > 1 && (
+        <Typography sx={{ fontSize: 11, color: neon.muted, mt: 0.5 }}>
+          …and the same for each of the other {repeat - 1} target
+          {repeat === 2 ? '' : 's'} — {repeat} tasks, spread across the
+          fleet by the project's routing.
+        </Typography>
+      )}
+    </Box>
   )
 }
 

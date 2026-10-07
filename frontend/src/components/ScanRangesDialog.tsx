@@ -35,7 +35,7 @@ import {
   AgentChooser, Argv, Caveat, EnumerateDialog, FleetNotice, chipSx,
 } from './EnumerateBits'
 import {
-  needsRegion, queue, rawSockets, useFleet, type AgentChoice,
+  needsRegion, queueEach, rawSockets, useFleet, type AgentChoice,
 } from './jawsTasking'
 
 /** Above this, a discovery sweep is a decision rather than a click. */
@@ -130,8 +130,11 @@ export function ScanRangesDialog({ project, selected = [], onClose,
     return n
   })
 
+  // One target, because one task per target is what gets queued; the
+  // count is said separately rather than crammed onto a command line
+  // that will never be run in that form.
   const head = subjects[0] ?? '<nothing selected>'
-  const more = subjects.length > 1 ? ` …+${subjects.length - 1} more` : ''
+  const more = ''
   const argv = tool === 'masscan'
     ? `masscan -oX <task output> -p ${ports || '80,443,8080,8443'} --rate 1000 `
       + head + more
@@ -143,17 +146,29 @@ export function ScanRangesDialog({ project, selected = [], onClose,
   const run = async () => {
     setBusy(true); setErr(null)
     try {
-      const args: Record<string, unknown> = { targets: subjects }
-      if (ports.trim()) args.ports = ports.trim()
-      const t = await queue(project, agent, tool, args, region)
+      // One task per range, not one task holding all of them: forty
+      // ranges in a single task is forty ranges on one agent while the
+      // rest of the fleet is idle, and one failure takes the lot.
+      const extra: Record<string, unknown> = {}
+      if (ports.trim()) extra.ports = ports.trim()
+      const { ids, failed } = await queueEach(project, agent, tool, subjects,
+                                              extra, region)
+      if (!ids.length) {
+        setErr(`Nothing was queued. ${failed[0]?.why ?? ''}`)
+        return
+      }
       const parts = [
         fromSelected.length && `${fromSelected.length} selected target(s)`,
         fromManual.length && `${fromManual.length} typed in`,
         chosen.length && `${chosen.length} scope range(s), `
                          + `${addresses.toLocaleString()} addresses`,
       ].filter(Boolean)
-      const msg = `Queued as task ${t.id} over ${parts.join(' + ')}. Results `
-                  + `import into ${project} when the agent reports back.`
+      const msg = `Queued ${ids.length} task${ids.length === 1 ? '' : 's'}, one `
+                  + `per target, over ${parts.join(' + ')}`
+                  + (failed.length
+                     ? `. ${failed.length} refused: ${failed[0].subject} — `
+                       + `${failed[0].why}`
+                     : `. Results import into ${project} as each reports back.`)
       if (onQueued) onQueued(msg); else setDone(msg)
       await qc.invalidateQueries({ queryKey: ['agents'] })
     } catch (e) {
@@ -312,7 +327,7 @@ export function ScanRangesDialog({ project, selected = [], onClose,
             <Typography sx={{ fontSize: 10.5, color: neon.muted, mb: 0.5 }}>
               What the agent will run
             </Typography>
-            <Argv text={argv} />
+            <Argv text={argv} repeat={subjects.length} />
           </Box>
 
           <Caveat>
