@@ -33,6 +33,17 @@ POSTED: list[dict] = []
 CREATED: list[str] = []
 WS_URL = ""          # filled once the fake socket server is up
 CHANNEL_NAME = "eng-vulcan"
+#: The workspace's channels, name -> id. A real registry rather than a
+#: blanket ok, because "does this channel exist" is now a question the
+#: application asks and acts on, and a fake that always says yes would
+#: make the missing-channel case untestable.
+CHANNELS: dict[str, str] = {}
+#: Set to an error string to make conversations.list fail, for the
+#: "could not determine" path.
+LIST_ERROR = ""
+#: Who is in the fake workspace. Anyone absent fails to resolve, which
+#: is what the "a failed invite is reported" check depends on.
+MEMBERS = ["wsu-person"]
 
 
 class Fake(BaseHTTPRequestHandler):
@@ -52,8 +63,31 @@ class Fake(BaseHTTPRequestHandler):
             out = {"ok": True, "ts": f"{len(POSTED)}.0001",
                    "channel": body.get("channel")}
         elif method == "conversations.create":
-            CREATED.append(body.get("name"))
-            out = {"ok": True, "channel": {"id": "C123", "name": body.get("name")}}
+            name = body.get("name")
+            if name in CHANNELS:
+                out = {"ok": False, "error": "name_taken"}
+            else:
+                CREATED.append(name)
+                CHANNELS[name] = f"C{len(CHANNELS) + 100}"
+                out = {"ok": True, "channel": {"id": CHANNELS[name],
+                                               "name": name}}
+        elif method == "users.list":
+            # A real member list, so the invite path can be driven end
+            # to end. Anyone not in here still fails to resolve, which
+            # is what the "failed invite is reported" check relies on.
+            out = {"ok": True,
+                   "members": [{"id": f"U{i}", "name": n,
+                                "profile": {"display_name": n}}
+                               for i, n in enumerate(MEMBERS, start=1)],
+                   "response_metadata": {"next_cursor": ""}}
+        elif method == "conversations.list":
+            if LIST_ERROR:
+                out = {"ok": False, "error": LIST_ERROR}
+            else:
+                out = {"ok": True,
+                       "channels": [{"id": i, "name": n}
+                                    for n, i in CHANNELS.items()],
+                       "response_metadata": {"next_cursor": ""}}
         else:
             out = {"ok": True}
         raw = json.dumps(out).encode()
@@ -471,5 +505,134 @@ check("and clears the confirmation rather than keeping both",
 
 st, _ = call("/api/projects/NOSUCH/slack/me", token=admin)
 check("an unknown project is 404, not 422", st == 404, f"status={st}")
+
+print("\n== a handle is given once per workspace, not once per project ==")
+# Asking again because a second engagement started in the same Slack is
+# how a prompt becomes something people dismiss without reading.
+call("/api/projects", "POST", {"code": "WSA", "name": "Workspace A"}, token=admin)
+call("/api/projects", "POST", {"code": "WSB", "name": "Workspace B"}, token=admin)
+call("/api/users", "POST", {"username": "wsu", "password": "wsu-password-123"},
+     token=admin)
+for p in ("WSA", "WSB"):
+    call(f"/api/projects/{p}/acl", "POST", {"username": "wsu", "role": "user"},
+         token=admin)
+wsu = call("/api/auth/login", "POST",
+           {"username": "wsu", "password": "wsu-password-123"})[1]["access_token"]
+
+st, a = call("/api/projects/WSA/slack/me", token=wsu)
+check("a new person is asked on the first engagement",
+      (a or {}).get("prompt") is True, str(a)[:120])
+st, b = call("/api/projects/WSB/slack/me", token=wsu)
+check("and on the second, while they have not answered",
+      (b or {}).get("prompt") is True, str(b)[:120])
+
+st, a = call("/api/projects/WSA/slack/me", "POST",
+             {"handle": "wsu-person"}, token=wsu)
+check("they answer on the first", (a or {}).get("confirmed") is True, str(a)[:120])
+
+st, b = call("/api/projects/WSB/slack/me", token=wsu)
+check("the second engagement no longer asks",
+      (b or {}).get("prompt") is False, str(b)[:160])
+check("but knows they are not in its channel yet",
+      (b or {}).get("can_adopt") is True, str(b)[:160])
+check("and offers back the handle they already gave",
+      (b or {}).get("handle") == "wsu-person", str(b.get("handle")))
+check("without claiming they are already in this one",
+      (b or {}).get("confirmed") is False, str(b.get("confirmed")))
+
+before = len(POSTED)
+st, b = call("/api/projects/WSB/slack/me/adopt", "POST", {}, token=wsu)
+check("adopting adds them to this engagement's channel", st == 200
+      and "added" in str((b or {}).get("invite_result")), str(b)[:160])
+check("and now it is confirmed here too",
+      (b or {}).get("confirmed") is True, str(b.get("confirmed")))
+check("still without asking", (b or {}).get("prompt") is False,
+      str(b.get("prompt")))
+
+print("-- declining is per workspace too --")
+call("/api/projects", "POST", {"code": "WSC", "name": "Workspace C"}, token=admin)
+call("/api/users", "POST", {"username": "wsn", "password": "wsn-password-123"},
+     token=admin)
+call("/api/projects/WSC/acl", "POST", {"username": "wsn", "role": "user"},
+     token=admin)
+call("/api/projects/WSA/acl", "POST", {"username": "wsn", "role": "user"},
+     token=admin)
+wsn = call("/api/auth/login", "POST",
+           {"username": "wsn", "password": "wsn-password-123"})[1]["access_token"]
+call("/api/projects/WSC/slack/me/decline", "POST", {}, token=wsn)
+st, other = call("/api/projects/WSA/slack/me", token=wsn)
+check("saying no once stops the asking everywhere in that workspace",
+      (other or {}).get("prompt") is False, str(other)[:140])
+check("and does not pretend they joined anything",
+      (other or {}).get("confirmed") is False
+      and (other or {}).get("can_adopt") is False, str(other)[:140])
+
+print("\n== a token is not a destination ==")
+# The bug this exists for: a bot token resolved, so the list showed
+# Slack as on, and every notification went into a channel_not_found
+# because nobody ever created it.
+call("/api/projects", "POST",
+     {"code": "GHOST", "name": "No channel", "slack_channel": "eng-ghost"},
+     token=admin)
+st, sc = call("/api/projects/GHOST/slack", token=admin)
+check("the site token resolves for it",
+      (sc or {}).get("token_resolves") is True, str(sc)[:120])
+check("but nothing claims Slack is on yet",
+      (sc or {}).get("active") is False, str((sc or {}).get("active")))
+
+st, r = call("/api/projects/slack/refresh?project=GHOST", "POST", {}, token=admin)
+check("a refresh reaches the workspace", st == 200, f"status={st}")
+check("and finds the channel is not there",
+      (r or {}).get("projects", {}).get("GHOST") == "missing", str(r)[:160])
+
+st, p = call("/api/projects/GHOST", token=admin)
+check("so the project is not live despite a working token",
+      p.get("slack_active") is False, str(p.get("slack_active")))
+check("and says the channel is the thing that is missing",
+      p.get("slack_channel_state") == "missing", str(p.get("slack_channel_state")))
+st, sc = call("/api/projects/GHOST/slack", token=admin)
+check("with a reason an operator can act on",
+      "does not exist in the workspace" in str((sc or {}).get("inactive_reason")),
+      str((sc or {}).get("inactive_reason"))[:120])
+
+print("-- creating it is what turns it on --")
+st, sc = call("/api/projects/GHOST/slack", "PUT", {"create": True}, token=admin)
+check("the channel is created", st == 200 and "eng-ghost" in CREATED,
+      f"status={st} {CREATED}")
+check("and creating it counts as verifying it",
+      (sc or {}).get("channel_state") == "present", str(sc)[:140])
+st, p = call("/api/projects/GHOST", token=admin)
+check("now the project is live", p.get("slack_active") is True,
+      str(p.get("slack_active")))
+check("and the list agrees",
+      next((x for x in call("/api/projects?limit=200", token=admin)[1]["items"]
+            if x["code"] == "GHOST"), {}).get("slack_active") is True, "")
+
+print("-- an unreachable workspace is not an absent channel --")
+# The distinction the whole three-state design exists for. A rate
+# limit must never be rendered as "your channel is gone".
+LIST_ERROR = "ratelimited"
+st, r = call("/api/projects/slack/refresh?project=GHOST", "POST", {}, token=admin)
+check("the refresh still succeeds", st == 200, f"status={st}")
+check("and reports unknown, not missing",
+      (r or {}).get("projects", {}).get("GHOST") == "unknown", str(r)[:160])
+st, p = call("/api/projects/GHOST", token=admin)
+check("the last known good answer is kept rather than overwritten",
+      p.get("slack_channel_state") == "present",
+      str(p.get("slack_channel_state")))
+check("with the failure recorded against it",
+      "ratelimited" in str(p.get("slack_channel_error")),
+      str(p.get("slack_channel_error"))[:90])
+LIST_ERROR = ""
+
+print("-- moving the destination forgets the old verification --")
+st, _ = call("/api/projects/GHOST/slack", "PUT",
+             {"channel": "eng-ghost-moved"}, token=admin)
+st, p = call("/api/projects/GHOST", token=admin)
+check("a new channel name is unknown, not inherited as present",
+      p.get("slack_channel_state") == "unknown",
+      str(p.get("slack_channel_state")))
+check("and the project is no longer claimed to be live",
+      p.get("slack_active") is False, str(p.get("slack_active")))
 
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

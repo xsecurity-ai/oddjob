@@ -331,6 +331,48 @@ check("a project admin can", st == 204, f"status={st}")
 st, _ = call("/api/projects/DOOMED", token=admin)
 check("and it is gone", st == 404, f"status={st}")
 
+print("\n== the code is derived when nobody supplies one ==")
+# An engagement has one name. The code is the join key — it is in every
+# URL, scan directory and report filename — but it is that same name in
+# a form a path can hold, and asking for both meant typing ACME twice.
+st, r = call("/api/projects", "POST", {"name": "Acme Bank"}, token=admin)
+check("a project can be created with no code", st == 201,
+      f"status={st} {str(r)[:120]}")
+code = ((r or {}).get("project") or {}).get("code")
+check("and gets one derived from the name", code == "ACME-BANK", str(code))
+check("which is what the project is reachable by",
+      call(f"/api/projects/{code}", token=admin)[0] == 200, str(code))
+
+st, r2 = call("/api/projects", "POST", {"name": "Acme Bank"}, token=admin)
+# Two engagements for one client in one year is normal, so this is the
+# expected path and not an error case.
+check("a second engagement of the same name gets a distinct code",
+      ((r2 or {}).get("project") or {}).get("code") == "ACME-BANK-2",
+      str(((r2 or {}).get("project") or {}).get("code")))
+
+st, r3 = call("/api/projects", "POST",
+              {"name": "Citroën Über"}, token=admin)
+# Folded, not stripped: BER-CO instead of UBER-CO would put a mangled
+# client name in every report filename.
+check("accents are folded rather than dropped",
+      ((r3 or {}).get("project") or {}).get("code") == "CITROEN-UBER",
+      str(((r3 or {}).get("project") or {}).get("code")))
+
+st, r4 = call("/api/projects", "POST", {"name": "日本"}, token=admin)
+check("a name with nothing code-able still creates",
+      st == 201 and ((r4 or {}).get("project") or {}).get("code"),
+      f"status={st} {str(r4)[:90]}")
+
+st, r5 = call("/api/projects", "POST",
+              {"code": "CHOSEN", "name": "Explicit"}, token=admin)
+check("an explicit code is still honoured",
+      ((r5 or {}).get("project") or {}).get("code") == "CHOSEN",
+      str(((r5 or {}).get("project") or {}).get("code")))
+st, _ = call("/api/projects", "POST",
+             {"code": "CHOSEN", "name": "Again"}, token=admin)
+check("and an explicit duplicate is still refused, not silently renamed",
+      st == 409, f"status={st}")
+
 print("\n== whether Slack is live, vs whether it is overridden ==")
 # These are different questions and the list column used to answer the
 # second while being labelled as the first: an engagement on the
@@ -353,18 +395,39 @@ check("with no site token, an inheriting project is not live",
       p.get("slack_active") is False, str(p.get("slack_active")))
 check("and it has no override of its own",
       p.get("slack_token_set") is False, str(p.get("slack_token_set")))
-
-p = proj("SLKOWN")
-check("a project with its own token is live without a site one",
-      p.get("slack_active") is True, str(p.get("slack_active")))
+check("the reason given is the missing token, not a missing channel",
+      p.get("slack_channel_state") == "no_token",
+      str(p.get("slack_channel_state")))
 
 call("/api/settings", "PATCH",
      {"values": {"slack.bot_token": "xoxb-site"}}, token=admin)
 p = proj("SLK")
-check("once a site token exists, the inheriting project is live",
-      p.get("slack_active") is True, str(p.get("slack_active")))
+check("a site token alone does not make a project live",
+      p.get("slack_active") is False, str(p.get("slack_active")))
 check("while still holding no token of its own — the two differ",
       p.get("slack_token_set") is False, str(p.get("slack_token_set")))
+
+# There is no Slack listening in this suite, so the channel cannot be
+# checked. That is the third outcome and it must stay distinct: a
+# workspace we cannot reach has not told us the channel is gone.
+st, sc = call("/api/projects/SLK/slack", token=admin)
+check("a token that resolves is reported as resolving",
+      (sc or {}).get("token_resolves") is True, str(sc))
+check("but Slack is not claimed to be on", (sc or {}).get("active") is False,
+      str((sc or {}).get("active")))
+st, r = call("/api/projects/slack/refresh?project=SLK", "POST", {}, token=admin)
+check("a refresh against an unreachable Slack succeeds", st == 200,
+      f"status={st} {str(r)[:120]}")
+check("and reports it could not tell, not that the channel is missing",
+      (r or {}).get("projects", {}).get("SLK") == "unknown", str(r)[:160])
+p = proj("SLK")
+check("the project agrees it is unknown rather than missing",
+      p.get("slack_channel_state") == "unknown",
+      str(p.get("slack_channel_state")))
+check("still not live, because unknown is not a working destination",
+      p.get("slack_active") is False, str(p.get("slack_active")))
+check("and it says why", bool(p.get("slack_channel_error")),
+      str(p.get("slack_channel_error"))[:90])
 
 # The reverse: set to use its own workspace, with nothing set. A site
 # token being present must not make this one look live, because
@@ -374,12 +437,29 @@ call("/api/projects/SLK", "PATCH",
 st, _ = call("/api/projects/SLK/slack-token", "DELETE", token=admin)
 p = proj("SLK")
 check("clearing the token also returns delivery to the site bot",
-      p.get("slack_delivery") == "site" and p.get("slack_active") is True,
-      f"{p.get('slack_delivery')} active={p.get('slack_active')}")
+      p.get("slack_delivery") == "site", str(p.get("slack_delivery")))
+check("and forgets what was known about the old workspace's channel",
+      p.get("slack_channel_state") == "unknown"
+      and p.get("slack_channel_checked_at") is None,
+      f"{p.get('slack_channel_state')} {p.get('slack_channel_checked_at')}")
 
 st, lst = call("/api/projects?limit=200", token=admin)
 row = next((x for x in (lst or {}).get("items", []) if x["code"] == "SLKOWN"), {})
 check("the list says the same as the detail route",
-      row.get("slack_active") is True, str(row.get("slack_active")))
+      row.get("slack_active") == proj("SLKOWN").get("slack_active"),
+      str(row.get("slack_active")))
+
+print("-- who may ask --")
+call("/api/users", "POST", {"username": "sr", "password": "sr-password-123"},
+     token=admin)
+srtok = call("/api/auth/login", "POST",
+             {"username": "sr", "password": "sr-password-123"})[1]["access_token"]
+st, r = call("/api/projects/slack/refresh", "POST", {}, token=srtok)
+# Allowed, but only over what they can see — a refresh is a read of
+# someone else's workspace otherwise.
+check("a user with no projects refreshes nothing", st == 200
+      and (r or {}).get("checked") == 0, f"status={st} {str(r)[:100]}")
+st, r = call("/api/projects/slack/refresh?project=SLK", "POST", {}, token=srtok)
+check("and cannot name a project they cannot see", st == 404, f"status={st}")
 
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

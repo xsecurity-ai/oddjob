@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import re
+import unicodedata
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,8 +16,8 @@ from ..events import broker
 from .. import slack
 from ..models import (Agent, Credential, Poc, Project, ProjectACL,
                       ProjectContact, ProjectScope,
-                      ProjectSlackMember,
-                      Service, Target, User, Vuln)
+                      ProjectSlackMember, UserSlackIdentity,
+                      Service, Target, User, Vuln, utcnow)
 from ..query import apply_search, apply_sort, paginate
 from ..scope import classify_country, classify_many
 from ..scopegate import index_for
@@ -66,9 +68,10 @@ def _counts_query():
 #: new column therefore defaulted to being dropped in silence —
 #: `codename` was added, stored correctly, and never appeared in a
 #: single response. The same mistake cost `remediation` in bulk.py.
-_EXPLICIT = {"slack_token_set", "slack_active", "slack_delivery",
-             "slack_private", "slack_private_effective", "total_targets",
-             "total_services", "total_vulns", "total_pocs"}
+_EXPLICIT = {"slack_token_set", "slack_active", "slack_channel_state",
+             "slack_channel_checked_at", "slack_channel_error",
+             "slack_delivery", "slack_private", "slack_private_effective",
+             "total_targets", "total_services", "total_vulns", "total_pocs"}
 _COPY = tuple(k for k in ProjectOut.model_fields
               if k not in _EXPLICIT and hasattr(Project, k))
 
@@ -86,21 +89,72 @@ def _out(row, cfg: dict | None = None) -> ProjectOut:
     site_token = bool(str(cfg.get("slack.bot_token") or "").strip())
     delivery = (p.slack_delivery or "site").lower()
     own = bool((p.slack_token or "").strip())
+    has_token = ((delivery in ("site", "both") and site_token)
+                 or (delivery in ("override", "both") and own))
+    # A token is half the answer. Posting to a channel nobody created
+    # fails with channel_not_found, so the channel has to have been
+    # seen in the workspace before this claims to be working.
+    state = (slack.channel_state(p) if has_token else slack.CHANNEL_NO_TOKEN)
     return ProjectOut(
         **{k: getattr(p, k) for k in _COPY},
         slack_token_set=own,
-        # Whether a notification would actually arrive, which is not the
-        # same question as whether this project overrides the token. A
-        # project on the site-wide bot has no override and working
-        # Slack; the list used to show those two cases identically.
-        slack_active=((delivery in ("site", "both") and site_token)
-                      or (delivery in ("override", "both") and own)),
+        # Whether a notification would actually arrive. Not whether this
+        # project overrides the token — a project on the site-wide bot
+        # has no override and working Slack — and not whether a token
+        # merely resolves, which says nothing about the destination.
+        slack_active=(has_token and state == slack.CHANNEL_PRESENT),
+        slack_channel_state=state,
+        slack_channel_checked_at=p.slack_channel_checked_at,
+        slack_channel_error=p.slack_channel_error or None,
         slack_delivery=delivery,
         slack_private=p.slack_private,
         slack_private_effective=(site_private if p.slack_private is None
                                  else bool(p.slack_private)),
         total_targets=row[1], total_services=row[2], total_vulns=row[3], total_pocs=row[4],
     )
+
+
+#: A code goes in URLs, scan directory names and report filenames, so
+#: it is reduced to the characters all three handle without quoting.
+_CODE_BAD = re.compile(r"[^A-Z0-9-]+")
+
+
+def derive_code(name: str) -> str:
+    """A project code from a project name. Not guaranteed unique."""
+    # Accents are folded rather than stripped: "Über" losing its first
+    # letter to become BER is worse than UBER, and a client's name
+    # mangled in every report filename is the sort of thing that gets
+    # noticed by the client.
+    folded = "".join(c for c in unicodedata.normalize("NFKD", name or "")
+                     if not unicodedata.combining(c))
+    v = _CODE_BAD.sub("-", folded.strip().upper().replace(" ", "-"))
+    v = re.sub(r"-{2,}", "-", v).strip("-")[:56]
+    # Everything was punctuation, or the name was empty. A code is
+    # mandatory, so fall back to something rather than failing the
+    # create over a name made of symbols.
+    return v or "ENGAGEMENT"
+
+
+async def _free_code(session: AsyncSession, name: str) -> str:
+    """`derive_code`, made unique against what already exists.
+
+    Two engagements for the same client in the same year is normal, so
+    the collision path is the expected one and not an error case.
+    """
+    base = derive_code(name)
+    taken = {c for (c,) in (await session.execute(
+        select(Project.code).where(Project.code.like(f"{base}%")))).all()}
+    if base not in taken:
+        return base
+    for n in range(2, 1000):
+        candidate = f"{base}-{n}"
+        if candidate not in taken:
+            return candidate
+    # 998 engagements sharing a name is not a thing that happens, but
+    # returning a duplicate would violate the unique constraint and
+    # fail with a 500 instead of something legible.
+    raise HTTPException(
+        409, f"too many engagements already named {base!r}; give an explicit code")
 
 
 async def resolve_project(session: AsyncSession, ref: str) -> Project:
@@ -162,10 +216,17 @@ async def create_project(body: ProjectCreateFull,
     act, and funnelling every new engagement through one person is how people
     end up sharing a single account. Authority stays scoped — the creator is
     admin of THIS project and nothing else."""
-    dup = (await session.execute(
-        select(Project).where(Project.code == body.code))).scalar_one_or_none()
-    if dup:
-        raise HTTPException(409, f"project {body.code!r} already exists")
+    if body.code:
+        dup = (await session.execute(
+            select(Project).where(Project.code == body.code))).scalar_one_or_none()
+        if dup:
+            raise HTTPException(409, f"project {body.code!r} already exists")
+        code = body.code
+    else:
+        # Nobody chose one, so it comes from the name. Derived rather
+        # than asked for: an engagement has one name, and the code is
+        # that name in a form a URL and a directory can hold.
+        code = await _free_code(session, body.codename or body.name)
 
     cfg = await load_all(session)
     # Selecting override/both without a token would silently post nowhere.
@@ -174,14 +235,15 @@ async def create_project(body: ProjectCreateFull,
         raise HTTPException(
             422, f"slack_delivery={delivery!r} needs a slack_token; "
                  f"without one only 'site' is possible")
-    base = body.model_dump(exclude={"scope", "contacts", "members", "slack_token",
-                                    "slack_channel", "slack_delivery", "slack_private"})
+    base = body.model_dump(exclude={"code", "scope", "contacts", "members",
+                                    "slack_token", "slack_channel",
+                                    "slack_delivery", "slack_private"})
     pr = Project(
-        **base,
+        **base, code=code,
         slack_token=body.slack_token or None,
         # Named after the operation when there is one: the existing
         # channels are called after the codename, not the client code.
-        slack_channel=channel_for(body.codename or body.code,
+        slack_channel=channel_for(body.codename or code,
                                   str(cfg.get("slack.channel_prefix") or ""),
                                   body.slack_channel),
         slack_delivery=delivery,
@@ -690,6 +752,9 @@ async def clear_slack_token(project: str, pr: Project = Depends(require_project(
     # Delivery must not keep pointing at a token that no longer exists.
     if pr.slack_delivery != "site":
         pr.slack_delivery = "site"
+    # The channel was verified in the workspace that token reached; it
+    # says nothing about the one the site bot is in.
+    _forget_channel(pr)
     await session.commit()
     await broker.publish("projects", action="update", project=pr.code)
 
@@ -815,9 +880,17 @@ class SlackConfigOut(BaseModel):
     the codename and the site prefix — and whether anything is sent at
     all depends on tokens, not on the channel.
     """
-    #: True when at least one destination resolves. This is the
-    #: question people actually mean by "is Slack on for this project".
+    #: True when a destination resolves AND its channel has been seen in
+    #: the workspace. This is the question people actually mean by "is
+    #: Slack on for this project" — a token on its own still posts into
+    #: a channel_not_found.
     active: bool
+    #: Whether a token resolves at all, which is the half of `active`
+    #: that is fixed by configuration rather than by making a channel.
+    token_resolves: bool = False
+    #: present | missing | unknown | no_token.
+    channel_state: str = "unknown"
+    channel_checked_at: datetime | None = None
     #: Where it posts, whether that was set here or derived.
     channel: str
     #: False when the name above came from the codename and the site
@@ -846,6 +919,18 @@ class SlackConfigIn(BaseModel):
     create: bool = False
 
 
+def _forget_channel(pr: Project) -> None:
+    """Drop what was known about this project's channel.
+
+    Called whenever the destination moves. Back to "unknown", never to
+    "missing": nobody has looked at the new place yet, and saying it is
+    not there would be inventing an answer.
+    """
+    pr.slack_channel_id = None
+    pr.slack_channel_checked_at = None
+    pr.slack_channel_error = None
+
+
 async def _slack_config(session: AsyncSession, pr: Project) -> SlackConfigOut:
     cfg = await load_all(session)
     site = str(cfg.get("slack.bot_token") or "").strip()
@@ -857,6 +942,7 @@ async def _slack_config(session: AsyncSession, pr: Project) -> SlackConfigOut:
          + (pr.codename or pr.code or "").lower()).strip("-"))
     dests = await _slack_channels(session, pr)
 
+    state = (slack.channel_state(pr) if dests else slack.CHANNEL_NO_TOKEN)
     why = ""
     if not dests:
         if delivery == "site" and not site:
@@ -869,8 +955,19 @@ async def _slack_config(session: AsyncSession, pr: Project) -> SlackConfigOut:
             why = "no bot token anywhere"
         else:
             why = "no destination resolves"
+    elif state == slack.CHANNEL_MISSING:
+        # The common case this whole mechanism exists for: configured
+        # correctly, posting into nothing.
+        why = (f"a bot token resolves, but #{channel} does not exist in the "
+               f"workspace — create it and notifications will start arriving")
+    elif state == slack.CHANNEL_UNKNOWN:
+        why = (pr.slack_channel_error
+               or f"#{channel} has not been checked yet, so whether a "
+                  f"notification would arrive is not known")
     return SlackConfigOut(
-        active=bool(dests), channel=channel,
+        active=bool(dests) and state == slack.CHANNEL_PRESENT,
+        token_resolves=bool(dests), channel_state=state,
+        channel_checked_at=pr.slack_channel_checked_at, channel=channel,
         channel_is_explicit=bool(explicit), delivery=delivery,
         site_token_set=bool(site), project_token_set=bool(own),
         private=bool(pr.slack_private if pr.slack_private is not None
@@ -883,6 +980,42 @@ async def read_slack_config(pr: Project = Depends(require_project("readonly")),
                             _: User = Depends(get_current_user),
                             session: AsyncSession = Depends(get_session)):
     return await _slack_config(session, pr)
+
+
+@router.post("/slack/refresh", response_model=dict)
+async def refresh_slack_channels(
+        project: str | None = Query(
+            None, description="one project code, or every visible one"),
+        user: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_session)):
+    """Ask Slack which engagement channels actually exist.
+
+    One listing call per distinct bot token, however many engagements
+    share it, so this is cheap enough to offer as a button and far too
+    expensive to do per row while rendering a list.
+    """
+    if project:
+        pr = await resolve_project(session, project)
+        vis = await visible_project_ids(session, user)
+        if vis is not None and pr.id not in vis:
+            raise HTTPException(404, f"no project {project!r}")
+        rows = [pr]
+    else:
+        stmt = select(Project)
+        vis = await visible_project_ids(session, user)
+        if vis is not None:
+            stmt = stmt.where(Project.id.in_(vis))
+        rows = list((await session.execute(stmt)).scalars())
+
+    states = await slack.refresh_channels(session, rows)
+    for pr in rows:
+        await broker.publish("projects", action="update", project=pr.code)
+    counts: dict[str, int] = {}
+    for s in states.values():
+        counts[s] = counts.get(s, 0) + 1
+    return {"checked": len(rows), "states": counts,
+            "projects": {pr.code: states.get(pr.id, slack.CHANNEL_UNKNOWN)
+                         for pr in rows}}
 
 
 @router.put("/{project}/slack", response_model=SlackConfigOut)
@@ -907,6 +1040,13 @@ async def write_slack_config(body: SlackConfigIn,
         pr.slack_token = body.token.strip()
     if body.private is not None:
         pr.slack_private = body.private
+    # Pointing somewhere new invalidates what was known about the old
+    # destination. Carrying the previous channel's id forward would
+    # report a channel as verified on the strength of a lookup against
+    # a different name in a different workspace.
+    if (body.channel is not None or body.token is not None
+            or body.delivery is not None):
+        _forget_channel(pr)
     await session.commit()
     await session.refresh(pr)
 
@@ -918,6 +1058,14 @@ async def write_slack_config(body: SlackConfigIn,
                 409, f"cannot create the channel: {out.inactive_reason}")
         token = dests[0][0]
         r = await slack.ensure_channel(token, out.channel, out.private)
+        if r.ok:
+            # Creating it IS the verification — Slack just told us the
+            # id — so the row is marked without a second round trip.
+            pr.slack_channel_id = r.channel
+            pr.slack_channel_checked_at = utcnow()
+            pr.slack_channel_error = None
+            await session.commit()
+            out = await _slack_config(session, pr)
         if not r.ok:
             # Surfaced rather than swallowed: a channel that was not
             # created is one nothing will arrive in, and the settings
@@ -937,6 +1085,10 @@ class SlackMeOut(BaseModel):
     prompt: bool
     #: Their profile default, offered as the one-click answer.
     default_handle: str | None = None
+    #: True when a handle is already on record for this project's
+    #: workspace but they are not in this engagement's channel yet.
+    #: The UI offers to add them rather than asking the question again.
+    can_adopt: bool = False
     #: What they already gave for this project, if anything.
     handle: str | None = None
     confirmed: bool = False
@@ -970,6 +1122,19 @@ async def _slack_channels(session: AsyncSession,
         return []
 
 
+async def _identities(session: AsyncSession, user_id: int,
+                      tokens: list[str]) -> dict[str, UserSlackIdentity]:
+    """This person's Slack identity in each of those workspaces."""
+    keys = {slack.workspace_key(t) for t in tokens if t}
+    if not keys:
+        return {}
+    rows = (await session.execute(
+        select(UserSlackIdentity)
+        .where(UserSlackIdentity.user_id == user_id,
+               UserSlackIdentity.workspace_key.in_(keys)))).scalars().all()
+    return {r.workspace_key: r for r in rows}
+
+
 @router.get("/{project}/slack/me", response_model=SlackMeOut)
 async def slack_me(pr: Project = Depends(require_project("readonly")),
                    user: User = Depends(get_current_user),
@@ -983,12 +1148,36 @@ async def slack_me(pr: Project = Depends(require_project("readonly")),
     """
     dests = await _slack_channels(session, pr)
     m = await _slack_member(session, pr.id, user.id)
+    ids = await _identities(session, user.id, [tok for tok, _ch in dests])
+
+    # Asked once per workspace, not once per engagement. Someone who
+    # has already given their handle for the Slack this project posts
+    # to has answered the question; asking again because a second
+    # engagement started in the same place is how a prompt becomes
+    # something people click past without reading.
+    #
+    # Still asked if ANY destination workspace is unanswered — a
+    # project posting to both the internal Slack and a customer's has
+    # two identities, and knowing one is not knowing the other.
+    unanswered = [tok for tok, _ch in dests
+                  if (i := ids.get(slack.workspace_key(tok))) is None
+                  or (i.confirmed_at is None and i.declined_at is None)]
+    known = next((i for i in ids.values() if i.confirmed_at), None)
     return SlackMeOut(
         slack_enabled=bool(dests),
-        prompt=bool(dests) and (m is None or
-                                (m.confirmed_at is None and m.declined_at is None)),
+        prompt=bool(dests) and bool(unanswered),
+        # Known here, but not yet joined to this engagement's channel.
+        can_adopt=(bool(dests) and not unanswered and known is not None
+                   and not (m and (m.invite_result or m.declined_at))),
         default_handle=user.slack_handle,
-        handle=m.handle if m else None,
+        # What they said for this workspace, falling back to this
+        # project's own older record. Shown even when not prompting, so
+        # the settings page can say which handle is in use.
+        handle=(m.handle if m else None) or (known.handle if known else None),
+        # Per engagement, deliberately. Only `prompt` is a question
+        # about the workspace; these two are "are you in THIS
+        # engagement's channel", and someone who declined this one has
+        # not retracted the handle they gave on another.
         confirmed=bool(m and m.confirmed_at),
         declined=bool(m and m.declined_at),
         channels=[ch for _tok, ch in dests],
@@ -1020,21 +1209,81 @@ async def slack_me_confirm(body: SlackMeIn,
     if body.save_as_default:
         user.slack_handle = handle
 
+    ids = await _identities(session, user.id, [tok for tok, _ch in dests])
     results: list[str] = []
     if not dests:
         results.append("slack is not configured for this project")
     for token, channel in dests:
-        uid = m.slack_user_id
+        key = slack.workspace_key(token)
+        ident = ids.get(key)
+        if ident is None:
+            ident = UserSlackIdentity(user_id=user.id, workspace_key=key)
+            session.add(ident)
+            ids[key] = ident
+        ident.handle = handle
+        ident.declined_at = None
+        ident.confirmed_at = datetime.now(timezone.utc)
+
+        # The resolved id is the expensive part — find_user has to walk
+        # the member list when there is no email match — and it is the
+        # same id in the same workspace whatever the engagement, so it
+        # is reused across projects rather than looked up again.
+        uid = ident.slack_user_id or m.slack_user_id
         if not uid:
             uid, why = await slack.find_user(token, handle, user.email)
             if not uid:
                 results.append(f"{channel}: {why}")
                 continue
-            m.slack_user_id = uid
+        ident.slack_user_id = uid
+        m.slack_user_id = uid
         r = await slack.invite_to_channel(token, channel, uid)
         results.append(f"{channel}: {'added' if r.ok else r.error}")
 
     m.invite_result = "; ".join(results)[:2000]
+    await session.commit()
+    return await slack_me(pr=pr, user=user, session=session)
+
+
+@router.post("/{project}/slack/me/adopt", response_model=SlackMeOut)
+async def slack_me_adopt(pr: Project = Depends(require_project("readonly")),
+                         user: User = Depends(get_current_user),
+                         session: AsyncSession = Depends(get_session)):
+    """Add me to this engagement's channels using the handle I already gave.
+
+    The counterpart to not prompting. Someone who confirmed their
+    handle for this workspace on another engagement should end up in
+    this one's channel too, and without being asked a question they
+    have already answered — but joining a channel is still an action,
+    so it happens here rather than as a side effect of a page load.
+    """
+    dests = await _slack_channels(session, pr)
+    ids = await _identities(session, user.id, [tok for tok, _ch in dests])
+    m = await _slack_member(session, pr.id, user.id)
+    if m is None:
+        m = ProjectSlackMember(project_id=pr.id, user_id=user.id)
+        session.add(m)
+
+    results: list[str] = []
+    for token, channel in dests:
+        ident = ids.get(slack.workspace_key(token))
+        if ident is None or not ident.confirmed_at or not ident.handle:
+            results.append(f"{channel}: no handle on record for this workspace")
+            continue
+        m.handle = m.handle or ident.handle
+        m.confirmed_at = m.confirmed_at or ident.confirmed_at
+        uid = ident.slack_user_id
+        if not uid:
+            uid, why = await slack.find_user(token, ident.handle, user.email)
+            if not uid:
+                results.append(f"{channel}: {why}")
+                continue
+            ident.slack_user_id = uid
+        m.slack_user_id = uid
+        r = await slack.invite_to_channel(token, channel, uid)
+        results.append(f"{channel}: {'added' if r.ok else r.error}")
+
+    if results:
+        m.invite_result = "; ".join(results)[:2000]
     await session.commit()
     return await slack_me(pr=pr, user=user, session=session)
 
@@ -1055,5 +1304,22 @@ async def slack_me_decline(pr: Project = Depends(require_project("readonly")),
         session.add(m)
     m.declined_at = datetime.now(timezone.utc)
     m.confirmed_at = None
+
+    # Declining is recorded against the workspace as well, or the next
+    # engagement in the same Slack asks again — which is the thing a
+    # decline is for. Only where there is no confirmed answer already:
+    # saying no on one engagement does not retract a handle given on
+    # another, and must not quietly remove them from its channels.
+    dests = await _slack_channels(session, pr)
+    ids = await _identities(session, user.id, [tok for tok, _ch in dests])
+    for token, _ch in dests:
+        key = slack.workspace_key(token)
+        ident = ids.get(key)
+        if ident is None:
+            ident = UserSlackIdentity(user_id=user.id, workspace_key=key)
+            session.add(ident)
+            ids[key] = ident
+        if ident.confirmed_at is None:
+            ident.declined_at = datetime.now(timezone.utc)
     await session.commit()
     return await slack_me(pr=pr, user=user, session=session)

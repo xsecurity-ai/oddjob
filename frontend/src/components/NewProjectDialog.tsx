@@ -48,6 +48,19 @@ function normaliseChannel(raw: string): string {
     .replace(/^-+|-+$/g, '').slice(0, 80)
 }
 
+/** Mirrors `derive_code` in backend/app/routers/projects.py.
+ *
+ *  A preview only — the server derives the real one and makes it
+ *  unique, so a drift between these two shows up as a suffix and never
+ *  as a wrong code. Accents are folded rather than stripped, so Über
+ *  previews as UBER and not BER. */
+function deriveCode(name: string): string {
+  return name.normalize('NFKD').replace(/\p{Diacritic}/gu, '')
+    .trim().toUpperCase().replace(/ /g, '-')
+    .replace(/[^A-Z0-9-]+/g, '-').replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '').slice(0, 56) || 'ENGAGEMENT'
+}
+
 type Contact = { name: string; email: string; phone: string; title: string; primary_contact: boolean }
 type Member = { username: string; role: string }
 
@@ -60,13 +73,14 @@ export function NewProjectDialog({ onClose, onCreated }: {
 }) {
   const qc = useQueryClient()
   const [customer, setCustomer] = useState('')
-  const [codename, setCodename] = useState('')
-  // The operation's name, separate from the code. ACME's code is ACME
-  // and its codename is FALCON; this field used to be labelled
-  // "Codename" but was posted as `code`, so the real operation names
-  // had nowhere to live and were never recorded.
+  // The engagement's name. There is no separate code field: the code
+  // is the join key, it is this name in a form a URL and a directory
+  // can hold, and the server derives it. Asking for both meant typing
+  // the same word twice and getting ACME/ACME in every list.
   const [opname, setOpname] = useState('')
-  const [name, setName] = useState('')
+  //: What the server assigned, so the "Open it" action below opens the
+  //: project that was actually created rather than a guess at its code.
+  const [createdCode, setCreatedCode] = useState('')
   const [scope, setScope] = useState('')
   const [slackToken, setSlackToken] = useState('')
   const [slackChannel, setSlackChannel] = useState('')
@@ -95,14 +109,14 @@ export function NewProjectDialog({ onClose, onCreated }: {
   const hasToken = !!slackToken.trim()
   // The channel is named after the operation when there is one, which
   // is what the existing channels are actually called.
-  const channelFrom = (opname.trim() || codename.trim())
+  const channelFrom = opname.trim()
   const defaultChannel = channelFrom ? normaliseChannel(prefix + channelFrom) : ''
   const resolvedChannel = slackChannel.trim()
     ? normaliseChannel(slackChannel)
     : defaultChannel
   const channelPreview = resolvedChannel
     ? `Will be #${resolvedChannel}`
-    : 'Defaults to the site prefix plus the codename, or the code.'
+    : 'Defaults to the site prefix plus the engagement name.'
 
   // Selecting a delivery that needs a token and then clearing the token
   // would be refused by the server, so fall back rather than letting the
@@ -116,9 +130,10 @@ export function NewProjectDialog({ onClose, onCreated }: {
     setErr(null); setWarn(null); setBusy(true)
     try {
       const r = await api.createProject({
-        code: codename,
-        codename: opname.trim() || null,
-        name: name.trim() || customer.trim() || codename,
+        // No code: the server derives one from the name and makes it
+        // unique. One name, not a name and a slug that have to agree.
+        codename: opname.trim(),
+        name: opname.trim() || customer.trim(),
         client: customer.trim() || null,
         scope: scopeLines,
         contacts: contacts.filter((c) => c.name.trim()),
@@ -133,6 +148,7 @@ export function NewProjectDialog({ onClose, onCreated }: {
       if (problems.length) {
         // Created, but not everything landed. Say so rather than closing on
         // a half-applied result the person never sees.
+        setCreatedCode(r.project.code)
         setWarn([
           `Created ${r.project.code} with ${r.scope.length} scope entries, ` +
           `${r.contacts.length} contact(s) and ${r.members.length} member(s).`,
@@ -180,7 +196,7 @@ export function NewProjectDialog({ onClose, onCreated }: {
           {err && <Alert severity="error" variant="outlined" sx={{ fontSize: 12.5 }}>{err}</Alert>}
           {warn && (
             <Alert severity="warning" variant="outlined" sx={{ fontSize: 12.5 }}
-                   action={<Button size="small" onClick={() => onCreated(codename.toUpperCase())}
+                   action={<Button size="small" onClick={() => onCreated(createdCode)}
                              sx={{ color: neon.cyan }}>Open it</Button>}>
               {warn.map((w, i) => <Box key={i} sx={{ mb: i === 0 ? 1 : 0.3 }}>{w}</Box>)}
             </Alert>
@@ -189,16 +205,13 @@ export function NewProjectDialog({ onClose, onCreated }: {
           <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
             <TextField size="small" fullWidth required label="Customer" value={customer}
               onChange={(e) => setCustomer(e.target.value)} placeholder="Acme Corp" />
-            <TextField size="small" fullWidth required label="Code" value={codename}
-              onChange={(e) => setCodename(e.target.value)} placeholder="ACME"
-              helperText="Uppercased. Unique across the site. Goes in the client's deliverables." />
-            <TextField size="small" fullWidth label="Codename (optional)" value={opname}
-              onChange={(e) => setOpname(e.target.value)} placeholder="FALCON"
-              helperText="The operation's internal name. Names the Slack channel." />
+            <TextField size="small" fullWidth required label="Engagement name"
+              value={opname} onChange={(e) => setOpname(e.target.value)}
+              placeholder="FALCON"
+              helperText={opname.trim()
+                ? `Names the Slack channel. Referred to as ${deriveCode(opname)}.`
+                : "What this engagement is called. Names the Slack channel."} />
           </Stack>
-          <TextField size="small" fullWidth label="Engagement name (optional)" value={name}
-            onChange={(e) => setName(e.target.value)}
-            helperText="Defaults to the customer name." />
 
           <Divider sx={{ borderColor: alpha(neon.purple, 0.2) }} />
           {section('Scope', 'One per line. CIDR, IPv4, IPv6 and FQDN are detected automatically — '
@@ -327,7 +340,7 @@ export function NewProjectDialog({ onClose, onCreated }: {
 
       <DialogActions sx={{ px: 3, pb: 2 }}>
         <Button onClick={onClose} sx={{ color: neon.muted }}>Cancel</Button>
-        <Button type="submit" variant="outlined" disabled={busy || !customer.trim() || !codename.trim()}
+        <Button type="submit" variant="outlined" disabled={busy || !customer.trim() || !opname.trim()}
           sx={{ color: neon.cyan, borderColor: alpha(neon.cyan, 0.6),
                 '&:hover': { borderColor: neon.cyan } }}>
           {busy ? '…' : 'Create engagement'}

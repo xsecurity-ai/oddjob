@@ -26,6 +26,7 @@ swallows its errors and reports them through the return value.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -119,6 +120,49 @@ async def post(token: str | None, channel: str | None, text: str,
     return Posted(ok=True, ts=d.get("ts"), channel=d.get("channel"))
 
 
+#: One page is 1000 channels and a busy workspace has more. Bounded so
+#: a paging bug cannot turn a status check into an unbounded crawl of
+#: someone's workspace; 20 pages is 20,000 channels.
+_LIST_PAGES = 20
+
+
+async def list_channels(token: str) -> tuple[dict[str, str] | None, str]:
+    """Every channel the token can see, as {name: id}. -> (map, error).
+
+    `None` for the map means the question could not be put — a bad
+    token, a rate limit, Slack being down. That is categorically
+    different from an empty map, which means the workspace answered and
+    has no channels we can see, and callers must not collapse the two:
+    one says a channel is absent, the other says we do not know.
+
+    Private channels are only listed where the bot is a member, so a
+    name missing from this map is "not visible to this bot" rather than
+    "does not exist in the workspace". For the purpose it is put to —
+    will a post to this name arrive — those amount to the same thing.
+    """
+    out: dict[str, str] = {}
+    try:
+        cursor = ""
+        for _ in range(_LIST_PAGES):
+            args: dict[str, Any] = {
+                "types": "public_channel,private_channel",
+                "limit": 1000, "exclude_archived": True}
+            if cursor:
+                args["cursor"] = cursor
+            d = await _call(token, "conversations.list", args)
+            if not d.get("ok"):
+                return None, str(d.get("error") or "slack refused the listing")[:300]
+            for ch in d.get("channels") or []:
+                if ch.get("name"):
+                    out[str(ch["name"])] = str(ch.get("id") or "")
+            cursor = ((d.get("response_metadata") or {}).get("next_cursor") or "")
+            if not cursor:
+                break
+        return out, ""
+    except Exception as e:                       # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}"[:300]
+
+
 async def ensure_channel(token: str, name: str, private: bool) -> Posted:
     """Create the channel if it is not there, and return its id.
 
@@ -132,14 +176,15 @@ async def ensure_channel(token: str, name: str, private: bool) -> Posted:
             return Posted(ok=True, channel=(d.get("channel") or {}).get("id"))
         if d.get("error") != "name_taken":
             return Posted(ok=False, error=str(d.get("error"))[:300])
-        # Already exists: find it.
-        for types in ("private_channel", "public_channel"):
-            d = await _call(token, "conversations.list",
-                            {"types": types, "limit": 1000,
-                             "exclude_archived": True})
-            for ch in d.get("channels") or []:
-                if ch.get("name") == name:
-                    return Posted(ok=True, channel=ch.get("id"))
+        # Already exists: find it. Paginated, because the name we want
+        # is as likely to be on page two as page one and reporting
+        # "could not be found" for a channel that is plainly there is
+        # the kind of answer that gets the tool distrusted.
+        found, err = await list_channels(token)
+        if found is None:
+            return Posted(ok=False, error=err)
+        if name in found:
+            return Posted(ok=True, channel=found[name])
         return Posted(ok=False, error="channel exists but could not be found")
     except Exception as e:                       # noqa: BLE001
         return Posted(ok=False, error=f"{type(e).__name__}: {e}"[:300])
@@ -336,6 +381,125 @@ async def targets_for(session, project) -> list[tuple[str, str]]:
     if delivery in ("override", "both") and own:
         out.append((own, channel))
     return out
+
+
+def workspace_key(token: str) -> str:
+    """A stable identifier for "the same Slack", from its bot token.
+
+    A digest, never the token: this is used as a lookup key and lands
+    in a table, and a second copy of a live credential sitting in a
+    column people join on would be indefensible. Two engagements
+    sharing a token are the same workspace, which is the question being
+    asked; the same workspace reached by two different tokens reads as
+    two, which costs one extra prompt and never leaks an identity
+    across a boundary it should not cross.
+    """
+    return hashlib.sha256((token or "").strip().encode()).hexdigest()[:32]
+
+
+# ------------------------------------------- does the channel exist?
+#: What `refresh_channels` writes, and what the API reports.
+CHANNEL_PRESENT = "present"
+CHANNEL_MISSING = "missing"
+CHANNEL_UNKNOWN = "unknown"
+#: No token resolves, so there is nothing to look in.
+CHANNEL_NO_TOKEN = "no_token"
+
+
+async def refresh_channels(session, projects) -> dict[int, str]:
+    """Ask each workspace which of our channels exist. -> {project_id: state}.
+
+    Grouped by token, so a deployment with fifty engagements on one
+    bot makes one listing call and not fifty. Commits.
+
+    A project set to deliver to two workspaces has to have the channel
+    in both: a post that reaches half its destinations is not a working
+    notification, and showing it as working is how someone comes to
+    believe the client was told something they were not.
+
+    Nothing here raises. Slack being unreachable leaves the previous
+    answer in place with the reason recorded, which is why the stored
+    state has an "unknown" and not just a boolean.
+    """
+    from .models import utcnow
+
+    # token -> the projects posting through it, and where.
+    by_token: dict[str, list[tuple[Any, str]]] = {}
+    no_token: list[Any] = []
+    for pr in projects:
+        dests = await targets_for(session, pr)
+        if not dests:
+            no_token.append(pr)
+            continue
+        for tok, ch in dests:
+            by_token.setdefault(tok, []).append((pr, ch))
+
+    listings: dict[str, tuple[dict[str, str] | None, str]] = {}
+    for tok in by_token:
+        listings[tok] = await list_channels(tok)
+
+    #: project id -> (state, id, error). Worst outcome across the
+    #: project's destinations wins, missing being worse than unknown
+    #: because it is actionable and unknown is not.
+    verdict: dict[int, tuple[str, str | None, str]] = {}
+    for tok, rows in by_token.items():
+        found, err = listings[tok]
+        for pr, ch in rows:
+            if found is None:
+                cur = (CHANNEL_UNKNOWN, None, err)
+            elif ch in found:
+                cur = (CHANNEL_PRESENT, found[ch] or None, "")
+            else:
+                cur = (CHANNEL_MISSING, None,
+                       f"#{ch} is not in the workspace, or the bot is not in it")
+            prev = verdict.get(pr.id)
+            if prev is None or _worse(cur[0], prev[0]):
+                verdict[pr.id] = cur
+            elif cur[0] == CHANNEL_PRESENT and prev[0] == CHANNEL_PRESENT:
+                verdict[pr.id] = prev
+
+    out: dict[int, str] = {}
+    for pr in projects:
+        if pr in no_token:
+            # Not recorded as a check: there was no workspace to ask, so
+            # stamping checked_at would claim a lookup that never
+            # happened. The absent token is the finding.
+            out[pr.id] = CHANNEL_NO_TOKEN
+            continue
+        state, cid, err = verdict.get(
+            pr.id, (CHANNEL_UNKNOWN, None, "no destination resolved"))
+        out[pr.id] = state
+        if state == CHANNEL_UNKNOWN and pr.slack_channel_checked_at is not None:
+            # Could not look this time. Keep what was last known rather
+            # than overwriting a real answer with an absence of one, and
+            # record why the refresh did not land.
+            pr.slack_channel_error = err
+            continue
+        pr.slack_channel_id = cid
+        pr.slack_channel_checked_at = utcnow()
+        pr.slack_channel_error = err
+    await session.commit()
+    return out
+
+
+_RANK = {CHANNEL_PRESENT: 0, CHANNEL_UNKNOWN: 1, CHANNEL_MISSING: 2}
+
+
+def _worse(a: str, b: str) -> bool:
+    return _RANK.get(a, 1) > _RANK.get(b, 1)
+
+
+def channel_state(pr) -> str:
+    """The stored answer for one project, without asking Slack."""
+    if pr.slack_channel_id:
+        return CHANNEL_PRESENT
+    if pr.slack_channel_checked_at is None:
+        return CHANNEL_UNKNOWN
+    # Looked, and did not find it. An error that is not "missing" means
+    # the look itself failed, which is still unknown.
+    if (pr.slack_channel_error or "").startswith("#"):
+        return CHANNEL_MISSING
+    return CHANNEL_MISSING if not pr.slack_channel_error else CHANNEL_UNKNOWN
 
 
 async def announce(session, project, text: str,

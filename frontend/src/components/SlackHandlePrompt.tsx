@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import {
   Alert, Box, Button, Checkbox, Chip, CircularProgress, Dialog, DialogActions,
-  DialogContent, DialogTitle, Divider, FormControlLabel, Stack, TextField,
-  Typography, alpha,
+  DialogContent, DialogTitle, Divider, FormControlLabel, Snackbar, Stack,
+  TextField, Typography, alpha,
 } from '@mui/material'
 import CheckCircleIcon from '@mui/icons-material/CheckCircleOutline'
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline'
@@ -69,6 +69,9 @@ export function SlackHandlePrompt({ project }: { project: string | null }) {
   const [report, setReport] = useState<SlackMe | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // Dismissing the offer below, for this view only. It is not a
+  // question, so refusing it is not an answer worth storing.
+  const [hideOffer, setHideOffer] = useState(false)
 
   // The header's project selector keeps an engagement chosen on /profile
   // and /config too, so "a project is selected" is not "a project is
@@ -91,7 +94,8 @@ export function SlackHandlePrompt({ project }: { project: string | null }) {
 
   // A different engagement is a different question.
   useEffect(() => {
-    setTyped(''); setSaveDefault(true); setReport(null); setError(null); setBusy(false)
+    setTyped(''); setSaveDefault(true); setReport(null); setError(null)
+    setBusy(false); setHideOffer(false)
   }, [project])
 
   const me = q.data
@@ -111,6 +115,24 @@ export function SlackHandlePrompt({ project }: { project: string | null }) {
     } finally { setBusy(false) }
   }
 
+  // Already known in this workspace, just not in this engagement's
+  // channel. Offered rather than done silently: giving a handle is
+  // consent to be added to that engagement's channels, and reading it
+  // as standing consent for every future one would be deciding
+  // something on their behalf. Offered rather than asked, because the
+  // question itself has been answered.
+  const adopt = async () => {
+    if (!project || busy) return
+    setBusy(true); setError(null)
+    try {
+      const r = await api.slackMe(project, 'adopt')
+      qc.setQueryData(key, r)
+      setReport(r)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally { setBusy(false) }
+  }
+
   const decline = async () => {
     if (!project || busy) return
     setBusy(true); setError(null)
@@ -125,6 +147,37 @@ export function SlackHandlePrompt({ project }: { project: string | null }) {
 
   const handle = typed.trim().replace(/^@/, '')
   const channels = me?.channels ?? []
+
+  // Known here, not in this channel. A banner, not a dialog: the
+  // question has been answered and re-opening a modal over an answered
+  // question is exactly what this whole change is removing.
+  if (!open && me?.can_adopt && !hideOffer && onProjectPage) {
+    return (
+      <Snackbar open anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+        sx={{ maxWidth: 420 }}>
+        <Alert severity="info" variant="outlined" icon={false}
+          sx={{ bgcolor: alpha(neon.paper, 0.98), fontSize: 12.5,
+                borderColor: alpha(neon.cyan, 0.5) }}
+          action={
+            <Stack direction="row" spacing={0.5}>
+              <Button size="small" disabled={busy} onClick={() => void adopt()}
+                sx={{ color: neon.green, fontSize: 11.5 }}>
+                {busy ? 'Adding…' : 'Add me'}
+              </Button>
+              <Button size="small" onClick={() => setHideOffer(true)}
+                sx={{ color: neon.muted, fontSize: 11.5 }}>
+                Not now
+              </Button>
+            </Stack>
+          }>
+          {error ? error : <>
+            You are <b>@{me.handle}</b> in this Slack. Add you to{' '}
+            {channels.map(chan).join(', ') || 'this engagement’s channels'}?
+          </>}
+        </Alert>
+      </Snackbar>
+    )
+  }
 
   return (
     // No onClose and no Escape: see the note at the top of the file. The

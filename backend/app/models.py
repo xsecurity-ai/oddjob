@@ -97,6 +97,20 @@ class Project(Base, TimestampMixin):
     # customer's own workspace. Write-only over the API, like every secret.
     slack_token: Mapped[str | None] = mapped_column(Text)
     slack_channel: Mapped[str | None] = mapped_column(String(128))
+    # Whether that channel actually exists in the workspace, which a
+    # token alone does not tell you — posting to a channel nobody
+    # created fails with channel_not_found. Recorded rather than derived
+    # because it is a fact about a remote workspace: one listing call
+    # per token refreshes every project using it.
+    #
+    # Three states, not two. An id means it was seen. A checked_at with
+    # no id means the workspace answered and the channel was not there.
+    # A NULL checked_at means nobody has been able to look, which is not
+    # the same as absent and must not render as it.
+    slack_channel_id: Mapped[str | None] = mapped_column(String(32))
+    slack_channel_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    slack_channel_error: Mapped[str | None] = mapped_column(String(300))
     # site | override | both. Only meaningful once an override token exists;
     # "both" is for an engagement that must be visible in the customer's
     # workspace AND stay on the internal record.
@@ -375,6 +389,40 @@ class Group(Base, TimestampMixin):
         secondary=user_groups, back_populates="groups", lazy="selectin")
     acls: Mapped[list["ProjectACL"]] = relationship(
         back_populates="group", cascade="all, delete-orphan", passive_deletes=True)
+
+
+class UserSlackIdentity(Base, TimestampMixin):
+    """One person's Slack identity in one workspace.
+
+    The per-project record below answers "did we add them to THIS
+    engagement's channel". This answers "who are they in Slack", which
+    is a property of the workspace and not of the engagement — someone
+    who has already told us their handle for the workspace an
+    engagement posts to should not be asked again because a second
+    engagement started in the same place.
+
+    Keyed by a digest of the bot token rather than the token itself: it
+    is the cheapest stable identifier for "the same Slack", needs no
+    extra API call, and storing a second copy of a credential to use as
+    a lookup key would be indefensible.
+    """
+    __tablename__ = "user_slack_identities"
+    __table_args__ = (
+        UniqueConstraint("user_id", "workspace_key", name="uq_slack_identity"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    #: sha256 of the bot token, truncated. Not reversible to the token.
+    workspace_key: Mapped[str] = mapped_column(String(64), index=True)
+    handle: Mapped[str | None] = mapped_column(String(128))
+    #: Slack's own id. A handle can be changed by its owner; this cannot.
+    slack_user_id: Mapped[str | None] = mapped_column(String(32))
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Saying no is per workspace too — someone declining to be added to
+    #: a customer's workspace has not declined their own company's.
+    declined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ProjectSlackMember(Base, TimestampMixin):

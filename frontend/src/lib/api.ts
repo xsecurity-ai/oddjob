@@ -11,10 +11,17 @@ export interface Project {
   description: string | null; status: string
   /** The token itself is never returned — only whether an override exists. */
   slack_token_set: boolean
-  /** Whether a notification posted now would reach a channel. Distinct
+  /** Whether a notification posted now would reach a channel: a token
+   *  resolves AND the channel has been seen in the workspace. Distinct
    *  from `slack_token_set`: a project on the site-wide bot has no
    *  override of its own and working Slack. */
   slack_active: boolean
+  /** present: seen in the workspace. missing: the workspace answered
+   *  and it was not there. unknown: Slack could not be asked, which is
+   *  NOT the same as missing. no_token: nothing to ask with. */
+  slack_channel_state: 'present' | 'missing' | 'unknown' | 'no_token'
+  slack_channel_checked_at: string | null
+  slack_channel_error: string | null
   /** site | override | both — which token(s) the project posts through. */
   slack_delivery: string
   slack_channel: string | null
@@ -886,12 +893,20 @@ export const api = {
    * on opening a project.
    */
   slackMe: (project: string,
-            answer?: { handle: string; save_as_default: boolean } | 'decline') =>
+            answer?: { handle: string; save_as_default: boolean }
+                     | 'decline' | 'adopt') =>
     req<{
       slack_enabled: boolean
       /** Ask now: Slack is on for this project and this person has
-       *  neither confirmed a handle nor declined. */
+       *  neither confirmed a handle nor declined FOR THIS WORKSPACE.
+       *  Scoped to the workspace rather than the engagement — a handle
+       *  given once should not be asked for again because a second
+       *  engagement started in the same Slack. */
       prompt: boolean
+      /** A handle is on record for this workspace, but they are not in
+       *  this engagement's channel yet. Offer to add them instead of
+       *  asking a question they have answered. */
+      can_adopt: boolean
       /** Their profile default, for the one-click answer. */
       default_handle: string | null
       /** What they already gave for THIS project, which may differ from
@@ -907,12 +922,14 @@ export const api = {
        *  is the only place that says so. */
       invite_result: string | null
     }>(`/api/projects/${encodeURIComponent(project)}/slack/me`
-         + (answer === 'decline' ? '/decline' : ''),
+         + (answer === 'decline' ? '/decline'
+            : answer === 'adopt' ? '/adopt' : ''),
       answer === undefined ? undefined : {
         method: 'POST',
         // The decline route takes no body; an empty object keeps the
         // Content-Type honest rather than sending `null`.
-        body: JSON.stringify(answer === 'decline' ? {} : answer),
+        body: JSON.stringify(
+          answer === 'decline' || answer === 'adopt' ? {} : answer),
       }),
   // --- user invites ---
   /**
@@ -993,7 +1010,12 @@ export const api = {
    *  rather than on the channel. A page showing only the stored
    *  fields would be misleading. */
   projectSlack: (project: string) => req<{
+    /** A token resolves AND its channel exists. Both, because a token
+     *  on its own posts into a channel_not_found. */
     active: boolean
+    token_resolves: boolean
+    channel_state: 'present' | 'missing' | 'unknown' | 'no_token'
+    channel_checked_at: string | null
     channel: string
     channel_is_explicit: boolean
     delivery: 'site' | 'override' | 'both'
@@ -1003,6 +1025,15 @@ export const api = {
     /** Why it is off, when it is. Empty when it is on. */
     inactive_reason: string
   }>(`/api/projects/${encodeURIComponent(project)}/slack`),
+
+  /** Ask Slack which engagement channels actually exist. One listing
+   *  call per distinct bot token, so this covers every project at
+   *  roughly the cost of covering one. Omit `project` for all of them. */
+  refreshSlackChannels: (project?: string) => req<{
+    checked: number
+    states: Record<string, number>
+    projects: Record<string, 'present' | 'missing' | 'unknown' | 'no_token'>
+  }>('/api/projects/slack/refresh' + qs({ project }), { method: 'POST' }),
   setProjectSlack: (project: string, body: {
     channel?: string; delivery?: string; token?: string
     private?: boolean; create?: boolean

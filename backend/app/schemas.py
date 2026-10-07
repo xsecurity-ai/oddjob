@@ -100,7 +100,26 @@ class ProjectBase(BaseModel):
 
 
 class ProjectCreate(ProjectBase):
-    pass
+    """A new engagement.
+
+    `code` is optional here and required everywhere else. It is the join
+    key — it is in every URL, every scan directory and every report
+    filename — but it is not something anyone wants to invent twice:
+    an engagement has one name, and the code is that name in a form a
+    path can hold. Omit it and the server derives it from the name,
+    making it unique if it has to.
+    """
+    code: str | None = Field(
+        default=None, max_length=64,
+        description="Derived from the name when omitted. Unique.")
+
+    @field_validator("code")
+    @classmethod
+    def _code(cls, v: str | None) -> str | None:
+        # Overrides the base rule, which rejects empty. Here empty means
+        # "you choose", and is the ordinary case.
+        v = (v or "").strip().upper().replace(" ", "-")
+        return v or None
 
 
 class ProjectUpdate(BaseModel):
@@ -122,10 +141,18 @@ class ProjectOut(ProjectBase):
     id: int
     # The token itself is never returned — only whether an override exists.
     slack_token_set: bool = False
-    # Whether a notification posted now would reach a channel. A project
+    # Whether a notification posted now would reach a channel: a token
+    # resolves AND the channel has been seen in the workspace. A project
     # on the site-wide bot is active with no override of its own, so
     # this and `slack_token_set` answer genuinely different questions.
     slack_active: bool = False
+    # present | missing | unknown | no_token. "unknown" is a real answer
+    # and not a synonym for missing — it means Slack could not be asked,
+    # and a rate limit must never render as "your channel is gone".
+    slack_channel_state: str = "unknown"
+    slack_channel_checked_at: datetime | None = None
+    #: Why the last check produced no channel. None when it did.
+    slack_channel_error: str | None = None
     slack_channel: str | None = None
     slack_delivery: str = "site"
     # None means "inherit the site default"; the resolved value is also given

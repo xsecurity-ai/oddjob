@@ -69,13 +69,25 @@ export function ProjectSlackCard({ project }: { project: string }) {
                           color: neon.cyan, textShadow: glow(neon.cyan, 0.5) }}>
           Slack
         </Typography>
+        {/* Which half is broken, not just that something is. A token
+            that resolves into a channel nobody created is the common
+            case and it is one button away from working; no token at
+            all is a different job on a different screen. */}
         {data.active
           ? <Chip size="small" label={`posting to #${data.channel}`} sx={{
               height: 19, fontSize: 10.5, color: neon.green,
               bgcolor: alpha(neon.green, 0.12) }} />
-          : <Chip size="small" label="nothing is sent" sx={{
-              height: 19, fontSize: 10.5, color: neon.muted,
-              bgcolor: alpha(neon.muted, 0.12) }} />}
+          : data.channel_state === 'missing'
+            ? <Chip size="small" label={`#${data.channel} does not exist`} sx={{
+                height: 19, fontSize: 10.5, color: neon.yellow,
+                bgcolor: alpha(neon.yellow, 0.14) }} />
+            : data.channel_state === 'unknown'
+              ? <Chip size="small" label="not checked" sx={{
+                  height: 19, fontSize: 10.5, color: neon.yellow,
+                  bgcolor: alpha(neon.yellow, 0.1) }} />
+              : <Chip size="small" label="nothing is sent" sx={{
+                  height: 19, fontSize: 10.5, color: neon.muted,
+                  bgcolor: alpha(neon.muted, 0.12) }} />}
         {!data.channel_is_explicit && (
           <Tooltip title="No channel was chosen for this engagement, so this name is derived from its codename and the site-wide prefix. It is a real channel name and is what gets posted to.">
             <Chip size="small" label="derived" sx={{ height: 19, fontSize: 10.5,
@@ -87,11 +99,14 @@ export function ProjectSlackCard({ project }: { project: string }) {
       {!data.active && (
         // The reason, not just the fact. "Off" with no explanation
         // sends people to the wrong settings page.
-        <Alert severity="info" variant="outlined" sx={{ mb: 1.5 }}>
+        <Alert variant="outlined" sx={{ mb: 1.5 }}
+          severity={data.channel_state === 'missing' ? 'warning' : 'info'}>
           {data.inactive_reason || 'No destination resolves.'}
           {!data.site_token_set && !data.project_token_set
             && ' A bot token is set either site-wide in Site Config, or '
              + 'here for this engagement alone.'}
+          {data.channel_state === 'missing'
+            && ' Use “Save and create the channel” below.'}
         </Alert>
       )}
 

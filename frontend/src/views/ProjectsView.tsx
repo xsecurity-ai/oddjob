@@ -2,10 +2,12 @@ import { Box, Button, Chip, IconButton, Tooltip, alpha } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
 import CheckCircleIcon from '@mui/icons-material/CheckCircleOutline'
 import CancelIcon from '@mui/icons-material/HighlightOff'
+import HelpIcon from '@mui/icons-material/HelpOutline'
+import SyncIcon from '@mui/icons-material/SyncOutlined'
 import TuneIcon from '@mui/icons-material/TuneOutlined'
 import type { GridColDef } from '@mui/x-data-grid'
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Project } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { DataTable } from '../components/DataTable'
@@ -21,8 +23,17 @@ export function ProjectsView({ onOpen, onConfigure }: {
   onConfigure: (code: string) => void
 }) {
   const { roleOn } = useAuth()
+  const qc = useQueryClient()
   const [creating, setCreating] = useState(false)
   const { data, isLoading, error } = useQuery({ queryKey: ['projects'], queryFn: api.projects })
+
+  // Asking Slack which channels exist is one listing call per distinct
+  // bot token however many engagements share it — cheap enough to be a
+  // button, far too expensive to do per row while rendering.
+  const recheck = useMutation({
+    mutationFn: () => api.refreshSlackChannels(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['projects'] }),
+  })
 
   const columns: GridColDef<Project>[] = [
     {
@@ -36,7 +47,7 @@ export function ProjectsView({ onOpen, onConfigure }: {
       // whatever the cell happens to be showing. The tooltip surfaces
       // it when it differs, because someone reading a filename or a
       // channel name still has to be able to find the row.
-      field: 'codename', headerName: 'Project', width: 190,
+      field: 'codename', headerName: 'Project', flex: 1, minWidth: 220,
       valueGetter: (_v, row) => row.codename || row.name || row.code,
       renderCell: (p) => {
         const label = String(p.value ?? '')
@@ -55,7 +66,6 @@ export function ProjectsView({ onOpen, onConfigure }: {
           : <Tooltip title={`Code: ${code}`} placement="right">{cell}</Tooltip>
       },
     },
-    { field: 'name', headerName: 'Name', flex: 2, minWidth: 200 },
     {
       // Shows the caller's own effective role, which is what makes the
       // ACL legible without opening a separate admin screen.
@@ -86,28 +96,49 @@ export function ProjectsView({ onOpen, onConfigure }: {
       renderCell: (p) => <Box sx={{ color: neon.yellow, fontWeight: 700 }}>{p.value}</Box> },
     { field: 'total_pocs', headerName: 'PoCs', width: 86, type: 'number' },
     {
-      // Whether a notification would actually arrive — not whether this
-      // engagement overrides the token. Those are different questions,
-      // and the column used to answer the second while looking like it
-      // answered the first: an engagement on the site-wide bot showed a
-      // dash with Slack working perfectly.
+      // Whether a notification would actually arrive. Two things have
+      // to be true — a token resolves AND the channel exists — and the
+      // column has answered only the first of them twice now. A token
+      // on its own posts into a channel_not_found, which looks exactly
+      // like working Slack from in here.
+      //
+      // Three icons, not two. "We could not ask Slack" is a real third
+      // answer and rendering it as a red cross would have an operator
+      // recreating a channel that was there all along.
       field: 'slack_active', headerName: 'Slack', width: 80, type: 'boolean',
       align: 'center', headerAlign: 'center',
+      valueGetter: (_v, row) => row.slack_active,
       renderCell: (p) => {
-        const on = !!p.value
-        const why = on
-          ? (p.row.slack_delivery === 'both'
-              ? 'Posting to the site-wide bot and this engagement’s own workspace'
-              : p.row.slack_delivery === 'override'
-                ? 'Posting through this engagement’s own workspace token'
-                : 'Posting through the site-wide bot')
-          : (p.row.slack_delivery === 'override'
-              ? 'Set to use its own workspace token, and none is set — nothing is posted'
-              : 'No bot token is configured, so nothing is posted')
+        const via = p.row.slack_delivery === 'both'
+          ? 'the site-wide bot and this engagement’s own workspace'
+          : p.row.slack_delivery === 'override'
+            ? 'this engagement’s own workspace token'
+            : 'the site-wide bot'
+        if (p.row.slack_active) {
+          return (
+            <Tooltip title={`Posting to #${p.row.slack_channel ?? '…'} through ${via}`}>
+              <CheckCircleIcon sx={{ fontSize: 18, color: neon.green }} />
+            </Tooltip>
+          )
+        }
+        if (p.row.slack_channel_state === 'unknown') {
+          return (
+            <Tooltip title={p.row.slack_channel_error
+              ? `Could not check with Slack: ${p.row.slack_channel_error}`
+              : 'Not checked yet — use Check Slack to find out'}>
+              <HelpIcon sx={{ fontSize: 18, color: alpha(neon.yellow, 0.8) }} />
+            </Tooltip>
+          )
+        }
+        const why = p.row.slack_channel_state === 'missing'
+          ? `A token resolves, but #${p.row.slack_channel ?? ''} is not in the `
+            + `workspace — nothing posted here arrives`
+          : p.row.slack_delivery === 'override'
+            ? 'Set to use its own workspace token, and none is set'
+            : 'No bot token is configured, so nothing is posted'
         return (
           <Tooltip title={why}>
-            {on ? <CheckCircleIcon sx={{ fontSize: 18, color: neon.green }} />
-                : <CancelIcon sx={{ fontSize: 18, color: alpha(neon.red, 0.75) }} />}
+            <CancelIcon sx={{ fontSize: 18, color: alpha(neon.red, 0.75) }} />
           </Tooltip>
         )
       },
@@ -141,12 +172,25 @@ export function ProjectsView({ onOpen, onConfigure }: {
       error={error as Error | null}
       initialSort={{ field: 'codename', sort: 'asc' }}
       extraActions={
-        // Any signed-in user may start an engagement; they become its admin.
-        <Button size="small" variant="outlined" startIcon={<AddIcon />}
-          onClick={() => setCreating(true)}
-          sx={{ color: neon.green, borderColor: alpha(neon.green, 0.5), fontSize: 11, py: 0.3 }}>
-          New engagement
-        </Button>
+        <>
+          <Tooltip title="Ask Slack which engagement channels actually exist">
+            <span>
+              <Button size="small" variant="outlined" disabled={recheck.isPending}
+                startIcon={<SyncIcon sx={{ fontSize: 16 }} />}
+                onClick={() => recheck.mutate()}
+                sx={{ color: neon.cyan, borderColor: alpha(neon.cyan, 0.5),
+                      fontSize: 11, py: 0.3, mr: 1 }}>
+                {recheck.isPending ? 'Checking…' : 'Check Slack'}
+              </Button>
+            </span>
+          </Tooltip>
+          {/* Any signed-in user may start an engagement; they become its admin. */}
+          <Button size="small" variant="outlined" startIcon={<AddIcon />}
+            onClick={() => setCreating(true)}
+            sx={{ color: neon.green, borderColor: alpha(neon.green, 0.5), fontSize: 11, py: 0.3 }}>
+            New engagement
+          </Button>
+        </>
       }
     />
     </>
