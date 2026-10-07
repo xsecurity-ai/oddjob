@@ -15,6 +15,7 @@ import (
 	"github.com/xsecurity-ai/oddjob/drone/internal/config"
 	"github.com/xsecurity-ai/oddjob/drone/internal/identity"
 	"github.com/xsecurity-ai/oddjob/drone/internal/recon"
+	"github.com/xsecurity-ai/oddjob/drone/internal/retire"
 	"github.com/xsecurity-ai/oddjob/drone/internal/spool"
 	"github.com/xsecurity-ai/oddjob/drone/internal/tasks"
 	"github.com/xsecurity-ai/oddjob/drone/internal/tools"
@@ -25,6 +26,11 @@ type Agent struct {
 	cli *client.Client
 	sp  *spool.Spool
 	id  *identity.Identity
+	// When this process came up. The dead-man switch falls back to it
+	// when there has never been a successful contact to measure from,
+	// so a Drone that enrolled and immediately lost the server still
+	// cleans itself up instead of sitting on the host forever.
+	started time.Time
 
 	mu      sync.Mutex
 	busy    bool
@@ -56,6 +62,7 @@ func New(cfg *config.Config) *Agent {
 			cfg.SpoolDir(), err)
 	}
 	return &Agent{
+		started: time.Now(),
 		cfg:     cfg,
 		sp:      sp,
 		running: map[int]bool{},
@@ -179,10 +186,16 @@ func (a *Agent) Register(ctx context.Context) error {
 	// a missing tool costs three dispatches and tells the operator
 	// nothing they could act on.
 	missing := map[string]string{}
+	// Everything we install goes in the ledger, so retirement can undo
+	// exactly what this Drone did and leave alone what it found.
+	var added []retire.Entry
 	for _, r := range tools.Ensure(ctx, tools.Baseline, tools.Privileged()) {
 		switch r.Action {
 		case "installed":
 			log.Printf("  installed %s %s", r.Tool, r.Version)
+			added = append(added, retire.Entry{
+				Tool: r.Tool, Action: r.Action, Version: r.Version,
+				Via: r.Via, Pkg: r.Pkg, Path: r.Path})
 		case "present":
 			log.Printf("  %s already present (%s)", r.Tool, r.Version)
 		default:
@@ -199,6 +212,13 @@ func (a *Agent) Register(ctx context.Context) error {
 	a.mu.Lock()
 	a.missing = missing
 	a.mu.Unlock()
+	if err := retire.RecordInstalls(a.cfg.WorkDir, added); err != nil {
+		// Not fatal, but say it loudly: an unrecorded install is a tool
+		// left on somebody's host after the engagement ends, and the
+		// Drone will no longer know it put it there.
+		log.Printf("WARNING: could not record installed tools (%v) — these "+
+			"will NOT be cleaned up automatically on retirement", err)
+	}
 
 	// Again, now that the inventory is true.
 	return announce("ready")
@@ -358,14 +378,28 @@ func (a *Agent) Run(ctx context.Context) error {
 			// must not end the agent — it is typically on a host nobody
 			// will log back into for days.
 			log.Printf("heartbeat: %v", err)
+			// ...but not forever. "Nobody will log back into it for
+			// days" is the same sentence as "nobody will remove it
+			// when the engagement ends".
+			if silent, over := a.tooLongSilent(); over {
+				a.retire(ctx, fmt.Sprintf(
+					"no contact with Oddjob for %s (limit %s)",
+					silent.Round(time.Minute), a.cfg.MaxSilence), false)
+				return nil
+			}
 			continue
 		}
+		// Reached the server. The clock is on disk, not in memory: a
+		// Drone crash-looping on a stranded host would otherwise reset
+		// it on every start and never time out.
+		retire.TouchContact(a.cfg.WorkDir)
 		if resp.Shutdown {
-			// Killed from Oddjob. Drain first: a result this agent is
-			// still holding is the last useful thing it can do, and
-			// exiting with it undelivered would lose a scan that ran.
-			log.Printf("told to stop: %s", resp.Reason)
-			a.drain(ctx)
+			// Killed from Oddjob.
+			reason := resp.Reason
+			if reason == "" {
+				reason = "killed from Oddjob"
+			}
+			a.retire(ctx, reason, true)
 			return nil
 		}
 		// `tasks` when the server sends it, falling back to the
@@ -628,4 +662,117 @@ func toString(v any) string {
 		return e.Error()
 	}
 	return "unknown"
+}
+
+// tooLongSilent reports how long Oddjob has been unreachable, and
+// whether that is past the limit.
+//
+// The clock starts at the last SUCCESSFUL contact on disk. If there
+// has never been one — a Drone that enrolled and immediately lost the
+// server — the process start is used instead, so a host that was never
+// reachable still cleans itself up rather than sitting there forever.
+func (a *Agent) tooLongSilent() (time.Duration, bool) {
+	if a.cfg.MaxSilence <= 0 {
+		return 0, false
+	}
+	since := retire.LastContact(a.cfg.WorkDir)
+	if since.IsZero() {
+		since = a.started
+	}
+	d := time.Since(since)
+	return d, d > a.cfg.MaxSilence
+}
+
+// retire takes this Drone off the host for good.
+//
+// Order matters, and it is: deliver, then tell, then uninstall, then
+// mark.
+//
+//   - deliver first, because a result still in the spool is the last
+//     useful thing this Drone will ever do and nothing below can be
+//     undone afterwards;
+//   - tell the server before uninstalling, while the tools are still
+//     there to be named, and because the report is best-effort — on
+//     the dead-man path the server is unreachable by definition;
+//   - uninstall only what the ledger says we installed;
+//   - mark last, so a crash anywhere above leaves a Drone that will
+//     try again rather than one that is silently half-retired.
+//
+// `reachable` says whether the server is believed to be listening. It
+// is false on the dead-man path, where skipping the report saves a
+// pointless timeout on a host that is already stranded.
+func (a *Agent) retire(ctx context.Context, reason string, reachable bool) {
+	log.Printf("retiring: %s", reason)
+
+	// Deliver whatever is owed. Bounded: a stranded Drone must not
+	// spend an hour retrying a server that is not there.
+	dctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	a.drain(dctx)
+	cancel()
+
+	entries, lerr := retire.Ledger(a.cfg.WorkDir)
+	if lerr != nil {
+		log.Printf("WARNING: %v — tools this drone installed may be left "+
+			"behind on this host", lerr)
+	}
+
+	// Uninstall exactly what we put here. Given its own context: the
+	// caller's may already be cancelled by the signal that is stopping
+	// us, and a cancelled context would skip the cleanup entirely.
+	rctx, rcancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	removals := tools.Remove(rctx, toInstallReports(entries), tools.Privileged())
+	rcancel()
+
+	var removed, kept, failed []string
+	for _, r := range removals {
+		switch r.Action {
+		case "removed":
+			removed = append(removed, r.Tool)
+			log.Printf("  removed %s (%s)", r.Tool, r.Via)
+		case "kept":
+			kept = append(kept, r.Tool)
+		default:
+			failed = append(failed, r.Tool+": "+r.Detail)
+			log.Printf("  could NOT remove %s: %s", r.Tool, r.Detail)
+		}
+	}
+	if len(entries) == 0 {
+		log.Printf("  nothing to uninstall: this drone installed no tools here")
+	}
+
+	reported := false
+	if reachable {
+		rep, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := a.cli.Retired(rep, reason, removed, kept, failed); err != nil {
+			log.Printf("  could not tell Oddjob it has retired: %v", err)
+		} else {
+			reported = true
+		}
+		cancel2()
+	}
+
+	// The tombstone goes last and is what makes this stick. Exiting is
+	// not enough: `--restart unless-stopped` and `Restart=always` both
+	// bring a Drone back within seconds, and both are what the
+	// documentation tells people to use.
+	if err := retire.Mark(a.cfg.WorkDir, retire.Tombstone{
+		Reason: reason, Removed: removed, Kept: kept, Failed: failed,
+		Reported: reported,
+	}); err != nil {
+		log.Printf("WARNING: could not write the retirement marker (%v) — "+
+			"a supervisor WILL restart this drone", err)
+		return
+	}
+	log.Printf("retired. This drone will not start again from %s until the "+
+		"marker is removed.", a.cfg.WorkDir)
+}
+
+func toInstallReports(in []retire.Entry) []tools.InstallReport {
+	out := make([]tools.InstallReport, 0, len(in))
+	for _, e := range in {
+		out = append(out, tools.InstallReport{
+			Tool: e.Tool, Action: e.Action, Version: e.Version,
+			Via: e.Via, Pkg: e.Pkg, Path: e.Path})
+	}
+	return out
 }

@@ -344,3 +344,29 @@ func (c *Client) SubmitResult(ctx context.Context, id int, r Result) error {
 	}
 	return fmt.Errorf("after 5 attempts: %w", last)
 }
+
+// RetiredReq is a Drone's last message: it has stopped, and this is
+// what it took with it.
+type RetiredReq struct {
+	Reason string `json:"reason"`
+	// Tools uninstalled, tools left because they were already on the
+	// host, and tools we could not remove. The third list is the one
+	// that matters: it is the cleanup somebody still has to do by hand.
+	Removed []string `json:"removed,omitempty"`
+	Kept    []string `json:"kept,omitempty"`
+	Failed  []string `json:"failed,omitempty"`
+}
+
+// Retired tells Oddjob this Drone has shut down for good.
+//
+// Best effort and short: it is sent while retiring, and a Drone that
+// hung here would be one that failed to clean up because it could not
+// file a report about cleaning up. One attempt, then carry on.
+func (c *Client) Retired(ctx context.Context, reason string,
+	removed, kept, failed []string) error {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	return c.do(ctx, http.MethodPost, "/api/agents/retired",
+		RetiredReq{Reason: reason, Removed: removed, Kept: kept,
+			Failed: failed}, nil)
+}

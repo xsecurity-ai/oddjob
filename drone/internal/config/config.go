@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"os"
@@ -38,6 +39,20 @@ type Config struct {
 
 	Name      string
 	Heartbeat time.Duration
+	// MaxSilence is how long this Drone will go unable to reach Oddjob
+	// before it uninstalls what it installed and stops for good.
+	//
+	// A Drone is a privileged process holding a credential to someone
+	// else's engagement data, and engagements end whether or not
+	// anybody remembers to tear down the fleet. Left alone it survives
+	// reboots -- that is what `--restart unless-stopped` and
+	// `Restart=always` are for -- so the thing that eventually removes
+	// it has to be the Drone itself.
+	//
+	// Zero disables it, which is the right answer for a long-lived
+	// Drone on infrastructure you own and watch, and the wrong one
+	// almost everywhere else.
+	MaxSilence time.Duration
 	// Insecure skips TLS verification. Engagement infrastructure
 	// routinely has a self-signed certificate; refusing to connect is
 	// not a useful default for a tool that lives on that network. It is
@@ -133,10 +148,11 @@ func Defaults() *Config {
 		host = "drone"
 	}
 	return &Config{
-		Name:      fmt.Sprintf("%s-%s", host, runtime.GOOS),
-		Heartbeat: 15 * time.Second,
-		Listen:    "",
-		WorkDir:   defaultWorkDir(),
+		Name:       fmt.Sprintf("%s-%s", host, runtime.GOOS),
+		Heartbeat:  15 * time.Second,
+		Listen:     "",
+		WorkDir:    defaultWorkDir(),
+		MaxSilence: 12 * time.Hour,
 	}
 }
 
@@ -186,5 +202,16 @@ func (c *Config) FromEnv() {
 	}
 	if c.Advertise == "" {
 		c.Advertise = env("ADVERTISE")
+	}
+	// Same rule as WORKDIR: the environment only fills what the flag
+	// left at its default. "0" is a deliberate value here, meaning
+	// never time out, so it has to be distinguishable from unset.
+	if v := env("MAX_SILENCE"); v != "" && c.MaxSilence == Defaults().MaxSilence {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.MaxSilence = d
+		} else {
+			log.Printf("WARNING: DRONE_MAX_SILENCE=%q is not a duration "+
+				"(try 12h) — keeping %s", v, c.MaxSilence)
+		}
 	}
 }

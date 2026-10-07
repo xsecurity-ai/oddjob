@@ -241,6 +241,7 @@ type Manager struct {
 	Name    string
 	Install []string // argv prefix; the package name is appended
 	Refresh []string // argv to update the index first, may be nil
+	Remove  []string // argv prefix for uninstalling; the package is appended
 	Sudo    bool
 }
 
@@ -253,19 +254,27 @@ func DetectManager() (*Manager, string) {
 		case Path("apt-get") != "":
 			return &Manager{Name: "apt", Sudo: true,
 				Refresh: []string{"apt-get", "update", "-qq"},
-				Install: []string{"apt-get", "install", "-y", "--no-install-recommends"}}, ""
+				Install: []string{"apt-get", "install", "-y", "--no-install-recommends"},
+				// --auto-remove takes the dependencies that came with
+				// it and nothing else; purge would also delete config
+				// belonging to a package somebody else installed.
+				Remove: []string{"apt-get", "remove", "-y", "--auto-remove"}}, ""
 		case Path("dnf") != "":
 			return &Manager{Name: "dnf", Sudo: true,
-				Install: []string{"dnf", "install", "-y"}}, ""
+				Install: []string{"dnf", "install", "-y"},
+				Remove:  []string{"dnf", "remove", "-y"}}, ""
 		case Path("yum") != "":
 			return &Manager{Name: "yum", Sudo: true,
-				Install: []string{"yum", "install", "-y"}}, ""
+				Install: []string{"yum", "install", "-y"},
+				Remove:  []string{"yum", "remove", "-y"}}, ""
 		case Path("apk") != "":
 			return &Manager{Name: "apk", Sudo: true,
-				Install: []string{"apk", "add", "--no-cache"}}, ""
+				Install: []string{"apk", "add", "--no-cache"},
+				Remove:  []string{"apk", "del"}}, ""
 		case Path("pacman") != "":
 			return &Manager{Name: "pacman", Sudo: true,
-				Install: []string{"pacman", "-S", "--noconfirm"}}, ""
+				Install: []string{"pacman", "-S", "--noconfirm"},
+				Remove:  []string{"pacman", "-Rns", "--noconfirm"}}, ""
 		}
 		return nil, "no supported package manager found (looked for apt-get, dnf, yum, apk, pacman)"
 	case "darwin":
@@ -273,18 +282,21 @@ func DetectManager() (*Manager, string) {
 			// Never with sudo: Homebrew refuses, and insisting would
 			// leave root-owned files in the Cellar that break every
 			// later install.
-			return &Manager{Name: "brew", Install: []string{"brew", "install"}}, ""
+			return &Manager{Name: "brew", Install: []string{"brew", "install"},
+				Remove: []string{"brew", "uninstall"}}, ""
 		}
 		return nil, "Homebrew is not installed — see https://brew.sh"
 	case "windows":
 		if Path("choco") != "" {
 			return &Manager{Name: "choco",
-				Install: []string{"choco", "install", "-y"}}, ""
+				Install: []string{"choco", "install", "-y"},
+				Remove:  []string{"choco", "uninstall", "-y"}}, ""
 		}
 		if Path("winget") != "" {
 			return &Manager{Name: "winget",
 				Install: []string{"winget", "install", "--silent",
-					"--accept-package-agreements", "--accept-source-agreements"}}, ""
+					"--accept-package-agreements", "--accept-source-agreements"},
+				Remove: []string{"winget", "uninstall", "--silent"}}, ""
 		}
 		return nil, "neither Chocolatey nor winget is available"
 	}
@@ -311,6 +323,15 @@ type InstallReport struct {
 	Action  string `json:"action"` // present | installed | failed | unavailable
 	Version string `json:"version,omitempty"`
 	Detail  string `json:"detail,omitempty"`
+	// How it arrived, and under what package name. Recorded because a
+	// Drone that cleans up after itself has to undo exactly what it
+	// did: apt, snap and `go install` put the binary in three
+	// different places, and guessing at retirement time means either
+	// leaving tools behind on someone's host or removing one that was
+	// already there before we arrived.
+	Via  string `json:"via,omitempty"`  // apt | dnf | yum | apk | pacman | brew | choco | snap | go
+	Pkg  string `json:"pkg,omitempty"`  // the package/module name used
+	Path string `json:"path,omitempty"` // where the binary landed, for `go`
 }
 
 // Ensure installs any of `names` that are missing. Already-present
@@ -347,6 +368,7 @@ func Ensure(ctx context.Context, names []string, elevated bool) []InstallReport 
 		// common agent platform.
 		var why []string
 		installed := false
+		via, viaPkg := "", ""
 
 		if p := mgr.pkgFor(name); p != "" {
 			if mgr.Refresh != nil && !refreshed {
@@ -355,7 +377,7 @@ func Ensure(ctx context.Context, names []string, elevated bool) []InstallReport 
 			}
 			argv := append(append([]string{}, mgr.Install...), p)
 			if out := run(ctx, mgr, elevated, argv, 15*time.Minute); out == "" {
-				installed = true
+				installed, via, viaPkg = true, mgr.Name, p
 			} else {
 				why = append(why, mgr.Name+": "+trunc(out, 200))
 			}
@@ -366,7 +388,7 @@ func Ensure(ctx context.Context, names []string, elevated bool) []InstallReport 
 		if !installed {
 			if out, tried := installSnap(ctx, name, elevated); tried {
 				if out == "" {
-					installed = true
+					installed, via, viaPkg = true, "snap", Known[name].snap
 				} else {
 					why = append(why, "snap: "+trunc(out, 200))
 				}
@@ -375,7 +397,7 @@ func Ensure(ctx context.Context, names []string, elevated bool) []InstallReport 
 		if !installed {
 			if out, tried := installGo(ctx, name, elevated); tried {
 				if out == "" {
-					installed = true
+					installed, via, viaPkg = true, "go", Known[name].gomod
 				} else {
 					why = append(why, "go install: "+trunc(out, 200))
 				}
@@ -392,7 +414,8 @@ func Ensure(ctx context.Context, names []string, elevated bool) []InstallReport 
 			continue
 		}
 		reports = append(reports, InstallReport{Tool: name, Action: "installed",
-			Version: Version(ctx, name)})
+			Version: Version(ctx, name), Via: via, Pkg: viaPkg,
+			Path: Path(name)})
 	}
 	return reports
 }
@@ -493,4 +516,105 @@ func runEnv(ctx context.Context, m *Manager, elevated bool, argv []string,
 		return strings.TrimSpace(string(out)) + " (" + err.Error() + ")"
 	}
 	return ""
+}
+
+// RemovalReport is the outcome of undoing one install.
+type RemovalReport struct {
+	Tool    string `json:"tool"`
+	Action  string `json:"action"` // removed | kept | failed
+	Detail  string `json:"detail,omitempty"`
+	Via     string `json:"via,omitempty"`
+}
+
+// Remove uninstalls tools this Drone installed, and ONLY those.
+//
+// The input is the ledger written at install time, not a list of
+// baseline tools: nmap that was already on the host when the Drone
+// arrived belongs to whoever put it there, and removing it on our way
+// out is a worse trespass than leaving ours behind. Anything whose
+// ledger entry does not say we installed it is kept and reported as
+// kept.
+//
+// Each entry is undone the way it was done. `go install` wrote a
+// binary into GOBIN and the package manager never heard about it, so
+// the only correct removal is deleting that file; conversely deleting
+// a file apt owns leaves the package database claiming it is still
+// there.
+//
+// Never fails the caller. Retirement has to finish even on a host
+// where the package manager is wedged — a Drone that refuses to shut
+// down because it could not uninstall gobuster is worse than one that
+// leaves gobuster behind and says so.
+func Remove(ctx context.Context, entries []InstallReport, elevated bool) []RemovalReport {
+	out := make([]RemovalReport, 0, len(entries))
+	var mgr *Manager
+
+	for _, e := range entries {
+		if e.Action != "installed" {
+			out = append(out, RemovalReport{Tool: e.Tool, Action: "kept",
+				Detail: "was already on this host before the drone arrived"})
+			continue
+		}
+		switch e.Via {
+		case "go":
+			// Delete the binary. `go install` leaves no package record
+			// to ask, so the path recorded at install time is the only
+			// handle there is.
+			path := e.Path
+			if path == "" {
+				path = Path(e.Tool)
+			}
+			if path == "" {
+				out = append(out, RemovalReport{Tool: e.Tool, Action: "failed",
+					Via: e.Via, Detail: "cannot find the binary to delete"})
+				continue
+			}
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				out = append(out, RemovalReport{Tool: e.Tool, Action: "failed",
+					Via: e.Via, Detail: trunc(err.Error(), 200)})
+				continue
+			}
+			out = append(out, RemovalReport{Tool: e.Tool, Action: "removed",
+				Via: e.Via, Detail: path})
+		case "":
+			out = append(out, RemovalReport{Tool: e.Tool, Action: "failed",
+				Detail: "the ledger does not say how it was installed"})
+		default:
+			if mgr == nil {
+				var why string
+				if mgr, why = DetectManager(); mgr == nil {
+					out = append(out, RemovalReport{Tool: e.Tool,
+						Action: "failed", Via: e.Via, Detail: why})
+					continue
+				}
+			}
+			if mgr.Remove == nil {
+				out = append(out, RemovalReport{Tool: e.Tool, Action: "failed",
+					Via: e.Via, Detail: mgr.Name + " has no uninstall command here"})
+				continue
+			}
+			name := e.Pkg
+			if name == "" {
+				name = e.Tool
+			}
+			if e.Via == "snap" {
+				if o := run(ctx, mgr, elevated,
+					[]string{"snap", "remove", name}, 10*time.Minute); o != "" {
+					out = append(out, RemovalReport{Tool: e.Tool, Action: "failed",
+						Via: e.Via, Detail: trunc(o, 200)})
+					continue
+				}
+			} else {
+				argv := append(append([]string{}, mgr.Remove...), name)
+				if o := run(ctx, mgr, elevated, argv, 10*time.Minute); o != "" {
+					out = append(out, RemovalReport{Tool: e.Tool, Action: "failed",
+						Via: e.Via, Detail: trunc(o, 200)})
+					continue
+				}
+			}
+			out = append(out, RemovalReport{Tool: e.Tool, Action: "removed",
+				Via: e.Via, Detail: name})
+		}
+	}
+	return out
 }

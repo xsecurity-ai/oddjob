@@ -17,6 +17,7 @@ import (
 	"github.com/xsecurity-ai/oddjob/drone/internal/callin"
 	"github.com/xsecurity-ai/oddjob/drone/internal/config"
 	"github.com/xsecurity-ai/oddjob/drone/internal/recon"
+	"github.com/xsecurity-ai/oddjob/drone/internal/retire"
 	"github.com/xsecurity-ai/oddjob/drone/internal/tools"
 )
 
@@ -24,6 +25,7 @@ const usage = `drone — enumeration agent for Oddjob
 
   drone run      connect to Oddjob and take tasking
   drone check    report what this host can do, and exit
+  revive    clear a retirement marker so a stopped drone can start again
   drone install  install the baseline tools, and exit
   drone lookup   resolve a name or address, and exit
   drone rdns     find the domains hosted on an address, and exit
@@ -46,6 +48,8 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		os.Exit(cmdRun(os.Args[2:]))
+	case "revive":
+		os.Exit(cmdRevive(os.Args[2:]))
 	case "check":
 		os.Exit(cmdCheck())
 	case "install":
@@ -78,6 +82,8 @@ func cmdRun(argv []string) int {
 	fs.StringVar(&cfg.Advertise, "advertise", "", "URL the server should use to reach --listen")
 	fs.StringVar(&cfg.Name, "name", cfg.Name, "name to report")
 	fs.DurationVar(&cfg.Heartbeat, "heartbeat", cfg.Heartbeat, "poll interval")
+	fs.DurationVar(&cfg.MaxSilence, "max-silence", cfg.MaxSilence,
+		"uninstall and stop after this long unable to reach Oddjob (0 disables)")
 	fs.BoolVar(&cfg.Insecure, "insecure", false, "skip TLS verification")
 	fs.BoolVar(&cfg.AllowPlaintext, "allow-plaintext", false,
 		"permit a non-loopback http:// server")
@@ -85,6 +91,35 @@ func cmdRun(argv []string) int {
 	_ = fs.Parse(argv)
 
 	cfg.FromEnv()
+
+	// Before the credential check, and before touching the network:
+	// has this Drone already been retired?
+	//
+	// Exiting is not what stops a Drone. `--restart unless-stopped`
+	// and `Restart=always` both bring it back within seconds, and both
+	// are what the documentation tells people to use — so without a
+	// mark on disk, "kill this drone" is a four-second pause. The work
+	// directory is a volume precisely so this survives.
+	//
+	// Ahead of Validate() because a retired Drone's enrollment token
+	// is spent: it would otherwise report "nothing to authenticate
+	// with", which is true, useless, and hides the real reason.
+	if t, ok := retire.Marked(cfg.WorkDir); ok {
+		log.Printf("this drone was retired: %s", t.Reason)
+		if t.At != "" {
+			log.Printf("  at %s", t.At)
+		}
+		if len(t.Failed) > 0 {
+			log.Printf("  tools it could NOT remove, still on this host: %v",
+				t.Failed)
+		}
+		log.Printf("  not starting. To bring it back deliberately: "+
+			"drone revive --workdir %s", cfg.WorkDir)
+		// Zero, not an error: a supervisor that sees a failure exit
+		// restarts it, logs the failure, and does that forever.
+		return 0
+	}
+
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "drone: \n  %v\n", err)
 		return 2
@@ -135,6 +170,31 @@ func cmdRun(argv []string) int {
 		log.Printf("drone: %v", err)
 		return 1
 	}
+	return 0
+}
+
+func cmdRevive(argv []string) int {
+	cfg := config.Defaults()
+	fs := flag.NewFlagSet("revive", flag.ExitOnError)
+	fs.StringVar(&cfg.WorkDir, "workdir", cfg.WorkDir, "the drone's work directory")
+	_ = fs.Parse(argv)
+	cfg.FromEnv()
+
+	t, ok := retire.Marked(cfg.WorkDir)
+	if !ok {
+		fmt.Printf("not retired: no marker in %s\n", cfg.WorkDir)
+		return 0
+	}
+	if err := retire.Unmark(cfg.WorkDir); err != nil {
+		fmt.Fprintf(os.Stderr, "drone: could not clear the marker: %v\n", err)
+		return 1
+	}
+	fmt.Printf("cleared the retirement marker (%s).\n", t.Reason)
+	// The identity went with the kill, and the tools it uninstalled
+	// are not coming back on their own. Say so rather than letting
+	// somebody discover it on the next task.
+	fmt.Printf("This drone still needs a fresh enrollment token, and any " +
+		"tools it uninstalled will be reinstalled on the next start.\n")
 	return 0
 }
 
