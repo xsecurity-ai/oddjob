@@ -196,7 +196,15 @@ to do.
 | | |
 |---|---|
 | **Read** | `list_projects` `list_targets` `get_target` `list_ports` `list_services` `list_vulns` `target_timeline` `stats` `whoami` `import_formats` |
+| **Exploits** | `search_exploits` `service_leads` `get_cve` `feed_status` |
 | **Write** | `create_project` `set_target_flags` `add_target_note` `bulk_import` `import_report` `import_nmap` |
+
+The exploit tools match against Oddjob's own copy of Exploit-DB and NVD,
+so a lookup tells nobody what the client runs — see
+[Exploits and CVEs](#exploits-and-cves-held-locally). `service_leads`
+takes a product and version and has no host parameter, which is the
+boundary rather than a convention. Read `version_match` on each result
+before believing it, and `feed_status` before believing an empty one.
 
 ### Two agents, and they are not the same thing
 
