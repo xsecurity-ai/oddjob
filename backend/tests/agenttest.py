@@ -1038,6 +1038,42 @@ check("writes are off when no single project is in view",
       (wide or {}).get("allow_writes") is False,
       str((wide or {}).get("allow_writes")))
 
+print("== read-only tools are available in read-only mode ==")
+# These four only read, and they are the ones an analyst actually asks
+# for: what is worth attacking, what runs PHP, what has a public
+# exploit. Registering them after the allow_writes gate left every one
+# of them unreachable in the mode the agent runs in by default, which
+# is the mode nearly every deployment uses.
+import asyncio as _aio                                           # noqa: E402
+from app.agent.tools import build as _build                      # noqa: E402
+from app.db import SessionLocal as _SL                           # noqa: E402
+from app.models import Project as _P, User as _U                 # noqa: E402
+from sqlalchemy import select as _sel                            # noqa: E402
+
+_READ_ONLY = ["rank_targets", "find_by_technology", "exploit_leads",
+              "search_exploits", "get_host", "host_timeline"]
+
+
+async def _names(allow_writes):
+    async with _SL() as s:
+        pr = (await s.execute(_sel(_P).limit(1))).scalars().first()
+        u = (await s.execute(_sel(_U).limit(1))).scalars().first()
+        return {t.name: t for t in _build(s, pr, u, allow_writes)}
+
+
+_ro = _aio.run(_names(False))
+_rw = _aio.run(_names(True))
+for _n in _READ_ONLY:
+    check(f"{_n} is available without writes", _n in _ro,
+          f"only in write mode" if _n in _rw else "missing entirely")
+check("no read-only tool is marked as writing",
+      all(getattr(_ro[n], "writes", False) is False for n in _ro), "")
+check("and enabling writes only ever adds tools",
+      set(_ro).issubset(set(_rw)), str(set(_ro) - set(_rw)))
+check("writes really do add the mutating ones",
+      {"add_note", "add_target", "add_finding"}.issubset(set(_rw)),
+      str(sorted(set(_rw) - set(_ro))))
+
 print("== agent binaries ==")
 st, dl = call("/api/agents/downloads", token=admin)
 check("the download list is served", st == 200 and "builds" in (dl or {}),

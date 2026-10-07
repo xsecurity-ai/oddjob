@@ -664,6 +664,31 @@ def build(session: AsyncSession, project: Project | None, user: User,
              "no lookups; every result is a hypothesis.",
              _obj({"domain": {"type": "string"}, "limit": {"type": "integer"}},
                   ["domain"]), suggest_domains),
+        Tool("rank_targets",
+             "Which hosts are worth going after first, with the reason for "
+             "each. Ranked rather than scored: the reasons come back so the "
+             "order can be argued with.",
+             _obj({"limit": {"type": "integer"}}), rank_targets),
+        Tool("find_by_technology",
+             "Hosts running a given technology — php, wordpress, nginx, "
+             "jboss. Matches service product, version and banner, and "
+             "captured page titles and URLs.",
+             _obj({"technology": {"type": "string",
+                                  "description": "e.g. php, wordpress, nginx"},
+                   "limit": {"type": "integer"}}, ["technology"]),
+             find_by_technology),
+        Tool("exploit_leads",
+             "Public exploits and CVEs that might apply to a host's "
+             "services, or to a product and version. Matched against a "
+             "local copy — nothing about the target is sent anywhere.",
+             _obj({"host": {"type": "string"},
+                   "product": {"type": "string"},
+                   "version": {"type": "string"},
+                   "limit": {"type": "integer"}}), exploit_leads),
+        Tool("search_exploits",
+             "searchsploit, against the local Exploit-DB copy.",
+             _obj({"query": {"type": "string"}, "limit": {"type": "integer"}},
+                  ["query"]), search_exploits),
     ]
     if not allow_writes:
         return reads
@@ -881,31 +906,6 @@ def build(session: AsyncSession, project: Project | None, user: User,
                    "connection_mode": {"type": "string",
                                        "enum": ["callback", "call_in"]}},
                   ["name"]), enroll_drone, writes=True),
-        Tool("rank_targets",
-             "Which hosts are worth going after first, with the reason for "
-             "each. Ranked rather than scored: the reasons come back so the "
-             "order can be argued with.",
-             _obj({"limit": {"type": "integer"}}), rank_targets),
-        Tool("find_by_technology",
-             "Hosts running a given technology — php, wordpress, nginx, "
-             "jboss. Matches service product, version and banner, and "
-             "captured page titles and URLs.",
-             _obj({"technology": {"type": "string",
-                                  "description": "e.g. php, wordpress, nginx"},
-                   "limit": {"type": "integer"}}, ["technology"]),
-             find_by_technology),
-        Tool("exploit_leads",
-             "Public exploits and CVEs that might apply to a host's "
-             "services, or to a product and version. Matched against a "
-             "local copy — nothing about the target is sent anywhere.",
-             _obj({"host": {"type": "string"},
-                   "product": {"type": "string"},
-                   "version": {"type": "string"},
-                   "limit": {"type": "integer"}}), exploit_leads),
-        Tool("search_exploits",
-             "searchsploit, against the local Exploit-DB copy.",
-             _obj({"query": {"type": "string"}, "limit": {"type": "integer"}},
-                  ["query"]), search_exploits),
         Tool("add_note", "Append a note to a host's timeline.",
              _obj({"host": {"type": "string"}, "note": {"type": "string"}},
                   ["host", "note"]), add_note, writes=True),
