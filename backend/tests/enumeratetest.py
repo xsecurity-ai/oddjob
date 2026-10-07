@@ -204,5 +204,77 @@ check("and the one chosen is not listed as an also-ran",
 check("the note says what they are and are not",
       "shared hosting" in blob or "load balancer" in blob, blob[:160])
 
+print("\n== the names not chosen can be added or refused ==")
+# Picking one name does not make the others untrue. Until now they went
+# on the timeline and nowhere else: findable, but not testable, and
+# proposed again by domain detection a week later.
+call("/api/targets?project=ENUM", "POST", {"host": "198.51.100.40"},
+     token=admin)
+finish("reverse_ip", {"targets": ["198.51.100.40"]},
+       [{"ip": "198.51.100.40",
+         "domains": ["keep.acme.example", "add-me.acme.example",
+                     "deny-me.acme.example", "ignore-me.acme.example"],
+         "sources": ["ptr"], "partial": False}])
+st, res = call("/api/enumerate/resolve?project=ENUM", "POST",
+               {"host": "198.51.100.40", "field": "host",
+                "value": "keep.acme.example",
+                "also_resolved": ["keep.acme.example", "add-me.acme.example",
+                                  "deny-me.acme.example",
+                                  "ignore-me.acme.example"],
+                "add": ["add-me.acme.example"],
+                "deny": ["deny-me.acme.example"]}, token=admin)
+check("the choice applies with decisions attached", st == 200,
+      f"status={st} {str(res)[:140]}")
+check("and names what it added rather than counting it",
+      (res or {}).get("added") == ["add-me.acme.example"], str(res)[:160])
+check("and what it refused", (res or {}).get("denied") == ["deny-me.acme.example"],
+      str(res)[:160])
+
+st, tgts = call("/api/targets?project=ENUM&page_size=200", token=admin)
+hosts = {t["host"] for t in (tgts or {}).get("items", [])}
+check("the chosen name is the target", "keep.acme.example" in hosts, str(sorted(hosts))[:200])
+check("the added one is a target in its own right",
+      "add-me.acme.example" in hosts, str(sorted(hosts))[:200])
+check("the refused one is not", "deny-me.acme.example" not in hosts,
+      str(sorted(hosts))[:200])
+# Silence is not a decision: untouched names stay leads on the
+# timeline, exactly as before.
+check("and one left alone is neither added nor refused",
+      "ignore-me.acme.example" not in hosts, str(sorted(hosts))[:200])
+
+added = next(t for t in (tgts or {}).get("items", [])
+             if t["host"] == "add-me.acme.example")
+check("nothing probed it, so it is not claimed to be alive",
+      added["alive"] is None, str(added["alive"]))
+
+# The refusal is remembered, or the same judgement gets asked for again.
+st, cands = call("/api/domains/candidates?project=ENUM", token=admin)
+by = {c["name"]: c for c in (cands or [])}
+check("the refusal is recorded against the name",
+      by.get("deny-me.acme.example", {}).get("state") == "rejected",
+      str(by.get("deny-me.acme.example"))[:140])
+check("and the acceptance too, so neither is proposed again",
+      by.get("add-me.acme.example", {}).get("state") == "accepted",
+      str(by.get("add-me.acme.example"))[:140])
+
+print("-- only names the lookup actually returned --")
+call("/api/targets?project=ENUM", "POST", {"host": "198.51.100.41"},
+     token=admin)
+finish("reverse_ip", {"targets": ["198.51.100.41"]},
+       [{"ip": "198.51.100.41", "domains": ["a.acme.example", "b.acme.example"],
+         "sources": ["ptr"], "partial": False}])
+st, res = call("/api/enumerate/resolve?project=ENUM", "POST",
+               {"host": "198.51.100.41", "field": "host",
+                "value": "a.acme.example",
+                "also_resolved": ["a.acme.example", "b.acme.example"],
+                "add": ["smuggled.acme.example"]}, token=admin)
+# This endpoint is for choosing between answers, not a door into
+# creating arbitrary targets.
+check("a name the lookup never returned is not created",
+      (res or {}).get("added") == [], str(res)[:140])
+st, tgts = call("/api/targets?project=ENUM&page_size=200&q=smuggled", token=admin)
+check("and does not appear in the inventory",
+      (tgts or {}).get("total") == 0, str(tgts)[:120])
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
