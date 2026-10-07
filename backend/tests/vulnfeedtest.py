@@ -278,5 +278,32 @@ check("at a boundary that actually completed",
       and _dt.fromisoformat(_cursor) <= _dt.now(_tz.utc),
       f"cursor={_cursor}")
 
+print("\n== a banner and a CPE spell a version differently ==")
+# OpenSSH reports 8.2p1; NVD records the patch level in the CPE's
+# separate `update` segment, as cpe:...:openssh:8.2:p1:*. Comparing the
+# banner string to the version segment therefore never matched, and
+# every OpenSSH lookup silently returned product-level hits only --
+# which reads as "nothing specific is known", the most reassuring
+# possible way to be wrong.
+from app.vulnfeed import version_candidates as _vc                  # noqa: E402
+
+check("a patch-suffixed version also tries its base",
+      _vc("8.2p1") == ["8.2p1", "8.2"], str(_vc("8.2p1")))
+check("a packager's suffix is trimmed",
+      "1.18.0" in _vc("1.18.0-6ubuntu14"), str(_vc("1.18.0-6ubuntu14")))
+check("a lettered release tries its base too",
+      "1.0.2" in _vc("1.0.2k"), str(_vc("1.0.2k")))
+check("an ordinary version is left alone",
+      _vc("2.4.49") == ["2.4.49"], str(_vc("2.4.49")))
+check("and nothing in means nothing out", _vc("") == [], str(_vc("")))
+
+_openssh = "cpe:2.3:a:openbsd:openssh:8.2:*:*:*:*:*:*:*"
+check("so the CPE NVD actually publishes matches the banner",
+      match_kind(_openssh, "8.2p1") == "exact",
+      str(match_kind(_openssh, "8.2p1")))
+check("without making every version match",
+      match_kind(_openssh, "9.1p1") is None,
+      str(match_kind(_openssh, "9.1p1")))
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 _sys.exit(1 if fail else 0)
