@@ -56,7 +56,12 @@ type RegisterReq struct {
 	Hostname   string            `json:"hostname"`
 	Privileged bool              `json:"privileged"`
 	Tools      map[string]string `json:"tools"`
-	CallInURL  string            `json:"call_in_url,omitempty"`
+	//: Tools this host could not get, and why. The server uses it to
+	//: stop sending work that needs them — a task that fails for a
+	//: missing tool costs three dispatches and tells the operator
+	//: nothing they can act on.
+	MissingTools map[string]string `json:"missing_tools,omitempty"`
+	CallInURL    string            `json:"call_in_url,omitempty"`
 	//: What the agent sees of itself. The server only ever sees the
 	//: last hop the connection came from, which behind NAT or a
 	//: tunnel is not the agent at all.

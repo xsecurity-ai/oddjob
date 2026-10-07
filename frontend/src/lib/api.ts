@@ -746,7 +746,26 @@ export const api = {
       }
     }
     candidates.sort((a, b2) => (b2.score ?? 0) - (a.score ?? 0))
-    const notes = b.results.filter((r) => r.note).map((r) => r.note!)
+    // Summarised, not concatenated. Every domain already searched
+    // returns the same sentence about itself, and joining 58 of them
+    // produced a paragraph that said one thing 58 times — which is
+    // worse than saying nothing, because it buries the results under
+    // it. One domain keeps its own wording; many get counted.
+    const ran = b.results.filter((r) => !r.error)
+    const skipped = ran.filter((r) => r.note && r.new_candidates === 0)
+    const fresh = ran.filter((r) => r.new_candidates > 0)
+    const notes = ran.length === 1
+      ? ran.filter((r) => r.note).map((r) => r.note!)
+      : [
+          fresh.length
+            ? `${fresh.length} searched, ${b.new_candidates} new candidate`
+              + `${b.new_candidates === 1 ? '' : 's'}`
+            : '',
+          skipped.length
+            ? `${skipped.length} had been searched before — showing what they `
+              + `found. Re-run with force to look again.`
+            : '',
+        ].filter(Boolean)
     const errors = b.results.filter((r) => r.error)
                             .map((r) => `${r.domain}: ${r.error}`)
     return {
@@ -1150,9 +1169,22 @@ export const api = {
      *  answering to several names is usually shared hosting or a load
      *  balancer, and those others are leads worth keeping. */
     also_resolved?: string[]
+    /** Of those others, the ones to create as targets in their own
+     *  right. Scope decides, as everywhere else. */
+    add?: string[]
+    /** And the ones to refuse. Remembered rather than skipped, so
+     *  domain detection does not propose them again next week. */
+    deny?: string[]
   }) =>
-    req<{ host: string; ip_address: string | null }>(
-      '/api/enumerate/resolve' + qs({ project }),
+    req<{
+      host: string; ip_address: string | null
+      /** Named rather than counted: "3 added" with no list is not
+       *  something anybody can check, and `out_of_scope` is the half
+       *  that most needs reading. */
+      added: string[]
+      denied: string[]
+      out_of_scope: Record<string, string>
+    }>('/api/enumerate/resolve' + qs({ project }),
       { method: 'POST', body: JSON.stringify(body) }),
 
   /** The project's included CIDR scope, with how many targets sit in

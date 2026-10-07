@@ -15,14 +15,22 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions,
-  DialogContent, DialogTitle, LinearProgress, MenuItem, Stack, TextField,
-  Tooltip, Typography, alpha,
+  Alert, Box, Button, Checkbox, Chip, CircularProgress, Dialog,
+  DialogActions, DialogContent, DialogTitle, LinearProgress, MenuItem,
+  Stack, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { neon } from '../theme'
 import { Caveat, EnumerateDialog, chipSx } from './EnumerateBits'
+
+/** Add or remove one entry, returning a new Set — the state is held
+ *  as a Set and React needs a different object to re-render. */
+function toggle(set: Set<string>, v: string, on: boolean): Set<string> {
+  const n = new Set(set)
+  if (on) n.add(v); else n.delete(v)
+  return n
+}
 
 export type PendingLookup =
   Awaited<ReturnType<typeof api.enumeratePending>>[number]
@@ -113,7 +121,14 @@ function Row({ row, project, onBusy }: {
 }) {
   const qc = useQueryClient()
   const [pick, setPick] = useState(row.options[0] ?? '')
+  //: What to do with the names NOT picked. Unticked on both sides is
+  //: the old behaviour — recorded on the timeline and nothing more —
+  //: which stays the default because silence is not a decision.
+  const [add, setAdd] = useState<Set<string>>(new Set())
+  const [deny, setDeny] = useState<Set<string>>(new Set())
   const [err, setErr] = useState<string | null>(null)
+  //: What became of the extras, when it is not simply "what you asked".
+  const [outcome, setOutcome] = useState<string | null>(null)
   //: The name we tried to apply, when it turned out to belong to a
   //: target that already exists.
   const [merge, setMerge] = useState<string | null>(null)
@@ -125,8 +140,21 @@ function Row({ row, project, onBusy }: {
       // make the others untrue, and they are often the most useful
       // thing a reverse lookup produces.
       also_resolved: row.options,
+      // The pick cannot also be an extra; the server enforces that
+      // too, but sending it would be asking for something incoherent.
+      add: [...add].filter((n) => n !== pick),
+      deny: [...deny].filter((n) => n !== pick),
     }),
-    onMutate: () => { setErr(null); onBusy(true) },
+    onMutate: () => { setErr(null); setOutcome(null); onBusy(true) },
+    onSuccess: (r) => {
+      // Scope can refuse an extra while the rename itself succeeds, so
+      // a silent success would be a lie about half the request.
+      const bad = Object.entries(r.out_of_scope ?? {})
+      if (bad.length) {
+        setOutcome(`${bad.length} not added — ${bad[0][0]}: ${bad[0][1]}`
+                   + (bad.length > 1 ? ` (+${bad.length - 1} more)` : ''))
+      }
+    },
     onError: (e) => setErr(e instanceof Error ? e.message : String(e)),
     onSettled: async () => { onBusy(false); await qc.invalidateQueries() },
   })
@@ -171,11 +199,77 @@ function Row({ row, project, onBusy }: {
       </Stack>
 
       {many && (
-        <Caveat>
-          More than one name answers for this address, so none of them is
-          <i> the</i> name. Only the one picked is recorded; the rest are not
-          this target's names just because they share its address.
-        </Caveat>
+        <>
+          <Caveat>
+            More than one name answers for this address, so none of them is
+            <i> the</i> name. The one picked becomes this target's; the rest
+            are not its names just because they share its address — but each
+            is a lead, so say what should happen to them.
+          </Caveat>
+          <Box sx={{ mt: 1 }}>
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
+              <Typography sx={{ fontSize: 11, color: neon.muted }}>
+                The other {row.options.length - 1}:
+              </Typography>
+              <Button size="small" sx={{ fontSize: 10.5, color: neon.green,
+                                         minWidth: 0 }}
+                onClick={() => { setAdd(new Set(row.options)); setDeny(new Set()) }}>
+                add all
+              </Button>
+              <Button size="small" sx={{ fontSize: 10.5, color: neon.red,
+                                         minWidth: 0 }}
+                onClick={() => { setDeny(new Set(row.options)); setAdd(new Set()) }}>
+                deny all
+              </Button>
+              <Button size="small" sx={{ fontSize: 10.5, color: neon.muted,
+                                         minWidth: 0 }}
+                onClick={() => { setAdd(new Set()); setDeny(new Set()) }}>
+                clear
+              </Button>
+            </Stack>
+            <Stack spacing={0.3}>
+              {row.options.filter((o) => o !== pick).map((o) => (
+                <Stack key={o} direction="row" spacing={0.5} alignItems="center">
+                  <Tooltip title={`Add ${o} to the inventory as its own target. Scope still decides.`}>
+                    <Checkbox size="small" checked={add.has(o)}
+                      onChange={(e) => {
+                        setAdd((p2) => toggle(p2, o, e.target.checked))
+                        if (e.target.checked) setDeny((p2) => toggle(p2, o, false))
+                      }}
+                      sx={{ p: 0.3, color: alpha(neon.green, 0.6),
+                            '&.Mui-checked': { color: neon.green } }} />
+                  </Tooltip>
+                  <Tooltip title={`Refuse ${o}. Remembered, so domain detection does not propose it again.`}>
+                    <Checkbox size="small" checked={deny.has(o)}
+                      onChange={(e) => {
+                        setDeny((p2) => toggle(p2, o, e.target.checked))
+                        if (e.target.checked) setAdd((p2) => toggle(p2, o, false))
+                      }}
+                      sx={{ p: 0.3, color: alpha(neon.red, 0.5),
+                            '&.Mui-checked': { color: neon.red } }} />
+                  </Tooltip>
+                  <Box sx={{ fontFamily: `'Share Tech Mono', monospace`,
+                             fontSize: 12,
+                             color: deny.has(o) ? alpha(neon.muted, 0.6)
+                                    : add.has(o) ? neon.green : neon.text,
+                             textDecoration: deny.has(o) ? 'line-through' : 'none' }}>
+                    {o}
+                  </Box>
+                </Stack>
+              ))}
+            </Stack>
+            <Typography sx={{ fontSize: 10.5, color: neon.muted, mt: 0.5 }}>
+              green adds it as a target · red refuses it for good ·
+              neither leaves it on the timeline as a lead
+            </Typography>
+          </Box>
+        </>
+      )}
+      {outcome && (
+        <Alert severity="warning" variant="outlined"
+          sx={{ mt: 1, fontSize: 11.5 }} onClose={() => setOutcome(null)}>
+          {outcome}
+        </Alert>
       )}
       {err && (
         <Alert severity="error" variant="outlined"

@@ -1166,6 +1166,12 @@ class Agent(Base, TimestampMixin):
         Boolean, default=False, server_default="false")
     #: JSON: {tool: version} for what it actually has installed.
     tools: Mapped[str | None] = mapped_column(Text)
+    #: JSON: {tool: why} for what it tried to install and could not.
+    #: Reported by the agent at startup. The dispatcher reads it so an
+    #: agent is never handed work that needs a tool it does not have —
+    #: that task failed three times and told the operator nothing they
+    #: could act on.
+    missing_tools: Mapped[str | None] = mapped_column(Text)
 
     #: What this agent decided its host can run at once, and why.
     #: Reported by the agent, not assumed here: it is the only side

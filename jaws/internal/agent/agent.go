@@ -38,7 +38,10 @@ type Agent struct {
 	// tuning live rather than a decision taken once at install.
 	cap_   int
 	capWhy string
-	wake   chan struct{}
+	// missing is {tool: why} for everything this host could not get.
+	// The server reads it to avoid sending work that needs them.
+	missing map[string]string
+	wake    chan struct{}
 }
 
 func New(cfg *config.Config) *Agent {
@@ -131,16 +134,23 @@ func (a *Agent) Register(ctx context.Context) error {
 
 	host, _ := hostname()
 	announce := func(note string) error {
+		a.mu.Lock()
+		missing := make(map[string]string, len(a.missing))
+		for k, v := range a.missing {
+			missing[k] = v
+		}
+		a.mu.Unlock()
 		resp, err := a.cli.Register(ctx, client.RegisterReq{
-			Platform:   runtime.GOOS,
-			Arch:       runtime.GOARCH,
-			Version:    config.Version,
-			Hostname:   host,
-			Privileged: priv,
-			Tools:      tools.Installed(ctx),
-			CallInURL:  a.cfg.Advertise,
-			OutboundIP: recon.OutboundIP(),
-			Interfaces: recon.InterfaceIPs(),
+			Platform:     runtime.GOOS,
+			Arch:         runtime.GOARCH,
+			Version:      config.Version,
+			Hostname:     host,
+			Privileged:   priv,
+			Tools:        tools.Installed(ctx),
+			MissingTools: missing,
+			CallInURL:    a.cfg.Advertise,
+			OutboundIP:   recon.OutboundIP(),
+			Interfaces:   recon.InterfaceIPs(),
 		})
 		if err != nil {
 			return err
@@ -164,6 +174,11 @@ func (a *Agent) Register(ctx context.Context) error {
 	}
 
 	log.Printf("ensuring baseline tools: %v", tools.Baseline)
+	// What could not be had, and why. Reported to the server so it can
+	// stop handing this agent work it cannot do: a task that fails for
+	// a missing tool costs three dispatches and tells the operator
+	// nothing they could act on.
+	missing := map[string]string{}
 	for _, r := range tools.Ensure(ctx, tools.Baseline, tools.Privileged()) {
 		switch r.Action {
 		case "installed":
@@ -171,11 +186,19 @@ func (a *Agent) Register(ctx context.Context) error {
 		case "present":
 			log.Printf("  %s already present (%s)", r.Tool, r.Version)
 		default:
-			// Not fatal. An agent with three of four tools can still do
-			// three of four jobs, and the server is told what it has.
+			// Not fatal. An agent with six of seven tools can still do
+			// six of seven jobs, and the server is told which.
 			log.Printf("  %s: %s — %s", r.Tool, r.Action, r.Detail)
+			why := r.Detail
+			if why == "" {
+				why = r.Action
+			}
+			missing[r.Tool] = why
 		}
 	}
+	a.mu.Lock()
+	a.missing = missing
+	a.mu.Unlock()
 
 	// Again, now that the inventory is true.
 	return announce("ready")
@@ -545,8 +568,26 @@ func (a *Agent) drain(ctx context.Context) {
 	// gone with it, so they cannot be finished -- but the server is
 	// still waiting, and a task stuck in `running` forever is worse
 	// than a task that says plainly it was interrupted.
+	//
+	// Anything THIS process is running right now is not an orphan.
+	// drain runs on every heartbeat, and tasks now execute
+	// concurrently rather than blocking the loop, so a scan that takes
+	// longer than one heartbeat interval is still open in the spool
+	// when drain next looks at it. Without this check every such task
+	// was reported interrupted eight seconds after it started, while
+	// it was still running — and then retried, and reported again.
+	a.mu.Lock()
+	live := make(map[int]bool, len(a.running))
+	for id := range a.running {
+		live[id] = true
+	}
+	a.mu.Unlock()
+
 	orphans, _ := a.sp.Orphaned()
 	for _, e := range orphans {
+		if live[e.TaskID] {
+			continue
+		}
 		log.Printf("task %d: was running when this agent stopped — "+
 			"reporting it as interrupted", e.TaskID)
 		_ = a.sp.Finish(e.TaskID, "failed", "", "", "", -1,

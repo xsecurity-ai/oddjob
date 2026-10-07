@@ -274,6 +274,82 @@ st, q = call("/api/agents/queue?project=AGENT", token=admin)
 check("so it is gone from the queue",
       DT not in [x["id"] for x in (q or [])], str(q)[:120])
 
+print("== an agent is not given work it cannot run ==")
+st, tl = call("/api/agents/tools", token=admin)
+check("the required tool list is published", st == 200
+      and "nuclei" in (tl or {}).get("required", []), str(tl)[:160])
+check("and says which kind needs which",
+      (tl or {}).get("by_kind", {}).get("nmap") == "nmap", str(tl)[:200])
+check("while naming the kinds that need nothing",
+      (tl or {}).get("by_kind", {}).get("nslookup") is None, str(tl)[:200])
+
+st, en6 = call("/api/agents?project=AGENT", "POST",
+               {"name": "toolless", "target_os": "linux"}, token=admin)
+TLID = ((en6 or {}).get("agent") or {}).get("id")
+TLKEY = (en6 or {}).get("callback_key")
+# Registers with nmap only, and says it could not get nuclei.
+call("/api/agents/register", "POST",
+     {"platform": "linux", "arch": "amd64", "tools": {"nmap": "7.94"},
+      "missing_tools": {"nuclei": "no package manager found"}}, key=TLKEY)
+
+st, agl = call("/api/agents?project=AGENT", token=admin)
+me = next((x for x in agl if x["id"] == TLID), {})
+check("what it could not get is recorded",
+      (me.get("missing_tools") or {}).get("nuclei") == "no package manager found",
+      str(me.get("missing_tools")))
+check("and turned into the kinds it cannot run",
+      "nuclei" in (me.get("cannot_run") or []), str(me.get("cannot_run")))
+check("without claiming it cannot do what it can",
+      "nmap" not in (me.get("cannot_run") or []), str(me.get("cannot_run")))
+
+# Pooled nuclei work is left alone for an agent that has it, rather
+# than handed over to fail three times.
+st, pooled_t = call("/api/agents/tasks?project=AGENT", "POST",
+                    {"kind": "nuclei", "args": {"targets": ["http://a.example"]}},
+                    token=admin)
+PT = (pooled_t or {}).get("id")
+st, hb = call("/api/agents/heartbeat", "POST",
+              {"ready": True, "running_tasks": [], "slots_free": 4,
+               "capacity": 4}, key=TLKEY)
+got = [t["id"] for t in (hb or {}).get("tasks", [])]
+check("pooled work it cannot run is not handed to it", PT not in got, str(got))
+st, q = call("/api/agents/queue?project=AGENT", token=admin)
+check("and stays in the queue for an agent that can",
+      PT in [x["id"] for x in (q or [])], str(q)[:140])
+
+# Addressed to it by name, though, is a different thing: nothing about
+# this agent is going to change, so waiting forever helps nobody.
+st, addressed = call(f"/api/agents/{TLID}/tasks?project=AGENT", "POST",
+                     {"kind": "nuclei", "args": {"targets": ["http://b.example"]}},
+                     token=admin)
+AT = (addressed or {}).get("id")
+call("/api/agents/heartbeat", "POST",
+     {"ready": True, "running_tasks": [], "slots_free": 4, "capacity": 4},
+     key=TLKEY)
+row = next((r for r in call("/api/agents/tasks?project=AGENT", token=admin)[1]
+            if r["id"] == AT), {})
+check("work addressed to it that it cannot run fails rather than waiting",
+      row.get("state") == "failed", str(row)[:140])
+check("naming the tool and what to do instead",
+      "nuclei" in (row.get("notes") or "")
+      and "pool" in (row.get("notes") or ""), str(row.get("notes"))[:170])
+
+# An agent that has never said what it has is not starved.
+st, en7 = call("/api/agents?project=AGENT", "POST",
+               {"name": "silent-tools", "target_os": "linux"}, token=admin)
+SID = ((en7 or {}).get("agent") or {}).get("id")
+SKEY = (en7 or {}).get("callback_key")
+call("/api/agents/register", "POST", {"platform": "linux", "arch": "amd64"},
+     key=SKEY)
+st, hb = call("/api/agents/heartbeat", "POST",
+              {"ready": True, "running_tasks": [], "slots_free": 4,
+               "capacity": 4}, key=SKEY)
+check("an agent that reported no inventory is still given work",
+      PT in [t["id"] for t in (hb or {}).get("tasks", [])],
+      str((hb or {}).get("tasks"))[:140])
+for fixture in (TLID, SID):
+    call(f"/api/agents/{fixture}/kill?project=AGENT", "POST", {}, token=admin)
+
 print("== a failed task goes back in the queue, twice ==")
 st, en5 = call("/api/agents?project=AGENT", "POST",
                {"name": "flaky", "target_os": "linux"}, token=admin)

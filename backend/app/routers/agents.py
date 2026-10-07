@@ -133,6 +133,13 @@ class AgentOut(BaseModel):
     #: None until it has told us.
     capacity: int | None = None
     capacity_reason: str | None = None
+    #: {tool: why} for everything this agent tried to install and could
+    #: not. Work needing one of these is not sent here.
+    missing_tools: dict[str, str] = {}
+    #: Task kinds this agent cannot run, derived from the above. The
+    #: useful form: an operator cares that it cannot do `nuclei`, not
+    #: that it lacks a binary of that name.
+    cannot_run: list[str] = []
     #: The effective limit: the lower of its own assessment and the
     #: project's ceiling. What the dispatcher will actually honour.
     max_parallel: int = 1
@@ -196,6 +203,9 @@ class RegisterIn(BaseModel):
     hostname: str | None = None
     privileged: bool = False
     tools: dict[str, str] = {}
+    #: Tools this host could not get, and why. Used to stop sending it
+    #: work that needs them.
+    missing_tools: dict[str, str] = {}
     outbound_ip: str | None = None
     interfaces: list[str] = []
     call_in_url: str | None = None
@@ -275,6 +285,15 @@ def _tools(raw: str | None) -> dict:
         return {}
 
 
+def _jdict(raw: str | None) -> dict[str, str]:
+    """A stored JSON object, or an empty one."""
+    try:
+        v = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    return {str(k): str(x) for k, x in v.items()} if isinstance(v, dict) else {}
+
+
 def _jlist(raw: str | None) -> list[str]:
     """A stored JSON list, or an empty one. Separate from `_tools`
     because that falls back to a dict, and handing a dict to a field
@@ -299,6 +318,9 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         queued_tasks=queued, running_tasks=running,
         completed_tasks=completed, failed_tasks=failed,
         capacity=a.capacity, capacity_reason=a.capacity_reason,
+        missing_tools=_jdict(a.missing_tools),
+        cannot_run=sorted(k for k, tool in KIND_TOOL.items()
+                          if not _has_tool(a, k)),
         # The lower of the two, which is what the dispatcher honours.
         # Shown rather than left to be worked out from two numbers in
         # different places.
@@ -368,6 +390,47 @@ def _stale(a: Agent, in_flight: int = 0) -> str:
 #: network without putting its hosts in `args`, this list is where it
 #: would be missed — so the extractor errs wide, see scopegate.task_hosts.
 SCOPED_KINDS = tuple(k for k in TASK_KINDS if k not in ("install",))
+
+#: The external tool each kind needs on the agent. The authoritative
+#: copy — `tools.Baseline` in the agent installs exactly these, and an
+#: agent that could not get one says so on registration.
+#:
+#: The kinds absent from this map need nothing: nslookup and reverse_ip
+#: use the Go resolver, and install and shell are the agent itself.
+KIND_TOOL: dict[str, str] = {
+    "nmap": "nmap",
+    "masscan": "masscan",
+    "amass": "amass",
+    "gobuster": "gobuster",
+    "gospider": "gospider",
+    "nuclei": "nuclei",
+    "httpx": "httpx",
+}
+
+#: Everything an agent is expected to have. Returned by the API so the
+#: UI can show a fleet's coverage, and so the list lives in one place
+#: rather than being inferred from whichever tasks happen to exist.
+REQUIRED_TOOLS = tuple(sorted(set(KIND_TOOL.values())))
+
+
+def _has_tool(a: Agent, kind: str) -> bool:
+    """Can this agent run this kind of task?
+
+    Unknown is treated as yes. An agent that has never reported its
+    inventory — one mid-enrollment, or an older build — would otherwise
+    be given nothing at all, which is a worse failure than letting it
+    try and report honestly.
+    """
+    need = KIND_TOOL.get(kind)
+    if not need:
+        return True
+    try:
+        have = json.loads(a.tools) if a.tools else {}
+    except (TypeError, ValueError):
+        return True
+    if not have:
+        return True
+    return need in have
 
 
 #: How many times a failed task goes back in the queue before it waits
@@ -1402,6 +1465,25 @@ def _subject(kind: str, args: dict) -> str:
     return "—"
 
 
+@router.get("/tools", response_model=dict)
+async def required_tools(_: User = Depends(get_current_user)):
+    """What a Jaws is expected to have, and what each one is for.
+
+    One list, here. The agent installs exactly these at startup and
+    reports what it could not get; the dispatcher reads that to avoid
+    sending work nothing on the other end can run. Published so the UI
+    can show a fleet's coverage without inferring the list from
+    whichever tasks happen to exist.
+    """
+    return {
+        "required": list(REQUIRED_TOOLS),
+        # The kinds that need nothing are as worth stating as the ones
+        # that do: "why does this agent still get nslookup work" has an
+        # answer, and it is here.
+        "by_kind": {k: KIND_TOOL.get(k) for k in sorted(TASK_KINDS)},
+    }
+
+
 @router.get("/queue", response_model=list[QueuedOut])
 async def list_queue(limit: int = Query(200, le=1000),
                      pr: Project = Depends(require_project("readonly")),
@@ -1754,6 +1836,7 @@ async def register(body: RegisterIn, request: Request,
     a.version, a.hostname = body.version, body.hostname
     a.privileged = bool(body.privileged)
     a.tools = json.dumps(body.tools or {})
+    a.missing_tools = json.dumps(body.missing_tools or {})
     a.outbound_ip = body.outbound_ip
     a.interfaces = json.dumps(body.interfaces or [])
     a.call_in_url = body.call_in_url
@@ -1961,10 +2044,19 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
         if len(chosen) >= free:
             break
         why = scope_refusal(cand)
-        if why is None:
-            chosen.append(cand)
-        else:
+        if why is not None:
             drop(cand, why)
+            continue
+        if not _has_tool(a, cand.kind):
+            # Addressed to this agent, which does not have what it
+            # needs. Failed rather than left waiting forever: nothing
+            # about this agent is going to change, and a task queued
+            # against it is a task that will never run.
+            drop(cand, f"{a.name} does not have {KIND_TOOL[cand.kind]} and "
+                       f"could not install it. Queue this against an agent "
+                       f"that has it, or to the project pool.")
+            continue
+        chosen.append(cand)
 
     if len(chosen) < free:
         # Then the project's pool, oldest first, subject to the routing
@@ -1983,6 +2075,12 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
             why = scope_refusal(cand)
             if why is not None:
                 drop(cand, why)
+                continue
+            if not _has_tool(a, cand.kind):
+                # Left in the pool, not failed: another agent may well
+                # have the tool, and this is exactly what pooling is
+                # for. It only becomes a problem if none of them do,
+                # which the queue depth makes visible.
                 continue
             if project is not None and await _may_claim(session, project, a, cand):
                 cand.agent_id = a.id

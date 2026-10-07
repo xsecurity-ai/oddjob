@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
+from datetime import datetime, timezone
 import ipaddress
 import json
 
@@ -37,7 +38,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_session
 from ..events import broker
 from ..hosts import InvalidHost, validate_host
-from ..models import AgentTask, Project, ProjectScope, Target, User
+from ..domains import registrable
+from ..models import (AgentTask, DomainCandidate, Project, ProjectScope,
+                      Target, User)
+from ..scopegate import index_for
 from ..security import get_current_user, require_project
 from .. import audit
 from .. import merge as merge_mod
@@ -96,6 +100,16 @@ class ResolveIn(BaseModel):
     #: because a dropdown only has room for one answer loses them
     #: silently, so they are recorded against the target.
     also_resolved: list[str] = []
+    #: Of those others, the ones to create as targets in their own
+    #: right. Recording a name on a timeline makes it findable; adding
+    #: it makes it testable, and an operator looking at six names
+    #: usually wants some of them in the inventory and the rest gone.
+    #: Scope decides, exactly as it does everywhere else.
+    add: list[str] = []
+    #: And the ones to refuse. Remembered rather than merely skipped,
+    #: so domain detection does not propose them again next week and
+    #: the judgement has to be made twice.
+    deny: list[str] = []
 
 
 class RangeCoverage(BaseModel):
@@ -216,6 +230,93 @@ async def pending(project: str = Query(...),
     return out
 
 
+async def _decide_others(session: AsyncSession, pr: Project, user: User,
+                         body: "ResolveIn", others: list[str]
+                         ) -> tuple[list[str], dict[str, str], list[str]]:
+    """Act on the names the operator did not choose.
+
+    Picking one name does not make the others untrue, and until now
+    they went on the timeline and nowhere else — findable, but not
+    testable, and offered again by domain detection a week later.
+
+    Two explicit decisions, both remembered:
+
+      add   becomes a target in its own right, scope permitting. This
+            is the one creation path where nothing has been observed
+            at the name itself, only that an address answers to it, so
+            `alive` stays None — a reverse lookup is not a probe.
+      deny  is written as a rejected candidate. Not merely skipped:
+            the generator will not re-propose a name it already has a
+            row for, so recording the refusal is what stops the same
+            judgement being asked for twice.
+
+    Anything in neither list is left exactly as before, on the
+    timeline. Silence is not a decision.
+    """
+    want_add = {n.strip().lower().rstrip(".") for n in body.add if n.strip()}
+    want_deny = {n.strip().lower().rstrip(".") for n in body.deny if n.strip()}
+    # Only names the lookup actually returned. A client that posts an
+    # arbitrary host here would otherwise be creating targets through a
+    # door meant for choosing between answers.
+    allowed = set(others)
+    want_add &= allowed
+    want_deny &= allowed - want_add
+
+    added: list[str] = []
+    refused: dict[str, str] = {}
+    denied: list[str] = []
+    if not (want_add or want_deny):
+        return added, refused, denied
+
+    idx = await index_for(session, pr.id)
+    now = datetime.now(timezone.utc)
+    for n in sorted(want_add):
+        try:
+            validate_host(n)
+        except InvalidHost as e:
+            refused[n] = str(e)
+            continue
+        dup = (await session.execute(
+            select(Target).where(Target.project_id == pr.id,
+                                 Target.host == n))).scalar_one_or_none()
+        if dup is not None:
+            continue                      # already here; nothing to do
+        ruling = idx.check(n)
+        if not ruling.allowed:
+            refused[n] = ruling.reason
+            continue
+        t = Target(project_id=pr.id, host=n, alive=None)
+        session.add(t)
+        await session.flush()
+        await record(session, t.id, "discovered",
+                     f"added from a reverse lookup on {body.value}",
+                     detail=(f"{body.value} answers to this name as well as "
+                             f"to the one chosen. Nothing has been probed at "
+                             f"it — it is a lead, added deliberately."),
+                     actor=user, source="jaws:reverse_ip")
+        added.append(n)
+
+    for n in sorted(want_add | want_deny):
+        # A row either way, because the generator skips any name it
+        # already has one for: that is what keeps a decision made.
+        row = (await session.execute(
+            select(DomainCandidate)
+            .where(DomainCandidate.project_id == pr.id,
+                   DomainCandidate.name == n))).scalar_one_or_none()
+        state = "accepted" if n in want_add else "rejected"
+        if row is None:
+            session.add(DomainCandidate(
+                project_id=pr.id, name=n, root_domain=registrable(n) or n,
+                source="reverse_ip", score=0,
+                reason=f"seen on {body.value} alongside {body.value}",
+                state=state, decided_by=user.id, decided_at=now))
+        else:
+            row.state, row.decided_by, row.decided_at = state, user.id, now
+        if state == "rejected":
+            denied.append(n)
+    return added, refused, denied
+
+
 @router.post("/resolve")
 async def resolve(body: ResolveIn, project: str = Query(...),
                   pr: Project = Depends(require_project("user")),
@@ -238,6 +339,12 @@ async def resolve(body: ResolveIn, project: str = Query(...),
     value = (body.value or "").strip()
     if not value:
         raise HTTPException(422, "nothing to apply")
+
+    # Same shape whichever branch runs below: a caller should not have
+    # to know which field it asked about to read the reply.
+    added: list[str] = []
+    refused: dict[str, str] = {}
+    denied: list[str] = []
 
     if body.field == "host":
         try:
@@ -273,6 +380,10 @@ async def resolve(body: ResolveIn, project: str = Query(...),
                   dict.fromkeys(x.strip().lower().rstrip(".")
                                 for x in body.also_resolved)
                   if n and n != name]
+        # Explicit decisions first, so the timeline note below can say
+        # what was done with them rather than only that they existed.
+        added, refused, denied = await _decide_others(
+            session, pr, user, body, others)
         if others:
             shown = others[:40]
             more = f" (+{len(others) - len(shown)} more)" if len(others) > len(shown) else ""
@@ -300,7 +411,12 @@ async def resolve(body: ResolveIn, project: str = Query(...),
 
     await session.commit()
     await broker.publish("targets", action="update", host=t.host, project=pr.code)
-    return {"host": t.host, "ip_address": t.ip_address}
+    if added:
+        await broker.publish("targets", action="create", project=pr.code)
+    # Named, not counted: "3 added" with no list is not something an
+    # operator can check, and `refused` is the half they most need.
+    return {"host": t.host, "ip_address": t.ip_address,
+            "added": added, "denied": denied, "out_of_scope": refused}
 
 
 @router.get("/ranges", response_model=list[RangeCoverage])

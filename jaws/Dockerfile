@@ -51,7 +51,9 @@ RUN CGO_ENABLED=0 go build -trimpath \
 # network to become useful.
 ENV GOFLAGS=-buildvcs=false
 RUN GOBIN=/out go install github.com/owasp-amass/amass/v4/cmd/amass@master \
- && GOBIN=/out go install github.com/jaeles-project/gospider@latest
+ && GOBIN=/out go install github.com/jaeles-project/gospider@latest \
+ && GOBIN=/out go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
+ && GOBIN=/out go install github.com/projectdiscovery/httpx/cmd/httpx@latest
 
 
 # ----------------------------------------------------------- runtime
@@ -67,6 +69,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /out/jaws /usr/local/bin/jaws
 COPY --from=build /out/amass /usr/local/bin/amass
 COPY --from=build /out/gospider /usr/local/bin/gospider
+# In the image rather than installed on first use: an agent should not
+# need to reach proxy.golang.org from inside a client's network to run
+# the task it was just given, and a nuclei task that fails because the
+# box is air-gapped is a worse answer than one that never had to ask.
+COPY --from=build /out/nuclei /usr/local/bin/nuclei
+COPY --from=build /out/httpx /usr/local/bin/httpx
 
 # WorkDir holds identity.json (0600, the agent's private key) and the
 # spool of results not yet delivered. Declared as a volume so a

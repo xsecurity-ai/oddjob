@@ -21,7 +21,17 @@ import (
 )
 
 // Baseline is installed on init without being asked.
-var Baseline = []string{"amass", "nmap", "masscan", "gobuster"}
+//
+// Everything a task kind actually needs, not a subset. An agent that
+// starts without nuclei and is then given a nuclei task fails it three
+// times and stops — the operator's answer to "why" is "the agent did
+// not try to get it", which is not an answer. Trying at startup costs
+// one package install on a machine that is about to spend hours
+// scanning, and an agent that cannot get one says so and is simply not
+// given that kind of work.
+var Baseline = []string{
+	"amass", "nmap", "masscan", "gobuster", "gospider", "nuclei", "httpx",
+}
 
 // Known is everything Jaws will install at all. The server has its own
 // copy of this list and refuses anything outside it; this is the second
