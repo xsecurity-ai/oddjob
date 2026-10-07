@@ -32,7 +32,7 @@ export interface Route {
 }
 
 /** Views that exist without a project in the path. */
-const GLOBAL = new Set(['projects', 'config', 'users', 'profile'])
+const GLOBAL = new Set(['projects', 'config', 'users', 'profile', 'health'])
 /** Views that live under a project.
  *
  *  `settings` is the project's own configuration — its name, client and
