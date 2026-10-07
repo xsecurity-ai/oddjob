@@ -1,7 +1,7 @@
 # Oddjob
 
 **Authorized penetration testing and red teaming only.** Nation-state
-actors and criminal hacking groups — as defined under US law — are not
+actors and criminal hacking groups, as defined under US law, are not
 authorized to use this toolset. See [Authorized use](#authorized-use).
 
 ---
@@ -13,13 +13,13 @@ findings, credentials, captured web traffic and the reports that come out
 of it. One place where "what do we know about this host" has one answer.
 
 It owes its shape to [**lair-framework**](https://github.com/lair-framework/lair),
-which got the important idea right years ago — that a team needs a shared
+which got the important idea right years ago, that a team needs a shared
 datastore for an engagement, not a folder of everyone's scan output. Lair
 is where this starts from. What Oddjob adds is the rest: the parts of
 every collaboration platform that were worth keeping, taken honestly and
-put in one place — Faraday's importer breadth, Dradis's reporting,
+put in one place: Faraday's importer breadth, Dradis's reporting,
 Ghostwriter's engagement structure, the proxy-history handling you only
-get from living in Burp — plus the things none of them do, like an agent
+get from living in Burp... plus the things none of them do, like an agent
 that can read and write the engagement, and Drones.
 
 **You can use it two ways, and the second is optional:**
@@ -30,7 +30,7 @@ that can read and write the engagement, and Drones.
 | **As an active engagement** | Oddjob **+ Drones** | The above, plus enumeration you drive from the UI. Drones run the scanners, on your infrastructure, and the results import themselves. |
 
 If you only ever import files, you never need a Drone. The whole agent
-side is additive — there is no degraded mode, no nagging, and no feature
+side is additive and there is no degraded mode, no nagging, and no feature
 that stops working because you did not deploy one.
 
 ### How the pieces fit
@@ -61,7 +61,7 @@ that stops working because you did not deploy one.
 ```
 
 Oddjob holds the queue. Drones ask for work, run it, and send results
-back, which import themselves into the project. A Drone **dials out** —
+back, which import themselves into the project. A Drone **dials out**,
 nothing listens on the internet, and nothing needs to be exposed to add
 one.
 
@@ -69,7 +69,7 @@ Drones are **tied to a project**. A Drone enrolled on ACME takes tasking
 from ACME, and everything it finds lands in ACME. It cannot be borrowed
 by another engagement.
 
-→ **[Drones have their own README](drone/README.md)** — what they are,
+→ **[Drones have their own README](drone/README.md)** which includes what they are,
 how to deploy one safely, and the rules about where they may be
 installed.
 
@@ -98,7 +98,7 @@ a target outside them, and the refusal is recorded.
 
 ## Setup
 
-### Docker — do it this way
+### Docker (Recommended way)
 
 Everything, including PostgreSQL and the migrations, in one command.
 
@@ -112,9 +112,9 @@ open http://127.0.0.1:8000
 First run creates the admin account. Everything after that needs a
 session.
 
-That is the whole install. You get PostgreSQL rather than SQLite — which
+That is the whole install. You get PostgreSQL rather than SQLite which
 matters the moment a long import and a background worker want to write at
-the same time — the UI already built, and the Drone binaries for every
+the same time and the UI already built, and the Drone binaries for every
 platform built and ready to hand out.
 
 ### From a checkout, if you must
@@ -136,7 +136,7 @@ to point it at a real database.
 ### Before you expose it
 
 Both ports bind to loopback. There is no rate limiting and no
-brute-force lockout — put this behind a VPN or an authenticating proxy
+brute-force lockout so put this behind a reverse proxy (e.g., nginx) 
 before changing that. It holds findings, credentials and captured
 traffic including session cookies. Read [SECURITY.md](SECURITY.md).
 
@@ -162,7 +162,7 @@ docker run -d --name drone --restart unless-stopped \
 **Drones go on infrastructure you control and nowhere else.** Never on a
 host you have compromised. The reasoning, the deployment modes, the
 routing policies and region configuration are all in the
-**[Drone README](drone/README.md)** — read it before deploying one.
+**[Drone README](drone/README.md)** read it before deploying one.
 
 ---
 
@@ -171,7 +171,7 @@ routing policies and region configuration are all in the
 - **Import** nmap, masscan, Nessus, Metasploit, Burp (issues *and* proxy
   history), Nikto, Nuclei, httpx, and five C2 frameworks. Formats are
   detected from the file.
-- **One row per captured exchange**, not per URL — the same endpoint
+- **One row per captured exchange**, not per URL... the same endpoint
   probed ten ways is ten pieces of evidence, and the differences between
   the responses are usually the finding. The UI groups them back under
   the URL.
@@ -189,17 +189,17 @@ routing policies and region configuration are all in the
 |---|---|---|---|
 | `host` | FQDN or IP | yes | meaningful |
 | `mobile` | bundle / package id | **N/A** | **N/A** |
-| `cloud` | whatever the provider uses — hostname, ARN, resource path | optional | meaningful |
+| `cloud` | whatever the provider uses to include hostname, ARN, resource path | optional | meaningful |
 
 The distinction is not cosmetic. A blank IP on a *host* means "not
-resolved yet" — a gap in our coverage. On a mobile app it means there is
+resolved yet" and a gap in our coverage. On a mobile app it means there is
 nothing to resolve. Recording which is which is what stops an app
 appearing in a report as an unscanned server.
 
 ## Importing at scale
 
-The importers stream. A 2.5 GB Burp proxy history — 357,276 transactions
-across 1,611 hosts — parses in about 9 seconds at a flat ~360 MB, and
+The importers stream. A 2.5 GB Burp proxy history, 357,276 transactions
+across 1,611 hosts parses in about 9 seconds at a flat ~360 MB, and
 imports as a background job that survives closing the tab.
 
 Two rules worth knowing:
@@ -236,8 +236,8 @@ be read until the connection it describes was already open.
 ## The agent
 
 Configure a provider in Site Config and the agent can answer questions
-about an engagement, draft remediation for findings one at a time, and —
-over Slack Socket Mode — reply when someone @-mentions it. It is
+about an engagement, draft remediation for findings one at a time, and
+over Slack Socket Mode... reply when someone @-mentions it. It is
 read-only unless writes are explicitly enabled, and scoped to a single
 engagement: a question asked in one channel cannot be answered with
 another's data.
@@ -259,7 +259,7 @@ because it is the command you type. Each gets its own server, port and
 database, and they refuse to run against `ODDJOB_DATABASE_URL`, so a
 shell with the production DSN exported cannot point them at real data.
 
-The backend suite needs `frontend/dist` to exist — it checks that the
+The backend suite needs `frontend/dist` to exist and it checks that the
 API serves the built UI.
 
 ## Layout
@@ -283,7 +283,7 @@ CLAUDE.md             notes for working on this, and the traps
 
 ## Documentation
 
-[`docs/reference.md`](docs/reference.md) is the detailed manual — every
+[`docs/reference.md`](docs/reference.md) is the detailed manual on every
 subsystem, the reasoning behind it, and the traps found the hard way.
 
 ## Security
