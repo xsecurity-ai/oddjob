@@ -305,5 +305,26 @@ check("without making every version match",
       match_kind(_openssh, "9.1p1") is None,
       str(match_kind(_openssh, "9.1p1")))
 
+# The version comes off a service banner, which is whatever the remote
+# host decided to send. The regex this replaced was quadratic against
+# 'a'*n + '!': 16ms at 2k characters, 16.7 SECONDS at 64k. The host that
+# chooses the input is the host being scanned, which is the whole threat
+# model of a tool like this.
+import time as _time                                                # noqa: E402
+
+_t0 = _time.perf_counter()
+_vc("a" * 60000 + "!")
+_elapsed = _time.perf_counter() - _t0
+check("a hostile banner cannot stall the version parser",
+      _elapsed < 0.1, f"{_elapsed*1000:.0f}ms for 60k characters")
+check("and an over-long version is bounded rather than carried whole",
+      all(len(x) <= 64 for x in _vc("9" * 5000)), str(len(_vc("9"*5000)[0])))
+
+# "   " is truthy, so `if version:` took the version-specific path and
+# then built an or_() from an empty list -- deprecated now, an error in
+# a later SQLAlchemy.
+check("a blank version yields no candidates to build a query from",
+      _vc("   ") == [], str(_vc("   ")))
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 _sys.exit(1 if fail else 0)

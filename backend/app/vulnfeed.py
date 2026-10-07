@@ -489,17 +489,43 @@ def version_candidates(version: str | None) -> list[str]:
 
     Also trims a packager's suffix: Debian and Ubuntu ship
     `1.18.0-6ubuntu14`, and nobody files a CVE against that.
+
+    Scanned rather than matched with a regular expression, deliberately.
+    This runs on a version string taken from a service banner, which is
+    whatever a remote host chose to send us — `[a-z]+\\d*$` against a
+    few hundred kilobytes of 'a' is quadratic, and the host on the other
+    end picks the input. Backward scans are linear and cannot be made
+    to behave badly.
     """
     v = (version or "").strip()
     if not v:
         return []
+    # A version is short. Anything longer came from a banner that is not
+    # really a version, and bounding it keeps the LIKE built from it
+    # bounded too.
+    v = v[:64]
     out = [v]
-    for cut in (re.sub(r"[-+~].*$", "", v),          # 1.18.0-6ubuntu14
-                re.sub(r"p\d+$", "", v),             # 8.2p1
-                re.sub(r"[a-z]+\d*$", "", v)):       # 1.0.2k
-        cut = cut.strip(".-_")
-        if cut and cut not in out:
-            out.append(cut)
+
+    def add(candidate: str) -> None:
+        candidate = candidate.strip(".-_")
+        if candidate and candidate not in out:
+            out.append(candidate)
+
+    # 1.18.0-6ubuntu14 -> 1.18.0
+    cuts = [i for i in (v.find(c) for c in "-+~") if i > 0]
+    if cuts:
+        add(v[:min(cuts)])
+
+    # A trailing letter run, with optional digits after it:
+    # 8.2p1 -> 8.2, and 1.0.2k -> 1.0.2.
+    end = len(v)
+    while end > 0 and v[end - 1].isdigit():
+        end -= 1
+    start = end
+    while start > 0 and v[start - 1].isalpha():
+        start -= 1
+    if start < end:                     # there was a letter run
+        add(v[:start])
     return out
 
 
@@ -533,6 +559,14 @@ async def leads_for_service(session: AsyncSession, product: str | None,
     reports the same version as an unpatched one. Nothing here has been
     confirmed against the host — confirming it is the engagement.
     """
+    # Normalised once, here. `version` of "   " is truthy, so a guard
+    # written as `if version:` runs the version-specific branch and then
+    # builds an or_() out of an empty candidate list — a deprecation
+    # today and an error in a later SQLAlchemy. Asking the candidate
+    # list whether there is a version to match on cannot drift from
+    # what the matching actually uses.
+    versions = version_candidates(version)
+
     terms = product_terms(product, name, banner)
     if not terms:
         return {"terms": [], "exploits": [], "cves": [],
@@ -543,7 +577,7 @@ async def leads_for_service(session: AsyncSession, product: str | None,
     seen_cve: set[str] = set()
     for term in terms:
         rows: list[CveRecord] = []
-        if version:
+        if versions:
             # Fetch the version-specific ones FIRST, and by name.
             #
             # Ordering the whole candidate set by score and taking the
@@ -562,7 +596,7 @@ async def leads_for_service(session: AsyncSession, product: str | None,
                 .where(CveRecord.products.is_not(None),
                        CveRecord.products.like(f"%{term}%"),
                        or_(*[CveRecord.cpes.like(f"%:{v}:%")
-                             for v in version_candidates(version)]))
+                             for v in versions]))
                 .order_by(CveRecord.cvss_score.desc().nullslast())
                 .limit(limit * 2))).scalars().all()
         rows += (await session.execute(
