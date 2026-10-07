@@ -306,7 +306,7 @@ check("API responses are not cached",
 # Directory traversal out of the built-SPA static fallback.
 #
 # The SPA catch-all serves any real file it finds under frontend/dist so
-# that /favicon.svg and friends work. It used to do that with a bare
+# that /favicon.ico and friends work. It used to do that with a bare
 # `_DIST / full_path`, which is not containment: an absolute right-hand
 # side replaces the base outright and ".." walks out of it. Signed in as
 # an ordinary user this returned app/main.py and the entire SQLite
@@ -338,7 +338,7 @@ def wire(path, hdrs=None):
 _auth = {"Authorization": f"Bearer {admin}"}
 
 check("the raw-socket helper reaches the app at all",
-      wire("/favicon.svg", _auth)[0] == 200)
+      wire("/favicon.ico", _auth)[0] == 200)
 
 ESCAPES = [
     "/../package.json",
@@ -369,8 +369,9 @@ for _p in ("/../../backend/oddjob.db", "/../package.json"):
 
 # The assets the fallback exists to serve must keep working, including
 # without a session -- the sign-in page renders them.
-for _p, _ct in (("/favicon.svg", b"svg"), ("/favicon.ico", b"icon"),
-                ("/favicon-32.png", b"png"), ("/apple-touch-icon.png", b"png")):
+for _p, _ct in (("/favicon.ico", b"icon"), ("/favicon-32.png", b"png"),
+                ("/icon-192.png", b"png"),
+                ("/apple-touch-icon.png", b"png")):
     _st, _body = wire(_p)
     check(f"{_p} serves to a signed-out browser", _st == 200 and len(_body) > 100,
           f"status {_st}, {len(_body)}b")

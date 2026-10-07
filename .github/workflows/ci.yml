@@ -269,7 +269,7 @@ jobs:
           set -euo pipefail
           curl -fsS http://127.0.0.1:8000/api/auth/setup-required | grep -q setup_required
           curl -fsS -H 'Accept: text/html' http://127.0.0.1:8000/ | grep -qE 'assets/index-[^"]+\.js'
-          curl -fsS -o /dev/null http://127.0.0.1:8000/favicon.svg
+          curl -fsS -o /dev/null http://127.0.0.1:8000/favicon.ico
 
       - name: Migrations ran, and against Postgres
         run: |
