@@ -129,6 +129,16 @@ class AgentOut(BaseModel):
     #: has completed nothing and failed forty is broken, and a column
     #: showing only successes would render it as merely idle.
     failed_tasks: int = 0
+    #: What this agent decided its host can run at once, and why.
+    #: None until it has told us.
+    capacity: int | None = None
+    capacity_reason: str | None = None
+    #: The effective limit: the lower of its own assessment and the
+    #: project's ceiling. What the dispatcher will actually honour.
+    max_parallel: int = 1
+    #: What is executing right now, so the fleet table can show the
+    #: work rather than only a count of it.
+    running: list[dict] = []
     connection_mode: str = "callback"
     target_os: str | None = None
     #: Whether the agent has completed the identity exchange. Until it
@@ -201,7 +211,11 @@ class AgentPatch(BaseModel):
 
 
 class RoutingIn(BaseModel):
-    mode: str = Field(description="mesh | primary | geo")
+    mode: str | None = Field(None, description="mesh | primary | geo")
+    #: How many tasks one agent may run at once on this engagement.
+    #: A ceiling: the agent's own assessment of its host still applies
+    #: and the lower of the two wins.
+    max_parallel: int | None = Field(None, ge=1, le=64)
 
 
 class RoutingOut(BaseModel):
@@ -212,6 +226,8 @@ class RoutingOut(BaseModel):
     current_primary_name: str | None = None
     eligible: int = 0
     unassigned_tasks: int = 0
+    #: The engagement's ceiling on simultaneous tasks per agent.
+    max_parallel: int = 5
 
 
 class TaskIn(BaseModel):
@@ -272,7 +288,8 @@ def _jlist(raw: str | None) -> list[str]:
 
 def _agent_out(a: Agent, code: str, queued: int = 0,
                running: int = 0, completed: int = 0,
-               failed: int = 0) -> AgentOut:
+               failed: int = 0, ceiling: int = 5,
+               running_rows: list[AgentTask] | None = None) -> AgentOut:
     return AgentOut(
         id=a.id, project_code=code, name=a.name, status=a.status,
         platform=a.platform, arch=a.arch, version=a.version,
@@ -281,6 +298,15 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         outbound_ip=a.outbound_ip, interfaces=_jlist(a.interfaces),
         queued_tasks=queued, running_tasks=running,
         completed_tasks=completed, failed_tasks=failed,
+        capacity=a.capacity, capacity_reason=a.capacity_reason,
+        # The lower of the two, which is what the dispatcher honours.
+        # Shown rather than left to be worked out from two numbers in
+        # different places.
+        max_parallel=max(1, min(ceiling, a.capacity or 1)),
+        running=[{"id": t.id, "kind": t.kind,
+                  "subject": _subject(t.kind, json.loads(t.args) if t.args else {}),
+                  "started_at": t.started_at.isoformat() if t.started_at else None}
+                 for t in (running_rows or [])],
         connection_mode=a.connection_mode, target_os=a.target_os,
         priority=a.priority, regions=sorted(_regions_of(a)),
         has_identity=bool(a.public_key),
@@ -814,6 +840,19 @@ async def list_agents(project: str | None = Query(None),
                                          "done", "failed")))
             .group_by(AgentTask.agent_id, AgentTask.status))).all()}
 
+    # The rows themselves, not just their count: the fleet table shows
+    # what each agent is working on now that it can be working on
+    # several things, and "3 running" does not answer which three.
+    in_flight: dict[int, list[AgentTask]] = {}
+    for t in (await session.execute(
+            select(AgentTask)
+            .where(AgentTask.project_id == pr.id,
+                   AgentTask.status.in_(("claimed", "running")),
+                   AgentTask.agent_id.is_not(None))
+            .order_by(AgentTask.id))).scalars():
+        in_flight.setdefault(t.agent_id, []).append(t)
+
+    ceiling = max(1, int(pr.jaws_max_parallel or 5))
     out = []
     for a in rows:
         # Claimed counts as in flight: the agent has taken it and the
@@ -823,7 +862,8 @@ async def list_agents(project: str | None = Query(None),
         out.append(_agent_out(
             a, pr.code, counts.get((a.id, "queued"), 0), running,
             completed=counts.get((a.id, "done"), 0),
-            failed=counts.get((a.id, "failed"), 0)))
+            failed=counts.get((a.id, "failed"), 0),
+            ceiling=ceiling, running_rows=in_flight.get(a.id, [])))
     return out
 
 
@@ -1229,7 +1269,7 @@ async def read_routing(pr: Project = Depends(require_project("readonly")),
     first = eligible[0] if eligible else None
     mode = (pr.jaws_mode or "mesh").lower()
     return RoutingOut(
-        mode=mode,
+        mode=mode, max_parallel=max(1, int(pr.jaws_max_parallel or 5)),
         current_primary=first.id if (mode == "primary" and first) else None,
         current_primary_name=first.name if (mode == "primary" and first) else None,
         eligible=len(eligible), unassigned_tasks=pending)
@@ -1240,10 +1280,13 @@ async def set_routing(body: RoutingIn,
                       pr: Project = Depends(require_project("admin")),
                       _: User = Depends(get_current_user),
                       session: AsyncSession = Depends(get_session)):
-    mode = (body.mode or "").strip().lower()
-    if mode not in JAWS_MODES:
-        raise HTTPException(422, f"mode is one of {', '.join(JAWS_MODES)}")
-    pr.jaws_mode = mode
+    if body.mode is not None:
+        mode = (body.mode or "").strip().lower()
+        if mode not in JAWS_MODES:
+            raise HTTPException(422, f"mode is one of {', '.join(JAWS_MODES)}")
+        pr.jaws_mode = mode
+    if body.max_parallel is not None:
+        pr.jaws_max_parallel = int(body.max_parallel)
     await session.commit()
     await broker.publish("agents", action="routing", project=pr.code)
     return await read_routing(pr=pr, _=_, session=session)
@@ -1604,10 +1647,24 @@ class HeartbeatIn(BaseModel):
     inference, because it is the only one of the two that cannot be
     stale.
     """
-    #: False while a task is executing. The queue is held until true.
+    #: False while at capacity. The queue is held until true.
     ready: bool | None = None
-    #: What it is working on, 0/None when idle.
+    #: What it is working on, 0/None when idle. Kept for agents that
+    #: run one task at a time; `running_tasks` is the general form.
     running_task: int | None = None
+    #: Everything it is running. The server trusts this over its own
+    #: record, because the agent is the only one that can be sure.
+    running_tasks: list[int] | None = None
+    #: How many more it will accept right now, as the agent sees it:
+    #: its own view of what the host can stand, which the project's
+    #: ceiling is then applied to. None from an agent that does not
+    #: know, which is read as one.
+    slots_free: int | None = None
+    #: What it decided it can run in total, and why. Recorded so an
+    #: operator can see a number the agent chose for itself rather
+    #: than wondering why a 32-core box is running two things.
+    capacity: int | None = None
+    capacity_reason: str | None = None
 
 
 @router.post("/heartbeat", response_model=dict)
@@ -1679,16 +1736,40 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
         select(AgentTask).where(AgentTask.agent_id == a.id,
                                 AgentTask.status.in_(("claimed", "running")))
         .order_by(AgentTask.id))).scalars().all()
-    # The agent's own word on whether it wants work. It beats while it
-    # is working, so the beat alone no longer implies readiness.
+    # The agent's own word on what it is doing and what it can take.
+    # It beats while it is working, so the beat alone says nothing
+    # about readiness.
     said = body.ready if body is not None else None
-    doing = (body.running_task or 0) if body is not None else 0
+    doing_list = list(body.running_tasks or []) if body is not None else []
+    if body is not None and body.running_task:
+        doing_list.append(body.running_task)
+    doing = set(doing_list)
+
+    # How many it will accept. The project sets a ceiling and the agent
+    # reports what its host can stand; the lower wins, because either
+    # one saying "no more" is a reason not to send more. An agent that
+    # reports nothing is read as one at a time, which is what every
+    # agent did before any of this existed.
+    pr_obj = await session.get(Project, a.project_id)
+    ceiling = max(1, int(getattr(pr_obj, "jaws_max_parallel", 5) or 5))
+    if body is not None and body.capacity is not None:
+        a.capacity = max(1, int(body.capacity))
+    if body is not None and body.capacity_reason:
+        a.capacity_reason = body.capacity_reason[:300]
+    agent_cap = a.capacity or 1
+    allowed = min(ceiling, agent_cap)
+    if body is not None and body.slots_free is not None:
+        free = max(0, min(int(body.slots_free), allowed - len(doing)))
+    elif said is None:
+        free = 0 if doing else 1          # silent agent: one at a time
+    else:
+        free = max(0, allowed - len(doing)) if said else 0
 
     if held:
         now = datetime.now(timezone.utc)
         released = 0
         for h in held:
-            if doing and h.id == doing:
+            if h.id in doing:
                 # It says it is running exactly this. Nothing to decide.
                 continue
             since = _aware(h.started_at or h.claimed_at)
@@ -1698,8 +1779,8 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
                 # raced into a duplicate run.
                 continue
             if said is False and not doing:
-                # Busy, but will not say with what. An older agent, so
-                # the claim is left alone rather than raced.
+                # At capacity, but will not say with what. An older
+                # agent, so the claim is left alone rather than raced.
                 continue
             h.status = "queued"
             h.agent_id = None
@@ -1714,33 +1795,36 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
             log.warning("released %d abandoned task(s) from %s", released, a.name)
             await session.commit()
         live = [h.id for h in held if h.status in ("claimed", "running")]
-        if live:
-            # Still holding something. Hand out nothing — the queue
-            # waits here until this agent reports back.
+        if live and body is None:
+            # A silent agent runs one at a time, so anything it holds
+            # means the queue waits here.
             await session.commit()
-            return {"ok": True, "task": None, "holding": live}
+            return {"ok": True, "task": None, "holding": live,
+                    "slots_free": 0, "max_parallel": ceiling}
+        free = max(0, min(free, allowed - len(live)))
 
-    if said is False:
-        # Working on something this server has no record of. Believed:
-        # it is the one that knows, and handing it a second task would
-        # be the thing this guard exists to prevent.
+    if free <= 0:
         await session.commit()
-        return {"ok": True, "task": None, "holding": [doing] if doing else []}
+        return {"ok": True, "task": None, "holding": sorted(doing),
+                "slots_free": 0, "max_parallel": ceiling}
 
-    # Work addressed to this agent by name comes first: the operator
-    # chose it, and a routing policy should not second-guess that.
-    t = None
+    # Up to `free`, not one. Work addressed to this agent by name
+    # comes first: the operator chose it, and a routing policy should
+    # not second-guess that.
+    chosen: list[AgentTask] = []
     for cand in (await session.execute(
             select(AgentTask).where(AgentTask.agent_id == a.id,
                                     AgentTask.status == "queued")
-            .order_by(AgentTask.id).limit(25))).scalars():
+            .order_by(AgentTask.id).limit(100))).scalars():
+        if len(chosen) >= free:
+            break
         why = scope_refusal(cand)
         if why is None:
-            t = cand
-            break
-        drop(cand, why)
+            chosen.append(cand)
+        else:
+            drop(cand, why)
 
-    if t is None:
+    if len(chosen) < free:
         # Then the project's pool, oldest first, subject to the routing
         # policy. Walked rather than filtered in SQL because "is this
         # agent the primary right now" is a question about live
@@ -1750,25 +1834,31 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
             select(AgentTask).where(AgentTask.project_id == a.project_id,
                                     AgentTask.agent_id.is_(None),
                                     AgentTask.status == "queued")
-            .order_by(AgentTask.id).limit(25))).scalars().all()
+            .order_by(AgentTask.id).limit(100))).scalars().all()
         for cand in pool:
+            if len(chosen) >= free:
+                break
             why = scope_refusal(cand)
             if why is not None:
                 drop(cand, why)
                 continue
             if project is not None and await _may_claim(session, project, a, cand):
                 cand.agent_id = a.id
-                t = cand
-                break
+                chosen.append(cand)
 
-    task = None
-    if t is not None:
+    now = datetime.now(timezone.utc)
+    out = []
+    for t in chosen:
         t.status = "claimed"
-        t.claimed_at = datetime.now(timezone.utc)
-        task = {"id": t.id, "kind": t.kind,
-                "args": json.loads(t.args) if t.args else {}}
+        t.claimed_at = now
+        out.append({"id": t.id, "kind": t.kind,
+                    "args": json.loads(t.args) if t.args else {}})
     await session.commit()
-    return {"ok": True, "task": task}
+    # `task` singular is kept alongside `tasks`: an agent built before
+    # this reads only the first field and would otherwise be handed
+    # nothing at all by a server that had moved on without it.
+    return {"ok": True, "task": out[0] if out else None, "tasks": out,
+            "slots_free": free, "max_parallel": ceiling}
 
 
 @router.post("/tasks/{task_id}/start", response_model=dict)

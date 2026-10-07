@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/xsecurity-ai/oddjob/jaws/internal/capacity"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/client"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/config"
 	"github.com/xsecurity-ai/oddjob/jaws/internal/identity"
@@ -27,7 +29,16 @@ type Agent struct {
 	mu      sync.Mutex
 	busy    bool
 	current int
-	wake    chan struct{}
+	// running is every task in flight, not just one. `busy` and
+	// `current` are kept alongside it so the status endpoint and any
+	// server predating concurrency still read something true.
+	running map[int]bool
+	// cap_ is what this host was assessed able to run at once, and the
+	// reasoning. Re-derived as load changes, which is what makes the
+	// tuning live rather than a decision taken once at install.
+	cap_   int
+	capWhy string
+	wake   chan struct{}
 }
 
 func New(cfg *config.Config) *Agent {
@@ -42,9 +53,15 @@ func New(cfg *config.Config) *Agent {
 			cfg.SpoolDir(), err)
 	}
 	return &Agent{
-		cfg: cfg,
-		sp:  sp,
-		cli: client.New(cfg.Server, cfg.CallbackKey, cfg.Insecure),
+		cfg:     cfg,
+		sp:      sp,
+		running: map[int]bool{},
+		// One until the host has been looked at, which happens in
+		// Run. Starting at anything higher would have the first
+		// heartbeat claim slots nothing has checked for.
+		cap_:   1,
+		capWhy: "not assessed yet",
+		cli:    client.New(cfg.Server, cfg.CallbackKey, cfg.Insecure),
 		// Buffered depth 1: a wake that arrives while one is already
 		// pending is the same wake. Blocking the caller — which is an
 		// inbound HTTP handler — would be worse.
@@ -269,6 +286,35 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Before taking anything new: whatever is owed from last time.
 	a.drain(ctx)
 
+	// What this host can stand. The masscan probe runs ONCE, here,
+	// because it is the only part that puts packets on the wire and
+	// the answer does not change with load; cores and memory are
+	// re-read on a timer below, which is what makes the tuning live.
+	first := capacity.Measure(ctx, true)
+	a.mu.Lock()
+	a.cap_, a.capWhy = first.Parallel, first.Reason
+	a.mu.Unlock()
+	log.Printf("capacity: %d simultaneous task(s) — %s",
+		first.Parallel, first.Reason)
+	if first.MasscanRate > 0 {
+		log.Printf("masscan sustained %d pps to a discard range locally. "+
+			"That is this host's send path, NOT the path to any target.",
+			first.MasscanRate)
+	}
+
+	retune := time.NewTicker(60 * time.Second)
+	defer retune.Stop()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-retune.C:
+				a.retune(ctx)
+			}
+		}
+	}()
+
 	tick := time.NewTicker(a.cfg.Heartbeat)
 	defer tick.Stop()
 
@@ -299,10 +345,42 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.drain(ctx)
 			return nil
 		}
-		if resp.Task == nil {
-			continue
+		// `tasks` when the server sends it, falling back to the
+		// single `task` so this still works against one that predates
+		// handing out more than one.
+		batch := resp.Tasks
+		if len(batch) == 0 && resp.Task != nil {
+			batch = []client.Task{*resp.Task}
 		}
-		a.runWithHeartbeat(ctx, resp.Task)
+		for i := range batch {
+			t := batch[i]
+			a.mu.Lock()
+			a.running[t.ID] = true
+			a.busy, a.current = true, t.ID
+			a.mu.Unlock()
+			go func() {
+				defer func() {
+					a.mu.Lock()
+					delete(a.running, t.ID)
+					a.busy = len(a.running) > 0
+					if !a.busy {
+						a.current = 0
+					} else {
+						for id := range a.running {
+							a.current = id
+							break
+						}
+					}
+					a.mu.Unlock()
+					// Ask for the next one straight away rather than
+					// waiting out a heartbeat interval: a queue of
+					// four hundred lookups should not take an extra
+					// eight seconds per task to get through.
+					a.Wake()
+				}()
+				a.execute(ctx, &t)
+			}()
+		}
 	}
 }
 
@@ -313,49 +391,45 @@ func (a *Agent) Run(ctx context.Context) error {
 // disagree about what this agent is doing.
 func (a *Agent) beat(ctx context.Context) (*client.HeartbeatResp, error) {
 	a.mu.Lock()
-	busy, id := a.busy, a.current
+	ids := make([]int, 0, len(a.running))
+	for id := range a.running {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	first, capacity, why := a.current, a.cap_, a.capWhy
 	a.mu.Unlock()
+
+	free := capacity - len(ids)
+	if free < 0 {
+		free = 0
+	}
 	return a.cli.Heartbeat(ctx, client.HeartbeatReq{
-		Ready: !busy, RunningTask: id,
+		Ready:          free > 0,
+		RunningTask:    first,
+		RunningTasks:   ids,
+		SlotsFree:      free,
+		Capacity:       capacity,
+		CapacityReason: why,
 	})
 }
 
-// runWithHeartbeat executes a task while continuing to check in.
+// retune re-measures the host and adopts the new number.
 //
-// A scan can run for the better part of an hour. Going quiet for that
-// long is indistinguishable from having died, which is why the server
-// had to infer `busy` from the fact that a task was claimed — an
-// inference that was wrong whenever a claim was stranded. Beating
-// throughout means the agent says what is true instead.
-//
-// The beats carry Ready=false, so none of them can be answered with
-// more work: the queue is held server-side until this returns.
-func (a *Agent) runWithHeartbeat(ctx context.Context, t *client.Task) {
-	// `busy` and `current` are set by execute() itself, which is the
-	// one writer; this only has to keep beating while it runs.
-	done := make(chan struct{})
-	go func() {
-		tick := time.NewTicker(a.cfg.Heartbeat)
-		defer tick.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ctx.Done():
-				return
-			case <-tick.C:
-				if _, err := a.beat(ctx); err != nil {
-					// Logged, never fatal: losing a beat must not
-					// interrupt a scan that is part-way through the
-					// client's estate.
-					log.Printf("heartbeat while running %d: %v", t.ID, err)
-				}
-			}
-		}
-	}()
-	defer close(done)
-
-	a.execute(ctx, t)
+// Called periodically rather than once at startup: an agent shares its
+// machine with whatever else runs there, and a capacity decided while
+// the box was idle is wrong by the time somebody starts a build on it.
+// The masscan probe is NOT repeated — it puts packets on the wire, and
+// doing that every minute to re-learn a number that does not change is
+// not a trade worth making. Cores and memory are free to read.
+func (a *Agent) retune(ctx context.Context) {
+	as := capacity.Measure(ctx, false)
+	a.mu.Lock()
+	changed := as.Parallel != a.cap_
+	a.cap_, a.capWhy = as.Parallel, as.Reason
+	a.mu.Unlock()
+	if changed {
+		log.Printf("capacity now %d (%s)", as.Parallel, as.Reason)
+	}
 }
 
 func (a *Agent) registerWithRetry(ctx context.Context) error {
@@ -377,16 +451,14 @@ func (a *Agent) registerWithRetry(ctx context.Context) error {
 	}
 }
 
+// execute runs one task to completion. Several may be in flight at
+// once, so it does NOT touch `busy`, `current` or `running`: the loop
+// that started it owns those. It used to set them itself, which was
+// correct while exactly one task could exist and became a bug the
+// moment two could — whichever finished first cleared `busy` while the
+// other was still going, and the server was told there was a free slot
+// that did not exist.
 func (a *Agent) execute(ctx context.Context, t *client.Task) {
-	a.mu.Lock()
-	a.busy, a.current = true, t.ID
-	a.mu.Unlock()
-	defer func() {
-		a.mu.Lock()
-		a.busy, a.current = false, 0
-		a.mu.Unlock()
-	}()
-
 	log.Printf("task %d: %s", t.ID, t.Kind)
 	if a.sp != nil {
 		if err := a.sp.Begin(t.ID, t.Kind); err != nil {

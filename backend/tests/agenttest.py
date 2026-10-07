@@ -169,6 +169,88 @@ st, _ = call(f"/api/agents/tasks/{T2}/result", "POST",
              {"status": "done", "output": "[]", "stderr": "",
               "summary": "done", "exit_code": 0}, key=KEY)
 
+print("== several at once, bounded by the project and by the host ==")
+# The project sets a ceiling; the agent reports what its host can
+# stand. The lower wins, because either one saying "no more" is a
+# reason not to send more.
+st, r = call("/api/agents/routing?project=AGENT", "PUT",
+             {"max_parallel": 4}, token=admin)
+check("the ceiling is settable", st == 200 and r.get("max_parallel") == 4,
+      str(r)[:120])
+st, r = call("/api/agents/routing?project=AGENT", token=admin)
+check("and is read back", r.get("max_parallel") == 4, str(r)[:120])
+
+st, en3 = call("/api/agents?project=AGENT", "POST",
+               {"name": "wide", "target_os": "linux"}, token=admin)
+WID = ((en3 or {}).get("agent") or {}).get("id")
+WKEY = (en3 or {}).get("callback_key")
+made = []
+for i in range(6):
+    st, t = call(f"/api/agents/{WID}/tasks?project=AGENT", "POST",
+                 {"kind": "nslookup", "args": {"targets": [f"h{i}.example"]}},
+                 token=admin)
+    made.append((t or {}).get("id"))
+check("six tasks are queued for it", all(made), str(made))
+
+# Says it can run 8; the project allows 4.
+st, hb = call("/api/agents/heartbeat", "POST",
+              {"ready": True, "running_tasks": [], "slots_free": 8,
+               "capacity": 8, "capacity_reason": "8 cores"}, key=WKEY)
+got = [t["id"] for t in (hb or {}).get("tasks", [])]
+check("it is handed several at once, not one", len(got) > 1, str(got))
+check("but never more than the project allows", len(got) == 4, str(got))
+check("and the single-task field still carries the first",
+      (hb or {}).get("task", {}).get("id") == got[0], str(hb)[:120])
+
+st, hb = call("/api/agents/heartbeat", "POST",
+              {"ready": False, "running_tasks": got, "slots_free": 0,
+               "capacity": 8}, key=WKEY)
+check("at capacity it gets nothing more",
+      not (hb or {}).get("tasks"), str(hb)[:140])
+
+# Finish one: exactly one slot opens, so exactly one more goes out.
+st, _ = call(f"/api/agents/tasks/{got[0]}/result", "POST",
+             {"status": "done", "output": "[]", "stderr": "",
+              "summary": "done", "exit_code": 0}, key=WKEY)
+st, hb = call("/api/agents/heartbeat", "POST",
+              {"ready": True, "running_tasks": got[1:], "slots_free": 1,
+               "capacity": 8}, key=WKEY)
+check("one finishing frees exactly one slot",
+      len((hb or {}).get("tasks", [])) == 1, str(hb)[:140])
+
+st, agl = call("/api/agents?project=AGENT", token=admin)
+me = next((x for x in agl if x["id"] == WID), {})
+check("the agent reports what it decided it can run",
+      me.get("capacity") == 8, str(me.get("capacity")))
+check("with the reasoning, so a low number is reviewable",
+      me.get("capacity_reason") == "8 cores", str(me.get("capacity_reason")))
+check("and the effective limit is the lower of the two",
+      me.get("max_parallel") == 4, str(me.get("max_parallel")))
+check("the fleet shows WHAT is running, not just how many",
+      len(me.get("running") or []) == 4
+      and all(r.get("subject") for r in me["running"]), str(me.get("running"))[:200])
+
+# An agent that says nothing is from before any of this and is held to
+# one at a time: a guard the thing it guards can opt out of is no guard.
+st, en4 = call("/api/agents?project=AGENT", "POST",
+               {"name": "quiet", "target_os": "linux"}, token=admin)
+QID = ((en4 or {}).get("agent") or {}).get("id")
+QKEY = (en4 or {}).get("callback_key")
+for i in range(3):
+    call(f"/api/agents/{QID}/tasks?project=AGENT", "POST",
+         {"kind": "nslookup", "args": {"targets": [f"q{i}.example"]}},
+         token=admin)
+st, hb = call("/api/agents/heartbeat", "POST", {}, key=QKEY)
+check("a silent agent is still given exactly one",
+      len((hb or {}).get("tasks", [])) == 1, str(hb)[:140])
+
+# Retired before leaving: the routing tests further down count how many
+# agents are eligible, and two fixtures left online would be counted.
+for fixture in (WID, QID):
+    call(f"/api/agents/{fixture}/kill?project=AGENT", "POST", {}, token=admin)
+call("/api/agents/routing?project=AGENT", "PUT", {"max_parallel": 5},
+     token=admin)
+
 print("== killing an agent does not strand what it was running ==")
 # A killed agent's credential is refused from that moment, so it can
 # never deliver a result. Leaving its task `running` meant a scan that

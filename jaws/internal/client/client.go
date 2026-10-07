@@ -80,8 +80,11 @@ type Task struct {
 }
 
 type HeartbeatResp struct {
-	OK   bool  `json:"ok"`
-	Task *Task `json:"task"`
+	OK bool `json:"ok"`
+	// Task is the first of Tasks, kept so an agent reading only this
+	// field still gets work from a server that hands out several.
+	Task  *Task  `json:"task"`
+	Tasks []Task `json:"tasks"`
 	//: Set when the agent has been killed from Oddjob. It is answered
 	//: rather than refused so it can stop, instead of retrying forever
 	//: against a 403 it cannot interpret.
@@ -252,14 +255,23 @@ func (c *Client) Register(ctx context.Context, r RegisterReq) (*RegisterResp, er
 // that long is indistinguishable from one that died. So the beat cannot
 // also mean "give me work": readiness is stated here instead.
 type HeartbeatReq struct {
-	// Ready is false while a task is executing. The server holds the
-	// queue until it is true, so nothing is handed to an agent that is
-	// still busy with the last thing.
+	// Ready is false at capacity. The server holds the queue until it
+	// is true, so nothing is handed to an agent with nothing free.
 	Ready bool `json:"ready"`
-	// RunningTask is what it is working on, 0 when idle. Lets the
-	// server tell "still going" from "died and came back", which are
-	// the same silence from the outside.
+	// RunningTask is the first of RunningTasks, for servers that
+	// predate running several at once.
 	RunningTask int `json:"running_task,omitempty"`
+	// RunningTasks is everything in flight. The server trusts this
+	// over its own record: the agent is the only side that can be
+	// sure, and it is what tells "still going" from "died and came
+	// back" — the same silence from outside.
+	RunningTasks []int `json:"running_tasks"`
+	// SlotsFree is how many more it will take right now.
+	SlotsFree int `json:"slots_free"`
+	// Capacity is what it decided this host can run at once, and why.
+	// Sent every beat because it is re-derived as load changes.
+	Capacity       int    `json:"capacity"`
+	CapacityReason string `json:"capacity_reason,omitempty"`
 }
 
 func (c *Client) Heartbeat(ctx context.Context, req HeartbeatReq) (*HeartbeatResp, error) {

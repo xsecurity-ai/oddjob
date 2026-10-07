@@ -306,6 +306,17 @@ export interface JawsAgent {
   last_seen: string | null
   /** Where the connection arrived from — the last hop, not the agent. */
   last_ip: string | null
+  /** What the agent decided its host can run at once, and why. Null
+   *  until it has reported. */
+  capacity: number | null
+  capacity_reason: string | null
+  /** The effective limit: the lower of its assessment and the
+   *  project's ceiling. What the dispatcher honours. */
+  max_parallel: number
+  /** What is executing right now — the work, not just a count. */
+  running: Array<{
+    id: number; kind: string; subject: string; started_at: string | null
+  }>
   /** The agent's own internet-facing address, from its routing table. */
   outbound_ip: string | null
   interfaces: string[]
@@ -350,6 +361,10 @@ export interface JawsRouting {
   current_primary_name: string | null
   eligible: number
   unassigned_tasks: number
+  /** The engagement's ceiling on simultaneous tasks per agent. An
+   *  agent's own assessment of its host still applies; the lower of
+   *  the two is what runs. */
+  max_parallel: number
 }
 export interface JawsTask {
   id: number
@@ -941,9 +956,12 @@ export const api = {
 
   jawsRouting: (project: string) =>
     req<JawsRouting>('/api/agents/routing' + qs({ project })),
-  setJawsRouting: (project: string, mode: string) =>
+  /** Either field alone: changing the parallelism must not require
+   *  restating the routing mode. */
+  setJawsRouting: (project: string,
+                   body: { mode?: string; max_parallel?: number }) =>
     req<JawsRouting>('/api/agents/routing' + qs({ project }),
-      { method: 'PUT', body: JSON.stringify({ mode }) }),
+      { method: 'PUT', body: JSON.stringify(body) }),
   /** Queue for the project rather than a named agent, so the routing
    *  mode decides which Jaws runs it. */
   queuePooledTask: (project: string, kind: string,

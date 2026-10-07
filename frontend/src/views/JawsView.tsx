@@ -281,7 +281,8 @@ function Routing({ project, routing }:
   const { canWrite } = useAuth()
   const [queueOpen, setQueueOpen] = useState(false)
   const set = useMutation({
-    mutationFn: (mode: string) => api.setJawsRouting(project, mode),
+    mutationFn: (b: { mode?: string; max_parallel?: number }) =>
+      api.setJawsRouting(project, b),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['jaws-routing', project] }),
   })
   // After the hooks: the early return below is conditional and moving
@@ -291,7 +292,7 @@ function Routing({ project, routing }:
     <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1.5 }}>
       <TextField select size="small" label="Routing" value={routing.mode}
         disabled={!canWrite(project) || set.isPending}
-        onChange={(e) => set.mutate(e.target.value)} sx={{ width: 150 }}>
+        onChange={(e) => set.mutate({ mode: e.target.value })} sx={{ width: 150 }}>
         <MenuItem value="mesh">Mesh</MenuItem>
         <MenuItem value="primary">Primary</MenuItem>
         <MenuItem value="geo">By region</MenuItem>
@@ -324,6 +325,16 @@ function Routing({ project, routing }:
                 border: `1px solid ${alpha(routing.unassigned_tasks > 0
                                            ? neon.yellow : neon.muted, 0.45)}`,
                 '&:hover': { bgcolor: alpha(neon.yellow, 0.26) } }} />
+      </Tooltip>
+      <Tooltip title="How many tasks one agent may run at once on this engagement. A ceiling, not a target: each agent also works out what its own host can stand — cores, memory, what masscan managed to emit — and the lower of the two is what runs.">
+        <TextField select size="small" label="Parallel" sx={{ width: 110 }}
+          value={routing.max_parallel}
+          disabled={!canWrite(project) || set.isPending}
+          onChange={(e) => set.mutate({ max_parallel: Number(e.target.value) })}>
+          {[1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 32].map((n) => (
+            <MenuItem key={n} value={n}>{n}</MenuItem>
+          ))}
+        </TextField>
       </Tooltip>
       {queueOpen && (
         <JawsQueueDialog project={project} onClose={() => setQueueOpen(false)} />
@@ -604,12 +615,53 @@ export function JawsView({ project }: { project: string | null }) {
       ),
     },
     {
-      field: 'running_tasks', headerName: 'Working on', width: 150,
+      // Several can run at once now, so a count alone stopped being an
+      // answer: "3 running" does not say which three, and the reason
+      // to look at this column is to find the one that is stuck.
+      field: 'running_tasks', headerName: 'Working on', width: 260,
       renderCell: (p) => {
         const running = p.value as number
         const queued = p.row.queued_tasks
+        const procs = p.row.running ?? []
         if (!running && !queued) {
           return <Box component="span" sx={{ color: alpha(neon.muted, 0.4) }}>idle</Box>
+        }
+        if (procs.length) {
+          return (
+            <Tooltip title={
+              <Box component="span">
+                {procs.map((r) => (
+                  <Box key={r.id} component="span" sx={{ display: 'block' }}>
+                    #{r.id} {r.kind} — {r.subject}
+                  </Box>
+                ))}
+                {queued > 0 ? `… and ${queued} queued for this agent` : ''}
+              </Box>
+            }>
+              <Box sx={{ overflow: 'hidden' }}>
+                {procs.slice(0, 2).map((r) => (
+                  <Box key={r.id} sx={{ fontSize: 11, lineHeight: 1.35,
+                                        whiteSpace: 'nowrap',
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis' }}>
+                    <Box component="span" sx={{ color: neon.cyan }}>
+                      {r.kind}
+                    </Box>
+                    <Box component="span" sx={{ color: neon.muted }}>
+                      {' '}{r.subject}
+                    </Box>
+                  </Box>
+                ))}
+                {(procs.length > 2 || queued > 0) && (
+                  <Box sx={{ fontSize: 10.5, color: neon.muted }}>
+                    {procs.length > 2 ? `+${procs.length - 2} more running` : ''}
+                    {procs.length > 2 && queued > 0 ? ' · ' : ''}
+                    {queued > 0 ? `${queued} queued` : ''}
+                  </Box>
+                )}
+              </Box>
+            </Tooltip>
+          )
         }
         return (
           <Stack direction="row" spacing={0.8} alignItems="baseline">
@@ -632,6 +684,34 @@ export function JawsView({ project }: { project: string | null }) {
               </Tooltip>
             )}
           </Stack>
+        )
+      },
+    },
+    {
+      // What this agent decided it can run, and why. Shown because the
+      // alternative is an operator raising the project ceiling to 16,
+      // seeing nothing change, and having no way to find out that the
+      // box had 900 MB free.
+      field: 'max_parallel', headerName: 'Parallel', width: 104,
+      renderCell: (p) => {
+        const eff = (p.value as number) ?? 1
+        const own = p.row.capacity
+        return (
+          <Tooltip title={own == null
+            ? 'This agent has not reported an assessment of its host yet, so it is held to one task at a time.'
+            : `${own} by its own assessment (${p.row.capacity_reason || 'no reason given'}). `
+              + `The project's ceiling and that are combined, and the lower runs.`}>
+            <Box sx={{ color: eff > 1 ? neon.green : neon.muted,
+                       fontWeight: 600 }}>
+              {eff}
+              {own != null && own !== eff && (
+                <Box component="span" sx={{ color: neon.muted,
+                                            fontWeight: 400, fontSize: 11 }}>
+                  {' '}of {own}
+                </Box>
+              )}
+            </Box>
+          </Tooltip>
         )
       },
     },

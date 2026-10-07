@@ -88,6 +88,16 @@ class Project(Base, TimestampMixin):
     #:           third-party geolocation service.
     jaws_mode: Mapped[str] = mapped_column(
         String(16), default="mesh", server_default="mesh")
+    #: How many tasks one agent may run at once on this engagement.
+    #:
+    #: A ceiling, not a target. The agent also decides for itself what
+    #: its host can stand — cores, memory, and what masscan can
+    #: actually emit — and the lower of the two wins. This is the
+    #: operator's half of that: an engagement running against a
+    #: fragile estate wants a small number regardless of how much
+    #: machine the scanner has under it.
+    jaws_max_parallel: Mapped[int] = mapped_column(
+        Integer, default=5, server_default="5")
     name: Mapped[str] = mapped_column(String(255))
     client: Mapped[str | None] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text)
@@ -1156,6 +1166,13 @@ class Agent(Base, TimestampMixin):
         Boolean, default=False, server_default="false")
     #: JSON: {tool: version} for what it actually has installed.
     tools: Mapped[str | None] = mapped_column(Text)
+
+    #: What this agent decided its host can run at once, and why.
+    #: Reported by the agent, not assumed here: it is the only side
+    #: that can see the cores, the memory and what masscan actually
+    #: managed to emit. The project's ceiling is applied on top.
+    capacity: Mapped[int | None] = mapped_column(Integer)
+    capacity_reason: Mapped[str | None] = mapped_column(String(300))
 
     #: offline | online | disabled. `disabled` is an operator decision
     #: and survives reconnection; offline is merely an observation.
