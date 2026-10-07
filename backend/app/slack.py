@@ -83,6 +83,12 @@ class Posted:
     ts: str | None = None
     channel: str | None = None
     error: str | None = None
+    #: `ensure_channel` only. True when THIS call made the channel, as
+    #: opposed to finding one that was already there. Both are `ok` --
+    #: the channel existing is the outcome either way -- but only one of
+    #: them is a new room with nobody in it, and a welcome posted into a
+    #: channel with months of history reads as a bot that lost its place.
+    created: bool = False
 
 
 async def _call(token: str, method: str, payload: dict) -> dict:
@@ -173,7 +179,8 @@ async def ensure_channel(token: str, name: str, private: bool) -> Posted:
         d = await _call(token, "conversations.create",
                         {"name": name, "is_private": bool(private)})
         if d.get("ok"):
-            return Posted(ok=True, channel=(d.get("channel") or {}).get("id"))
+            return Posted(ok=True, created=True,
+                          channel=(d.get("channel") or {}).get("id"))
         if d.get("error") != "name_taken":
             return Posted(ok=False, error=str(d.get("error"))[:300])
         # Already exists: find it. Paginated, because the name we want
@@ -343,6 +350,193 @@ def finding_thread(port: int | None, protocol: str | None,
 
 def engagement_started(name: str) -> str:
     return f":green_circle: Engagement started. *{name}*"
+
+
+#: How many scope lines go in the welcome before it is summarised. A
+#: channel opener that is four screens of CIDRs is one nobody reads,
+#: and the full list is one click away in Oddjob.
+WELCOME_SCOPE_LIMIT = 12
+
+#: The same rule for agents. A deployment with twenty scanners does not
+#: need all twenty named in a channel opener; the count is the fact and
+#: the list is the colour.
+WELCOME_AGENT_LIMIT = 6
+
+
+async def welcome(session, project, token: str) -> str:
+    """The first message in a channel that was just created.
+
+    Answers the three things somebody added to a new engagement channel
+    asks immediately: what is this, who do I ask, and where do I go.
+
+    Admins are @-mentioned when we know their Slack id IN THIS
+    WORKSPACE -- identities are per workspace, so the id that works in
+    the site workspace is meaningless in a client's. Anyone we cannot
+    resolve is named in plain text rather than silently dropped: "who
+    is the admin" must still be answerable, and a half-list that looks
+    complete is worse than one that is visibly plain.
+    """
+    from sqlalchemy import func, select
+    from .models import (Agent, ProjectACL, ProjectScope, Target, User,
+                         UserSlackIdentity, Vuln)
+    from .routers.settings import load_all
+
+    lines = [f":wave: *{project.codename or project.name}* "
+             f"(`{project.code}`) — engagement channel"]
+    if project.client:
+        lines.append(f"*Client:* {project.client}")
+    # Only when it says something the header did not. The header
+    # already carries the codename and the code, and an engagement
+    # whose name is one of those printed itself twice.
+    if project.name and project.name not in (project.codename, project.code):
+        lines.append(f"*Engagement:* {project.name}")
+
+    # ---- who to ask -------------------------------------------------
+    key = workspace_key(token)
+    admin_ids = [a.user_id for a in (await session.execute(
+        select(ProjectACL).where(ProjectACL.project_id == project.id,
+                                 ProjectACL.role == "admin",
+                                 ProjectACL.user_id.is_not(None)))).scalars()]
+    who: list[str] = []
+    if admin_ids:
+        users = {u.id: u for u in (await session.execute(
+            select(User).where(User.id.in_(admin_ids)))).scalars()}
+        idents = {i.user_id: i for i in (await session.execute(
+            select(UserSlackIdentity).where(
+                UserSlackIdentity.user_id.in_(admin_ids),
+                UserSlackIdentity.workspace_key == key))).scalars()}
+        for uid in admin_ids:
+            u = users.get(uid)
+            if not u:
+                continue
+            sid = (idents.get(uid) or None) and idents[uid].slack_user_id
+            who.append(f"<@{sid}>" if sid else u.username)
+    lines.append("*Admins:* " + (", ".join(who) if who
+                                 else "none assigned yet"))
+
+    # ---- what is in play --------------------------------------------
+    rows = list((await session.execute(
+        select(ProjectScope).where(ProjectScope.project_id == project.id)
+        .order_by(ProjectScope.included.desc(), ProjectScope.kind,
+                  ProjectScope.value))).scalars())
+    inc = [r for r in rows if r.included]
+    exc = [r for r in rows if not r.included]
+    if not rows:
+        # Said out loud rather than omitted. An absent scope section
+        # reads as "not shown here"; this has to read as "nothing is
+        # authorised yet", which is a different and more urgent fact.
+        lines.append("*Scope:* none defined yet — nothing is in scope "
+                     "until it is added in Oddjob.")
+    else:
+        head = f"*Scope:* {len(inc)} included"
+        if exc:
+            head += f", {len(exc)} excluded"
+        lines.append(head)
+        for r in inc[:WELCOME_SCOPE_LIMIT]:
+            lines.append(f"• `{r.value}`")
+        if len(inc) > WELCOME_SCOPE_LIMIT:
+            lines.append(f"• …and {len(inc) - WELCOME_SCOPE_LIMIT} more")
+        if exc:
+            lines.append(f"• _excluded:_ " + ", ".join(
+                f"`{r.value}`" for r in exc[:3])
+                + (f" and {len(exc) - 3} more" if len(exc) > 3 else ""))
+
+    # ---- what is already on record -----------------------------------
+    # A channel opened for an engagement that has been running for weeks
+    # is the normal case, not the exception, and "4,319 targets already"
+    # is the difference between somebody starting work and somebody
+    # starting it again from the beginning.
+    n_targets = int((await session.execute(
+        select(func.count()).select_from(Target)
+        .where(Target.project_id == project.id))).scalar_one())
+    if not n_targets:
+        lines.append("*Targets:* none yet.")
+    else:
+        alive = int((await session.execute(
+            select(func.count()).select_from(Target)
+            .where(Target.project_id == project.id,
+                   Target.alive.is_(True)))).scalar_one())
+        n_vulns = int((await session.execute(
+            select(func.count()).select_from(Vuln)
+            .join(Target, Vuln.target_id == Target.id)
+            .where(Target.project_id == project.id))).scalar_one())
+        bits = [f"{n_targets:,} on record"]
+        if alive:
+            bits.append(f"{alive:,} confirmed up")
+        if n_vulns:
+            bits.append(f"{n_vulns:,} finding{'' if n_vulns == 1 else 's'}")
+        lines.append("*Targets:* " + ", ".join(bits) + ".")
+
+    # ---- what will do the scanning ------------------------------------
+    agents = list((await session.execute(
+        select(Agent).where(Agent.project_id == project.id)
+        .order_by(Agent.priority, Agent.id))).scalars())
+    live = [a for a in agents if a.status == "online"]
+    if not agents:
+        # Stated, not omitted. Somebody reading this needs to know that
+        # nothing can be scanned yet, which is not the same as nothing
+        # having been scanned.
+        lines.append("*Jaws:* no agents enrolled — nothing can run until "
+                     "one is.")
+    else:
+        mode = (project.jaws_mode or "mesh").lower()
+        how = {"mesh": "load-balanced across all of them",
+               "primary": "one at a time, next in line takes over",
+               "geo": "routed by region"}.get(mode, mode)
+        lines.append(f"*Jaws:* {len(live)} of {len(agents)} online · "
+                     f"`{mode}` — {how}")
+        for a in agents[:WELCOME_AGENT_LIMIT]:
+            mark = {"online": ":large_green_circle:",
+                    "disabled": ":no_entry:"}.get(a.status, ":white_circle:")
+            extra = []
+            if a.connection_mode == "call_in":
+                extra.append("call-in")
+            if mode == "geo":
+                # The one mode where a missing region is a misconfiguration
+                # rather than a detail: an agent serving no region is one
+                # that will never be given work.
+                extra.append(f"regions {a.regions}" if a.regions
+                             else "_no regions set_")
+            lines.append(f"• {mark} `{a.name}`"
+                         + (f" — {', '.join(extra)}" if extra else ""))
+        if len(agents) > WELCOME_AGENT_LIMIT:
+            lines.append(f"• …and {len(agents) - WELCOME_AGENT_LIMIT} more")
+
+    # ---- where to go -------------------------------------------------
+    cfg = await load_all(session)
+    base = str(cfg.get("site.base_url") or "").strip().rstrip("/")
+    if base:
+        lines.append(f"*Oddjob:* {base}/projects/{project.code}")
+    else:
+        # Without a base URL there is no link to give. Say so, rather
+        # than emitting a relative path that resolves to nothing.
+        lines.append("*Oddjob:* set `site.base_url` in site config to "
+                     "get a link here.")
+    return "\n".join(lines)
+
+
+async def opened(session, project, token: str, channel: str | None,
+                 *, created: bool) -> list[Posted]:
+    """Say the right thing in the right workspace after ensure_channel.
+
+    Not `announce`, which fans the SAME text out to every destination.
+    A Slack user id is meaningful only in the workspace it came from, so
+    a welcome full of `<@U…>` mentions posted into a SECOND workspace
+    renders as dead text naming strangers. The opener therefore goes to
+    the one workspace whose channel was just made, and every other
+    destination gets the one-liner it has always had.
+    """
+    results: list[Posted] = []
+    line = engagement_started(project.codename or project.code)
+    if created and channel:
+        results.append(await post(token, channel,
+                                  await welcome(session, project, token)))
+    else:
+        results.append(await post(token, channel, line))
+    for tok, ch in await targets_for(session, project):
+        if tok != token:
+            results.append(await post(tok, ch, line))
+    return results
 
 
 def engagement_stopped(name: str) -> str:

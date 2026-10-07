@@ -443,9 +443,23 @@ check("the project is created", st == 201, f"{st} {str(r)[:80]}")
 check("a channel is created for it", "eng-beacon" in CREATED, str(CREATED))
 check("named after the codename, not the code",
       "eng-autoch" not in CREATED, str(CREATED))
-check("and the engagement start is announced into it",
-      sent("Engagement started") is not None,
+# A channel we just made is empty, so its first message is the one
+# that orients whoever gets added to it -- not the one-liner, which
+# says nothing a newcomer needs.
+w = sent("engagement channel")
+check("a welcome is posted into the new channel", w is not None,
       str([p.get("text") for p in POSTED])[:160])
+wt = (w or {}).get("text", "")
+check("naming the engagement", "BEACON" in wt and "AUTOCH" in wt, wt[:140])
+check("saying who the admins are", "*Admins:* root" in wt, wt[:200])
+check("and saying plainly that no scope is defined yet",
+      "none defined yet" in wt, wt[:260])
+# A brand-new engagement has nothing in it, and the opener has to say
+# that rather than leave the sections out: an absent line reads as
+# "not shown here", which is a different claim from "there is none".
+check("saying there are no targets yet", "*Targets:* none yet" in wt, wt[:300])
+check("and that nothing can scan until an agent exists",
+      "no agents enrolled" in wt, wt[:360])
 
 # `ensure_channel` treats `name_taken` as success, which is right for
 # it and wrong as the whole story: without a check before anything is
@@ -464,6 +478,128 @@ check("naming the channel it collided with",
 st_gone, _ = call("/api/projects/AUTOCH2", token=admin)
 check("and the refused engagement is not half-created",
       st_gone == 404, f"status={st_gone}")
+
+print("\n-- the welcome answers what a newcomer actually asks --")
+# A channel that ALREADY existed has history; an opener posted into the
+# middle of it reads as a bot that lost its place. Only a channel this
+# call actually made gets one -- `ensure_channel` treats `name_taken`
+# as success, so "ok" alone cannot tell the two apart.
+POSTED.clear()
+st, r = call("/api/projects", "POST",
+             {"code": "PREEXIST", "name": "Already there",
+              "codename": "BEACON"}, token=admin)
+check("a project whose channel already exists is still created",
+      st in (201, 409), f"status={st}")
+if st == 201:
+    check("and gets the one-liner, not an opener",
+          sent("engagement channel") is None,
+          str([p.get("text") for p in POSTED])[:160])
+
+# With scope, admins and a base URL set, the opener carries all three.
+call("/api/settings", "PATCH",
+     {"values": {"site.base_url": "https://oddjob.test"}}, token=admin)
+POSTED.clear()
+st, r = call("/api/projects", "POST",
+             {"code": "WELCO", "name": "Welcome test", "codename": "LANTERN",
+              "client": "Acme Corp",
+              "scope": ["10.0.0.0/24", "*.acme.example", "198.51.100.5"]},
+             token=admin)
+check("the scoped project is created", st == 201, f"{st} {str(r)[:80]}")
+w = sent("engagement channel")
+wt = (w or {}).get("text", "")
+check("the opener names the client", "Acme Corp" in wt, wt[:200])
+check("it lists the scope rather than claiming there is none",
+      "10.0.0.0/24" in wt and "*.acme.example" in wt and "3 included" in wt,
+      wt[:300])
+check("it does NOT say scope is undefined", "none defined yet" not in wt, wt[:200])
+check("and it gives the URL for this project",
+      "https://oddjob.test/projects/WELCO" in wt, wt[:300])
+
+# Without a base URL there is no link to give, and a relative path would
+# resolve to nothing. Say so instead of emitting a dead link.
+call("/api/settings", "PATCH", {"values": {"site.base_url": ""}}, token=admin)
+POSTED.clear()
+call("/api/projects", "POST",
+     {"code": "NOURL", "name": "No url", "codename": "CANDLE"}, token=admin)
+wt2 = (sent("engagement channel") or {}).get("text", "")
+check("with no base URL it says how to get one rather than linking nowhere",
+      "site.base_url" in wt2 and "/projects/NOURL" not in wt2, wt2[:260])
+
+print("\n-- an engagement already under way says so --")
+# The normal case for opening a channel: the work started weeks ago.
+# "4,319 targets already" is the difference between somebody picking
+# the engagement up and somebody starting it from the beginning.
+call("/api/settings", "PATCH",
+     {"values": {"site.base_url": "https://oddjob.test"}}, token=admin)
+call("/api/projects", "POST",
+     {"code": "RUNNING", "name": "Under way", "codename": "QUARRY"},
+     token=admin)
+for h in ("one.acme.example", "two.acme.example", "three.acme.example"):
+    call("/api/targets?project=RUNNING", "POST",
+         {"host": h, "alive": True}, token=admin)
+call("/api/vulns?project=RUNNING", "POST",
+     {"host": "one.acme.example", "title": "Weak ciphers",
+      "severity": "medium"}, token=admin)
+st, a = call("/api/agents?project=RUNNING", "POST",
+             {"name": "quarry-01"}, token=admin)
+check("an agent is enrolled for it", st in (200, 201), f"{st} {str(a)[:90]}")
+
+POSTED.clear()
+st, _ = call("/api/projects/RUNNING/slack", "PUT",
+             {"channel": "eng-quarry-live", "create": True}, token=admin)
+check("the channel is created for the running engagement", st == 200,
+      f"status={st}")
+wt3 = (sent("engagement channel") or {}).get("text", "")
+check("the opener counts what is already on record",
+      "3 on record" in wt3, wt3[:400])
+check("including what is confirmed up", "3 confirmed up" in wt3, wt3[:400])
+check("and the findings already filed", "1 finding" in wt3, wt3[:400])
+check("it names the scanners that will do the work",
+      "quarry-01" in wt3, wt3[:460])
+check("and how work is shared between them", "`mesh`" in wt3, wt3[:460])
+
+print("\n-- admins are @-mentioned once we know them in THIS workspace --")
+# A Slack user id means nothing outside the workspace it came from, so
+# the mention is only emitted where the identity was confirmed. Anyone
+# unresolved is named in plain text rather than dropped: "who is the
+# admin" has to stay answerable, and a half-list that looks complete is
+# worse than one that is visibly plain.
+#
+# Driven as a user created here, NOT as root: a handle is confirmed
+# per WORKSPACE, so confirming root's would satisfy the prompt and
+# silently disarm the tests further down that expect to be asked. That
+# is the feature working, and it makes shared fixtures dangerous.
+MEMBERS.append("torch-person")
+call("/api/users", "POST",
+     {"username": "torchy", "password": "torchy-password-123"}, token=admin)
+torchy = call("/api/auth/login", "POST",
+              {"username": "torchy", "password": "torchy-password-123"}
+              )[1]["access_token"]
+# Their own engagement, so they are its only admin and the assertion
+# below is about them and nobody else.
+call("/api/projects", "POST",
+     {"code": "MENTION", "name": "Mentions", "codename": "TORCH"},
+     token=torchy)
+st, me = call("/api/projects/MENTION/slack/me", "POST",
+              {"handle": "torch-person"}, token=torchy)
+check("their handle is confirmed for this workspace",
+      (me or {}).get("confirmed") is True, str(me)[:140])
+POSTED.clear()
+st, _ = call("/api/projects/MENTION/slack", "PUT",
+             {"channel": "eng-torch-live", "create": True}, token=torchy)
+check("the channel is created", st == 200, f"status={st}")
+wt4 = (sent("engagement channel") or {}).get("text", "")
+check("the opener @-mentions the admin rather than naming them flatly",
+      "*Admins:* <@U" in wt4, wt4[:200])
+check("and does not fall back to the bare username",
+      "*Admins:* torchy" not in wt4, wt4[:200])
+# The thing the operator asked for last: the opener ends on the link.
+check("the Oddjob link is the last thing in it",
+      wt3.strip().split("\n")[-1].startswith("*Oddjob:*")
+      and "https://oddjob.test/projects/RUNNING" in wt3,
+      wt3.strip().split("\n")[-1][:120])
+call("/api/settings", "PATCH",
+     {"values": {"site.base_url": "https://oddjob.test"}}, token=admin)
 
 call("/api/settings", "PATCH",
      {"values": {"slack.auto_create_channel": False}}, token=admin)
