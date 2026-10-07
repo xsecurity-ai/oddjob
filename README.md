@@ -166,6 +166,50 @@ routing policies and region configuration are all in the
 
 ---
 
+## Driving it from outside: the MCP server
+
+Oddjob ships an MCP server, so a model in Claude Code, Claude Desktop or
+anything else that speaks MCP can read and write the engagement
+directly — "what do we know about web01", "file this finding", "import
+this nmap XML" — without a human copying data between windows.
+
+```bash
+# Mint a key in the UI (Profile → API keys), or:
+curl -X POST 'http://127.0.0.1:8000/api/auth/keys?name=mcp' \
+     -H "Authorization: Bearer <jwt>"
+
+# Register it with Claude Code
+claude mcp add oddjob --env ODDJOB_API_KEY=ojk_... -- \
+    uv --directory /path/to/oddjob/backend run python oddjob_mcp.py
+```
+
+**It is a thin client over the HTTP API, not a second way into the
+database.** Every call carries the API key, so the server applies
+exactly the same per-project ACL it applies to the browser. An MCP
+server talking straight to SQLite would silently bypass the whole
+authorisation model — which is the obvious way to build one, and wrong.
+
+The key's ACL is the boundary. A key with `readonly` on one engagement
+can read that engagement and nothing else, whatever the model is asked
+to do.
+
+| | |
+|---|---|
+| **Read** | `list_projects` `list_targets` `get_target` `list_ports` `list_services` `list_vulns` `target_timeline` `stats` `whoami` `import_formats` |
+| **Write** | `create_project` `set_target_flags` `add_target_note` `bulk_import` `import_report` `import_nmap` |
+
+### Two agents, and they are not the same thing
+
+| | runs | reaches | used for |
+|---|---|---|---|
+| **MCP server** | wherever your MCP client runs | Oddjob's HTTP API | driving the engagement from your editor |
+| **In-platform agent** | inside Oddjob | its own database, and Drones | answering questions in the UI and over Slack |
+
+The in-platform agent is configured in Site Config and is read-only
+unless writes are explicitly enabled. See [The agent](#the-agent).
+
+---
+
 ## What Oddjob does with the data
 
 - **Import** nmap, masscan, Nessus, Metasploit, Burp (issues *and* proxy

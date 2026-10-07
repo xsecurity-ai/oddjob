@@ -20,6 +20,7 @@ an agent reading them is being fed untrusted input all day.
 """
 from __future__ import annotations
 
+import collections
 import json
 from datetime import datetime, timezone
 import re
@@ -31,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..domains import registrable
 from ..hosts import InvalidHost, validate_host
 from ..models import (ROLE_ORDER, Agent, AgentTask, Credential, DomainCandidate,
+                      Event,
                       Implant, Poc, Project,
                       Service, Target, User, Vuln, WebAddress)
 from ..scopegate import check_task_targets, index_for
@@ -175,19 +177,180 @@ def build(session: AsyncSession, project: Project | None, user: User,
         urls = (await session.execute(
             select(WebAddress.url, WebAddress.status_code, WebAddress.title)
             .where(WebAddress.target_id == t.id).limit(100))).all()
+        # What has already been done to it, which is the half of the
+        # context that stops the same scan being queued twice.
+        events = (await session.execute(
+            select(Event).where(Event.target_id == t.id)
+            .order_by(Event.at.desc()).limit(15))).scalars().all()
+        creds = int((await session.execute(
+            select(func.count()).select_from(Credential)
+            .where(Credential.target_id == t.id))).scalar_one())
+
+        # Is it even allowed to be touched? Asked here rather than
+        # discovered when a task is refused: an agent deciding what to
+        # do next should know the answer before it proposes anything.
+        idx = await index_for(session, t.project_id)
+        ruling = idx.check(t.host)
+
+        # What is NOT known. The most useful thing to tell something
+        # about to act, and the thing an inventory record never says:
+        # every field it holds is a fact, and the gaps are silent.
+        gaps = []
+        if t.ip_address is None and t.kind == "host":
+            gaps.append("no address resolved for this name")
+        if t.alive is None:
+            gaps.append("never probed — liveness is unknown, not false")
+        if not svcs:
+            gaps.append("no ports recorded; nothing has been scanned here")
+        if t.os is None:
+            gaps.append("no OS identified")
+        if svcs and not any(s.product for s in svcs):
+            gaps.append("ports are known but no versions — a -sV pass "
+                        "would make exploit matching possible")
+
         return {
             "host": t.host, "ip": t.ip_address, "alive": t.alive,
+            "kind": t.kind, "provider": t.provider,
             "compromised": t.hacked, "os": t.os, "os_accuracy": t.os_accuracy,
             "notes": t.notes,
+            # product and version, not just the service name: "http" is
+            # not actionable and "Apache 2.4.49" is.
             "services": [{"port": s.port, "protocol": s.protocol, "state": s.state,
-                          "service": s.name, "banner": s.banner} for s in svcs],
+                          "service": s.name, "product": s.product,
+                          "version": s.version, "banner": s.banner}
+                         for s in svcs],
             "findings": [{"title": v.title, "severity": v.severity,
                           "status": v.status, "port": v.port} for v in vulns],
             "implants": [{"framework": i.framework, "id": i.implant_id,
                           "user": i.user, "integrity": i.integrity} for i in imps],
             "web_addresses": [{"url": u, "status": sc, "title": ti}
                               for u, sc, ti in urls],
+            "credentials_held": creds,
+            "in_scope": ruling.allowed,
+            "scope_reason": None if ruling.allowed else ruling.reason,
+            "recent_activity": [{"at": e.at.isoformat() if e.at else None,
+                                 "kind": e.kind, "summary": e.summary,
+                                 "actor": e.actor} for e in events],
+            "not_known": gaps,
         }
+
+    async def rank_targets(limit: int = 10) -> dict:
+        """Which hosts are worth going after first, and WHY.
+
+        Ranked, not scored into a single number nobody can argue with:
+        the reasons are returned so an operator can disagree with the
+        order. A host at the top because it has one critical finding is
+        a different proposition from one there because it exposes
+        fifteen unversioned services, and collapsing both into "87"
+        hides exactly the thing being decided.
+        """
+        tsel = select(Target)
+        if project:
+            tsel = tsel.where(Target.project_id == project.id)
+        rows = (await session.execute(tsel)).scalars().all()
+        if not rows:
+            return {"targets": [], "note": "this engagement has no targets yet"}
+
+        ids = [t.id for t in rows]
+        svc = {}
+        for sv in (await session.execute(
+                select(Service).where(Service.target_id.in_(ids)))).scalars():
+            svc.setdefault(sv.target_id, []).append(sv)
+        vul = {}
+        for v in (await session.execute(
+                select(Vuln).where(Vuln.target_id.in_(ids)))).scalars():
+            vul.setdefault(v.target_id, []).append(v)
+
+        WEIGHT = {"critical": 100, "high": 40, "medium": 10, "low": 2, "info": 0}
+        out = []
+        for t in rows:
+            vs, ss = vul.get(t.id, []), svc.get(t.id, [])
+            score, why = 0, []
+            for sev, n in sorted(collections.Counter(
+                    (v.severity or "info").lower() for v in vs).items()):
+                score += WEIGHT.get(sev, 0) * n
+                if WEIGHT.get(sev, 0):
+                    why.append(f"{n} {sev} finding{'' if n == 1 else 's'}")
+            if t.hacked:
+                # Already in. Ranked high because it is a foothold, and
+                # said plainly so nobody reads it as "still to do".
+                score += 60
+                why.append("already compromised — this is a foothold, not a target")
+            remote = [x for x in ss if x.port in (21, 22, 23, 445, 3389, 5985, 1433,
+                                                  3306, 5432, 6379, 27017)]
+            if remote:
+                score += 8 * len(remote)
+                why.append("remote-access or database ports: "
+                           + ", ".join(f"{x.port}/{x.protocol}" for x in remote[:6]))
+            versioned = [x for x in ss if x.product and x.version]
+            if versioned:
+                score += 3 * len(versioned)
+                why.append(f"{len(versioned)} service(s) with an identified "
+                           f"version, which is what exploit matching needs")
+            if ss and not versioned:
+                why.append("ports open but unversioned — a -sV pass would "
+                           "say more than this ranking can")
+            if not ss:
+                why.append("nothing scanned here yet, so this ranking knows "
+                           "almost nothing about it")
+            out.append({"host": t.host, "ip": t.ip_address, "score": score,
+                        "compromised": t.hacked, "open_ports": len(ss),
+                        "findings": len(vs), "why": why})
+        out.sort(key=lambda r: (-r["score"], r["host"]))
+        return {"targets": out[:max(1, min(limit, 100))],
+                "ranked_of": len(out),
+                "caveat": "Ordered by what this engagement has RECORDED. A "
+                          "host nothing has scanned scores low because it is "
+                          "unknown, not because it is safe."}
+
+    async def find_by_technology(technology: str, limit: int = 50) -> dict:
+        """Hosts running a given technology — php, wordpress, nginx, jboss.
+
+        Matched against the service product, version and banner, and
+        against captured page titles and URLs, because which of those
+        carries the evidence depends entirely on the tool that found it.
+        """
+        q = (technology or "").strip().lower()
+        if not q:
+            return {"error": "give a technology to look for, e.g. 'php'"}
+        like = f"%{q}%"
+
+        tsel = select(Target)
+        if project:
+            tsel = tsel.where(Target.project_id == project.id)
+        rows = {t.id: t for t in (await session.execute(tsel)).scalars()}
+        if not rows:
+            return {"hosts": [], "technology": q}
+
+        hits: dict[int, list[str]] = {}
+        for sv in (await session.execute(
+                select(Service).where(
+                    Service.target_id.in_(list(rows)),
+                    or_(func.lower(Service.product).like(like),
+                        func.lower(Service.name).like(like),
+                        func.lower(Service.version).like(like),
+                        func.lower(Service.banner).like(like))))).scalars():
+            hits.setdefault(sv.target_id, []).append(
+                f"{sv.port}/{sv.protocol}: "
+                + " ".join(x for x in (sv.product, sv.version) if x)
+                  or (sv.name or "service"))
+        for w in (await session.execute(
+                select(WebAddress).where(
+                    WebAddress.target_id.in_(list(rows)),
+                    or_(func.lower(WebAddress.url).like(like),
+                        func.lower(WebAddress.title).like(like),
+                        func.lower(WebAddress.server).like(like))))).scalars():
+            hits.setdefault(w.target_id, []).append(
+                f"web: {w.url}" + (f" ({w.title})" if w.title else ""))
+
+        out = [{"host": rows[tid].host, "ip": rows[tid].ip_address,
+                "evidence": ev[:8]}
+               for tid, ev in hits.items() if tid in rows]
+        out.sort(key=lambda r: r["host"])
+        return {"technology": q, "hosts": out[:max(1, min(limit, 500))],
+                "matched": len(out),
+                "caveat": "Found in what has been RECORDED. A host running "
+                          "this and never scanned does not appear."}
 
     async def list_findings(severity: str = "", search: str = "",
                             host: str = "", limit: int = 50) -> dict:
@@ -647,6 +810,19 @@ def build(session: AsyncSession, project: Project | None, user: User,
                    "connection_mode": {"type": "string",
                                        "enum": ["callback", "call_in"]}},
                   ["name"]), enroll_drone, writes=True),
+        Tool("rank_targets",
+             "Which hosts are worth going after first, with the reason for "
+             "each. Ranked rather than scored: the reasons come back so the "
+             "order can be argued with.",
+             _obj({"limit": {"type": "integer"}}), rank_targets),
+        Tool("find_by_technology",
+             "Hosts running a given technology — php, wordpress, nginx, "
+             "jboss. Matches service product, version and banner, and "
+             "captured page titles and URLs.",
+             _obj({"technology": {"type": "string",
+                                  "description": "e.g. php, wordpress, nginx"},
+                   "limit": {"type": "integer"}}, ["technology"]),
+             find_by_technology),
         Tool("add_note", "Append a note to a host's timeline.",
              _obj({"host": {"type": "string"}, "note": {"type": "string"}},
                   ["host", "note"]), add_note, writes=True),
