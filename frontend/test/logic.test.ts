@@ -10,6 +10,11 @@
  * reads as a ranking and is the wrong one).
  */
 import { prune, describe as describeState, visibilityDiff } from '../src/lib/useTableState'
+import {
+  describeItem, filterableColumns, isArmed, nextSort, operatorsFor,
+  type ColumnDef, type FilterModel,
+} from '../src/lib/columns'
+import { filterRows, sortRows } from '../src/lib/tableOps'
 import { maybeSorted, sortedStrings, isRanked } from '../src/lib/sortOptions'
 import { THEMES } from '../src/palettes'
 import { parse as parseRoute, build as buildRoute } from '../src/lib/route'
@@ -86,6 +91,187 @@ check('a user hiding a normally-visible column is stored',
       eq(visibilityDiff({ port: false }, {}), { port: false }))
 check('untouched visible columns are not stored',
       eq(visibilityDiff({ host: true, port: true }, {}), {}))
+
+console.log('\n== several conditions at once ==')
+// The point of moving off @mui/x-data-grid: its free tier hardcodes
+// disableMultipleColumnsFiltering, so the second condition replaced the
+// first. These are the cases where being wrong is silent — a condition
+// that quietly matches everything looks exactly like one that works.
+const webCols: ColumnDef[] = [
+  { field: 'url', headerName: 'URL' },
+  { field: 'status_code', headerName: 'Status', type: 'number' },
+  { field: 'crawled', headerName: 'Fetched', type: 'boolean' },
+  { field: 'title', headerName: 'Title', valueGetter: (v) => v ?? '' },
+  { field: 'secret', headerName: 'Secret', filterable: false },
+]
+const web = [
+  { url: 'https://a.acme.example/admin', status_code: 500, crawled: true, title: null, secret: 'hunter2' },
+  { url: 'https://a.acme.example/login', status_code: 200, crawled: true, title: 'Login', secret: 'hunter2' },
+  { url: 'https://b.corp.com/admin', status_code: 503, crawled: false, title: null, secret: 'hunter2' },
+  { url: 'https://b.corp.com/health', status_code: 404, crawled: false, title: 'Health', secret: 'hunter2' },
+]
+const and: FilterModel = {
+  items: [{ field: 'status_code', operator: '>=', value: '500' },
+          { field: 'url', operator: 'contains', value: 'admin' }],
+  logicOperator: 'and',
+}
+check('two conditions ANDed keep only the rows matching both',
+      eq(filterRows(web, and, webCols).map((r) => r.status_code), [500, 503]),
+      JSON.stringify(filterRows(web, and, webCols).map((r) => r.url)))
+// Deliberately two conditions that match DIFFERENT rows, so AND and OR
+// cannot give the same answer and the assertion means something.
+const or: FilterModel = {
+  items: [{ field: 'status_code', operator: '>=', value: '500' },
+          { field: 'url', operator: 'contains', value: 'health' }],
+  logicOperator: 'or',
+}
+check('ORed, a row matching either is kept',
+      eq(filterRows(web, or, webCols).map((r) => r.status_code), [500, 503, 404]),
+      JSON.stringify(filterRows(web, or, webCols).map((r) => r.status_code)))
+check('and ANDed, the same pair matches nothing',
+      filterRows(web, { ...or, logicOperator: 'and' }, webCols).length === 0)
+check('no logicOperator means AND, not "whatever is first"',
+      filterRows(web, { items: and.items }, webCols).length === 2)
+check('two conditions on the SAME column are a range, which is the thing '
+      + 'a one-condition-per-column model cannot express',
+      filterRows(web, { items: [
+        { field: 'status_code', operator: '>=', value: '400' },
+        { field: 'status_code', operator: '<', value: '500' }] }, webCols)
+        .length === 1)
+check('a half-typed condition filters nothing rather than everything',
+      filterRows(web, { items: [{ field: 'url', operator: 'contains', value: '' }] },
+                 webCols).length === 4)
+check('an operator we do not recognise KEEPS the rows — never hide a '
+      + 'finding because a filter was not understood',
+      filterRows(web, { items: [{ field: 'url', operator: 'sorcery', value: 'x' }] },
+                 webCols).length === 4)
+check('isEmpty is armed with no value and really does hide rows',
+      filterRows(web, { items: [{ field: 'title', operator: 'isEmpty' }] },
+                 webCols).length === 2)
+check('a condition and the search box both have to pass',
+      filterRows(web, { items: [{ field: 'url', operator: 'contains', value: 'admin' }],
+                        quickFilterValues: ['corp'] }, webCols).length === 1)
+
+console.log('\n== the search box does not read a withheld column ==')
+// Credentials marks its secret column `filterable: false` so that "a
+// secret should not be discoverable by typing fragments of it into a
+// filter box". Before this was honoured the panel left the column out
+// and the search then read every column anyway.
+check('a term matching only an unfilterable column matches no rows',
+      filterRows(web, { items: [], quickFilterValues: ['hunter2'] }, webCols).length === 0)
+check('while an ordinary column is still searched',
+      filterRows(web, { items: [], quickFilterValues: ['health'] }, webCols).length === 1)
+check('and the filter panel is offered the same set',
+      eq(filterableColumns(webCols).map((c) => c.field),
+         ['url', 'status_code', 'crawled', 'title']))
+
+console.log('\n== what each column type may be asked ==')
+const ops = (c: ColumnDef) => operatorsFor(c).map((o) => o.value)
+check('a boolean gets is/not and presence, and nothing else — every '
+      + 'other operator reaches filtering.py’s boolean branch and comes '
+      + 'back as the NEGATION, with a 200',
+      eq(ops({ field: 'b', type: 'boolean' }), ['is', 'not', 'isEmpty', 'isNotEmpty']),
+      JSON.stringify(ops({ field: 'b', type: 'boolean' })))
+check('a number gets no "contains"',
+      !ops({ field: 'n', type: 'number' }).includes('contains'))
+check('a string gets no ">="',
+      !ops({ field: 's' }).includes('>='))
+check('every operator offered is one filtering.py lists in _TEXT_OPS or '
+      + '_NUM_OPS',
+      [...new Set([...ops({ field: 's' }), ...ops({ field: 'n', type: 'number' }),
+                   ...ops({ field: 'b', type: 'boolean' }),
+                   ...ops({ field: 'v', type: 'singleSelect' })])]
+        .every((o) => new Set([
+          'contains', 'doesNotContain', 'equals', 'doesNotEqual', 'startsWith',
+          'endsWith', 'isEmpty', 'isNotEmpty', 'isAnyOf', 'is', 'not',
+          '=', '!=', '>', '>=', '<', '<=']).has(o)))
+
+console.log('\n== pruning a condition whose operator has gone ==')
+// The other half of "stale state must never hide data silently": a
+// `contains` left on a column that is now a number is not recognised by
+// matches(), so the chip says filtered and nothing is filtered.
+const typed: ColumnDef[] = [{ field: 'port', type: 'number' }, { field: 'host' }]
+const typedFields = new Set(['port', 'host'])
+const stalely = prune({ filter: { items: [
+  { field: 'port', operator: 'contains', value: '44' },
+  { field: 'port', operator: '>=', value: '443' },
+  { field: 'host', operator: 'contains', value: 'acme' },
+] } }, typedFields, typed)
+check('a condition the column can no longer answer is dropped',
+      (stalely.filter?.items ?? []).length === 2,
+      JSON.stringify(stalely.filter?.items))
+check('without columns given, only the field is checked — which is what '
+      + 'the storage layer could do before it knew about operators',
+      (prune({ filter: { items: [{ field: 'port', operator: 'contains', value: '44' }] } },
+             typedFields).filter?.items ?? []).length === 1)
+
+console.log('\n== clicking a header ==')
+check('a fresh column sorts ascending', eq(nextSort([], 'host'), [{ field: 'host', sort: 'asc' }]))
+check('clicking again reverses',
+      eq(nextSort([{ field: 'host', sort: 'asc' }], 'host'), [{ field: 'host', sort: 'desc' }]))
+check('and a third click clears it, rather than cycling forever',
+      eq(nextSort([{ field: 'host', sort: 'desc' }], 'host'), []))
+check('a different column replaces the sort',
+      eq(nextSort([{ field: 'host', sort: 'asc' }], 'port'), [{ field: 'port', sort: 'asc' }]))
+check('shift-clicking adds to it instead',
+      eq(nextSort([{ field: 'sev', sort: 'asc' }], 'host', true),
+         [{ field: 'sev', sort: 'asc' }, { field: 'host', sort: 'asc' }]))
+check('and shift-clicking it off leaves the rest in place',
+      eq(nextSort([{ field: 'sev', sort: 'asc' }, { field: 'host', sort: 'desc' }],
+                  'host', true),
+         [{ field: 'sev', sort: 'asc' }]))
+
+console.log('\n== a column may insist on its own order ==')
+// Severity is a string, so the generic comparator sorts it critical,
+// high, info, low, medium — putting "info" third on a findings table.
+const RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
+const sevCols: ColumnDef[] = [{
+  field: 'sev',
+  sortComparator: (a, b) => (RANK[a as string] ?? 9) - (RANK[b as string] ?? 9),
+}]
+const sevRows = [{ sev: 'info' }, { sev: 'critical' }, { sev: 'medium' }]
+check('sortComparator is honoured, so ascending really is worst first',
+      eq(sortRows(sevRows, [{ field: 'sev', sort: 'asc' }], sevCols).map((r) => r.sev),
+         ['critical', 'medium', 'info']),
+      JSON.stringify(sortRows(sevRows, [{ field: 'sev', sort: 'asc' }], sevCols)
+        .map((r) => r.sev)))
+check('and without one the generic comparator would have got it wrong',
+      eq(sortRows(sevRows, [{ field: 'sev', sort: 'asc' }], [{ field: 'sev' }])
+        .map((r) => r.sev), ['critical', 'info', 'medium']))
+check('a second sort key breaks ties in the first',
+      eq(sortRows([{ a: 1, b: 'z' }, { a: 1, b: 'a' }, { a: 0, b: 'm' }],
+                  [{ field: 'a', sort: 'asc' }, { field: 'b', sort: 'asc' }],
+                  [{ field: 'a' }, { field: 'b' }]).map((r) => `${r.a}${r.b}`),
+         ['0m', '1a', '1z']))
+
+console.log('\n== saying what a condition does, in words ==')
+check('an operator with a value reads as a sentence',
+      describeItem({ field: 'status_code', operator: '>=', value: '500' },
+                   { field: 'status_code', headerName: 'Status', type: 'number' })
+        === 'Status ≥ 500')
+check('one without a value does not pretend to have one',
+      describeItem({ field: 'title', operator: 'isEmpty' },
+                   { field: 'title', headerName: 'Title' }) === 'Title is empty')
+check('a list is spelled out',
+      describeItem({ field: 's', operator: 'isAnyOf', value: ['200', '401'] },
+                   { field: 's', headerName: 'Status' }) === 'Status is any of 200, 401')
+check('a condition with no column falls back to the field name',
+      describeItem({ field: 'mystery', operator: 'contains', value: 'x' })
+        === 'mystery contains x')
+
+console.log('\n== armed, or still being typed ==')
+check('no field is never armed', isArmed({ field: '', operator: 'contains', value: 'x' }) === false)
+check('no value is not armed', isArmed({ field: 'a', operator: 'contains' }) === false)
+check('an empty string is not armed',
+      isArmed({ field: 'a', operator: 'contains', value: '' }) === false)
+check('an empty list is not armed',
+      isArmed({ field: 'a', operator: 'isAnyOf', value: [] }) === false)
+check('isEmpty needs no value to be armed',
+      isArmed({ field: 'a', operator: 'isEmpty' }) === true)
+check('zero IS a value — the bug where "port = 0" filters nothing',
+      isArmed({ field: 'a', operator: '=', value: 0 }) === true)
+check('and so is false',
+      isArmed({ field: 'a', operator: 'is', value: false }) === true)
 
 console.log('\n== dropdown ordering ==')
 check('arbitrary lists sort, numeric-aware',

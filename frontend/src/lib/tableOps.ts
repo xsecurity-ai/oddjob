@@ -1,43 +1,41 @@
-/** Filtering and sorting rows ourselves, so page size is not capped at 100.
+/** Filtering, sorting and paging the whole row set, in the browser.
  *
- * The MIT DataGrid refuses a page size above 100:
- *
- *     MAX_PAGE_SIZE = 100
- *     'MUI X: `pageSize` cannot exceed 100 in the MIT version of the
- *      DataGrid. You need to upgrade to DataGridPro...'
- *
- * and it throws from `getDerivedPaginationModel`, so it happens whatever
- * the pagination mode is. Offering 250 and 500 in `pageSizeOptions` was
- * therefore a promise the grid could not keep — picking one threw.
- *
- * The one page size it accepts above 100 is `-1`, its "all results"
- * sentinel. So the grid is given `-1` and exactly one page of rows, and
- * the paging happens here. That in turn means the grid must not sort or
- * filter either: it only ever sees one page, and sorting a page is not
- * sorting the table. Both are done here instead, over the whole set,
+ * This is the client-side half of DataTable's two modes. The table
+ * component renders exactly one page at a time, so it cannot be the thing
+ * that orders or filters: sorting a page is not sorting the table, and
+ * filtering a page would hide rows from that page while the footer went on
+ * describing the whole set. Both therefore happen here, over everything,
  * before the slice.
  *
- * The operators implemented are the ones the grid's own filter panel
- * offers for string, number, boolean and single-select columns. An
- * operator that is not recognised keeps the row rather than dropping
- * it: a filter we failed to understand must not silently hide findings.
+ * The other mode is `lib/useServerTable.ts`, where the database does all
+ * three because the row count makes doing it here wrong as well as slow.
+ * The two agree on the operator names so that a filter means the same
+ * thing whichever side evaluates it — see `lib/columns.ts`, and
+ * `backend/app/filtering.py` for the SQL end of the same list.
+ *
+ * `items` is a list and `logicOperator` joins it, so any number of
+ * conditions combine with AND or OR. An operator that is not recognised
+ * keeps the row rather than dropping it: a filter we failed to understand
+ * must not silently hide findings.
  */
-import type { GridColDef, GridFilterModel, GridSortModel } from '@mui/x-data-grid'
+import {
+  filterableColumns, isArmed,
+  type ColumnDef, type FilterModel, type SortModel,
+} from './columns'
 
 type Row = Record<string, unknown>
 
 /** The value a column shows for a row, honouring `valueGetter`. */
-export function cellValue(row: Row, col: GridColDef | undefined, field: string): unknown {
+export function cellValue(row: Row, col: ColumnDef | undefined, field: string): unknown {
   const raw = row[field]
-  const get = col?.valueGetter as
-    | ((value: unknown, row: Row, column: GridColDef, apiRef: unknown) => unknown)
-    | undefined
+  const get = col?.valueGetter
   if (typeof get !== 'function') return raw
   try {
-    return get(raw, row, col as GridColDef, undefined)
+    return get(raw, row)
   } catch {
-    // A valueGetter that needs the grid's apiRef cannot run out here.
-    // Falling back to the raw field is better than losing the column.
+    // A valueGetter is view code and may assume more about the row than
+    // it is given. Falling back to the raw field is better than taking
+    // the whole table down with it.
     return raw
   }
 }
@@ -84,27 +82,28 @@ function matches(value: unknown, op: string, target: unknown): boolean {
   }
 }
 
-/** Whether a filter item is armed. An empty value means "not set yet". */
-function armed(op: string, value: unknown): boolean {
-  if (op === 'isEmpty' || op === 'isNotEmpty') return true
-  if (Array.isArray(value)) return value.length > 0
-  return !empty(value)
-}
-
 export function filterRows<T extends Row>(
-  rows: readonly T[], model: GridFilterModel | undefined, columns: GridColDef[],
+  rows: readonly T[], model: FilterModel | undefined, columns: ColumnDef[],
 ): readonly T[] {
   if (!model) return rows
   const byField = new Map(columns.map((c) => [c.field, c]))
-  const items = (model.items ?? []).filter((i) => armed(String(i.operator), i.value))
+  // `isArmed` is shared with the server-side query builder and the "this
+  // table is filtered" chip, so all three agree on what counts as a live
+  // condition.
+  const items = (model.items ?? []).filter(isArmed)
   const quick = (model.quickFilterValues ?? []).filter(Boolean).map((q) => lower(q))
 
   if (!items.length && !quick.length) return rows
 
   const linkOr = model.logicOperator === 'or'
-  // The grid's quick filter defaults to requiring every term, across
-  // any column. Mirroring that matters: "acme 500" should mean both.
+  // The search box requires every term by default, across any column.
+  // "acme 500" should mean both.
   const quickAll = (model.quickFilterLogicOperator ?? 'and') !== 'or'
+  // A column excluded from filtering is excluded from the search too —
+  // the same list the panel offers. Credentials relies on it: a secret
+  // must not be discoverable by typing fragments of it into a box and
+  // watching rows disappear. This used to read every column.
+  const searchable = filterableColumns(columns)
 
   return rows.filter((row) => {
     if (items.length) {
@@ -116,7 +115,7 @@ export function filterRows<T extends Row>(
       if (!pass) return false
     }
     if (quick.length) {
-      const haystack = columns
+      const haystack = searchable
         .map((c) => lower(cellValue(row, c, c.field)))
         .join('\u0000')
       const hits = quick.map((q) => haystack.includes(q))
@@ -126,7 +125,7 @@ export function filterRows<T extends Row>(
   })
 }
 
-/** Compare two cell values the way the grid would. */
+/** Compare two cell values, guessing at the type from the values. */
 function compare(a: unknown, b: unknown): number {
   if (a == null && b == null) return 0
   if (a == null) return -1
@@ -142,7 +141,7 @@ function compare(a: unknown, b: unknown): number {
 }
 
 export function sortRows<T extends Row>(
-  rows: readonly T[], model: GridSortModel | undefined, columns: GridColDef[],
+  rows: readonly T[], model: SortModel | undefined, columns: ColumnDef[],
 ): readonly T[] {
   const active = (model ?? []).filter((s) => s.sort)
   if (!active.length) return rows

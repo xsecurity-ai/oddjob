@@ -6,9 +6,10 @@ import {
 import CloseIcon from '@mui/icons-material/Close'
 import DnsIcon from '@mui/icons-material/Dns'
 import TravelExploreIcon from '@mui/icons-material/TravelExplore'
-import { DataGrid, type GridColDef } from '@mui/x-data-grid'
 import { useQuery } from '@tanstack/react-query'
 import { api, type ExploreHost, type NameCount } from '../lib/api'
+import type { ColumnDef } from '../lib/columns'
+import { DataTable } from './DataTable'
 import { useHostModal } from './HostModal'
 import { neon, glow } from '../theme'
 
@@ -86,23 +87,6 @@ function Distribution({ title, rows, colour }: { title: string; rows: NameCount[
   )
 }
 
-const gridSx = {
-  border: 0, color: neon.text, fontFamily: `'Share Tech Mono', monospace`,
-  '--DataGrid-containerBackground': 'transparent',
-  '& .MuiDataGrid-columnHeaderTitle': {
-    fontFamily: `'Orbitron', sans-serif`, fontSize: 10, fontWeight: 700,
-    letterSpacing: '0.12em', textTransform: 'uppercase', color: neon.cyan,
-  },
-  '& .MuiDataGrid-cell': { borderBottom: `1px solid ${alpha(neon.purple, 0.12)}` },
-  '& .MuiDataGrid-row:hover': { backgroundColor: alpha(neon.pink, 0.08) },
-  '& .MuiDataGrid-toolbarContainer, & .MuiDataGrid-toolbar': {
-    borderBottom: `1px solid ${alpha(neon.pink, 0.2)}`,
-    backgroundColor: alpha(neon.bgDeep, 0.5), padding: '6px 8px',
-  },
-  '& .MuiDataGrid-footerContainer': { borderTop: `1px solid ${alpha(neon.pink, 0.25)}` },
-  '& .MuiTablePagination-root': { color: neon.muted },
-} as const
-
 /** "All hosts with this port/service" — the flat list. */
 function HostsBody({ subject }: { subject: Subject }) {
   const { open } = useHostModal()
@@ -115,7 +99,7 @@ function HostsBody({ subject }: { subject: Subject }) {
     }),
   })
 
-  const columns: GridColDef[] = [
+  const columns: ColumnDef[] = [
     {
       field: 'host', headerName: 'Host', flex: 2, minWidth: 230,
       renderCell: (p) => (
@@ -141,16 +125,20 @@ function HostsBody({ subject }: { subject: Subject }) {
       renderCell: (p) => <Box sx={{ color: neon.purple, fontSize: 11.5 }}>{p.value}</Box> },
   ]
 
-  if (error) return <Typography sx={{ color: neon.red, py: 4 }}>{(error as Error).message}</Typography>
   return (
-    <Box sx={{ height: '100%', minHeight: 420 }}>
-      <DataGrid
-        rows={data?.items ?? []} columns={columns} loading={isLoading}
-        showToolbar density="compact" disableRowSelectionOnClick
-        pageSizeOptions={[25, 50, 100, 250]}
-        columnVisibilityModel={subject.project ? { project_code: false } : {}}
-        initialState={{ pagination: { paginationModel: { pageSize: 50, page: 0 } } }}
-        sx={gridSx}
+    <Box sx={{ height: '100%', minHeight: 420, display: 'flex' }}>
+      {/* The same table as everywhere else, rather than a second one with
+          its own rules: it brings the search box, the multi-condition
+          filter and the column control with it, which is exactly what
+          "show me every host on this port" wants next. */}
+      <DataTable
+        tableId="explore-hosts"
+        rows={data?.items ?? []}
+        columns={columns}
+        loading={isLoading}
+        error={error as Error | null}
+        initialSort={{ field: 'host', sort: 'asc' }}
+        hiddenColumns={subject.project ? { project_code: false } : undefined}
       />
     </Box>
   )
@@ -186,7 +174,7 @@ function ExploreBody({ subject }: { subject: Subject }) {
     </Box>
   )
 
-  const hostCols: GridColDef<ExploreHost>[] = [
+  const hostCols: ColumnDef<ExploreHost>[] = [
     { field: 'host', headerName: 'Host', flex: 2, minWidth: 230,
       renderCell: (p) => (
         <Box onClick={() => open(p.row.project_code, p.row.host)}
@@ -246,16 +234,16 @@ function ExploreBody({ subject }: { subject: Subject }) {
         <Distribution title="Banners" rows={data.banners} colour={neon.yellow} />
       </Stack>
 
-      <Box sx={{ flex: 1, minHeight: 320 }}>
+      <Box sx={{ flex: 1, minHeight: 320, display: 'flex', flexDirection: 'column' }}>
         <Label>Hosts — worst first{data.truncated ? ' (truncated)' : ''}</Label>
-        <DataGrid
+        <DataTable
+          tableId="explore-detail"
+          // The server returns these already ordered worst-first and the
+          // list is truncated, so the index IS the ranking — and the only
+          // id these rows have.
           rows={data.hosts.map((h, i) => ({ id: i, ...h }))}
-          columns={hostCols as GridColDef[]}
-          showToolbar density="compact" disableRowSelectionOnClick
-          pageSizeOptions={[25, 50, 100]}
-          columnVisibilityModel={subject.project ? { project_code: false } : {}}
-          initialState={{ pagination: { paginationModel: { pageSize: 25, page: 0 } } }}
-          sx={gridSx}
+          columns={hostCols as ColumnDef[]}
+          hiddenColumns={subject.project ? { project_code: false } : undefined}
         />
       </Box>
     </Stack>

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Box, Chip, IconButton, Tooltip, alpha } from '@mui/material'
 import VisibilityIcon from '@mui/icons-material/VisibilityOutlined'
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOffOutlined'
-import type { GridColDef } from '@mui/x-data-grid'
+import type { ColumnDef } from '../lib/columns'
 import { useQuery } from '@tanstack/react-query'
 import { api, type Credential } from '../lib/api'
 import { useAuth } from '../lib/auth'
@@ -25,7 +25,7 @@ export function CredentialsView({ project }: { project: string | null }) {
     queryFn: () => api.credentials(project ?? undefined),
   })
 
-  const columns: GridColDef<Credential>[] = [
+  const columns: ColumnDef<Credential>[] = [
     {
       field: 'host', headerName: 'Host', flex: 1.4, minWidth: 190,
       valueGetter: (v) => v ?? '',
@@ -105,7 +105,7 @@ export function CredentialsView({ project }: { project: string | null }) {
   return (
     <DataTable
       rows={data?.items ?? []}
-      columns={columns as GridColDef[]}
+      columns={columns as ColumnDef[]}
       loading={isLoading}
       error={error as Error | null}
       initialSort={{ field: 'host', sort: 'asc' }}

@@ -175,12 +175,21 @@ themselves.
 ```bash
 # In Oddjob: Drones → Deploy a Drone. Copy the enrollment token, then:
 docker run -d --name drone --restart unless-stopped \
+  --network host \
   --cap-drop=ALL --cap-add=NET_RAW --cap-add=NET_ADMIN \
   -e DRONE_SERVER=https://oddjob.internal \
   -e DRONE_ENROLL_TOKEN=drone_... \
   -v drone-state:/var/lib/drone/work drone-agent \
   run --name edge-01 --workdir /var/lib/drone/work
 ```
+
+**`--network host` is not decoration.** Leave it off and the Drone sits on
+a private bridge network: it cannot receive a reverse shell, an SSRF
+callback or any other inbound connection, it reports an address that
+appears in nobody's logs, and it cannot reach the other networks the host
+is on. Scanning still works. Catching anything does not. The trade-off —
+`NET_ADMIN` then applies to the host's network stack — is written out in
+the [Drone README](drone/README.md).
 
 **Drones go on infrastructure you control and nowhere else.** Never on a
 host you have compromised. The reasoning, the deployment modes, the

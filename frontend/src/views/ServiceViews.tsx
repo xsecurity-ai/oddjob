@@ -1,5 +1,5 @@
 import { Box, Chip, alpha } from '@mui/material'
-import type { GridColDef } from '@mui/x-data-grid'
+import type { ColumnDef } from '../lib/columns'
 import { useQuery } from '@tanstack/react-query'
 import { api, type Service } from '../lib/api'
 import { DataTable } from '../components/DataTable'
@@ -10,7 +10,7 @@ import { ServiceActions } from '../components/ServiceActions'
 import { useAuth } from '../lib/auth'
 import { neon, glow } from '../theme'
 
-const makeHostCol = (open: (p: string, h: string) => void): GridColDef<Service> => ({
+const makeHostCol = (open: (p: string, h: string) => void): ColumnDef<Service> => ({
   field: 'host',
   headerName: 'Host',
   flex: 2,
@@ -28,7 +28,7 @@ const makeHostCol = (open: (p: string, h: string) => void): GridColDef<Service> 
 
 const makePortCol = (
   openMenu: ReturnType<typeof useExplore>['openMenu'], project: string | null,
-): GridColDef<Service> => ({
+): ColumnDef<Service> => ({
   field: 'port',
   headerName: 'Port',
   width: 96,
@@ -47,7 +47,7 @@ const makePortCol = (
   ),
 })
 
-const protoCol: GridColDef<Service> = {
+const protoCol: ColumnDef<Service> = {
   field: 'protocol',
   headerName: 'Proto',
   width: 92,
@@ -68,7 +68,7 @@ const protoCol: GridColDef<Service> = {
 /** What a person recorded about the service, as distinct from what the
  *  service said about itself. Hidden by default: most have none, and an
  *  empty column in a 6,000-row grid costs more than one click to show. */
-const notesCol: GridColDef<Service> = {
+const notesCol: ColumnDef<Service> = {
   field: 'notes',
   headerName: 'Notes',
   flex: 2,
@@ -78,7 +78,7 @@ const notesCol: GridColDef<Service> = {
 
 /** Version strings are long and frequently empty; keep them last and let
  *  them flex. The field is `banner` — what nmap and Faraday both call it. */
-const bannerCol: GridColDef<Service> = {
+const bannerCol: ColumnDef<Service> = {
   field: 'banner',
   headerName: 'Version',
   flex: 3,
@@ -95,7 +95,7 @@ const bannerCol: GridColDef<Service> = {
     ),
 }
 
-const projectCol: GridColDef<Service> = {
+const projectCol: ColumnDef<Service> = {
   field: 'project_code', headerName: 'Project', width: 130,
   renderCell: (p) => (
     <Box sx={{ color: neon.purple, fontSize: 11.5, letterSpacing: '0.06em' }}>{p.value}</Box>
@@ -111,7 +111,7 @@ export function ServicesView({ project }: { project: string | null }) {
     queryKey: ['services', project],
     queryFn: () => api.services(project ?? undefined),
   })
-  const serviceCol: GridColDef<Service> = {
+  const serviceCol: ColumnDef<Service> = {
     field: 'name',
     headerName: 'Service',
     flex: 1,
@@ -132,7 +132,7 @@ export function ServicesView({ project }: { project: string | null }) {
         <Box component="span" sx={{ color: alpha(neon.muted, 0.35) }}>unknown</Box>
       ),
   }
-  const stateCol: GridColDef<Service> = {
+  const stateCol: ColumnDef<Service> = {
     field: 'state',
     headerName: 'State',
     width: 100,
@@ -141,7 +141,7 @@ export function ServicesView({ project }: { project: string | null }) {
       return <Box sx={{ color: c, textShadow: glow(c, 0.35) }}>{p.value}</Box>
     },
   }
-  const actionsCol: GridColDef<Service> = {
+  const actionsCol: ColumnDef<Service> = {
     field: 'actions', headerName: 'Actions', width: 112,
     sortable: false, filterable: false,
     renderCell: (p) => <ServiceActions serviceId={p.row.id} canWrite={writable} />,
@@ -151,7 +151,7 @@ export function ServicesView({ project }: { project: string | null }) {
   return (
     <DataTable
       rows={data?.items ?? []}
-      columns={columns as GridColDef[]}
+      columns={columns as ColumnDef[]}
       loading={isLoading}
       error={error as Error | null}
       initialSort={{ field: 'host', sort: 'asc' }}
