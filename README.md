@@ -211,7 +211,7 @@ curl -X POST 'http://127.0.0.1:8000/api/auth/keys?name=mcp' \
      -H "Authorization: Bearer <jwt>"
 
 # Register it with Claude Code
-claude mcp add oddjob --env ODDJOB_API_KEY=ojk_... -- \
+claude mcp add oddjob --env ODDJOB_API_KEY=msk_... -- \
     uv --directory /path/to/oddjob/backend run python oddjob_mcp.py
 ```
 
@@ -223,30 +223,84 @@ authorisation model — which is the obvious way to build one, and wrong.
 
 The key's ACL is the boundary. A key with `readonly` on one engagement
 can read that engagement and nothing else, whatever the model is asked
-to do.
+to do. A key holding no role at all on a project gets a **404, not a
+403** — the API will not confirm that a project code exists to someone
+who cannot see it — so the tools attach a note saying that "no such
+project" may mean "not yours".
 
 | | |
 |---|---|
-| **Read** | `list_projects` `list_targets` `get_target` `list_ports` `list_services` `list_vulns` `target_timeline` `stats` `whoami` `import_formats` |
-| **Exploits** | `search_exploits` `service_leads` `get_cve` `feed_status` |
-| **Write** | `create_project` `set_target_flags` `add_target_note` `bulk_import` `import_report` `import_nmap` |
+| **Engagements** | `list_projects` `create_project` `stats` `whoami` |
+| **Scope** | `list_scope` `add_scope` `scope_violations` |
+| **Targets** | `list_targets` `get_target` `add_target` `set_target_flags` `find_by_technology` `target_timeline` `add_target_note` |
+| **Ports & services** | `list_ports` `list_services` `port_summary` `explore` |
+| **Findings & web** | `list_vulns` `add_finding` `list_web_addresses` `list_web_urls` `list_credentials` |
+| **Importing** | `import_formats` `import_report` `import_nmap` `bulk_import` |
+| **Drone — fleet** | `list_drones` `enroll_drone` `kill_drone` `drone_routing` `drone_task_kinds` |
+| **Drone — work** | `task_drone` `enumerate_drones` `drone_queue` `list_drone_tasks` `drone_task_status` `retry_drone_task` `cancel_drone_task` `import_drone_task` |
+| **Domains** | `domain_roots` `enumerate_domains` `domain_candidates` `promote_domain_candidates` `reject_domain_candidates` |
+| **Exploits** | `search_exploits` `service_leads` `exploit_leads` `get_cve` `feed_status` |
+| **Deployment** | `site_health` |
 
 The exploit tools match against Oddjob's own copy of Exploit-DB and NVD,
 so a lookup tells nobody what the client runs — see
 [Exploits and CVEs](#exploits-and-cves-held-locally). `service_leads`
 takes a product and version and has no host parameter, which is the
-boundary rather than a convention. Read `version_match` on each result
-before believing it, and `feed_status` before believing an empty one.
+boundary rather than a convention; `exploit_leads` is the other shape of
+the question and keeps the boundary in a different place, resolving a
+host to its recorded services inside the MCP process and looking up only
+the software. Read `version_match` on each result before believing it,
+and `feed_status` before believing an empty one.
 
-### Two agents, and they are not the same thing
+`list_credentials` returns usernames and metadata and **never the
+secret**, even though the HTTP endpoint behind it will hand the
+plaintext to any caller holding `user` on the project. The UI has a
+reveal button and a human clicking it is the point; a model's context is
+shipped to a third party and may be logged there, and a captured
+password is still live on the client's estate after the engagement ends.
+`secret_captured` says whether there is one to go and look at.
 
-| | runs | reaches | used for |
-|---|---|---|---|
-| **MCP server** | wherever your MCP client runs | Oddjob's HTTP API | driving the engagement from your editor |
-| **In-platform agent** | inside Oddjob | its own database, and Drones | answering questions in the UI and over Slack |
+`port_summary` counts in the MCP process rather than in the model's
+context. The row caps that make a model answer "the top ports are
+80/53/25" are a context budget, not an HTTP limit, and this side of the
+pipe has no context budget.
+
+### Keeping the two tool surfaces from drifting
+
+Oddjob has two of them, and they are not the same program:
+
+| | runs | reaches | auth | used for |
+|---|---|---|---|---|
+| **MCP server** | wherever your MCP client runs | Oddjob's HTTP API | an API key, and exactly the ACL that key has | driving the engagement from your editor |
+| **In-platform agent** | inside Oddjob | its own database, and Drones | the session, with the project fixed by the caller | answering questions in the UI and over Slack |
 
 The in-platform agent is configured in Site Config and is read-only
 unless writes are explicitly enabled. See [The agent](#the-agent).
+
+They cannot share an implementation — different transport, different
+auth, and an in-process tool that let the model name a project would be
+a hole. They do share a **definition**. Every tool in `oddjob_mcp.py` is
+registered through `@tool(agent_equivalent=...)`, which records it in
+`MANIFEST` alongside the name of the in-platform tool it corresponds to,
+or `None` where the agent has no such thing.
+
+`backend/tests/mcptest.py` then enumerates the agent's tools by calling
+`build()` with a null session, reads the manifest, and fails if the two
+have come apart in **either** direction: an agent tool nobody covered and
+nobody waived, an `agent_equivalent` pointing at a renamed tool, a stale
+waiver, or a table in this README that no longer matches the code. A
+deliberate omission goes in `AGENT_ONLY` with a reason — there is one
+today, `rank_targets`, because its scoring weights live in the agent and
+a second copy of a scoring rule is the drift rather than a fix for it.
+
+This exists because the hand-maintained version failed: eighteen of the
+agent's twenty-two tools had drifted out of MCP, the entire Drone
+subsystem among them, and nothing said so. **A failure in that suite is
+the mechanism working.**
+
+The agent is a yardstick, not a ceiling. The MCP server talks to the HTTP
+API and so reaches things the in-platform agent never needed — scope
+entries, domain candidates, the task queue, site health.
 
 ---
 
