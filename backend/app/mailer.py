@@ -49,5 +49,21 @@ def _send_sync(cfg: dict, to: str, subject: str, body: str) -> None:
 
 
 async def send_mail(cfg: dict, to: str, subject: str, body: str) -> None:
-    """smtplib is blocking; keep it off the event loop."""
-    await asyncio.to_thread(_send_sync, cfg, to, subject, body)
+    """smtplib is blocking; keep it off the event loop.
+
+    Records the outcome, then re-raises. Callers that already handle a
+    failure keep handling it; what changes is that an admin can see the
+    failure happened at all. A magic link that is never delivered looks,
+    from this side, exactly like one nobody clicked.
+    """
+    from . import servicehealth
+    try:
+        await asyncio.to_thread(_send_sync, cfg, to, subject, body)
+    except Exception as e:                       # noqa: BLE001
+        # The subject, not the body, and never the recipient: site
+        # admins all read the health page, and "magic link for
+        # someone@example.com" is a disclosure.
+        await servicehealth.note("smtp", False, str(subject)[:120],
+                                 f"{type(e).__name__}: {e}"[:300])
+        raise
+    await servicehealth.note("smtp", True, str(subject)[:120])

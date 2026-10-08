@@ -16,6 +16,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import SmartToyIcon from '@mui/icons-material/SmartToyOutlined'
 import PersonIcon from '@mui/icons-material/PersonOutline'
 import SettingsIcon from '@mui/icons-material/SettingsOutlined'
+import MonitorHeartIcon from '@mui/icons-material/MonitorHeartOutlined'
 import GroupIcon from '@mui/icons-material/GroupOutlined'
 import LogoutIcon from '@mui/icons-material/Logout'
 import MenuIcon from '@mui/icons-material/Menu'
@@ -35,6 +36,7 @@ import { VulnsView } from './views/VulnsView'
 import { CredentialsView } from './views/CredentialsView'
 import { ProfileView } from './views/ProfileView'
 import { SiteConfigView } from './views/SiteConfigView'
+import { HealthView } from './views/HealthView'
 import { WebView } from './views/WebView'
 import { ImportView } from './views/ImportView'
 import { ReportsView } from './views/ReportsView'
@@ -278,6 +280,8 @@ export default function App() {
     // keeps the filters you had.
   ]
   const ADMIN_NAV = [
+    ...(siteAdmin ? [{ key: 'health', label: 'Health',
+                       icon: <MonitorHeartIcon fontSize="small" /> }] : []),
     ...(siteAdmin ? [{ key: 'config', label: 'Site Config',
                        icon: <SettingsIcon fontSize="small" /> }] : []),
     ...(siteAdmin || projectAdmin ? [{ key: 'users', label: 'Users',
@@ -308,6 +312,7 @@ export default function App() {
     drones: <DronesView project={project === ALL ? null : project} />,
     settings: <ProjectConfigView project={project === ALL ? null : project} />,
     config: <SiteConfigView />,
+    health: <HealthView />,
     users: <UsersView />,
     profile: <ProfileView />,
   }[view]

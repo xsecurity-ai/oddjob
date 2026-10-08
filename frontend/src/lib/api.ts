@@ -1352,6 +1352,91 @@ export const api = {
     req<ScopeApplyResult>(
       `/api/projects/${encodeURIComponent(project)}/scope/apply`,
       { method: 'POST', body: JSON.stringify({ action, hosts }) }),
+
+  // site health and the audit trail — site admin only
+  siteHealth: () => req<SiteHealth>('/api/health/site'),
+  auditLog: (f: AuditFilter = {}) => req<AuditPage>('/audit/json' + qs({ ...f })),
+  /** The export is a download, not a fetch: it carries the filters so the
+   *  file matches the table that was on screen, and the browser handles
+   *  the Content-Disposition. */
+  auditCsvUrl: (f: AuditFilter = {}) => '/audit/csv' + qs({ ...f }),
+}
+
+/** Three states, never two. `unused` is not a kind of healthy: a Slack
+ *  integration nothing has ever sent through is neither working nor
+ *  broken, and showing it as either is how a status page stops being
+ *  read. `idle` is "it worked, but not lately". */
+export type HealthState = 'ok' | 'idle' | 'failing' | 'unused'
+
+export interface HealthBlock {
+  state: HealthState
+  note?: string | null
+  last_ok?: string | null
+  last_error_at?: string | null
+  last_error?: string | null
+  last_detail?: string | null
+  ok_count?: number
+  error_count?: number
+  configured?: boolean
+  [k: string]: unknown
+}
+
+export interface SiteHealth {
+  generated_at: string
+  server: HealthBlock & { started_at: string; uptime_seconds: number; sse_subscribers: number }
+  database: HealthBlock & {
+    latency_ms?: number; dialect?: string; url?: string; size?: string
+    pool?: { checked_out: number; in_pool: number }
+    rows?: Record<string, number>
+  }
+  cve_feed: HealthBlock & { label: string; records: number; age_seconds?: number | null; synced?: string }
+  exploit_feed: HealthBlock & { label: string; records: number; age_seconds?: number | null; synced?: string }
+  slack: HealthBlock
+  slack_socket: { connected: boolean; last: string | null }
+  smtp: HealthBlock & { host?: string | null }
+  drones: HealthBlock & {
+    drones: Array<{ id: number; name: string; state: string; last_seen: string | null
+                    age_seconds: number | null; missing_tools: string | null }>
+    by_state: Record<string, number>
+    queue: Record<string, number>
+    queued_over_an_hour: number
+  }
+  audit: HealthBlock & { newest: string | null; retain_days?: unknown }
+}
+
+export interface AuditFilter {
+  q?: string
+  source?: string
+  username?: string
+  project?: string
+  action?: string
+  hours?: number
+  limit?: number
+  before?: number
+}
+
+export interface AuditEntry {
+  id: number
+  at: string
+  source: string
+  action: string
+  username: string | null
+  ip: string | null
+  method: string | null
+  path: string | null
+  status: number | null
+  ms: number | null
+  project: string | null
+  detail: string | null
+}
+
+export interface AuditPage {
+  retain_days: number
+  source: string | null
+  count: number
+  /** `null` when this is the last page. */
+  next_before: number | null
+  entries: AuditEntry[]
 }
 
 /** The violation report, shared by the read and the apply. */

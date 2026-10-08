@@ -404,4 +404,128 @@ check("ordinary text is left alone", for_log("nmap.bulk") == "nmap.bulk",
 check("and it is bounded, so one field cannot flood the log",
       len(for_log("x" * 5000)) <= 200, str(len(for_log("x" * 5000))))
 
+print("\n== audit search looks in more than the message ==")
+# The thing half-remembered is as often the username, the path or the
+# address as the detail text, and one search box that only reads one
+# column trains people not to use it.
+st, r = call("/audit/json?q=auth&limit=50", token=admin)
+check("a free-text search is accepted", st == 200, f"status={st}")
+_hits = (r or {}).get("entries", [])
+check("and finds entries", len(_hits) > 0, str(r)[:120])
+check("matching on any of the columns a person would type",
+      all(any("auth" in str(e.get(k) or "").lower()
+              for k in ("action", "username", "detail", "path", "project", "ip"))
+          for e in _hits),
+      str(_hits[:1])[:200])
+
+st, r = call("/audit/json?q=zzz-definitely-not-present-anywhere", token=admin)
+check("a search matching nothing returns nothing, not everything",
+      st == 200 and (r or {}).get("entries") == [], str(r)[:120])
+
+print("\n== audit export ==")
+st, body = call("/audit/csv?limit=5", token=admin, raw=True)
+check("csv exports", st == 200, f"status={st}")
+_lines = [l for l in (body or "").splitlines() if l.strip()]
+check("with a fixed header row",
+      _lines and _lines[0].startswith("at,id,source,action,username"),
+      (_lines[0] if _lines else "")[:80])
+# Exporting must honour the filters. Someone who narrowed to one user
+# and one afternoon means that afternoon; 5,000 unrelated rows is a
+# different document.
+st, filtered = call("/audit/csv?q=zzz-definitely-not-present-anywhere",
+                    token=admin, raw=True)
+_flines = [l for l in (filtered or "").splitlines() if l.strip()]
+check("and exports what the filters select, not the whole table",
+      len(_flines) == 1, f"{len(_flines)} line(s) for a filter matching nothing")
+
+st, _ = call("/audit/csv?limit=5")
+check("export needs a session", st in (401, 403), f"status={st}")
+
+print("\n== the health page ==")
+st, h = call("/api/health/site", token=admin)
+check("site health is served to a site admin", st == 200, f"status={st}")
+for _k in ("database", "cve_feed", "exploit_feed", "slack", "smtp",
+           "drones", "audit", "server"):
+    check(f"it reports {_k}", _k in (h or {}), str(list((h or {}).keys()))[:120])
+check("the database is reachable and says how fast",
+      (h or {}).get("database", {}).get("state") == "ok"
+      and "latency_ms" in (h or {}).get("database", {}),
+      str((h or {}).get("database"))[:140])
+
+# Three states, never two. A subsystem nothing has ever used is not
+# healthy and is not broken, and reporting it as either is how a page
+# earns the habit of being ignored.
+check("a subsystem that has never run says so, rather than reading green",
+      (h or {}).get("slack", {}).get("state") == "unused",
+      str((h or {}).get("slack"))[:140])
+check("and says why it is unused",
+      (h or {}).get("slack", {}).get("note"),
+      str((h or {}).get("slack"))[:140])
+
+st, _ = call("/api/health/site")
+check("health needs a session", st in (401, 403), f"status={st}")
+
+print("\n== health is recorded from inside the send, not at its call sites ==")
+# There are ten slack.post call sites and four send_mail ones. Recording
+# at each is how one gets forgotten, and the forgotten one is the path
+# whose silence nobody notices.
+import asyncio as _aio                                              # noqa: E402
+from app import servicehealth as _sh, slack as _slack               # noqa: E402
+from app.db import SessionLocal as _SL                              # noqa: E402
+from app.models import ServiceHealth as _SH                         # noqa: E402
+
+
+async def _post_with(stub):
+    real, _slack._call = _slack._call, stub
+    try:
+        return await _slack.post("xoxb-test", "#chan", "hello")
+    finally:
+        _slack._call = real
+
+
+async def _row():
+    async with _SL() as s:
+        return await s.get(_SH, "slack")
+
+
+async def _boom(*a, **k):
+    raise RuntimeError("channel_not_found")
+
+
+async def _fine(*a, **k):
+    return {"ok": True, "ts": "1.2", "channel": "C1"}
+
+
+_r = _aio.run(_post_with(_boom))
+check("a failed post is reported as failed", _r.ok is False, str(_r))
+_row1 = _aio.run(_row())
+check("and recorded without touching the call site",
+      _row1 is not None and _row1.error_count == 1, str(_row1 and _row1.error_count))
+check("with the reason kept", "channel_not_found" in (_row1.last_error or ""),
+      str(_row1.last_error)[:80])
+# The channel, never the text: a finding's title names a client's host,
+# and every site admin reads this page.
+check("and the channel, not the message", _row1.last_detail == "post to #chan",
+      str(_row1.last_detail))
+check("the message body is never stored",
+      "hello" not in str(_row1.last_detail) + str(_row1.last_error or ""),
+      str(_row1.last_detail))
+
+_aio.run(_post_with(_fine))
+_row2 = _aio.run(_row())
+check("a later success is recorded", _row2.ok_count == 1, str(_row2.ok_count))
+check("and the earlier failure is NOT cleared — intermittent faults are "
+      "exactly what gets missed",
+      "channel_not_found" in (_row2.last_error or ""), str(_row2.last_error)[:80])
+check("though the state reads healthy again",
+      _sh.describe(_row2)["state"] == "ok", _sh.describe(_row2)["state"])
+
+# An unconfigured install is not a broken one.
+_r = _aio.run(_slack.post(None, None, "x"))
+check("an unconfigured slack records nothing at all",
+      _r.ok is False and _aio.run(_row()).ok_count == 1, str(_r.error))
+
+check("a subsystem with no row is 'unused', not 'ok'",
+      _sh.describe(None)["state"] == "unused", str(_sh.describe(None)))
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

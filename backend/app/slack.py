@@ -110,19 +110,34 @@ async def post(token: str | None, channel: str | None, text: str,
                blocks: list[dict[str, Any]] | None = None) -> Posted:
     """Send one message. Never raises."""
     if not token or not channel:
+        # Not recorded: nothing was attempted, and writing a failure
+        # here would make an unconfigured install look broken rather
+        # than unconfigured.
         return Posted(ok=False, error="slack is not configured")
     payload: dict[str, Any] = {"channel": channel, "text": text}
     if thread_ts:
         payload["thread_ts"] = thread_ts
     if blocks:
         payload["blocks"] = blocks
+    # Recorded here rather than at the call sites. There are ten of
+    # them, and the one that gets forgotten is the one whose silence
+    # nobody notices.
+    from . import servicehealth
+    where = f"#{channel}" if not str(channel).startswith("#") else str(channel)
     try:
         d = await _call(token, "chat.postMessage", payload)
     except Exception as e:                       # noqa: BLE001
         log.warning("slack post failed: %s", e)
-        return Posted(ok=False, error=f"{type(e).__name__}: {e}"[:300])
+        err = f"{type(e).__name__}: {e}"[:300]
+        await servicehealth.note("slack", False, f"post to {where}", err)
+        return Posted(ok=False, error=err)
     if not d.get("ok"):
-        return Posted(ok=False, error=str(d.get("error"))[:300])
+        err = str(d.get("error"))[:300]
+        await servicehealth.note("slack", False, f"post to {where}", err)
+        return Posted(ok=False, error=err)
+    # The text itself is never recorded: a finding's title can name a
+    # client's host, and every site admin can read the health page.
+    await servicehealth.note("slack", True, f"post to {where}")
     return Posted(ok=True, ts=d.get("ts"), channel=d.get("channel"))
 
 

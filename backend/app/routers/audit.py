@@ -29,11 +29,13 @@ catch-all, so they win over it.
 """
 from __future__ import annotations
 
+import csv
+import io
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import PlainTextResponse
-from sqlalchemy import select
+from fastapi.responses import PlainTextResponse, StreamingResponse
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..audit import retain_days
@@ -51,27 +53,41 @@ MAX_LIMIT = 5000
 async def _rows(session: AsyncSession, limit: int, source: str | None,
                 username: str | None, project: str | None,
                 action: str | None, hours: int | None,
-                before: int | None) -> list[AuditEvent]:
-    q = select(AuditEvent)
+                before: int | None, q: str | None = None,
+                ) -> list[AuditEvent]:
+    stmt = select(AuditEvent)
     if source:
-        q = q.where(AuditEvent.source == source)
+        stmt = stmt.where(AuditEvent.source == source)
     if username:
-        q = q.where(AuditEvent.username == username)
+        stmt = stmt.where(AuditEvent.username == username)
     if project:
-        q = q.where(AuditEvent.project_code == project)
+        stmt = stmt.where(AuditEvent.project_code == project)
     if action:
         # Prefix match, so `project` finds `project.create` and
         # `project.delete` without needing to know the whole verb.
-        q = q.where(AuditEvent.action.startswith(action))
+        stmt = stmt.where(AuditEvent.action.startswith(action))
+    if q:
+        # One box over the columns a person would actually type into.
+        # Deliberately not `detail` alone: the thing half-remembered is
+        # as often the username, the path or the address as the message.
+        like = f"%{q.strip()}%"
+        stmt = stmt.where(or_(
+            AuditEvent.action.ilike(like),
+            AuditEvent.username.ilike(like),
+            AuditEvent.detail.ilike(like),
+            AuditEvent.path.ilike(like),
+            AuditEvent.project_code.ilike(like),
+            AuditEvent.ip.ilike(like)))
     if hours:
-        q = q.where(AuditEvent.at
+        stmt = stmt.where(AuditEvent.at
                     >= datetime.now(timezone.utc) - timedelta(hours=hours))
     if before:
-        q = q.where(AuditEvent.id < before)
+        stmt = stmt.where(AuditEvent.id < before)
     # Newest first, with id as the tiebreak so entries written in the same
     # tick keep a stable order across pages.
-    q = q.order_by(AuditEvent.at.desc(), AuditEvent.id.desc()).limit(limit)
-    return list((await session.execute(q)).scalars())
+    stmt = stmt.order_by(AuditEvent.at.desc(),
+                         AuditEvent.id.desc()).limit(limit)
+    return list((await session.execute(stmt)).scalars())
 
 
 def _common(
@@ -83,10 +99,12 @@ def _common(
     hours: int | None = Query(None, ge=1,
                               description="only the last N hours"),
     before: int | None = Query(None, description="id to page back from"),
+    q: str | None = Query(None, description="free text over action, user, "
+                                            "detail, path, project and ip"),
 ) -> dict:
     return {"limit": limit, "source": source, "username": username,
             "project": project, "action": action, "hours": hours,
-            "before": before}
+            "before": before, "q": q}
 
 
 def _narrow(f: dict, origin: str) -> dict:
@@ -191,3 +209,53 @@ async def audit_source_log(origin: str, f: dict = Depends(_common),
                            _: User = Depends(require_site_admin),
                            session: AsyncSession = Depends(get_session)):
     return await _as_text(session, _narrow(f, origin))
+
+
+#: Column order for the export. Fixed and explicit: a spreadsheet whose
+#: columns move between downloads cannot be compared against an older
+#: one, which is most of what an exported audit trail is for.
+CSV_COLUMNS = ("at", "id", "source", "action", "username", "ip",
+               "method", "path", "status", "ms", "project", "detail")
+
+
+async def _as_csv(session: AsyncSession, f: dict) -> StreamingResponse:
+    """The same rows the table shows, as a file.
+
+    Exports what the FILTERS select, not the whole table. Someone who
+    has narrowed to one user and one afternoon and then clicks export
+    means that afternoon; handing them 5,000 unrelated rows is a
+    different document and they would have to redo the work in Excel.
+    """
+    rows = await _rows(session, **f)
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(CSV_COLUMNS)
+    for r in rows:
+        w.writerow([
+            r.at.isoformat() if r.at else "", r.id, r.source, r.action,
+            r.username or "", r.ip or "", r.method or "", r.path or "",
+            "" if r.status is None else r.status,
+            "" if r.ms is None else r.ms,
+            r.project_code or "", r.detail or "",
+        ])
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    who = f"-{f['source']}" if f.get("source") else ""
+    name = f"oddjob-audit{who}-{stamp}.csv"
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@router.get("/csv")
+async def audit_csv(f: dict = Depends(_common),
+                    _: User = Depends(require_site_admin),
+                    session: AsyncSession = Depends(get_session)):
+    return await _as_csv(session, f)
+
+
+@router.get("/{origin}/csv")
+async def audit_source_csv(origin: str, f: dict = Depends(_common),
+                           _: User = Depends(require_site_admin),
+                           session: AsyncSession = Depends(get_session)):
+    return await _as_csv(session, _narrow(f, origin))

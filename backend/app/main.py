@@ -17,7 +17,7 @@ from .agentseal import AgentSeal
 from .gatekeeper import (FORBIDDEN_HTML, Gatekeeper, NOT_FOUND_HTML,
                          wants_html)
 from .routers import (agents, actions, agent, audit, auth, bulk, credentials, domains,
-                      vulnfeeds,
+                      vulnfeeds, health,
                       enumerate as enumerate_routes, explore,
                       index as api_index, rest,
                       findings, google, magic, meta, projects, reports, scans,
@@ -221,6 +221,7 @@ for r in (auth.router, google.router, magic.router, projects.router, targets.rou
           reports.router,
           audit.router,
           vulnfeeds.router,
+          health.router,
           meta.router):
     app.include_router(r)
 
@@ -270,7 +271,7 @@ if _DIST.is_dir():
     #: added will be added in one place again.
     SPA_ROUTES = ("projects", "targets", "services", "web", "vulns",
                   "credentials", "reports", "import", "config", "users",
-                  "profile", "drones", "settings")
+                  "profile", "drones", "settings", "health")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(request: Request, full_path: str):

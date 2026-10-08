@@ -1439,3 +1439,42 @@ class FeedState(Base):
     #: True while a sync is running, so two do not start at once.
     running: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false")
+
+
+# ========================================= subsystem health
+#
+# "Has Slack worked recently?" is not answerable from configuration.
+# A token can be present and valid and the workspace can still be
+# refusing every message, and the only moment anybody finds out is when
+# a finding quietly fails to arrive. The same is true of SMTP: a magic
+# link that is never delivered looks, from the server's side, exactly
+# like one nobody clicked.
+#
+# So each subsystem records the outcome of its last real attempt. Not a
+# synthetic probe — probes test the probe. This is written from inside
+# `slack.post` and `mailer.send_mail` rather than at their call sites,
+# because there are fourteen call sites between them and a health page
+# that silently misses one is worse than no health page at all.
+
+
+class ServiceHealth(Base):
+    """The last thing a subsystem actually did, and whether it worked."""
+    __tablename__ = "service_health"
+
+    #: slack | smtp | drone | … — the subsystem's own name.
+    service: Mapped[str] = mapped_column(String(32), primary_key=True)
+    last_ok_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    last_error_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    #: Why the last failure failed. Kept after a later success, so
+    #: "working now, but it broke an hour ago" stays visible — that is
+    #: usually the more useful of the two facts.
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    #: What the last attempt was, in a few words. Never a message body,
+    #: a recipient or a token: site admins all read this.
+    last_detail: Mapped[str | None] = mapped_column(String(300))
+    ok_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0")
+    error_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0")
