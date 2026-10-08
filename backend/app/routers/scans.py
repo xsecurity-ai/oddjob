@@ -465,6 +465,29 @@ async def _weburl(session: AsyncSession, target: Target, pw: ParsedWebAddress,
                               Service.port == u.port,
                               Service.protocol == "tcp"))).scalar_one_or_none()
     method = (pw.method or "").upper()[:12]
+    # Raw, deliberately — NOT `weburl.stable_response`, which the replay
+    # route uses to keep a moving `Date` header from making every repeat
+    # of a request look like a new exchange. Three reasons the importer
+    # does not want the same treatment, and the first is the one that
+    # settles it:
+    #
+    # The hash is stored on the row. Changing how it is computed does not
+    # re-key what is already in the table, so the next import of a
+    # history that was imported before would miss every existing row and
+    # insert the lot again. The replay path has no such exposure — it
+    # compares against rows it wrote itself, within one engagement, and a
+    # stale key there costs one extra row once.
+    #
+    # The two paths are also asking different questions. Replay asks "did
+    # I already send this and get this answer back", where the clock is
+    # noise this server itself just stamped on. An import asks "do I
+    # already hold this captured record", and the record is a file: two
+    # entries in a proxy history that differ only in `Date` are two
+    # visits, seconds apart, and the timeline is most of what a history
+    # is for. Collapsing them would lose evidence rather than noise.
+    #
+    # And re-importing the same file is already a no-op, because the same
+    # bytes hash the same way. The bug being fixed does not exist here.
     xk = exchange_key(method, u.url, pw.request, pw.response)
 
     # Identity is the EXCHANGE, not the address: the same endpoint hit
