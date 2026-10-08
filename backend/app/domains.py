@@ -92,6 +92,50 @@ def registrable(host: str) -> str:
     return ".".join(labels[-2:])
 
 
+def walk_to_registrable(host: str) -> list[str]:
+    """`host` and every parent of it down to its registrable domain.
+
+    `a.b.c.d.e.f.com` gives a.b.c.d.e.f.com, b.c.d.e.f.com, c.d.e.f.com,
+    d.e.f.com, e.f.com, f.com — longest first, the host itself included.
+
+    **The registrable domain is a floor, not a suggestion.** Stripping
+    labels until two are left turns `a.b.acme.co.uk` into `co.uk`, which
+    is a public suffix: nobody owns it, enumerating it is enumerating
+    every British company at once, and it is the one name in that list
+    guaranteed not to belong to the client. `registrable()` already
+    knows where to stop — it consults `_TWO_LEVEL` — so the walk is
+    bounded by its answer rather than by a label count.
+
+    That makes this exactly as good as `_TWO_LEVEL` is. A two-level
+    suffix missing from that set (`com.ve`, say) yields a bottom name
+    that is a public suffix rather than a domain. The deliberate answer
+    to that is the scope gate, not a bigger list here: a name nobody
+    authorised is refused whether it is a public suffix or a stranger's
+    company, and the caller checks every name this returns on its own
+    merits. Generating a name is still free; sending a packet is not.
+
+    Returns [] for an address, for a bare label with no dot, and for a
+    name with an empty label in it (`a..b.com`) — the last because
+    slicing such a name produces more malformed names, and a malformed
+    host is better refused by its caller than quietly walked.
+    """
+    h = (host or "").strip().rstrip(".").lower()
+    if not h or is_ip(h) or "." not in h:
+        return []
+    labels = h.split(".")
+    if not all(labels):
+        return []
+    root = registrable(h)
+    if not root or "." not in root:
+        return []
+    depth = len(root.split("."))
+    if len(labels) < depth:
+        # registrable() returned something longer than the host, which
+        # it cannot do for any input reaching here. Refusing to guess.
+        return []
+    return [".".join(labels[i:]) for i in range(len(labels) - depth + 1)]
+
+
 def subdomain_of(host: str, root: str) -> str | None:
     """The part of `host` in front of `root`, or None if it is not under it.
 

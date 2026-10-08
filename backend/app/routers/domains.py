@@ -20,7 +20,15 @@ from .. import domains as gen
 from ..db import get_session
 from ..events import broker
 from ..hosts import InvalidHost, validate_host
-from ..models import DomainCandidate, Project, ProjectScope, Target, User, WebAddress
+from ..models import (
+    DomainCandidate,
+    DomainSearch,
+    Project,
+    ProjectScope,
+    Target,
+    User,
+    WebAddress,
+)
 from ..schemas import DomainCandidateOut, PromoteRequest
 from ..scopegate import index_for
 from ..security import get_current_user, require_project
@@ -175,6 +183,19 @@ async def roots(project: str = Query(...),
             for d, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
+#: Most domains one submission will queue tasks for. The same number the
+#: typed list is capped at, for the same reason: each is a task, and a
+#: queue that long buries everything else the project needs to run.
+#:
+#: Kitchen Sink is not refused for exceeding it, though. A typed list over
+#: the cap is an operator mistake they can fix by splitting it; a generated
+#: list over the cap is just a big estate, and there is nothing for them to
+#: split. The overflow is reported as deferred and picked up by the next
+#: run, which skips everything this one queued — so running it twice drains
+#: the backlog rather than repeating it.
+MAX_TASKS = 200
+
+
 class EnumerateRequest(BaseModel):
     """Domains to hand to an agent. One, several, or a pasted list."""
     #: Free text: newlines, commas or spaces. Operators paste from a
@@ -186,6 +207,17 @@ class EnumerateRequest(BaseModel):
         "passive",
         description="passive sends nothing to the client's infrastructure. "
                     "active does, and is a scope decision.")
+    kitchen_sink: bool = Field(
+        False,
+        description="Take every hostname the project knows, drop the "
+                    "addresses, and walk each name back to its registrable "
+                    "domain. Everything the walk produces is enumerated, "
+                    "subject to scope.")
+    rescan: bool = Field(
+        False,
+        description="Queue a Kitchen Sink domain again even though it has "
+                    "been enumerated before. Off by default: the point of "
+                    "the mode is that running it twice costs nothing.")
 
     def wanted(self) -> list[str]:
         raw = (self.domains if isinstance(self.domains, str)
@@ -220,18 +252,47 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
     are queued unassigned so the project's routing policy spreads them,
     which is what makes a list of forty domains finish in parallel
     across every agent rather than serially on one.
+
+    **Kitchen Sink Lookup** (`kitchen_sink`) adds the other way of saying
+    what to enumerate: not a list, but "everything this project knows
+    about". It takes every hostname on record — targets, the alternate
+    and certificate names hung off them, the hosts of web addresses —
+    throws away the ones that are addresses, and walks each remaining
+    name back to its registrable domain, so `a.b.c.example` asks about
+    `a.b.c.example`, `b.c.example` and `c.example`. Anything typed in the
+    box is walked too, so a selection and the estate compose rather than
+    one replacing the other.
+
+    Two things that walk must not do, and does not:
+
+    * **Run past the registrable domain.** See `gen.walk_to_registrable`.
+    * **Assume a parent is approved because a child is.** Every name the
+      walk produces goes through the scope gate on its own. Scope does
+      not flow upwards — an operator authorised for `uat.acme.example`
+      was not thereby authorised for `acme.example`, and amass against a
+      zone apex nobody signed off is traffic at an unapproved asset.
+      `*.acme.example` deliberately does not cover `acme.example`
+      either, which is the usual way a parent gets refused here.
+
+    Domains already handed to amass for this project are skipped and
+    reported as skipped, not dropped: the operator sees "queued 12,
+    skipped 30". `rescan` turns that off. The skip is Kitchen Sink only
+    — a domain somebody typed is an explicit instruction, and silently
+    not running it because it ran last month would be the tool deciding
+    it knew better.
     """
-    wanted = body.wanted()
-    if not wanted:
-        raise HTTPException(422, "give at least one domain")
-    if len(wanted) > 200:
-        raise HTTPException(
-            422, f"{len(wanted)} domains in one submission. Split it: each "
-                 f"becomes a task, and a queue that long buries anything "
-                 f"else this project needs to run.")
     mode = (body.mode or "passive").strip().lower()
     if mode not in ("passive", "active"):
         raise HTTPException(422, "mode is passive or active")
+
+    typed = body.wanted()
+    if len(typed) > MAX_TASKS:
+        raise HTTPException(
+            422, f"{len(typed)} domains in one submission. Split it: each "
+                 f"becomes a task, and a queue that long buries anything "
+                 f"else this project needs to run.")
+    if not typed and not body.kitchen_sink:
+        raise HTTPException(422, "give at least one domain")
 
     from ..models import Agent, AgentTask
     live = (await session.execute(
@@ -245,8 +306,39 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
                  "nothing to run the enumeration. Bring one up and submit "
                  "again.")
 
+    # Read once and used for two things: the Kitchen Sink source list,
+    # and `known_at_last_run` on every row written below. Two indexed
+    # selects, so it is cheaper than asking per domain.
+    known = await known_hosts(session, pr.id)
+
+    wanted, addresses = _domains_to_enumerate(body, typed, known)
+    if not wanted:
+        # Kitchen Sink with nothing to walk. Said plainly rather than
+        # returning an empty success, because "it worked and did
+        # nothing" and "there was nothing here" read identically on the
+        # screen and have different fixes.
+        why = ("this project has no hostnames on record yet" if not addresses
+               else "the one host on record is an address, and an address "
+                    "has no zone" if addresses == 1
+               else f"all {addresses} hosts on record are addresses, and an "
+                    f"address has no zone")
+        raise HTTPException(422, f"nothing to enumerate: {why}.")
+
+    # What has already been handed to amass, for the skip. Loaded for
+    # every request so the rows are written against current state, and
+    # keyed by domain because that is what the unique constraint is on.
+    seen: dict[str, DomainSearch] = {
+        r.domain: r for r in (await session.execute(
+            select(DomainSearch).where(
+                DomainSearch.project_id == pr.id,
+                DomainSearch.domain.in_(wanted)))).scalars().all()}
+
     idx = await index_for(session, pr.id)
-    queued, refused = [], {}
+    queued: list[dict] = []
+    refused: dict[str, str] = {}
+    skipped: list[dict] = []
+    deferred: list[str] = []
+    now = datetime.now(UTC)
     for d in wanted:
         if gen.is_ip(d):
             refused[d] = "an address has no zone to enumerate"
@@ -256,9 +348,21 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
         except InvalidHost as e:
             refused[d] = str(e)
             continue
+        # Independently, for every generated parent as much as for every
+        # typed name. This is the check that stops a walk reaching an
+        # apex the engagement does not cover.
         ruling = idx.check(d)
         if not ruling.allowed:
             refused[d] = ruling.reason
+            continue
+        prior = seen.get(d)
+        if prior is not None and body.kitchen_sink and not body.rescan:
+            skipped.append({"domain": d, "runs": prior.runs,
+                            "last_run_at": prior.last_run_at.isoformat()
+                            if prior.last_run_at else None})
+            continue
+        if len(queued) >= MAX_TASKS:
+            deferred.append(d)
             continue
         t = AgentTask(agent_id=None, project_id=pr.id, requested_by=user.id,
                       kind="amass",
@@ -267,10 +371,73 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
         session.add(t)
         await session.flush()
         queued.append({"domain": d, "task_id": t.id})
+        _record_search(session, pr, user, d, prior, mode, known, now)
     await session.commit()
     await broker.publish("agents", action="task", project=pr.code)
-    return {"queued": queued, "refused": refused, "agents_online": live,
-            "mode": mode}
+    return {"queued": queued, "refused": refused, "skipped": skipped,
+            "deferred": deferred, "agents_online": live, "mode": mode,
+            "kitchen_sink": bool(body.kitchen_sink),
+            "considered": len(wanted)}
+
+
+def _domains_to_enumerate(body: EnumerateRequest, typed: list[str],
+                          known: list[str]) -> tuple[list[str], int]:
+    """-> (the domains to put through the gate, how many addresses were
+    ignored).
+
+    Deduplicated across hosts, and that matters more than it sounds: ten
+    names under `f.com` walk to `f.com` ten times, and ten identical
+    amass tasks is ten times the traffic for one zone's worth of answer.
+    An insertion-ordered dict does it while keeping the order the walk
+    produced, which is longest name first — so the output reads from the
+    deepest name down to the apex rather than in hash order.
+    """
+    out: dict[str, None] = {}
+    addresses = 0
+    if not body.kitchen_sink:
+        # Unchanged behaviour: what was typed, as typed. No walking, so
+        # a list of names does not quietly become a list of apexes.
+        return list(dict.fromkeys(typed)), 0
+    for h in list(known) + typed:
+        if gen.is_ip(h):
+            # "ignore the ip address hosts". An address has no zone, and
+            # `registrable()` on one used to return its last two octets.
+            addresses += 1
+            continue
+        for name in gen.walk_to_registrable(h):
+            out.setdefault(name, None)
+    return list(out), addresses
+
+
+def _record_search(session: AsyncSession, pr: Project, user: User, domain: str,
+                   prior: DomainSearch | None, mode: str, known: list[str],
+                   now: datetime) -> None:
+    """Remember that this domain has been handed to amass.
+
+    Written at queue time rather than when the task reports. The thing
+    being prevented is a second task for a zone already being
+    enumerated, and a result that has not arrived yet does not make the
+    first task un-sent.
+
+    Amends the existing row rather than inserting a second one: the
+    table is unique on (project, domain), and `runs` only means anything
+    if it accumulates.
+    """
+    # How much of this zone the project already had. The column's whole
+    # purpose is letting a later run say what is genuinely new rather
+    # than re-listing an estate that was already there.
+    under = sum(1 for h in known if gen.subdomain_of(h, domain) is not None)
+    if prior is None:
+        session.add(DomainSearch(
+            project_id=pr.id, domain=domain, runs=1, last_run_at=now,
+            candidates_found=0, known_at_last_run=under,
+            requested_by=user.id, note=f"amass {mode}"))
+        return
+    prior.runs = (prior.runs or 0) + 1
+    prior.last_run_at = now
+    prior.known_at_last_run = under
+    prior.requested_by = user.id
+    prior.note = f"amass {mode}"
 
 
 @router.get("/candidates", response_model=list[DomainCandidateOut])

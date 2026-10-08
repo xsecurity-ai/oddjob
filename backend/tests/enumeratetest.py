@@ -404,5 +404,224 @@ check("another project's id promotes nothing",
 st, tgts = call("/api/targets?project=ENUM2&page_size=200", token=admin)
 check("and creates no target there", (tgts or {}).get("total") == 0, str(tgts)[:120])
 
+# ====================================================== Kitchen Sink Lookup
+# The walk is the part most easily got subtly wrong, and the way it goes
+# wrong is by producing one name too many at the bottom. Checked here
+# directly as well as through the endpoint, because "it stopped at the
+# registrable domain" is a property of the function and asserting it over
+# HTTP would only ever cover the handful of suffixes the fixture happens
+# to use.
+print("\n== walking a hostname back to its registrable domain ==")
+from app.domains import walk_to_registrable as _walk  # noqa: E402
+
+check("the operator's example, in full",
+      _walk("a.b.c.d.e.f.com") == [
+          "a.b.c.d.e.f.com", "b.c.d.e.f.com", "c.d.e.f.com", "d.e.f.com",
+          "e.f.com", "f.com"],
+      str(_walk("a.b.c.d.e.f.com")))
+check("the host itself is included, not just its parents",
+      _walk("one.corp.com")[0] == "one.corp.com", str(_walk("one.corp.com")))
+check("a registrable domain walks to itself alone",
+      _walk("corp.com") == ["corp.com"], str(_walk("corp.com")))
+
+# The floor. `co.uk` is a public suffix: nobody owns it, enumerating it
+# is enumerating every British company at once, and it is the one name
+# in the list guaranteed not to be the client's.
+_uk = _walk("a.b.example.co.uk")
+check("a two-level public suffix stops at the registrable domain",
+      _uk == ["a.b.example.co.uk", "b.example.co.uk", "example.co.uk"],
+      str(_uk))
+check("and the suffix itself is never produced", "co.uk" not in _uk, str(_uk))
+check("nor the TLD", "uk" not in _uk, str(_uk))
+check("the same for .com", "com" not in _walk("a.b.corp.com"),
+      str(_walk("a.b.corp.com")))
+
+check("an address has no zone to walk", _walk("198.51.100.5") == [],
+      str(_walk("198.51.100.5")))
+check("nor does a bare label", _walk("localhost") == [], str(_walk("localhost")))
+check("a name with an empty label is refused rather than walked",
+      _walk("a..b.com") == [], str(_walk("a..b.com")))
+check("and so is nothing at all", _walk("") == [] and _walk("   ") == [],
+      str(_walk("   ")))
+
+print("\n== Kitchen Sink Lookup over a project's hosts ==")
+call("/api/projects", "POST", {"code": "KS", "name": "Kitchen Sink"},
+     token=admin)
+# `*.acme.example` covers names under it and deliberately NOT the apex,
+# which is how a generated parent ends up refused — the case the walk
+# must not be allowed to talk its way past. `example.co.uk` is written
+# out in full so the two-level-suffix host has somewhere legitimate to
+# stop; both are placeholders, and nothing here resolves anything.
+call("/api/projects/KS/scope", "POST",
+     {"lines": ["*.acme.example", "*.example.co.uk", "example.co.uk",
+                "198.51.100.0/24"]}, token=admin)
+st, ksa = call("/api/agents?project=KS", "POST", {"name": "ks-drone"},
+               token=admin)
+KSKEY = ksa["callback_key"]
+call("/api/agents/register", "POST",
+     {"platform": "linux", "arch": "amd64", "privileged": True}, key=KSKEY)
+call("/api/agents/heartbeat", "POST", {}, key=KSKEY)
+
+for _h in ("one.svc.acme.example", "two.svc.acme.example",
+           "shop.example.co.uk", "198.51.100.5"):
+    call("/api/targets?project=KS", "POST", {"host": _h}, token=admin)
+
+
+def ks(body):
+    return call("/api/domains/enumerate?project=KS", "POST", body, token=admin)
+
+
+st, r1 = call("/api/domains/enumerate?project=KS", "POST",
+              {"domains": "", "kitchen_sink": True}, token=admin)
+check("a kitchen sink run with an empty box is accepted", st == 200,
+      f"status={st} {str(r1)[:160]}")
+q1 = sorted(x["domain"] for x in (r1 or {}).get("queued", []))
+check("every host walks back to its domain and all of it is queued",
+      q1 == ["example.co.uk", "one.svc.acme.example", "shop.example.co.uk",
+             "svc.acme.example", "two.svc.acme.example"], str(q1))
+
+# Two hosts share `svc.acme.example`. Ten would share it ten times, and
+# ten amass tasks for one zone is ten times the traffic for one zone's
+# worth of answer.
+check("a parent shared by two hosts is queued once, not twice",
+      q1.count("svc.acme.example") == 1, str(q1))
+check("and the count of distinct domains considered is reported",
+      (r1 or {}).get("considered") == 6, str(r1)[:200])
+
+# The apex. `one.svc.acme.example` being approved says nothing about
+# `acme.example`, and queueing amass at a zone nobody signed off is
+# traffic at an unapproved asset.
+ref1 = (r1 or {}).get("refused", {})
+check("the apex parent of approved children is refused on its own merits",
+      list(ref1) == ["acme.example"], str(ref1)[:200])
+check("with the scope list's reason, not a bare no",
+      "in-scope list" in ref1.get("acme.example", ""), str(ref1)[:200])
+
+_blob = json.dumps(r1)
+check("the public suffix under the co.uk host is never reached",
+      '"co.uk"' not in _blob and "co.uk:" not in _blob, _blob[:200])
+check("and the address-named host contributes nothing",
+      "198.51" not in _blob and "100.5" not in _blob, _blob[:200])
+check("nothing was skipped on a first run", (r1 or {}).get("skipped") == [],
+      str(r1)[:160])
+check("and the mode is reported back", (r1 or {}).get("kitchen_sink") is True,
+      str(r1)[:160])
+
+print("-- a second run skips what the first queued --")
+st, r2 = ks({"domains": "", "kitchen_sink": True})
+check("the run is accepted rather than erroring", st == 200, f"status={st}")
+check("and queues nothing", (r2 or {}).get("queued") == [], str(r2)[:200])
+sk2 = sorted(x["domain"] for x in (r2 or {}).get("skipped", []))
+check("every domain already handed to amass comes back as skipped",
+      sk2 == q1, str(sk2))
+check("named, not merely counted, so the operator can see which",
+      all(x.get("domain") for x in (r2 or {}).get("skipped", [])), str(sk2))
+check("each carrying how many times it has run",
+      {x["runs"] for x in (r2 or {}).get("skipped", [])} == {1},
+      str((r2 or {}).get("skipped"))[:200])
+check("and when",
+      all(x.get("last_run_at") for x in (r2 or {}).get("skipped", [])),
+      str((r2 or {}).get("skipped"))[:200])
+# A skip is not a refusal: the apex is still out of scope and still
+# said so, and the two reasons must not be collapsed into one list.
+check("a domain refused on scope is still refused, not reported as skipped",
+      list((r2 or {}).get("refused", {})) == ["acme.example"], str(r2)[:200])
+check("and is not in the skipped list", "acme.example" not in sk2, str(sk2))
+
+print("-- the rescan flag is what runs them again --")
+st, r3 = ks({"domains": "", "kitchen_sink": True, "rescan": True})
+q3 = sorted(x["domain"] for x in (r3 or {}).get("queued", []))
+check("ticking rescan queues the lot again", q3 == q1, str(q3))
+check("and nothing is skipped", (r3 or {}).get("skipped") == [], str(r3)[:160])
+
+st, r4 = ks({"domains": "", "kitchen_sink": True})
+check("the rerun is counted rather than overwritten",
+      {x["runs"] for x in (r4 or {}).get("skipped", [])} == {2},
+      str((r4 or {}).get("skipped"))[:200])
+
+print("-- a typed domain is an instruction, and is run --")
+# The skip belongs to the generated list. Refusing to enumerate a zone
+# somebody just typed the name of, because it ran last week, would be
+# the tool overruling the operator.
+st, r5 = ks({"domains": "svc.acme.example"})
+check("a domain already scanned is still queued when it is typed",
+      [x["domain"] for x in (r5 or {}).get("queued", [])] ==
+      ["svc.acme.example"], f"status={st} {str(r5)[:200]}")
+check("and nothing is skipped in plain mode",
+      (r5 or {}).get("skipped") == [], str(r5)[:160])
+check("plain mode says so", (r5 or {}).get("kitchen_sink") is False,
+      str(r5)[:160])
+
+st, r6 = ks({"domains": "one.svc.acme.example"})
+check("and a typed name is not walked — only what was asked for goes out",
+      [x["domain"] for x in (r6 or {}).get("queued", [])] ==
+      ["one.svc.acme.example"], str(r6)[:200])
+check("so no parent is invented from a plain submission",
+      (r6 or {}).get("considered") == 1, str(r6)[:160])
+
+print("-- a project with nothing but addresses --")
+call("/api/projects", "POST", {"code": "KS2", "name": "Addresses only"},
+     token=admin)
+call("/api/projects/KS2/scope", "POST", {"lines": ["203.0.113.0/24"]},
+     token=admin)
+st, ks2a = call("/api/agents?project=KS2", "POST", {"name": "ks2-drone"},
+                token=admin)
+call("/api/agents/register", "POST",
+     {"platform": "linux", "arch": "amd64", "privileged": True},
+     key=ks2a["callback_key"])
+call("/api/targets?project=KS2", "POST", {"host": "203.0.113.7"}, token=admin)
+st, r7 = call("/api/domains/enumerate?project=KS2", "POST",
+              {"domains": "", "kitchen_sink": True}, token=admin)
+# "There was nothing here" and "it worked and did nothing" read
+# identically as an empty success and have different fixes.
+check("an estate of addresses is told so rather than silently succeeding",
+      st == 422, f"status={st} {str(r7)[:160]}")
+check("and the reason says addresses, not 'no domains'",
+      "address" in str(r7).lower(), str(r7)[:200])
+
+print("-- more domains than one submission may queue --")
+# A typed list over the cap is an operator mistake they can fix by
+# splitting it. A WALKED list over the cap is just a big estate, and
+# there is nothing for them to split — so the overflow is reported and
+# left for the next run, which skips everything this one queued.
+call("/api/projects", "POST", {"code": "KS3", "name": "Big estate"},
+     token=admin)
+call("/api/projects/KS3/scope", "POST",
+     {"lines": ["*.cap.example", "cap.example"]}, token=admin)
+st, ks3a = call("/api/agents?project=KS3", "POST", {"name": "ks3-drone"},
+                token=admin)
+call("/api/agents/register", "POST",
+     {"platform": "linux", "arch": "amd64", "privileged": True},
+     key=ks3a["callback_key"])
+_many = [f"n{i}.cap.example" for i in range(200)]
+st, r8 = call("/api/domains/enumerate?project=KS3", "POST",
+              {"domains": "\n".join(_many), "kitchen_sink": True},
+              token=admin)
+check("the submission is accepted rather than refused for being big",
+      st == 200, f"status={st} {str(r8)[:160]}")
+check("and 201 domains come out of 200 names plus their shared parent",
+      (r8 or {}).get("considered") == 201, str(r8)[:200])
+check("exactly the cap is queued", len((r8 or {}).get("queued", [])) == 200,
+      str(len((r8 or {}).get("queued", []))))
+check("and the overflow is named, not dropped",
+      len((r8 or {}).get("deferred", [])) == 1,
+      str((r8 or {}).get("deferred"))[:160])
+
+_left = (r8 or {}).get("deferred", [None])[0]
+st, r9 = call("/api/domains/enumerate?project=KS3", "POST",
+              {"domains": "\n".join(_many), "kitchen_sink": True},
+              token=admin)
+# No search row was written for a deferred domain, so it is the one
+# thing the next run still has to do. Running it twice drains the
+# backlog rather than repeating the first 200.
+check("the next run picks up exactly what was left",
+      [x["domain"] for x in (r9 or {}).get("queued", [])] == [_left],
+      f"deferred was {_left}; queued {str((r9 or {}).get('queued'))[:160]}")
+check("and skips the 200 already handed over",
+      len((r9 or {}).get("skipped", [])) == 200,
+      str(len((r9 or {}).get("skipped", []))))
+check("with nothing left deferred", (r9 or {}).get("deferred") == [],
+      str((r9 or {}).get("deferred"))[:120])
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
