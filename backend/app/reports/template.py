@@ -27,6 +27,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import Implant, Project, ProjectScope, Service, Target, Vuln, WebAddress
+from ..scope import entry_label
 from .model import SEVERITY_ORDER, Block, Finding, ReportDoc, Section, TargetRow
 
 TOP_N = 10
@@ -198,7 +199,12 @@ async def _scope(session: AsyncSession, project: Project, s: dict) -> Section:
             f"{_plural(len(included), 'entry', 'entries')}.")))
         by_kind: dict[str, list[str]] = {}
         for e in included:
-            by_kind.setdefault(e.kind, []).append(e.value)
+            # Labelled, not bare: an entry carrying its whole zone must
+            # not print to the client as the single name they would read
+            # it as. The report would then describe a narrower scope
+            # than the one that was enforced against their estate.
+            by_kind.setdefault(e.kind, []).append(
+                entry_label(e.kind, e.value, e.include_subdomains))
         sec.blocks.append(Block(
             kind="table", headers=["Type", "Entries", "Values"],
             rows=[[k.upper(), str(len(v)), ", ".join(sorted(v)[:40])
@@ -214,8 +220,10 @@ async def _scope(session: AsyncSession, project: Project, s: dict) -> Section:
 
     if excluded:
         sec.blocks.append(Block(kind="para", text="The following were excluded:"))
-        sec.blocks.append(Block(kind="bullets",
-                                items=[f"{e.value} ({e.kind})" for e in excluded]))
+        bullets = [
+            f"{entry_label(e.kind, e.value, e.include_subdomains)} ({e.kind})"
+            for e in excluded]
+        sec.blocks.append(Block(kind="bullets", items=bullets))
     return sec
 
 

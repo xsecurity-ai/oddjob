@@ -519,6 +519,9 @@ export interface Acl {
 export interface ScopeEntry {
   id: number; kind: 'cidr' | 'ipv4' | 'ipv6' | 'fqdn'; value: string
   included: boolean; notes: string | null
+  /** An FQDN entry whose zone comes with it. Always false on the other
+   *  kinds — a wildcard already says it and a range has no subdomains. */
+  include_subdomains: boolean
 }
 export interface Contact {
   id?: number; name: string; email?: string | null; phone?: string | null
@@ -1210,6 +1213,10 @@ export const api = {
         kind: 'cidr' | 'ipv4' | 'ipv6' | 'fqdn' | 'wildcard' | 'country'
         value: string
         included: boolean
+        /** An FQDN entry whose zone comes with it: `acme.example` set
+         *  this way also covers `a.acme.example`. Only ever true on an
+         *  `fqdn`. */
+        include_subdomains: boolean
         /** Operator-declared, never looked up. Null is "undetermined",
          *  which is a different claim from "no country". */
         country: string | null
@@ -1229,18 +1236,26 @@ export const api = {
       { method: 'PATCH', body: JSON.stringify(body) }),
 
   /** Append entries. `included` picks the list; a line's own leading `!`
-   *  still wins, because that is how scope documents are pasted. */
+   *  still wins, because that is how scope documents are pasted.
+   *
+   *  `include_subdomains` applies to the FQDN lines in the batch and is
+   *  dropped on the rest. On an entry the project ALREADY has in scope
+   *  the server refuses it and says so in `scope_errors` rather than
+   *  widening a live allowlist from a re-paste — use `patchProjectScope`
+   *  on that one entry. */
   addProjectScope: (project: string, body: {
     lines?: string[]; countries?: string[]; included?: boolean
-    country?: string | null
+    country?: string | null; include_subdomains?: boolean
   }) =>
     req<ProjectCreated>(`/api/projects/${encodeURIComponent(project)}/scope`,
       { method: 'POST', body: JSON.stringify(body) }),
 
   patchProjectScope: (project: string, entryId: number, body: {
     included?: boolean; country?: string | null; notes?: string | null
+    include_subdomains?: boolean
   }) =>
     req<{ id: number; kind: string; value: string; included: boolean
+          include_subdomains: boolean
           country: string | null; notes: string | null }>(
       `/api/projects/${encodeURIComponent(project)}/scope/${entryId}`,
       { method: 'PATCH', body: JSON.stringify(body) }),

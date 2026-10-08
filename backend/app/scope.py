@@ -43,13 +43,44 @@ class Entry:
     kind: str          # cidr | ipv4 | ipv6 | fqdn | wildcard
     value: str
     included: bool
+    #: Only ever true on an `fqdn`. See `classify` for why it is dropped
+    #: rather than carried on the other kinds.
+    include_subdomains: bool = False
 
 
-def classify(raw: str) -> Entry:
+def entry_label(kind: str, value: str, include_subdomains: bool = False) -> str:
+    """How an entry is written wherever a person reads it back.
+
+    One function because the string appears in three places that have to
+    agree: the sentence in a `Ruling` that explains a refusal, the scope
+    section of a report, and the Slack welcome post. A row that silently
+    covers a whole zone must not print as the bare apex in a deliverable
+    the client reads — that is the client being told a narrower scope
+    than the one that was enforced.
+    """
+    if include_subdomains and kind == "fqdn":
+        return f"{value} (+subdomains)"
+    return value
+
+
+def classify(raw: str, include_subdomains: bool = False) -> Entry:
     """-> Entry, or raise ValueError naming what is wrong with it.
 
     A leading '!' or '-' marks an exclusion, which is how scope documents are
     usually written.
+
+    `include_subdomains` is the operator's answer to "does the zone come
+    with it", asked once for a pasted batch rather than per line — the
+    same shape as `included` and the country tag, and for the same
+    reason: the kinds are derived here, so the person pasting cannot be
+    asked to answer it only for the lines that turn out to be names.
+
+    It is DROPPED on every kind but `fqdn`, never an error. `*.a.example`
+    already covers its subdomains, and a CIDR has none; carrying the flag
+    on them would make the stored row claim a rule it does not have, and
+    refusing those lines would make a mixed paste — which is the normal
+    case — unusable with the box ticked. Dropping only ever narrows, so
+    it is safe in the direction this file cares about.
     """
     s = (raw or "").strip()
     if not s:
@@ -111,10 +142,11 @@ def classify(raw: str) -> Entry:
         raise ValueError(str(e)) from e
     if "." not in host:
         raise ValueError(f"{raw!r} is a single label, not a fully-qualified name")
-    return Entry("fqdn", host, included)
+    return Entry("fqdn", host, included, include_subdomains)
 
 
-def classify_many(lines: list[str]) -> tuple[list[Entry], list[str]]:
+def classify_many(lines: list[str],
+                  include_subdomains: bool = False) -> tuple[list[Entry], list[str]]:
     """-> (entries, errors). Deduplicates on value, keeping the first.
 
     Returns both rather than raising: a 400-line paste with two bad lines
@@ -127,7 +159,7 @@ def classify_many(lines: list[str]) -> tuple[list[Entry], list[str]]:
         if not raw.strip():
             continue
         try:
-            e = classify(raw)
+            e = classify(raw, include_subdomains)
         except ValueError as err:
             errors.append(str(err))
             continue
@@ -235,7 +267,8 @@ class _Side:
     def has_hosts(self) -> bool:
         return bool(self.names or self.suffixes or self.addrs or self.nets)
 
-    def add(self, kind: str, value: str) -> None:
+    def add(self, kind: str, value: str,
+            include_subdomains: bool = False) -> None:
         if kind == "country":
             self.countries.add(value.lower())
             return
@@ -243,7 +276,25 @@ class _Side:
             self.suffixes[value[1:].lower()] = value     # "*.x.y" -> ".x.y"
             return
         if kind == "fqdn":
-            self.names.add(normalise_host(value))
+            name = normalise_host(value)
+            self.names.add(name)
+            if include_subdomains:
+                # One row, expanded here into the two things it means:
+                # the apex in `names`, and the zone in `suffixes`. The
+                # expansion is deliberately in the INDEX and not in
+                # `match_name` — the matcher is the hot path and the part
+                # that must stay obviously correct, and this way it is
+                # byte-for-byte the function it was before the feature
+                # existed. Whatever is wrong with "+subdomains" can only
+                # be wrong in these three lines.
+                #
+                # `setdefault`, so an explicit `*.x.y` row already on
+                # this side keeps its own label in a ruling. Which of the
+                # two gets named changes no verdict; it changes which
+                # rule the operator is sent to go and edit, and the one
+                # they literally typed is the better answer.
+                self.suffixes.setdefault(
+                    f".{name}", entry_label(kind, value, True))
             return
         if kind in ("ipv4", "ipv6"):
             try:
@@ -269,7 +320,11 @@ class _Side:
         #
         # `*.acme.example` covers a.acme.example and a.b.acme.example but
         # NOT acme.example itself, which is how certificates and DNS both
-        # read it. An operator who wants the apex adds it as its own line.
+        # read it. An operator who wants the apex adds it as its own
+        # line, or writes `acme.example` with "include subdomains" — see
+        # models.ProjectScope.include_subdomains, which `_Side.add`
+        # expands into an entry in BOTH of the dicts this reads. Nothing
+        # about the walk below changed when that arrived, on purpose.
         i = host.find(".")
         while i != -1:
             hit = self.suffixes.get(host[i:])
@@ -336,15 +391,32 @@ class ScopeIndex:
         self.links: dict[str, set[str]] = {}
         for e in entries:
             self.add(e.kind, e.value, e.included,
-                     getattr(e, "country", None))
+                     getattr(e, "country", None),
+                     bool(getattr(e, "include_subdomains", False)))
 
     def add(self, kind: str, value: str, included: bool,
-            country: str | None = None) -> None:
-        (self.inc if included else self.out).add(kind, value)
+            country: str | None = None,
+            include_subdomains: bool = False) -> None:
+        subs = bool(include_subdomains) and kind == "fqdn"
+        (self.inc if included else self.out).add(kind, value, subs)
         if country and kind in HOST_KINDS:
             self.attributions.append(
                 _Attribution(kind, value, country.lower(),
                              _rank(kind, value)))
+            if subs:
+                # The country has to travel with the rule, or the two
+                # halves of one row disagree about where its hosts are.
+                # That is not cosmetic: an out-of-scope COUNTRY list bars
+                # on a declared country, so a zone whose subdomains carry
+                # no attribution would leave `a.x.example` unplaced and
+                # therefore unbarred, while the apex it was written with
+                # is barred. The row would be half-enforced.
+                #
+                # Ranked as the wildcard it stands in for, so an exact
+                # entry for a subdomain still beats it.
+                self.attributions.append(
+                    _Attribution("wildcard", f"*.{value}", country.lower(),
+                                 _rank("wildcard", f"*.{value}")))
 
     def link(self, host: str, ip: str | None) -> None:
         """Record that `host` was observed at `ip`."""

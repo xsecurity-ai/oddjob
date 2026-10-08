@@ -255,7 +255,8 @@ async def create_project(body: ProjectCreateFull,
         raise HTTPException(
             422, f"slack_delivery={delivery!r} needs a slack_token; "
                  f"without one only 'site' is possible")
-    base = body.model_dump(exclude={"code", "scope", "contacts", "members",
+    base = body.model_dump(exclude={"code", "scope", "scope_include_subdomains",
+                                    "contacts", "members",
                                     "slack_token", "slack_channel",
                                     "slack_delivery", "slack_private"})
     # Named after the operation when there is one: the existing
@@ -306,10 +307,12 @@ async def create_project(body: ProjectCreateFull,
     session.add(ProjectACL(project_id=pr.id, user_id=user.id, role="admin"))
 
     # ---- scope: kinds are derived, bad lines are named not fatal -------
-    entries, scope_errors = classify_many(body.scope)
+    entries, scope_errors = classify_many(body.scope,
+                                          body.scope_include_subdomains)
     for e in entries:
         session.add(ProjectScope(project_id=pr.id, kind=e.kind,
-                                 value=e.value, included=e.included))
+                                 value=e.value, included=e.included,
+                                 include_subdomains=e.include_subdomains))
 
     for c in body.contacts:
         session.add(ProjectContact(project_id=pr.id, **c.model_dump()))
@@ -415,6 +418,12 @@ class ScopeAdd(BaseModel):
     #: leading `!`, because that is how scope documents are pasted; this
     #: is the default for a line that says nothing.
     included: bool = True
+    #: Whether the names in this batch bring their subdomains with
+    #: them. Batch-level for the same reason `included` is: the kinds
+    #: are derived from the lines, so there is nothing to tick per line
+    #: at the moment the operator is pasting. Ignored on every kind but
+    #: `fqdn` — see scope.classify().
+    include_subdomains: bool = False
     #: ISO 3166-1 alpha-2 country entries, kept apart from `lines`
     #: because "jp" is indistinguishable from a hostname and guessing
     #: between the two would put a typo on the geographic allowlist.
@@ -442,13 +451,28 @@ async def add_scope(project: str, body: ScopeAdd,
                                  getting it wrong is a scan of a host
                                  the client said to leave alone.
       a country supplied         recorded against the entry either way
+      +subdomains, entry is out  applied. It bars a whole zone instead
+                                 of one name, which only ever refuses
+                                 more
+      +subdomains, entry is in   REFUSED and named back, same rule and
+                                 the same reason as un-barring. Turning
+                                 one host of an allowlist into its whole
+                                 zone is a widening, and re-pasting a
+                                 400-line document with the box ticked
+                                 for the sake of four new names would
+                                 otherwise widen the other 396 silently.
+                                 The per-entry PATCH does it deliberately
+
+    Nothing here ever turns `include_subdomains` OFF either. Narrowing a
+    rule is still a change to a rule, and this endpoint appends; PATCH
+    and DELETE are where an entry is edited.
 
     Which also means the two lists cannot both literally contain the
     same string. "Out trumps in" is about rules that OVERLAP — a range
     on one list and an address inside it on the other — and that is
     settled by the matcher, not here.
     """
-    entries, errors = classify_many(body.lines)
+    entries, errors = classify_many(body.lines, body.include_subdomains)
     tag: str | None = None
     if body.country:
         try:
@@ -458,14 +482,16 @@ async def add_scope(project: str, body: ScopeAdd,
     have = {r.value: r for r in (await session.execute(
         select(ProjectScope).where(ProjectScope.project_id == pr.id))).scalars()}
 
-    def put(kind: str, value: str, included: bool) -> None:
+    def put(kind: str, value: str, included: bool,
+            subs: bool = False) -> None:
         # A country row IS a country; tagging it with one would read as
         # "the country JP is located in JP".
         mine = tag if kind != "country" else None
         cur = have.get(value)
         if cur is None:
             cur = ProjectScope(project_id=pr.id, kind=kind, value=value,
-                               included=included, country=mine)
+                               included=included, country=mine,
+                               include_subdomains=subs)
             session.add(cur)
             have[value] = cur
             return
@@ -476,13 +502,27 @@ async def add_scope(project: str, body: ScopeAdd,
                 f"{value!r} is on the out-of-scope list; it was left there. "
                 f"Remove that entry deliberately if it really is in scope.")
             return
+        # Read AFTER the move above, not before: a line that pushes an
+        # entry to the out list and asks for its subdomains is asking to
+        # bar the zone, and that is allowed. Checking `cur.included` on
+        # the way in would have refused it.
+        if subs and not cur.include_subdomains:
+            if cur.included:
+                errors.append(
+                    f"{value!r} is already in scope on its own; subdomains "
+                    f"were NOT added to it. Widening an entry that is "
+                    f"already enforced is a decision — turn on subdomains "
+                    f"on that entry itself if that is what you mean.")
+            else:
+                cur.include_subdomains = True
         if mine:
             cur.country = mine
 
     for e in entries:
         # A line's own `!` wins; `included` is only the default for the
         # rest of the batch.
-        put(e.kind, e.value, e.included and body.included)
+        put(e.kind, e.value, e.included and body.included,
+            e.include_subdomains)
     for raw in body.countries:
         try:
             code = classify_country(raw)
@@ -510,6 +550,15 @@ class ScopeEntryPatch(BaseModel):
     force all along. Delete and re-add.
     """
     included: bool | None = None
+    #: Whether the zone under an FQDN entry comes with it. This is the
+    #: one place it may be WIDENED, and deliberately so: it names a
+    #: single entry, so it cannot be the accidental consequence of
+    #: pasting a document — which is exactly what POST refuses it for.
+    #: Setting it on anything but an `fqdn` is refused rather than
+    #: ignored; on a named entry there is no batch to keep usable, and
+    #: a silent no-op on a security control is how someone comes to
+    #: believe a zone is covered.
+    include_subdomains: bool | None = None
     #: "" clears it back to undetermined, which is a real state and not
     #: the same as "no country".
     country: str | None = None
@@ -526,6 +575,14 @@ async def patch_scope(project: str, entry_id: int, body: ScopeEntryPatch,
     data = body.model_dump(exclude_unset=True)
     if "included" in data and data["included"] is not None:
         e.included = bool(data["included"])
+    if data.get("include_subdomains") is not None:
+        want = bool(data["include_subdomains"])
+        if want and e.kind != "fqdn":
+            raise HTTPException(
+                422, f"{e.value!r} is a {e.kind} entry; subdomains are only "
+                     f"a question about a hostname. A wildcard already "
+                     f"covers them, and a range has none.")
+        e.include_subdomains = want
     if "country" in data:
         raw = (data["country"] or "").strip()
         if not raw:

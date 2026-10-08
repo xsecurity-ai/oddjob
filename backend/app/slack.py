@@ -395,6 +395,7 @@ async def welcome(session, project, token: str) -> str:
 
     from .models import Agent, ProjectACL, ProjectScope, Target, User, UserSlackIdentity, Vuln
     from .routers.settings import load_all
+    from .scope import entry_label
 
     lines = [f":wave: *{project.codename or project.name}* "
              f"(`{project.code}`) — engagement channel"]
@@ -448,12 +449,17 @@ async def welcome(session, project, token: str) -> str:
             head += f", {len(exc)} excluded"
         lines.append(head)
         for r in inc[:WELCOME_SCOPE_LIMIT]:
-            lines.append(f"• `{r.value}`")
+            # `entry_label`, so a row that covers a whole zone says so
+            # here. This post is the channel's standing answer to "what
+            # is in scope", and it is read far more often than the UI.
+            lines.append(
+                f"• `{entry_label(r.kind, r.value, r.include_subdomains)}`")
         if len(inc) > WELCOME_SCOPE_LIMIT:
             lines.append(f"• …and {len(inc) - WELCOME_SCOPE_LIMIT} more")
         if exc:
             lines.append("• _excluded:_ " + ", ".join(
-                f"`{r.value}`" for r in exc[:3])
+                f"`{entry_label(r.kind, r.value, r.include_subdomains)}`"
+                for r in exc[:3])
                 + (f" and {len(exc) - 3} more" if len(exc) > 3 else ""))
 
     # ---- what is already on record -----------------------------------

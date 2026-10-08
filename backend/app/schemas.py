@@ -937,6 +937,9 @@ class ScopeEntryOut(BaseModel):
     kind: str
     value: str
     included: bool
+    #: True on an `fqdn` whose zone comes with it. Always false on the
+    #: other kinds — see models.ProjectScope.include_subdomains.
+    include_subdomains: bool = False
     #: Operator-declared, never looked up. See models.ProjectScope.country.
     country: str | None = None
     notes: str | None = None
@@ -980,6 +983,14 @@ class ProjectCreateFull(ProjectCreate):
     """Everything the new-project modal collects, in one transaction."""
     # Free text, one entry per line. Kinds are derived, not supplied.
     scope: list[str] = []
+    #: Whether the names in `scope` bring their subdomains. Named for
+    #: the list it applies to, because this model also carries contacts
+    #: and members and a bare `include_subdomains` would not say which.
+    #: The paste-time twin of ScopeAdd.include_subdomains in
+    #: routers/projects.py — the two entry points have to agree, or the
+    #: option exists on one of them and the other quietly refuses the
+    #: apex. Dropped on every kind but `fqdn`; see scope.classify().
+    scope_include_subdomains: bool = False
     contacts: list[ContactIn] = []
     members: list[MemberIn] = []
     slack_token: str | None = Field(

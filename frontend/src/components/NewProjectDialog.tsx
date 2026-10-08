@@ -82,6 +82,10 @@ export function NewProjectDialog({ onClose, onCreated }: {
   //: project that was actually created rather than a guess at its code.
   const [createdCode, setCreatedCode] = useState('')
   const [scope, setScope] = useState('')
+  // Asked here and not only on the config screen: the apex-versus-
+  // wildcard rule is met at paste time, and an operator who learns it
+  // later learns it as a refused scan on a host they thought they had.
+  const [scopeSubs, setScopeSubs] = useState(false)
   const [slackToken, setSlackToken] = useState('')
   const [slackChannel, setSlackChannel] = useState('')
   const [delivery, setDelivery] = useState<Delivery>('site')
@@ -136,6 +140,7 @@ export function NewProjectDialog({ onClose, onCreated }: {
         name: opname.trim() || customer.trim(),
         client: customer.trim() || null,
         scope: scopeLines,
+        scope_include_subdomains: scopeSubs,
         contacts: contacts.filter((c) => c.name.trim()),
         members: members.filter((m) => m.username.trim()),
         slack_token: slackToken.trim() || null,
@@ -223,9 +228,23 @@ export function NewProjectDialog({ onClose, onCreated }: {
             placeholder={'10.0.0.0/24\n2001:db8::/32\nportal.acme.com\n!10.0.0.5'}
             slotProps={{ htmlInput: { style: { fontFamily: `'Share Tech Mono', monospace`,
                                                fontSize: 12.5 } } }} />
-          <Typography sx={{ fontSize: 11, color: neon.muted, mt: -1 }}>
-            {scopeLines.length} line{scopeLines.length === 1 ? '' : 's'}
-          </Typography>
+          <Stack direction="row" spacing={2} alignItems="center"
+                 flexWrap="wrap" useFlexGap sx={{ mt: -1 }}>
+            <Typography sx={{ fontSize: 11, color: neon.muted }}>
+              {scopeLines.length} line{scopeLines.length === 1 ? '' : 's'}
+            </Typography>
+            <FormControlLabel
+              control={<Checkbox size="small" checked={scopeSubs}
+                         onChange={(e) => setScopeSubs(e.target.checked)} />}
+              label="Include subdomains"
+              slotProps={{ typography: { sx: { fontSize: 12 } } }} />
+            <Typography sx={{ fontSize: 11, color: neon.muted }}>
+              {scopeSubs
+                ? 'acme.example also covers a.acme.example. Ranges and'
+                  + ' wildcards are unaffected.'
+                : 'Each name covers itself only.'}
+            </Typography>
+          </Stack>
 
           <Divider sx={{ borderColor: alpha(neon.purple, 0.2) }} />
           {section('Slack', 'The channel this engagement posts to. Supply a bot token to '

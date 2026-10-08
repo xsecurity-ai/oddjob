@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import {
-  Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions,
-  DialogContent, DialogTitle, Divider, IconButton, MenuItem, Paper, Stack,
-  Switch, Table, TableBody, TableCell, TableHead, TableRow, TextField,
-  Tooltip, Typography, alpha,
+  Alert, Box, Button, Checkbox, Chip, CircularProgress, Dialog, DialogActions,
+  DialogContent, DialogTitle, Divider, FormControlLabel, IconButton, MenuItem,
+  Paper, Stack, Switch, Table, TableBody, TableCell, TableHead, TableRow,
+  TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import DeleteIcon from '@mui/icons-material/DeleteOutline'
 import GppBadIcon from '@mui/icons-material/GppBadOutlined'
@@ -37,6 +37,13 @@ import { neon, glow } from '../theme'
  *    the ranges they know, and a host no tagged entry covers has an
  *    undetermined country — which the server treats as a third answer,
  *    not as "not barred".
+ *  - "Include subdomains" is asked WHERE THE NAME IS TYPED, which is the
+ *    whole point of it. `*.acme.example` does not cover `acme.example` —
+ *    that is how DNS and certificates read a wildcard and the server is
+ *    right to refuse it — but an operator who has pasted a scope document
+ *    meets that rule later, as a refusal on a host they believed they had
+ *    authorisation for. Asking at the point of entry is the difference
+ *    between expressing an intent and debugging a rule.
  */
 
 type Config = Awaited<ReturnType<typeof api.projectConfig>>
@@ -63,6 +70,7 @@ export function ProjectConfigView({ project }: { project: string | null }) {
   const [lines, setLines] = useState('')
   const [addTo, setAddTo] = useState<'in' | 'out'>('in')
   const [addCountry, setAddCountry] = useState('')
+  const [addSubs, setAddSubs] = useState(false)
   const [countries, setCountries] = useState('')
   const [confirm, setConfirm] = useState<ScopeApplyResult | null>(null)
 
@@ -146,8 +154,9 @@ export function ProjectConfigView({ project }: { project: string | null }) {
       const r = await api.addProjectScope(project, {
         lines: ls, countries: cs, included: addTo === 'in',
         country: addCountry.trim() || null,
+        include_subdomains: addSubs,
       })
-      setLines(''); setCountries(''); setAddCountry('')
+      setLines(''); setCountries(''); setAddCountry(''); setAddSubs(false)
       // Named individually rather than counted: a line that did not load
       // is a rule that is not being enforced, and "3 errors" does not say
       // which rule.
@@ -163,6 +172,36 @@ export function ProjectConfigView({ project }: { project: string | null }) {
       <TableCell sx={{ py: 0.4, fontFamily: `'Share Tech Mono', monospace`,
                        fontSize: 12.5 }}>
         {e.kind === 'country' ? e.value.toUpperCase() : e.value}
+        {/* Written into the value, not only shown as the switch below.
+            A row covering a whole zone has to read as one at a glance,
+            the same way the server writes it into a refusal and the
+            report prints it. */}
+        {e.include_subdomains && (
+          <Box component="span" sx={{ color: neon.yellow, ml: 0.6 }}>
+            +subdomains
+          </Box>
+        )}
+      </TableCell>
+      {/* Only an FQDN can answer this. A wildcard already covers its
+          subdomains and a range has none, so the control is absent
+          rather than present-and-inert: a switch that does nothing on
+          a security list is one somebody will read as a guarantee. */}
+      <TableCell sx={{ py: 0.4, width: 96 }}>
+        {e.kind !== 'fqdn' ? (
+          <Box component="span" sx={{ color: alpha(neon.muted, 0.5) }}>—</Box>
+        ) : (
+          <Tooltip title={e.include_subdomains
+            ? `Covers ${e.value} and everything under it. Turn off to cover only ${e.value}.`
+            : `Covers only ${e.value}. Turn on to cover everything under it too.`}>
+            <Switch size="small" checked={e.include_subdomains} disabled={busy}
+              onChange={() => run(
+                e.include_subdomains
+                  ? `${e.value} now covers only itself.`
+                  : `${e.value} now covers its subdomains too.`,
+                () => api.patchProjectScope(project, e.id,
+                  { include_subdomains: !e.include_subdomains }))} />
+          </Tooltip>
+        )}
       </TableCell>
       <TableCell sx={{ py: 0.4, width: 120 }}>
         {e.kind === 'country' ? (
@@ -227,6 +266,7 @@ export function ProjectConfigView({ project }: { project: string | null }) {
               <TableRow>
                 <TableCell sx={{ fontSize: 10.5 }}>Kind</TableCell>
                 <TableCell sx={{ fontSize: 10.5 }}>Value</TableCell>
+                <TableCell sx={{ fontSize: 10.5 }}>Subdomains</TableCell>
                 <TableCell sx={{ fontSize: 10.5 }}>Country</TableCell>
                 <TableCell sx={{ fontSize: 10.5 }}>In</TableCell>
                 <TableCell />
@@ -329,6 +369,23 @@ export function ProjectConfigView({ project }: { project: string | null }) {
               <MenuItem value="in" sx={{ fontSize: 12.5 }}>In scope</MenuItem>
               <MenuItem value="out" sx={{ fontSize: 12.5 }}>Out of scope</MenuItem>
             </TextField>
+            {/* Beside the box the names are typed into, because the
+                question it answers is one the operator has in mind at
+                exactly that moment and never again until a scan is
+                refused. */}
+            <Box>
+              <FormControlLabel
+                control={<Checkbox size="small" checked={addSubs}
+                           onChange={(e) => setAddSubs(e.target.checked)} />}
+                label="Include subdomains"
+                slotProps={{ typography: { sx: { fontSize: 12.5 } } }} />
+              <Typography sx={{ fontSize: 11, color: neon.muted, mt: -0.3 }}>
+                {addSubs
+                  ? 'portal.acme.example also covers a.portal.acme.example.'
+                  : 'Names cover themselves only. Ranges, addresses and'
+                    + ' wildcards ignore this — a wildcard already says it.'}
+              </Typography>
+            </Box>
             <TextField size="small" label="Countries" value={countries}
               placeholder="jp, de"
               helperText="ISO 3166-1 alpha-2. Goes on the list chosen above."
