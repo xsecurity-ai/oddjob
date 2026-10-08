@@ -10,6 +10,66 @@
 # Versions live in git tags, not in Docker Hub tag listings. Hub tags
 # get deleted, retention-pruned and hand-edited; a git tag is signed
 # history and is also what somebody checks out to reproduce a release.
+# Both are published — `cr0n1c/oddjob:v0.0.2` and `cr0n1c/drone:v0.0.2`
+# exist so a deployment can pin to a version — but the git tag is the
+# record and the Hub tags are a convenience over it.
+#
+# ----------------------------------------- who decides the version
+#
+# Not this workflow. Read that twice, because it used to.
+#
+# This file used to take a `bump: minor|major` input, read the highest
+# existing `v*.*.*` git tag, and compute the next one. That made it a
+# second place the version was decided, alongside the `VERSION` file
+# that the binaries, the images and the Health view all read. Two
+# mechanisms that both claim the version will disagree, and the one
+# people trust is whichever they looked at last.
+#
+# So the arithmetic moved out, into bump-version.yml, which does one
+# thing: it edits `VERSION` on main. Everything downstream reads that
+# file. The chain is:
+#
+#   bump-version.yml   writes VERSION = 0.0.2, commits to main
+#        |             (the ONLY thing that decides a version)
+#        v
+#   images.yml         rebuilds — VERSION is part of the content key —
+#        |             stamps 0.0.2 into the Go binaries and into the
+#        |             org.opencontainers.image.version LABEL, and
+#        |             publishes src-<key>, :develop / :nightly
+#        v
+#   promote.yml        reads the label off the digest it is promoting
+#   (this file)        and makes THAT the release tag. It computes
+#                      nothing. If the label says 0.0.2, the release
+#                      is 0.0.2, in Docker Hub and in git alike.
+#
+# The label is read rather than the file at HEAD on purpose. A
+# promotion is about a specific set of bytes, and `VERSION` at the tip
+# of main may have moved on since those bytes were built. The version
+# of an image is a property of the image. Where the two differ this
+# workflow says so in its summary and carries on — promoting an older
+# nightly is a legitimate thing to do, and it should publish the number
+# that image was built with, not today's.
+#
+# -------------------------------------------------- what is checked
+#
+# Before anything is tagged:
+#
+#   * the label exists, and both images agree on it when promoting
+#     both. One number for one release.
+#   * it is a bare semver triple with no `-dev-` suffix
+#     (scripts/check-version.sh, the same script ci.yml and the
+#     pre-commit hook run). A dev build must never become a Docker Hub
+#     tag any more than it may reach main.
+#   * `src-<key>` resolves to the same digest as the tag being
+#     promoted. This is what keeps the version tag coherent with
+#     images.yml: `v0.0.2` is provably the same bytes as the
+#     `src-<key>` they were published under, and anyone can check it
+#     afterwards with the two commands printed in the summary.
+#   * the git tag does not already exist.
+#
+# `latest` only moves forward. Promoting an older image — which is
+# allowed, and is what you do to re-release bytes after a bad
+# promotion — must not drag `latest` backwards for everyone pulling it.
 name: promote
 
 on:
@@ -20,11 +80,6 @@ on:
         type: choice
         options: [both, oddjob, drone]
         default: both
-      bump:
-        description: 'Next version'
-        type: choice
-        options: [minor, major]
-        default: minor
       from:
         # `nightly` rather than `develop`: a nightly has had a night of
         # being the thing people ran. `develop` is whatever landed
@@ -34,6 +89,14 @@ on:
         description: 'Tag to promote — nightly, develop, or src-<key>'
         type: string
         default: nightly
+      expect:
+        # Optional, and the only way an operator states a version at
+        # all. Not a choice of version — a statement of what they
+        # believe they are releasing, checked against what the image
+        # says. Leave it blank to accept whatever the image carries.
+        description: 'Optional: the version you expect, e.g. 0.0.2. Blank to accept the image''s own.'
+        type: string
+        default: ''
 
 permissions:
   contents: write        # to push the git tag
@@ -48,7 +111,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0     # tags, so the current version is knowable
+          fetch-depth: 0     # tags, so an existing release is knowable
 
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
@@ -56,92 +119,224 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Work out the next version
+      - name: Read the version off the images being promoted
         id: v
         env:
-          BUMP: ${{ inputs.bump }}
+          FROM: ${{ inputs.from }}
+          WHICH: ${{ inputs.image }}
+          EXPECT: ${{ inputs.expect }}
         run: |
           set -euo pipefail
-          # Highest existing vMAJOR.MINOR.PATCH, or v0.0.0 if this is
-          # the first. `sort -V` so v0.10.0 beats v0.9.0, which a
-          # lexical sort gets backwards.
-          cur=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -1)
-          cur=${cur:-v0.0.0}
-          # Patch is read and discarded: a promotion always lands on .0.
-          IFS=. read -r MA MI _ <<< "${cur#v}"
-          case "$BUMP" in
-            major) MA=$((MA+1)); MI=0 ;;
-            minor) MI=$((MI+1)) ;;
-            *) echo "unknown bump: $BUMP" >&2; exit 1 ;;
-          esac
-          # Patch is always 0 here. A promotion is a deliberate
-          # minor/major; patches come from a fix branch, not from
-          # pressing this button.
-          next="v${MA}.${MI}.0"
-          if git rev-parse "$next" >/dev/null 2>&1; then
-            echo "::error::$next already exists — promote again for the one after, or delete it" >&2
+
+          # Spelled out rather than `[ ... ] && images+=(...)`: under
+          # `set -e` that form exits the step when the test is false,
+          # so selecting only `drone` would have silently selected
+          # nothing. This is the same bug the old retag step carried a
+          # comment about; it is repeated here because the shape is
+          # just as tempting the second time.
+          images=()
+          if [ "$WHICH" = "both" ] || [ "$WHICH" = "oddjob" ]; then
+            images+=(oddjob)
+          fi
+          if [ "$WHICH" = "both" ] || [ "$WHICH" = "drone" ]; then
+            images+=(drone)
+          fi
+          if [ ${#images[@]} -eq 0 ]; then
+            echo "::error::no image selected" >&2; exit 1
+          fi
+
+          # One label value per image, read from the image config
+          # rather than from anywhere in this repository. `.Image` is
+          # the config for a single-platform image and a map of them
+          # for a manifest list, which is why the jq normalises both
+          # into a list. Every platform must agree: a manifest whose
+          # two halves were built from different VERSIONs is a broken
+          # publish, and silently taking the first one would hide it.
+          label_of() {
+            docker buildx imagetools inspect "$1" --format '{{json .Image}}' \
+              | jq -r '(if has("config") then [.] else [.[]] end)
+                       | map(.config.Labels["'"$2"'"] // "") | unique | .[]'
+          }
+
+          version=""
+          for img in "${images[@]}"; do
+            repo="docker.io/cr0n1c/$img"
+            ref="$repo:$FROM"
+            if ! docker manifest inspect "$ref" >/dev/null 2>&1; then
+              echo "::error::$ref does not exist — has the images workflow run?" >&2
+              exit 1
+            fi
+
+            v=$(label_of "$ref" org.opencontainers.image.version)
+            if [ -z "$v" ]; then
+              echo "::error::$ref carries no org.opencontainers.image.version label." >&2
+              echo "::error::It predates version pinning. Re-run the images workflow" >&2
+              echo "::error::(workflow_dispatch, force) and promote the result." >&2
+              exit 1
+            fi
+            if [ "$(printf '%s\n' "$v" | wc -l | tr -d '[:space:]')" -ne 1 ]; then
+              echo "::error::$ref reports more than one version across platforms:" >&2
+              printf '  %s\n' $v >&2
+              exit 1
+            fi
+            if [ -n "$version" ] && [ "$version" != "$v" ]; then
+              echo "::error::the selected images disagree: $version vs $v." >&2
+              echo "::error::Promote them separately, or rebuild so they match." >&2
+              exit 1
+            fi
+            version="$v"
+
+            # Coherence with images.yml. `src-<key>` is the durable
+            # name for exactly these bytes; if it does not resolve to
+            # the same digest then the moving tag has been hand-edited
+            # and `v$version` would be a name for something nobody can
+            # trace back.
+            key=$(label_of "$ref" ai.xsecurity.source-key)
+            digest=$(docker buildx imagetools inspect "$ref" \
+                      --format '{{json .Manifest.Digest}}' | tr -d '"')
+            if [ -n "$key" ] && [ "$(printf '%s\n' "$key" | wc -l | tr -d '[:space:]')" -eq 1 ]; then
+              srcd=$(docker buildx imagetools inspect "$repo:src-$key" \
+                      --format '{{json .Manifest.Digest}}' | tr -d '"' || true)
+              if [ "$srcd" != "$digest" ]; then
+                echo "::error::$ref is $digest but $repo:src-$key is ${srcd:-missing}." >&2
+                echo "::error::The moving tag and its source tag have come apart." >&2
+                exit 1
+              fi
+              echo "$img: $FROM == src-$key == $digest"
+              echo "${img}_key=$key" >> "$GITHUB_OUTPUT"
+            fi
+            echo "${img}_digest=$digest" >> "$GITHUB_OUTPUT"
+            echo "${img}_revision=$(label_of "$ref" org.opencontainers.image.revision | head -1)" \
+              >> "$GITHUB_OUTPUT"
+          done
+
+          # A bare triple, and no `-dev-`. The same script the CI
+          # version job and the pre-commit hook run, so a dev build
+          # cannot become a Hub tag by a route that skipped the one
+          # place the rule is written down.
+          scripts/check-version.sh "$version"
+
+          if [ -n "$EXPECT" ] && [ "$EXPECT" != "$version" ]; then
+            echo "::error::you asked for $EXPECT and the image says $version." >&2
+            echo "::error::Nothing was tagged. Either the wrong tag is being" >&2
+            echo "::error::promoted, or VERSION was bumped after it was built." >&2
             exit 1
           fi
+
+          if git rev-parse "v$version" >/dev/null 2>&1; then
+            echo "::error::git tag v$version already exists." >&2
+            echo "::error::That version has been released. Bump VERSION on main" >&2
+            echo "::error::(bump-version.yml), let images.yml rebuild, then promote." >&2
+            exit 1
+          fi
+
+          # `latest` moves only forward. `sort -V` so v0.10.0 beats
+          # v0.9.0, which a lexical sort gets backwards.
+          highest=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -1)
+          highest=${highest:-v0.0.0}
+          newest=$(printf '%s\nv%s\n' "$highest" "$version" | sort -V | tail -1)
+          if [ "$newest" = "v$version" ]; then
+            move_latest=true
+          else
+            move_latest=false
+          fi
+
+          # Not an error. The file having moved on is the normal state
+          # when a bump landed after the nightly being promoted was
+          # built, and the image's own number is still the right one to
+          # publish. Said out loud so nobody has to wonder.
+          head_version=$(scripts/version.sh --release)
           {
-            echo "current=$cur"
-            echo "next=$next"
-            echo "bare=${next#v}"
+            echo "version=$version"
+            echo "images=${images[*]}"
+            echo "move_latest=$move_latest"
+            echo "head_version=$head_version"
           } >> "$GITHUB_OUTPUT"
-          echo "Promoting $cur -> $next ($BUMP)"
+          echo "promoting $FROM as $version (VERSION on main is $head_version)"
 
       - name: Retag the images
         env:
           FROM: ${{ inputs.from }}
-          WHICH: ${{ inputs.image }}
-          NEXT: ${{ steps.v.outputs.bare }}
+          IMAGES: ${{ steps.v.outputs.images }}
+          VER: ${{ steps.v.outputs.version }}
+          MOVE_LATEST: ${{ steps.v.outputs.move_latest }}
         run: |
           set -euo pipefail
-          promote_one() {
-            repo="cr0n1c/$1"
-            # Fail loudly if there is nothing to promote, rather than
-            # tagging thin air.
-            if ! docker manifest inspect "$repo:$FROM" >/dev/null 2>&1; then
-              echo "::error::$repo:$FROM does not exist — has the images workflow run?" >&2
-              return 1
-            fi
+          {
+            echo "### Promoted \`$VER\`"
+            echo "| image | tags | digest | source |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for img in $IMAGES; do
+            repo="cr0n1c/$img"
+            # By digest, never by name. Resolving the name a second
+            # time could pick up a different image if the pointer moved
+            # between the check above and this step, and the whole
+            # promise of this workflow is that the released bytes are
+            # the bytes that were inspected.
             digest=$(docker buildx imagetools inspect "$repo:$FROM" \
                       --format '{{json .Manifest.Digest}}' | tr -d '"')
-            echo "  $repo:$FROM is $digest"
+            tags=(--tag "$repo:v$VER" --tag "$repo:$VER")
+            names="\`v$VER\`, \`$VER\`"
+            if [ "$MOVE_LATEST" = "true" ]; then
+              tags+=(--tag "$repo:latest")
+              names="$names, \`latest\`"
+            fi
             # Same bytes, new names. Multi-arch manifest preserved.
-            docker buildx imagetools create \
-              --tag "$repo:v$NEXT" --tag "$repo:$NEXT" --tag "$repo:latest" \
-              "$repo@$digest"
-            echo "| \`$repo\` | \`v$NEXT\`, \`latest\` | \`${digest:0:19}…\` |" \
+            docker buildx imagetools create "${tags[@]}" "$repo@$digest"
+            echo "| \`$repo\` | $names | \`${digest:0:19}…\` | \`$FROM\` |" \
               >> "$GITHUB_STEP_SUMMARY"
-          }
-          {
-            echo "### Promoted"
-            echo "| image | tags | digest |"
-            echo "|---|---|---|"
-          } >> "$GITHUB_STEP_SUMMARY"
-          # Spelled out rather than `[ ... ] && promote_one`: under
-          # `set -e` that form exits the step when the test is false,
-          # so promoting only `drone` would have silently skipped it.
-          if [ "$WHICH" = "both" ] || [ "$WHICH" = "oddjob" ]; then
-            promote_one oddjob
-          fi
-          if [ "$WHICH" = "both" ] || [ "$WHICH" = "drone" ]; then
-            promote_one drone
+          done
+
+          if [ "$MOVE_LATEST" != "true" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`latest\` was **not** moved: \`$VER\` is not the highest release." \
+              >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Tag the commit
         env:
-          NEXT: ${{ steps.v.outputs.next }}
-          CUR: ${{ steps.v.outputs.current }}
-          WHICH: ${{ inputs.image }}
-          BUMP: ${{ inputs.bump }}
+          VER: ${{ steps.v.outputs.version }}
+          IMAGES: ${{ steps.v.outputs.images }}
+          FROM: ${{ inputs.from }}
+          HEAD_VERSION: ${{ steps.v.outputs.head_version }}
+          ODDJOB_REVISION: ${{ steps.v.outputs.oddjob_revision }}
+          DRONE_REVISION: ${{ steps.v.outputs.drone_revision }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$NEXT" -m "$NEXT ($BUMP from $CUR) — promoted $WHICH from ${{ inputs.from }}"
-          git push origin "$NEXT"
+
+          # The commit the image was BUILT from, out of the
+          # org.opencontainers.image.revision label — not HEAD. "Check
+          # out v0.0.2 to reproduce the release" is only true if the
+          # tag is on the commit whose tree produced those bytes, and
+          # main has usually moved on by the time anybody promotes.
+          rev="${ODDJOB_REVISION:-$DRONE_REVISION}"
+          if [ -z "$rev" ] || ! git cat-file -e "$rev^{commit}" 2>/dev/null; then
+            echo "::warning::no usable revision label (${rev:-none}); tagging HEAD instead"
+            rev=$(git rev-parse HEAD)
+          fi
+
+          git tag -a "v$VER" "$rev" \
+            -m "v$VER — promoted $IMAGES from $FROM" \
+            -m "Version from the image's org.opencontainers.image.version label." \
+            -m "VERSION on main at promotion time: $HEAD_VERSION"
+          git push origin "v$VER"
           {
             echo ""
-            echo "Git tag \`$NEXT\` on \`$(git rev-parse --short HEAD)\`."
+            echo "Git tag \`v$VER\` on \`$(git rev-parse --short "$rev")\`."
+            echo ""
+            echo "To verify the release tag is the same bytes as the source tag"
+            echo "it was promoted from:"
+            echo ""
+            echo '```'
+            for img in $IMAGES; do
+              echo "docker buildx imagetools inspect cr0n1c/$img:v$VER \\"
+              echo "  --format '{{json .Manifest.Digest}}'"
+              echo "docker buildx imagetools inspect cr0n1c/$img:$FROM \\"
+              echo "  --format '{{json .Manifest.Digest}}'"
+            done
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

@@ -471,6 +471,86 @@ check("and says why it is unused",
 st, _ = call("/api/health/site")
 check("health needs a session", st in (401, 403), f"status={st}")
 
+print("\n== versions ==")
+# The version is decided in exactly one place — VERSION at the
+# repository root — and both halves of this application read it rather
+# than carrying a literal of their own. These assert the reading, not
+# the number: hard-coding 0.0.1 here would make this file the second
+# place the version is written down, which is the thing the whole
+# arrangement exists to prevent.
+import re as _re  # noqa: E402
+
+from app.servicehealth import fleet_versions as _fv  # noqa: E402
+from app.servicehealth import semver_key as _sk  # noqa: E402
+from app.version import VERSION as _VER  # noqa: E402
+
+_srv = (h or {}).get("server", {})
+check("the health page reports the Oddjob version",
+      _srv.get("version") == _VER, str(_srv.get("version")))
+check("which is semver, with at most a -dev-<commit time> pre-release",
+      bool(_re.fullmatch(r"\d+\.\d+\.\d+(-dev-(\d+|unknown))?", _srv.get("version") or "")),
+      str(_srv.get("version")))
+# Stated by the server rather than left for the UI to spot a substring.
+check("and says plainly whether this is an unreleased build",
+      _srv.get("dev") == ("-dev-" in (_srv.get("version") or "")),
+      f"version={_srv.get('version')} dev={_srv.get('dev')}")
+
+_dv = (h or {}).get("drones", {}).get("versions")
+check("the fleet's versions are summarised on the health page",
+      isinstance(_dv, dict) and isinstance(_dv.get("versions"), list),
+      str(_dv)[:140])
+check("and the summary knows what the server is running",
+      (_dv or {}).get("server_version") == _VER, str((_dv or {}).get("server_version")))
+check("every drone row carries its reported version, or null",
+      all("version" in d for d in (h or {}).get("drones", {}).get("drones", [])),
+      str((h or {}).get("drones", {}).get("drones"))[:140])
+
+# The aggregate itself, as a pure function, because the interesting
+# cases are a mixed fleet and the server has one drone at best.
+_f = _fv(["0.0.1", "0.0.1", "0.1.0", None, "", "dev"], server_version="0.0.1")
+check("every version in use gets its own row", _f["distinct"] == 3, str(_f["versions"]))
+check("with a count, so a split fleet is visible rather than averaged",
+      [(r["version"], r["count"]) for r in _f["versions"]][0] == ("0.1.0", 1),
+      str(_f["versions"]))
+check("a drone that has reported nothing is counted apart",
+      _f["unreported"] == 2, str(_f))
+check("and is never folded into a version bucket",
+      sum(r["count"] for r in _f["versions"]) == 4, str(_f["versions"]))
+check("the newest is the newest PARSEABLE version, not the last row",
+      _f["newest"] == "0.1.0", str(_f["newest"]))
+check("an unorderable version sorts last rather than reading as oldest",
+      _f["versions"][-1]["version"] == "dev", str(_f["versions"]))
+check("rows say whether they match the server",
+      [r["matches_server"] for r in _f["versions"]] == [False, True, False],
+      str(_f["versions"]))
+check("and how much of the fleet does", _f["matching_server"] == 2, str(_f))
+# Yellow, not red. Neither a split fleet nor a silent drone is an
+# outage, and calling them failing is how a page teaches people to
+# stop looking at it.
+check("a split fleet is flagged without being called failing",
+      _f["state"] == "idle", str(_f["state"]))
+check("one version, every drone reporting, is ok",
+      _fv(["0.1.0", "0.1.0"])["state"] == "ok", str(_fv(["0.1.0", "0.1.0"])))
+check("no drones at all is 'never used', not 'ok'",
+      _fv([])["state"] == "unused" and _fv([])["newest"] is None, str(_fv([])))
+check("a dev build is marked as one",
+      _fv(["0.0.1-dev-1759900000"])["versions"][0]["dev"] is True,
+      str(_fv(["0.0.1-dev-1759900000"])["versions"]))
+
+# Semver precedence, which differs from a string sort in the two ways
+# that bite: the tenth minor release, and a pre-release of a version
+# sorting below the release of it.
+check("0.10.0 is newer than 0.9.0", _sk("0.10.0") > _sk("0.9.0"))
+check("a -dev- build of 0.0.1 is OLDER than 0.0.1",
+      _sk("0.0.1-dev-1759900000") < _sk("0.0.1"))
+check("and newer than 0.0.0", _sk("0.0.1-dev-1759900000") > _sk("0.0.0"))
+check("anything unparseable sorts below everything that parses",
+      _sk("dev") < _sk("0.0.0") and _sk("v0.1.0-14-gdeadbee") < _sk("0.0.0"))
+check("rc.2 beats rc.10 on a string sort and loses here",
+      _sk("1.0.0-rc.10") > _sk("1.0.0-rc.2"))
+check("build metadata does not change precedence",
+      _sk("1.0.0+abc") == _sk("1.0.0"))
+
 print("\n== health is recorded from inside the send, not at its call sites ==")
 # There are ten slack.post call sites and four send_mail ones. Recording
 # at each is how one gets forgotten, and the forgotten one is the path

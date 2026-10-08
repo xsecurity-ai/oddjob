@@ -403,6 +403,72 @@ These are **leads, not findings**: a banner is often wrong, and a patched
 host reports the same version as an unpatched one. Confirming them
 against the target is the engagement.
 
+## Versions
+
+One number, in one file: **`VERSION`** at the repository root, a bare
+semver triple. Everything else reads it and nothing else decides it.
+
+```
+VERSION                      0.0.1
+  |
+  |-- backend/app/version.py        Health view: "Oddjob version"
+  |-- drone/Makefile, Dockerfiles   -ldflags into config.Version, so
+  |                                 every Drone reports it on register
+  |-- images.yml                    part of the image content key, and
+  |                                 the org.opencontainers.image.version
+  |                                 label on what it publishes
+  `-- promote.yml                   reads that label back and makes it
+                                    the release tag
+```
+
+**Site health** shows Oddjob's own version and what the fleet is
+running — every version in use with a count, newest first, and a
+separate line for Drones that have not reported one. A fleet split
+across three versions is the thing worth seeing; "the newest one"
+hides the two that are not.
+
+### Bumping it
+
+The **bump-version** workflow (Actions → Run workflow) is the only
+thing that writes `VERSION`. Pick `build` (the patch component),
+`minor` or `major`; it commits the new number to `main`. It does not
+build or release anything.
+
+Then **promote** turns a published image into a release: it reads the
+version off the image's own label, retags that **digest** as
+`cr0n1c/oddjob:vX.Y.Z` / `:X.Y.Z` and the same for `cr0n1c/drone`, and
+pushes the matching git tag onto the commit the image was built from.
+It never rebuilds — the released bytes are the bytes that were running
+overnight — and it computes no version of its own.
+
+The git tag is the record. Docker Hub tags are a convenience over it:
+hub tags get pruned and hand-edited, a git tag is what you check out to
+reproduce a release. To prove a release is the image it claims to be:
+
+```bash
+docker buildx imagetools inspect cr0n1c/oddjob:v0.0.2 --format '{{json .Manifest.Digest}}'
+docker buildx imagetools inspect cr0n1c/oddjob:nightly --format '{{json .Manifest.Digest}}'
+```
+
+### Local builds say so
+
+A build that is not a release gets `-dev-<unix time of the last
+commit>` appended — `0.0.1-dev-1759900000`. The *commit* time, not the
+build time, so the same source always produces the same string.
+
+```bash
+scripts/version.sh             # 0.0.1-dev-1759900000
+scripts/version.sh --release   # 0.0.1
+ODDJOB_RELEASE=1 make release  # in drone/, builds the bare version
+```
+
+The default is the dev suffix on purpose: forgetting the flag costs a
+`-dev-` on a local binary, and forgetting it the other way round would
+publish an unreleasable version. `scripts/check-version.sh` is what
+stops that happening — it runs in the pre-commit hook, in CI's
+`version` job, in the `drone` and `docker` jobs against the actual
+built artefacts, and in `promote` before anything is tagged.
+
 ## Tests
 
 ```bash
@@ -433,6 +499,9 @@ backend/tests/        one suite per area
 backend/alembic/      migrations
 frontend/src/         React UI
 frontend/test/        typecheck helpers and logic tests
+VERSION               the one place the version number is decided
+scripts/              version.sh, check-version.sh, check-secrets.sh —
+                      one copy of each rule, run by CI and by the hooks
 Dockerfile            multi-stage: UI build, deps, slim runtime
 docker-compose.yml    the app and its database
 docs/reference.md     the long version of all of this

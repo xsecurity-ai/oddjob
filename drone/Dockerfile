@@ -115,10 +115,38 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     go mod download
 
 COPY . .
+
+# The version this agent reports on register, and prints from
+# `drone version`.
+#
+# A build argument here and a plain file read in the Oddjob image,
+# which is an asymmetry worth explaining rather than tidying away.
+# The version is decided in exactly one place — `VERSION` at the
+# repository root — and the Oddjob image's build context *is* that
+# root, so it reads the file. This image's context is `drone/`: the
+# file is not in it and cannot be, short of duplicating it or
+# symlinking it, both of which create the second answer the single
+# file exists to prevent.
+#
+# So the caller passes it, and every caller derives it from the same
+# file: .github/workflows/images.yml and ci.yml both run
+# `scripts/version.sh --release`. The `cat VERSION` fallback is kept
+# for the case where somebody does drop a VERSION into this directory,
+# and `unstamped` rather than the old `docker` for the case where
+# nobody did — "unstamped" says what happened, where "docker" reads
+# like a version somebody chose.
+#
+# Not defaulted to a number. A default would be a second place the
+# version is written down, and it would win silently whenever the
+# argument was forgotten — which is exactly the shape of the bug that
+# `ARG TARGETARCH=amd64` caused further up this file.
+ARG DRONE_VERSION=
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    ver="${DRONE_VERSION:-$(cat VERSION 2>/dev/null || echo unstamped)}"; \
+    echo "stamping drone as $ver"; \
     go build -trimpath \
-      -ldflags "-s -w -X github.com/xsecurity-ai/oddjob/drone/internal/config.Version=$(cat VERSION 2>/dev/null || echo docker)" \
+      -ldflags "-s -w -X github.com/xsecurity-ai/oddjob/drone/internal/config.Version=$ver" \
       -o /out/drone ./cmd/drone
 
 # Asserted, not assumed. The failure mode otherwise is an image that

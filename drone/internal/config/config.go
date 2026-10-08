@@ -16,7 +16,25 @@ import (
 	"github.com/xsecurity-ai/oddjob/drone/internal/recon"
 )
 
-// Version is stamped at build time with -ldflags.
+// Version is stamped at build time with -ldflags, from the VERSION
+// file at the repository root. That file is the single place a version
+// number is decided; see scripts/version.sh.
+//
+// Three shapes reach the server on register, and they mean different
+// things:
+//
+//	0.1.0                 a release build
+//	0.1.0-dev-1759900000  built from a working tree, at that commit
+//	dev                   not stamped at all
+//
+// "dev" is the literal below and is what a bare `go build` or `go
+// test` produces. It is deliberately not a version number: an agent
+// reporting it was not built by the Makefile, the Dockerfile or CI,
+// and Oddjob's fleet summary shows it in its own row rather than
+// sorting it in among the releases. A plausible-looking default here
+// would be worse than an implausible one — it would be indistinguish-
+// able from a real release in the one table whose job is telling them
+// apart.
 var Version = "dev"
 
 type Config struct {

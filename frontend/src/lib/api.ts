@@ -1327,9 +1327,56 @@ export interface HealthBlock {
   [k: string]: unknown
 }
 
+/** One version, and how much of the fleet is on it.
+ *
+ *  `parsed` is false for anything that is not semver — an agent old
+ *  enough to predate the VERSION file reports `dev`, and a `git
+ *  describe` string from before that reports `v0.1.0-14-gdeadbee`.
+ *  Those rows sort to the bottom and are shown as unorderable rather
+ *  than as the oldest version, because they are not comparable at all. */
+export interface DroneVersionRow {
+  version: string
+  count: number
+  /** Whether this is the same version Oddjob itself is running. */
+  matches_server: boolean
+  /** A `-dev-<commit time>` build. Decided by the server so the view
+   *  is not the second place that knows what a dev build looks like. */
+  dev: boolean
+  parsed: boolean
+}
+
+/** What the fleet is running, which is not the same question as what
+ *  the newest drone is running. A fleet split across three versions is
+ *  the thing a site admin needs to see; "the newest one is 0.1.0" says
+ *  nothing about the two that are not. */
+export interface DroneFleetVersions {
+  state: HealthState
+  note: string | null
+  /** Newest first. Unparseable versions last — see `parsed`. */
+  versions: DroneVersionRow[]
+  distinct: number
+  /** Drones that reported a version. */
+  reported: number
+  /** Drones that have not. Counted separately and never folded into a
+   *  bucket: "we do not know" is a third answer. */
+  unreported: number
+  newest: string | null
+  matching_server: number
+  server_version: string | null
+}
+
 export interface SiteHealth {
   generated_at: string
-  server: HealthBlock & { started_at: string; uptime_seconds: number; sse_subscribers: number }
+  server: HealthBlock & {
+    /** Oddjob's own version, from the VERSION file at the repository
+     *  root — the single place a version number is decided. */
+    version: string
+    /** True when that version carries the `-dev-` marker, i.e. this is
+     *  an unreleased build. Stated by the server rather than inferred
+     *  from the string here. */
+    dev: boolean
+    started_at: string; uptime_seconds: number; sse_subscribers: number
+  }
   database: HealthBlock & {
     latency_ms?: number; dialect?: string; url?: string; size?: string
     pool?: { checked_out: number; in_pool: number }
@@ -1342,10 +1389,13 @@ export interface SiteHealth {
   smtp: HealthBlock & { host?: string | null }
   drones: HealthBlock & {
     drones: Array<{ id: number; name: string; state: string; last_seen: string | null
-                    age_seconds: number | null; missing_tools: string | null }>
+                    age_seconds: number | null; missing_tools: string | null
+                    /** Null when the drone has never reported one. */
+                    version: string | null }>
     by_state: Record<string, number>
     queue: Record<string, number>
     queued_over_an_hour: number
+    versions: DroneFleetVersions
   }
   audit: HealthBlock & { newest: string | null; retain_days?: unknown }
 }
