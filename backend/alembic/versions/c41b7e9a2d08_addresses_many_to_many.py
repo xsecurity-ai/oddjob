@@ -1,7 +1,7 @@
 """A host has many addresses, and an address has many hosts
 
 Revision ID: c41b7e9a2d08
-Revises: a81c5e4f2d60
+Revises: c4b7e2098d15
 Create Date: 2026-10-08
 
 `targets.ip_address` held one string. The thing it was modelling does
@@ -61,7 +61,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = 'c41b7e9a2d08'
-down_revision: str | Sequence[str] | None = 'a81c5e4f2d60'
+down_revision: str | Sequence[str] | None = 'c4b7e2098d15'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
