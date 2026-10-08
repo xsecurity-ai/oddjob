@@ -216,13 +216,32 @@ jobs:
         working-directory: drone
         run: make release
 
+      # Layer cache for the image build below. Without it every PR
+      # recompiles amass, nuclei, httpx and gospider from source —
+      # four large Go programs, and the bulk of this job's four
+      # minutes.
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+
+      # Through the action rather than `docker buildx build`, because
+      # `type=gha` needs ACTIONS_RUNTIME_TOKEN and GitHub exposes that
+      # to actions and not to `run:` steps. The CLI form builds fine
+      # and then caches nothing, which is the failure that looks like
+      # success.
+      - name: Build the agent image
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: ./drone
+          load: true
+          tags: drone-agent
+          cache-from: type=gha,scope=ci-drone
+          cache-to: type=gha,scope=ci-drone,mode=max
+
       # The agent image is how most people will actually deploy this,
       # and it has already hidden one bug the binaries could not: file
       # capabilities that are present and not effective.
-      - name: The agent image builds and can raw-socket
+      - name: The agent image can raw-socket
         working-directory: drone
         run: |
-          docker build -q -t drone-agent .
           docker run --rm --cap-drop=ALL --cap-add=NET_RAW --cap-add=NET_ADMIN \
             drone-agent check > /tmp/check.json || true
           cat /tmp/check.json
@@ -253,16 +272,36 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+
+      # Built separately from `compose up` so it can use the layer
+      # cache: `compose up --build` drives the legacy builder, which
+      # has none. Compose then finds the tag already present and
+      # starts it rather than building again.
+      #
+      # Single-arch on purpose. This job asks "does it start", and the
+      # arm64 answer is the same one — the multi-arch build belongs in
+      # images.yml, where it is published.
+      - name: Build the image
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: .
+          load: true
+          tags: oddjob-ci:latest
+          cache-from: type=gha,scope=ci-oddjob
+          cache-to: type=gha,scope=ci-oddjob,mode=max
 
       # Building is not the claim worth testing — starting is. The
       # interesting failures are the entrypoint, the migrations against
       # a real database, and whether the API actually serves the built
       # UI out of the image.
       - name: Bring the stack up
+        env:
+          ODDJOB_IMAGE: oddjob-ci:latest
         run: |
           set -euo pipefail
           printf 'POSTGRES_PASSWORD=ci-not-a-real-secret\nAPP_PORT=8000\n' > .env
-          docker compose up -d --build
+          docker compose up -d
           for i in $(seq 1 60); do
             state=$(docker inspect --format '{{.State.Health.Status}}' oddjob-app-1 2>/dev/null || echo starting)
             [ "$state" = "healthy" ] && break

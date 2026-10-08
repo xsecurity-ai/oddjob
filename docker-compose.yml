@@ -39,6 +39,13 @@ services:
     # synchronous_commit — add them as `command: [postgres, -c, ...]`.
 
   app:
+    # Named so the build is reusable rather than anonymous. Two things
+    # this buys: `docker compose up` finds an image already built by
+    # `docker buildx build -t` and starts it instead of rebuilding
+    # with the legacy builder, which has no layer cache; and setting
+    # ODDJOB_IMAGE to a published tag runs that instead of building at
+    # all — `ODDJOB_IMAGE=cr0n1c/oddjob:v1.2.0 docker compose up -d`.
+    image: ${ODDJOB_IMAGE:-oddjob:local}
     build:
       context: .
       dockerfile: Dockerfile

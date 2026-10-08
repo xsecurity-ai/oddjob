@@ -198,8 +198,15 @@ jobs:
           context: ./drone
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=docker.io/cr0n1c/drone,push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=drone-${{ matrix.arch }}
-          cache-to: type=gha,scope=drone-${{ matrix.arch }},mode=max
+          # Registry, not type=gha. GitHub's Actions cache is 10 GB for
+          # the whole repository with LRU eviction, and `mode=max` on
+          # four scopes here plus two in CI does not fit — they evict
+          # each other and the cache silently stops working, which
+          # looks exactly like having no cache at all. A cache ref in
+          # the registry has no such cap, and is shared across
+          # branches and runners rather than per-repo-per-key.
+          cache-from: type=registry,ref=docker.io/cr0n1c/drone:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=docker.io/cr0n1c/drone:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
 
       - name: oddjob
         id: oddjob
@@ -209,8 +216,11 @@ jobs:
           context: .
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=docker.io/cr0n1c/oddjob,push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=oddjob-${{ matrix.arch }}
-          cache-to: type=gha,scope=oddjob-${{ matrix.arch }},mode=max
+          # Registry for the same reason as drone above. `image-manifest`
+          # so Docker Hub accepts it as an ordinary tag rather than
+          # rejecting the OCI index form.
+          cache-from: type=registry,ref=docker.io/cr0n1c/oddjob:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=docker.io/cr0n1c/oddjob:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
 
       # A file per digest rather than one file both legs write: two
       # runners uploading the same artifact name is a race, and the
