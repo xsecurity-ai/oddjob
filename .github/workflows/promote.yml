@@ -1,4 +1,4 @@
-# Promote a nightly to a semver release. Manual, always.
+# Promote a published image to a semver release. Manual, always.
 #
 # This RETAGS, it does not rebuild. `buildx imagetools create` copies
 # the manifest list, so vX.Y.Z and the nightly it came from are the
@@ -26,7 +26,12 @@ on:
         options: [minor, major]
         default: minor
       from:
-        description: 'Tag to promote (default: nightly)'
+        # `nightly` rather than `develop`: a nightly has had a night of
+        # being the thing people ran. `develop` is whatever landed
+        # minutes ago, which is a fine thing to deploy and a poor thing
+        # to put a version number on. Either is accepted, and so is a
+        # `src-<key>` for promoting one exact source by hand.
+        description: 'Tag to promote — nightly, develop, or src-<key>'
         type: string
         default: nightly
 
@@ -96,7 +101,7 @@ jobs:
             # Fail loudly if there is nothing to promote, rather than
             # tagging thin air.
             if ! docker manifest inspect "$repo:$FROM" >/dev/null 2>&1; then
-              echo "::error::$repo:$FROM does not exist — has a nightly run?" >&2
+              echo "::error::$repo:$FROM does not exist — has the images workflow run?" >&2
               return 1
             fi
             digest=$(docker buildx imagetools inspect "$repo:$FROM" \

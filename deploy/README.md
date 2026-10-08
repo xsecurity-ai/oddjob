@@ -120,6 +120,38 @@ scan, and throttling that drops findings from work that has already run
 against someone's estate. They authenticate with a signed agent key
 rather than a password, so they are not the brute-force surface.
 
+## Which image to run
+
+CI publishes to Docker Hub as `cr0n1c/oddjob` and `cr0n1c/drone`, both
+`linux/amd64` and `linux/arm64`:
+
+| tag | moves | what it is |
+|---|---|---|
+| `src-<key>` | never | one exact source tree. The durable name. |
+| `develop-<sha>` | never | the `develop` build for one commit |
+| `nightly-<date>` | never | the `nightly` build for one date |
+| `develop` | every merge to main | what main currently is |
+| `nightly` | 03:17 UTC | what a promotion draws from |
+| `vX.Y.Z`, `latest` | on promotion | a release, by hand |
+
+`develop` and `nightly` are the same bytes whenever the source has not
+changed between them — the scheduled run retags rather than rebuilds,
+so there is no second build that merely ought to match.
+
+**Run an immutable tag in anything you care about.** `develop` moves
+under you, which is the point of it and the reason not to pin
+production to it:
+
+```bash
+# what is :develop right now
+docker buildx imagetools inspect cr0n1c/oddjob:develop \
+  --format '{{json .Manifest.Digest}}'
+```
+
+A promotion is `Actions → promote → Run workflow`, choosing `minor` or
+`major`. It retags by digest and never rebuilds, so the version number
+lands on bytes somebody has actually run.
+
 ## What this still does not give you
 
 - **No IP allowlist.** If only your team should reach it, say so in

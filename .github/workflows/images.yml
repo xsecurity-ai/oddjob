@@ -1,0 +1,226 @@
+# Published images for oddjob and drone.
+#
+# Three triggers, three moving pointers, one build:
+#
+#   push to main   -> :develop     every merge, so there is always an
+#                                  image of what main currently is
+#   schedule       -> :nightly     what promote.yml draws from
+#   workflow_dispatch              either, for a rebuild by hand
+#
+# and under all of them `:src-<key>`, which is the durable one. The
+# moving names are conveniences; `src-<key>` is the fact.
+#
+# ---------------------------------------------------------------- keys
+#
+# Each image is keyed on a hash of ITS OWN inputs and the build is
+# skipped when an image already exists for that key. `paths:` cannot do
+# this: path filters are ignored on a `schedule` trigger, so a nightly
+# either rebuilds every night regardless — republishing byte-identical
+# images and making "when did this change?" unanswerable — or it does
+# not run at all. The key is also stricter than "did any commit land":
+# a README change, or a change to the other image's source, correctly
+# rebuilds nothing.
+#
+# The two images are not symmetric, and this is the part worth reading:
+#
+#   drone  <- drone/
+#   oddjob <- backend/ frontend/ docker/ Dockerfile AND drone/
+#
+# because the oddjob image compiles the drone binaries into itself for
+# the download endpoint. A drone-only change therefore rebuilds both,
+# which is exactly what a naive `paths: drone/**` filter on the oddjob
+# job would get wrong.
+#
+# ------------------------------------------------- why a retag branch
+#
+# "Already built" cannot mean "do nothing", now that there is more than
+# one pointer. A merge builds `src-X` and moves `:develop` to it; the
+# 03:17 run that night finds `src-X` already published and, if it
+# simply skipped, would leave `:nightly` on whatever it pointed at
+# before — and promote.yml draws from `:nightly`, so the version number
+# would go on stale bytes.
+#
+# So a skipped build still moves its pointer, with `imagetools create`
+# against the existing digest. Seconds rather than twenty minutes, and
+# `:develop` and `:nightly` are then provably the same bytes whenever
+# the source is the same, rather than two builds that ought to match.
+name: images
+
+on:
+  push:
+    branches: [main]
+    # Deliberately no `paths:` filter. The content key below already
+    # decides, and a second mechanism that can disagree with it is how
+    # you get a push that skips a build the key says is needed — after
+    # a revert, for instance, where the paths changed but the tree went
+    # back to one already built.
+  schedule:
+    # 03:17 UTC. Not on the hour: GitHub queues scheduled runs hard at
+    # :00 and a nightly that waits twenty minutes for a runner is a
+    # nightly that sometimes does not happen.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      pointer:
+        description: 'Which moving tag to move'
+        type: choice
+        options: [develop, nightly]
+        default: develop
+      force:
+        description: 'Rebuild even if an image already exists for this source'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # One at a time across every trigger. Two runs pushing the same
+  # `src-<key>` from different commits is a race over which bytes win.
+  group: images
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      drone_key: ${{ steps.k.outputs.drone_key }}
+      oddjob_key: ${{ steps.k.outputs.oddjob_key }}
+      drone_build: ${{ steps.k.outputs.drone_build }}
+      oddjob_build: ${{ steps.k.outputs.oddjob_build }}
+      pointer: ${{ steps.k.outputs.pointer }}
+      dated: ${{ steps.k.outputs.dated }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Work out what changed, and which pointer this run owns
+        id: k
+        env:
+          FORCE: ${{ inputs.force }}
+          EVENT: ${{ github.event_name }}
+          WANT: ${{ inputs.pointer }}
+        run: |
+          set -euo pipefail
+          # `git rev-parse HEAD:<path>` is the tree hash: it changes
+          # when the contents change and not otherwise. Commit SHAs
+          # would rebuild on every merge, which is the thing being
+          # avoided.
+          drone_tree=$(git rev-parse "HEAD:drone")
+          odd_tree=$(
+            { git rev-parse "HEAD:backend" "HEAD:frontend" "HEAD:docker" "HEAD:drone"
+              git rev-parse "HEAD:Dockerfile"
+            } | sha256sum | cut -c1-16)
+          drone_key="${drone_tree:0:16}"
+
+          case "$EVENT" in
+            schedule)          pointer=nightly ;;
+            workflow_dispatch) pointer="${WANT:-develop}" ;;
+            *)                 pointer=develop ;;
+          esac
+          # A second, immutable name alongside the moving one, so a
+          # deployment can pin to the exact thing it was given rather
+          # than to a label that moves under it.
+          if [ "$pointer" = "nightly" ]; then
+            dated="nightly-$(date -u +%Y%m%d)"
+          else
+            dated="develop-$(git rev-parse --short HEAD)"
+          fi
+          {
+            echo "drone_key=$drone_key"
+            echo "oddjob_key=$odd_tree"
+            echo "pointer=$pointer"
+            echo "dated=$dated"
+          } >> "$GITHUB_OUTPUT"
+
+          # Does an image already exist for that exact source? If so
+          # this run retags rather than rebuilds. `docker manifest
+          # inspect` needs no login for a public repo and no pull.
+          need() {
+            if [ "$FORCE" = "true" ]; then echo true; return; fi
+            if docker manifest inspect "docker.io/cr0n1c/$1:src-$2" >/dev/null 2>&1
+            then echo false; else echo true; fi
+          }
+          echo "drone_build=$(need drone "$drone_key")"   >> "$GITHUB_OUTPUT"
+          echo "oddjob_build=$(need oddjob "$odd_tree")"  >> "$GITHUB_OUTPUT"
+
+      - name: Say what will happen
+        run: |
+          {
+            echo "### Plan — moving \`:${{ steps.k.outputs.pointer }}\`"
+            echo ""
+            echo "| image | source key | action |"
+            echo "|---|---|---|"
+            echo "| drone | \`${{ steps.k.outputs.drone_key }}\` | ${{ steps.k.outputs.drone_build == 'true' && 'build' || 'retag existing' }} |"
+            echo "| oddjob | \`${{ steps.k.outputs.oddjob_key }}\` | ${{ steps.k.outputs.oddjob_build == 'true' && 'build' || 'retag existing' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  drone:
+    needs: plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # QEMU is only needed to BUILD arm64, not to retag a manifest
+      # that already has it. Skipped on the retag path, which is most
+      # runs.
+      - if: needs.plan.outputs.drone_build == 'true'
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - if: needs.plan.outputs.drone_build == 'true'
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: ./drone
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            cr0n1c/drone:src-${{ needs.plan.outputs.drone_key }}
+            cr0n1c/drone:${{ needs.plan.outputs.pointer }}
+            cr0n1c/drone:${{ needs.plan.outputs.dated }}
+          cache-from: type=gha,scope=drone
+          cache-to: type=gha,scope=drone,mode=max
+
+      - if: needs.plan.outputs.drone_build != 'true'
+        name: This source is already built — move the pointer to it
+        env:
+          KEY: ${{ needs.plan.outputs.drone_key }}
+          POINTER: ${{ needs.plan.outputs.pointer }}
+          DATED: ${{ needs.plan.outputs.dated }}
+        run: .github/scripts/retag.sh drone
+
+  oddjob:
+    needs: plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - if: needs.plan.outputs.oddjob_build == 'true'
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - if: needs.plan.outputs.oddjob_build == 'true'
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            cr0n1c/oddjob:src-${{ needs.plan.outputs.oddjob_key }}
+            cr0n1c/oddjob:${{ needs.plan.outputs.pointer }}
+            cr0n1c/oddjob:${{ needs.plan.outputs.dated }}
+          cache-from: type=gha,scope=oddjob
+          cache-to: type=gha,scope=oddjob,mode=max
+
+      - if: needs.plan.outputs.oddjob_build != 'true'
+        name: This source is already built — move the pointer to it
+        env:
+          KEY: ${{ needs.plan.outputs.oddjob_key }}
+          POINTER: ${{ needs.plan.outputs.pointer }}
+          DATED: ${{ needs.plan.outputs.dated }}
+        run: .github/scripts/retag.sh oddjob
