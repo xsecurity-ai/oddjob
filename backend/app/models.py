@@ -1206,13 +1206,43 @@ class Agent(Base, TimestampMixin):
     #: the last hop, not the agent: behind NAT it is the gateway,
     #: through a reverse tunnel it is 127.0.0.1.
     last_ip: Mapped[str | None] = mapped_column(String(45))
-    #: What the agent says its own internet-facing address is, found
-    #: from its routing table. This is the one that answers "what will
-    #: the client see in their logs", which `last_ip` cannot.
+    #: What the agent says its own internet-facing address is. This is
+    #: the one that answers "what will the client see in their logs",
+    #: which `last_ip` cannot.
     outbound_ip: Mapped[str | None] = mapped_column(String(45))
+    #: How the agent arrived at `outbound_ip`, in its own words:
+    #: public-service, host-route, container-host-netns,
+    #: container-internal, interface, unknown.
+    #:
+    #: Stored because the six are not interchangeable and the address
+    #: alone cannot be told apart. A drone in Docker reported
+    #: 172.17.0.2 here and it rendered exactly like an egress address —
+    #: an operator writing an incident notification would have given
+    #: the client a number that appears in nobody's logs.
+    outbound_ip_source: Mapped[str | None] = mapped_column(String(32))
+    #: What qualifies it: which lookup failed, what the address is not.
+    #: Prose from the agent, for a tooltip rather than a column.
+    outbound_ip_note: Mapped[str | None] = mapped_column(Text)
     #: JSON list of every usable address on the host. A jump box
     #: usually has one facing us and another facing the target.
     interfaces: Mapped[str | None] = mapped_column(Text)
+    #: The OS of the machine underneath, where it differs from
+    #: `platform`. A Linux container on WSL2 on Windows Server is
+    #: platform=linux, host_platform=windows — both true, answering
+    #: different questions: which binary to ship, and which machine
+    #: this is.
+    #:
+    #: NULL means undetermined, which is deliberately distinct from
+    #: "linux". Nothing here guesses.
+    host_platform: Mapped[str | None] = mapped_column(String(32))
+    #: The evidence for `host_platform`, so the claim can be checked
+    #: rather than taken: the kernel string, the markers found.
+    host_platform_source: Mapped[str | None] = mapped_column(Text)
+    #: The container runtime this agent is inside, NULL if none was
+    #: detected. Absence of a marker is not proof of absence of a
+    #: container, so this says what was found and never that there is
+    #: nothing.
+    container: Mapped[str | None] = mapped_column(String(32))
     notes: Mapped[str | None] = mapped_column(Text)
 
 

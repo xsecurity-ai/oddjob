@@ -1567,5 +1567,111 @@ check("the drone stays killed, it cannot un-kill itself by retiring",
 st, _ = raw("/api/agents/retired", "POST", {"reason": "nice try"})
 check("an unsigned retirement is refused", st in (401, 403), f"status={st}")
 
+# ============================================= which machine, which address
+# Two reports that looked right and were not. A drone in Docker said
+# its address was 172.17.0.2, which rendered in the same column as
+# every genuine egress address — an operator copying that into an
+# incident notification would hand the client a number from a private
+# namespace. And a drone on Windows Server said `linux`, truthfully of
+# the binary inside the container and wrongly of the machine.
+#
+# The agent works both out; the server's job is to keep the two
+# answers apart instead of flattening them into one.
+print("\n== a drone says which machine it is on, and where its address came from ==")
+
+st, hostie = call("/api/agents?project=AGENT", "POST", {"name": "in-a-box"},
+                  token=admin)
+HKEY = (hostie or {}).get("callback_key")
+# By id, not by name: enrolment appends a random suffix so two drones
+# called "scanner" do not become one.
+HID = ((hostie or {}).get("agent") or {}).get("id")
+st, _ = call("/api/agents/register", "POST",
+             {"platform": "linux", "arch": "amd64", "version": "test",
+              "hostname": "wsl-box", "privileged": False,
+              "outbound_ip": "172.17.0.2",
+              "outbound_ip_source": "container-internal",
+              "outbound_ip_note": "ifconfig.me unreachable; this is the "
+                                  "docker container's own address",
+              "host_platform": "windows",
+              "host_platform_source": "WSL2 kernel (5.15.0-microsoft-standard)",
+              "container": "docker"}, key=HKEY)
+check("a drone can report what is underneath it", st == 200, f"status={st}")
+
+
+def drone(aid):
+    """By id. Enrolment appends a random suffix to the name, so two
+    drones called "scanner" do not become one."""
+    st, rows = call("/api/agents?project=AGENT", token=admin)
+    return next((a for a in (rows or []) if a["id"] == aid), None)
+
+
+a = drone(HID)
+check("the binary's platform is still reported as it was",
+      (a or {}).get("platform") == "linux", str((a or {}).get("platform")))
+# The whole point. Both are true and they answer different questions:
+# which binary to ship, and which machine this is.
+check("and the machine underneath is reported separately",
+      (a or {}).get("host_platform") == "windows",
+      str((a or {}).get("host_platform")))
+check("with the evidence, so the claim can be checked rather than taken",
+      "WSL2" in ((a or {}).get("host_platform_source") or ""),
+      str((a or {}).get("host_platform_source")))
+check("the container runtime is named", (a or {}).get("container") == "docker",
+      str((a or {}).get("container")))
+check("the address is kept", (a or {}).get("outbound_ip") == "172.17.0.2",
+      str((a or {}).get("outbound_ip")))
+# Without this the address is indistinguishable from a real one. It is
+# the same shape, and nothing else on the record says otherwise.
+check("and labelled as the container's own, not an egress address",
+      (a or {}).get("outbound_ip_source") == "container-internal",
+      str((a or {}).get("outbound_ip_source")))
+check("with the note saying which lookup failed",
+      "ifconfig.me" in ((a or {}).get("outbound_ip_note") or ""),
+      str((a or {}).get("outbound_ip_note")))
+
+print("-- an older drone says nothing, which is not the same as 'no' --")
+st, plain = call("/api/agents?project=AGENT", "POST", {"name": "bare-metal"},
+                 token=admin)
+PKEY = (plain or {}).get("callback_key")
+PID = ((plain or {}).get("agent") or {}).get("id")
+call("/api/agents/register", "POST",
+     {"platform": "linux", "arch": "amd64", "hostname": "metal"}, key=PKEY)
+a = drone(PID)
+# Null, never defaulted to `platform`. A server that filled this in
+# from the binary's own OS would be asserting "this is a Linux
+# machine" on no evidence -- which is exactly the bug, restated.
+check("host_platform is null, not copied from the binary's platform",
+      (a or {}).get("host_platform") is None, str((a or {}).get("host_platform")))
+# Not finding a marker is not proof there is no container.
+check("container is null, not 'none'", (a or {}).get("container") is None,
+      str((a or {}).get("container")))
+check("and the source of an unreported address is null too",
+      (a or {}).get("outbound_ip_source") is None,
+      str((a or {}).get("outbound_ip_source")))
+
+print("-- a later register corrects an earlier answer --")
+# Register is idempotent and runs on every reconnect, so a drone moved
+# out of its container has to be able to withdraw what it said before.
+# Leaving the stale `docker` behind would be worse than never having
+# recorded it.
+call("/api/agents/register", "POST",
+     {"platform": "linux", "arch": "amd64", "hostname": "wsl-box",
+      "outbound_ip": "203.0.113.9", "outbound_ip_source": "public-service",
+      "host_platform": "linux",
+      "host_platform_source": "Linux kernel, no WSL or Docker Desktop markers"},
+     key=HKEY)
+a = drone(HID)
+check("the new address replaces the container one",
+      (a or {}).get("outbound_ip") == "203.0.113.9",
+      str((a or {}).get("outbound_ip")))
+check("and so does its source",
+      (a or {}).get("outbound_ip_source") == "public-service",
+      str((a or {}).get("outbound_ip_source")))
+check("the stale container is cleared rather than left standing",
+      (a or {}).get("container") is None, str((a or {}).get("container")))
+check("the stale note goes with it",
+      (a or {}).get("outbound_ip_note") is None,
+      str((a or {}).get("outbound_ip_note")))
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

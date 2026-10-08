@@ -319,9 +319,28 @@ export interface DroneAgent {
   running: Array<{
     id: number; kind: string; subject: string; started_at: string | null
   }>
-  /** The agent's own internet-facing address, from its routing table. */
+  /** The agent's own answer for its internet-facing address. */
   outbound_ip: string | null
+  /** How it got there: public-service, host-route,
+   *  container-host-netns, container-internal, interface, unknown.
+   *  Null from a Drone too old to say. The six are not
+   *  interchangeable — `container-internal` is a private address that
+   *  will appear in nobody's logs — and they are all the same shape,
+   *  so the label is the only thing that tells them apart. */
+  outbound_ip_source: string | null
+  /** Which lookup failed, what the address is not. Prose. */
+  outbound_ip_note: string | null
   interfaces: string[]
+  /** The OS of the machine underneath, where it differs from
+   *  `platform`. A Linux container on WSL2 on Windows Server is
+   *  platform=linux, host_platform=windows. Null means undetermined,
+   *  which is not the same as linux. */
+  host_platform: string | null
+  /** The evidence, so the claim above can be checked. */
+  host_platform_source: string | null
+  /** The container runtime it is inside, null if none was detected.
+   *  Not finding a marker is not proof there is no container. */
+  container: string | null
   queued_tasks: number
   /** Taken by the agent and in flight, as distinct from waiting. */
   running_tasks: number
