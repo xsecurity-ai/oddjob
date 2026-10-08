@@ -6,18 +6,35 @@ is the part that does.
 
 **What gets posted is deliberately narrow.** An engagement channel that
 carries every event becomes a channel nobody reads, and the one message
-that mattered scrolls past. Only two kinds of thing go to Slack:
+that mattered scrolls past. Four kinds of thing go to Slack:
 
-  findings      `HIGH on web01.example.com: SQL injection`, with the
+  findings      `HIGH on web01.acme.example: SQL injection`, with the
                 port, protocol and detail in the thread rather than the
                 channel — the one-liner is what gets scanned, the
                 thread is what gets read.
-  engagement    started, stopped, imports beginning and ending, people
-                joining and leaving, reports requested and delivered.
+  engagement    started, stopped, imports beginning and ending, reports
+                requested and delivered.
+  membership    somebody added to the engagement, removed from it, or
+                given a different role. Posted ONE PER EVENT, the
+                moment it happens.
+  targets       `3 new targets added and 1 targets modified`, posted on
+                a five-minute timer and never per target. See `Digest`.
 
-Everything else — a service discovered, a note added, a target marked
+Everything else — a service discovered, a port closing, a target marked
 alive — stays in the timeline, which is where that level of detail
 belongs.
+
+**Why those last two are treated so differently.** It looks inconsistent
+and it is not. Targets arrive in HUNDREDS: one Nessus file, one Kitchen
+Sink lookup walking an estate back to its registrable domains, one
+auto-resolution pass, and the channel has a thousand messages in it and
+is dead — which costs you the FINDINGS posts too, because nobody is
+reading any more. So targets are counted and summarised. Membership
+changes are the opposite in every respect: rare, always a deliberate
+human act, and each one is an access-control fact. Somebody being added
+to an engagement, or promoted to admin on it, is precisely the event a
+security team wants on a screen rather than only in a table. A missed
+target count is an inconvenience; a missed promotion is an audit gap.
 
 **Failure is never fatal.** A finding that exists in the database but
 did not reach Slack is a notification problem; refusing to record the
@@ -26,14 +43,18 @@ swallows its errors and reports them through the return value.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+
+from . import timeline
 
 log = logging.getLogger("oddjob.slack")
 
@@ -581,6 +602,72 @@ def user_removed(username: str) -> str:
     return f":bust_in_silhouette: User `{username}` was removed from engagement."
 
 
+def user_role_changed(username: str, old: str, new: str) -> str:
+    """A role moved on an existing member.
+
+    Both roles, always. "User `alice`'s role is now `admin`" does not say
+    whether somebody was promoted or demoted, and those are not remotely
+    the same event — one widens access and the other narrows it. The
+    direction is in the words AND in the arrow, so the line is right
+    whichever of the two a reader takes in first.
+
+    The ordering comes from ROLE_ORDER, which is the same ranking the
+    authorisation checks use, so "promoted" here means promoted there.
+    An unrecognised role — one renamed in the model without this being
+    updated — falls back to the neutral wording rather than guessing a
+    direction, because a line that says "demoted" about a promotion is
+    worse than one that says neither.
+    """
+    from .models import ROLE_ORDER
+    a, b = ROLE_ORDER.get(old, -1), ROLE_ORDER.get(new, -1)
+    if a < 0 or b < 0:
+        return (f":key: User `{username}` role changed from `{old}` "
+                f"to `{new}` on this engagement.")
+    if b > a:
+        return (f":arrow_up: User `{username}` was promoted from `{old}` "
+                f"to `{new}` on this engagement.")
+    return (f":arrow_down: User `{username}` was demoted from `{old}` "
+            f"to `{new}` on this engagement.")
+
+
+async def announce_membership(session, project, username: str, *,
+                              was: str | None, now: str | None) -> list[Posted]:
+    """Somebody's access to this engagement changed. Say which way.
+
+    One entry point for all three transitions, because three separate
+    call sites each deciding for themselves is how `routers/auth.py` came
+    to announce a ROLE CHANGE as though somebody had just joined: its
+    grant endpoint re-uses the same row for a re-grant, and the announce
+    underneath it only ever knew the word "joined".
+
+      was=None            they were not on the engagement -> joined
+      now=None            they are not on it any more     -> removed
+      otherwise           the role moved                  -> promoted/demoted
+
+    A role re-granted to the value it already held says nothing: saving a
+    form without changing it is not an access-control event, and a
+    channel that announces non-events teaches people to skim past the
+    ones that matter.
+
+    **Never gated on a Slack handle.** Whether this person has mapped a
+    Slack identity is a question about the CHANNEL's convenience, not
+    about whether the access change happened, and somebody added to an
+    engagement before they have ever opened Slack is the normal case on
+    day one of a job. The username is the message; a mention would only
+    ever have been a courtesy on top of it.
+
+    Never raises: `announce` already swallows everything, and this adds
+    no call that could fail on its own.
+    """
+    if was == now:
+        return []
+    if was is None and now is not None:
+        return await announce(session, project, user_joined(username, now))
+    if now is None:
+        return await announce(session, project, user_removed(username))
+    return await announce(session, project, user_role_changed(username, was, now))
+
+
 def report_requested(report_type: str) -> str:
     return f":page_facing_up: Report requested for `{report_type}`."
 
@@ -759,6 +846,253 @@ async def announce(session, project, text: str,
         log.warning("could not resolve slack destinations: %s", e)
         return []
     return [await post(tok, ch, text, thread_ts=thread) for tok, ch in dests]
+
+
+# ------------------------------------------------- the target digest
+def target_digest(added: int, modified: int) -> str:
+    """`3 new targets added and 1 targets modified`.
+
+    The wording is the operator's, verbatim, including the plural on a
+    count of one. That is not an oversight left in: the line is fixed so
+    it is greppable, so it looks identical every time it appears, and so
+    the rule a reader has to learn is one sentence rather than one
+    sentence with inflections. A channel of near-identical lines is read
+    by its NUMBERS, and numbers are what change.
+
+    **No hostnames.** Not because naming a host in Slack is forbidden —
+    `finding_line` has always done it, and `welcome` prints the scope —
+    but because here it would buy nothing. A sample of five names out of
+    three hundred is not actionable, and the full list is one click away
+    in Oddjob. So the single highest-volume notification in the system
+    carries no client data at all, which is a pleasant place to end up.
+    """
+    return (f":round_pushpin: `{added}` new targets added and "
+            f"`{modified}` targets modified.")
+
+
+#: How often the digest runs. The operator's number.
+DIGEST_SECS = 300
+
+#: A way to switch the timer off without unwiring it. Two callers:
+#: a deployment that wants findings and membership in the channel but
+#: not a target count, and the test runner, whose suites would otherwise
+#: have a second process ticking the same watermarks they are driving by
+#: hand. `tick()` itself is unaffected — only the loop that calls it.
+DIGEST_ENABLED = os.environ.get("ODDJOB_SLACK_DIGEST", "1") not in ("0", "false", "no")
+
+#: A little after start, so a restart does not fire a digest into the
+#: channel while the process is still coming up. Same reasoning as the
+#: vulnfeed loop in `main.py`.
+DIGEST_WARMUP = 45
+
+#: The furthest back one digest will ever look. Reached only when Slack
+#: has been refusing posts for a day, because the watermark does not
+#: advance over a failed post (see `_tick_project`). Without the clamp a
+#: week-long outage would end in one query across a week of events and a
+#: message whose numbers nobody can place. With it, the loss is bounded,
+#: logged, and never silent.
+DIGEST_MAX_LOOKBACK = timedelta(hours=24)
+
+#: Where the window boundary lives, one row per project in `settings`.
+#:
+#: In the DATABASE and not in memory, because the live deployment updates
+#: itself now and a restart is routine: an in-memory boundary would make
+#: every redeploy either lose a window or replay one, with no way to tell
+#: which from the channel. These keys are deliberately outside
+#: `settings_spec.SPEC`, so `load_all` never surfaces them, the settings
+#: screen never shows them and `PATCH /api/settings` rejects them as
+#: unknown — it is private bookkeeping that happens to live in a table
+#: that already exists, not a knob.
+WATERMARK_PREFIX = "slack.target_digest."
+
+
+async def _watermark(session, project_id: int) -> datetime | None:
+    """When this project's last digest window ended. None = never run."""
+    from .models import Setting
+    row = await session.get(Setting, f"{WATERMARK_PREFIX}{project_id}")
+    if row is None or not (row.value or "").strip():
+        return None
+    try:
+        at = datetime.fromisoformat(row.value.strip())
+    except ValueError:
+        # A hand-edited or corrupted row. Treated as "never run", which
+        # re-anchors the clock at now and skips one window rather than
+        # replaying the whole engagement into the channel.
+        log.warning("slack digest: unreadable watermark for project %s", project_id)
+        return None
+    return at if at.tzinfo else at.replace(tzinfo=UTC)
+
+
+async def _set_watermark(session, project_id: int, when: datetime) -> None:
+    from .models import Setting
+    key = f"{WATERMARK_PREFIX}{project_id}"
+    row = await session.get(Setting, key)
+    if row is None:
+        session.add(Setting(key=key, value=when.isoformat()))
+    else:
+        row.value = when.isoformat()
+    await session.commit()
+
+
+async def _tick_project(session, project, now: datetime) -> str:
+    """One project, one window. -> what happened, for the log and tests.
+
+    The watermark advances AFTER the post, never before. The two ways
+    that can go wrong are not equal: advancing first and then failing to
+    post loses a window silently, and nobody can tell from the channel
+    that it happened. Advancing afterwards means a process killed between
+    the post and the commit replays one window — a repeated digest, which
+    is visibly a repeat and harms nothing. At-least-once is the right
+    side to err on for a notification.
+    """
+    mark = await _watermark(session, project.id)
+    if mark is None:
+        # First sight of this project. Anchor the clock and say nothing:
+        # a deployment that has been running for months must not greet a
+        # newly configured channel with a count of its entire history.
+        await _set_watermark(session, project.id, now)
+        return "anchored"
+
+    start = mark
+    if now - start > DIGEST_MAX_LOOKBACK:
+        start = now - DIGEST_MAX_LOOKBACK
+        log.warning("slack digest: %s was %s behind; window clamped to %s",
+                    project.code, now - mark, DIGEST_MAX_LOOKBACK)
+    if start >= now:
+        # Clock went backwards, or two ticks landed on the same instant.
+        return "nothing to cover"
+
+    added, modified, capped = await timeline.target_activity(
+        session, project.id, start, now)
+    if capped:
+        # Said out loud. A number quietly capped is a number that lies,
+        # and the whole value of this line is that it can be trusted.
+        log.warning("slack digest: %s hit the row cap; the counts are a "
+                    "floor, not a total", project.code)
+
+    if added + modified == 0:
+        # The operator's rule, and the most important one here: silence
+        # means nothing happened. A channel that posts "0 and 0" every
+        # five minutes is a channel people mute, and a muted channel does
+        # not carry findings either.
+        await _set_watermark(session, project.id, now)
+        return "quiet"
+
+    try:
+        dests = await targets_for(session, project)
+    except Exception as e:                       # noqa: BLE001
+        # Could not find out where this project posts. That is not the
+        # same as "it posts nowhere", so the window is held rather than
+        # consumed, and the next tick will cover it along with its own.
+        log.warning("slack digest: could not resolve destinations for %s: %s",
+                    project.code, e)
+        return "undeliverable"
+    if not dests:
+        # Slack is simply not configured for this engagement. Quietly
+        # nothing — and the watermark still moves, or an unconfigured
+        # project would accumulate a window forever and then post a
+        # month of history the day somebody switches Slack on.
+        await _set_watermark(session, project.id, now)
+        return "unconfigured"
+
+    text = target_digest(added, modified)
+    results = [await post(tok, ch, text) for tok, ch in dests]
+    if not any(r.ok for r in results):
+        # Slack was down. Hold the window; next tick re-counts this one
+        # plus the new one and the numbers simply come out larger. This
+        # is the restart/outage guarantee: nothing is lost, and nothing
+        # is counted twice, because the boundary only ever moves over
+        # ground that was actually delivered.
+        return "failed"
+    await _set_watermark(session, project.id, now)
+    return f"posted {added}/{modified}"
+
+
+class Digest:
+    """The five-minute target digest. One loop for the whole deployment.
+
+    A `Worker` in the same shape as `slack_socket.Worker`, started and
+    stopped from `main.py`'s lifespan alongside the other background
+    loops, rather than a timer thread of its own. That matters for one
+    concrete reason: it owns its session. Every tick opens a session from
+    `SessionLocal`, finishes with it and closes it, so the digest can
+    never be mid-query on a session that a request handler is also using
+    — which is exactly what a thread bolted on beside the existing
+    scheduler would eventually do.
+
+    Nothing here can fail a target write. It does not share a transaction
+    with one, it does not run inside one, and it only ever reads.
+    """
+
+    def __init__(self) -> None:
+        self.task: asyncio.Task | None = None
+        #: For the health page and for tests: what the last tick did.
+        self.last: str | None = None
+        self.ticks = 0
+
+    def start(self) -> None:
+        if not DIGEST_ENABLED:
+            # Off by configuration. Said in the log rather than silently
+            # not happening, because "the digest stopped posting" is
+            # otherwise indistinguishable from "nothing is being added".
+            log.info("slack digest: disabled by ODDJOB_SLACK_DIGEST")
+            return
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        if self.task and not self.task.done():
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+
+    async def tick(self, now: datetime | None = None) -> dict[str, str]:
+        """One pass over every project. -> {project code: what happened}.
+
+        Public and parameterised on `now` so a test can drive a window
+        without waiting five minutes for one. A loop that can only be
+        observed by watching it is a loop nobody tests.
+        """
+        from sqlalchemy import select as _select
+
+        from .db import SessionLocal
+        from .models import Project
+
+        at = now or datetime.now(UTC)
+        out: dict[str, str] = {}
+        async with SessionLocal() as session:
+            projects = list((await session.execute(
+                _select(Project).order_by(Project.id))).scalars())
+            for pr in projects:
+                try:
+                    out[pr.code] = await _tick_project(session, pr, at)
+                except Exception as e:           # noqa: BLE001
+                    # One project's bad row must not cost every other
+                    # project its digest, and must not kill the loop.
+                    log.warning("slack digest: %s failed: %s", pr.code, e)
+                    out[pr.code] = f"error: {type(e).__name__}"
+        self.ticks += 1
+        return out
+
+    async def _loop(self) -> None:
+        await asyncio.sleep(DIGEST_WARMUP)
+        while True:
+            try:
+                res = await self.tick()
+                self.last = ", ".join(f"{k}: {v}" for k, v in res.items()) or "no projects"
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:               # noqa: BLE001
+                # Never fatal. Losing a digest costs a notification;
+                # losing the process costs the engagement.
+                self.last = f"{type(e).__name__}: {e}"[:300]
+                log.warning("slack digest: tick failed: %s", e)
+            await asyncio.sleep(DIGEST_SECS)
+
+
+digest = Digest()
 
 
 async def announce_finding(session, project, *, severity: str, host: str,

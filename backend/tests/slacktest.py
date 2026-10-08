@@ -47,6 +47,11 @@ CHANNELS: dict[str, str] = {}
 #: Set to an error string to make conversations.list fail, for the
 #: "could not determine" path.
 LIST_ERROR = ""
+#: Make chat.postMessage refuse, the way a real outage or a revoked token
+#: does. The digest's whole restart/outage guarantee rests on what it does
+#: when a post does not land, and that cannot be tested against a fake
+#: that always says yes.
+SLACK_DOWN = False
 #: Who is in the fake workspace. Anyone absent fails to resolve, which
 #: is what the "a failed invite is reported" check depends on.
 MEMBERS = ["wsu-person"]
@@ -65,9 +70,14 @@ class Fake(BaseHTTPRequestHandler):
             out = {"ok": True, "channel": {"id": body.get("channel"),
                                            "name": CHANNEL_NAME}}
         elif method == "chat.postMessage":
-            POSTED.append(body)
-            out = {"ok": True, "ts": f"{len(POSTED)}.0001",
-                   "channel": body.get("channel")}
+            if SLACK_DOWN:
+                # Not recorded in POSTED: nothing arrived in the channel,
+                # which is the whole point of the case.
+                out = {"ok": False, "error": "service_unavailable"}
+            else:
+                POSTED.append(body)
+                out = {"ok": True, "ts": f"{len(POSTED)}.0001",
+                       "channel": body.get("channel")}
         elif method == "conversations.create":
             name = body.get("name")
             if name in CHANNELS:
@@ -814,5 +824,268 @@ check("a new channel name is unknown, not inherited as present",
       str(p.get("slack_channel_state")))
 check("and the project is no longer claimed to be live",
       p.get("slack_active") is False, str(p.get("slack_active")))
+
+
+# ============================================================ membership
+# Access to an engagement changing is an audit event, so each one is
+# posted on its own the moment it happens — no batching, no digest. The
+# checks below are about the WIRING: three separate places in the app
+# build a ProjectACL, and until now only some of them said anything.
+print("\n== membership and permission changes post immediately ==")
+
+check("a promotion names both roles",
+      "promoted from `user` to `admin`"
+      in slack.user_role_changed("bob", "user", "admin"),
+      slack.user_role_changed("bob", "user", "admin"))
+check("a demotion says so rather than reporting a new role",
+      "demoted from `admin` to `readonly`"
+      in slack.user_role_changed("bob", "admin", "readonly"),
+      slack.user_role_changed("bob", "admin", "readonly"))
+check("an unknown role falls back to neutral wording rather than guessing",
+      "role changed from `x` to `y`" in slack.user_role_changed("bob", "x", "y"),
+      slack.user_role_changed("bob", "x", "y"))
+
+POSTED.clear()
+call("/api/projects/SLK/acl", "POST", {"username": "bob", "role": "user"}, token=admin)
+check("a fresh grant still announces a join, not a role change",
+      sent("joined the engagement as `user`") is not None, str(POSTED)[:160])
+
+POSTED.clear()
+st, _ = call("/api/projects/SLK/acl", "POST",
+             {"username": "bob", "role": "admin"}, token=admin)
+check("re-granting at a higher role announces a promotion", st == 201
+      and sent("User `bob` was promoted from `user` to `admin`") is not None,
+      f"{st} {str(POSTED)[:200]}")
+check("and does NOT announce it as somebody joining",
+      sent("joined the engagement", 0.4) is None, str(POSTED)[:200])
+
+POSTED.clear()
+call("/api/projects/SLK/acl", "POST", {"username": "bob", "role": "readonly"}, token=admin)
+check("dropping a role announces a demotion",
+      sent("User `bob` was demoted from `admin` to `readonly`") is not None,
+      str(POSTED)[:200])
+
+POSTED.clear()
+call("/api/projects/SLK/acl", "POST", {"username": "bob", "role": "readonly"}, token=admin)
+check("re-granting the role somebody already holds announces nothing",
+      sent("bob", 0.6) is None, str(POSTED)[:200])
+
+# The gap that mattered most: members named while CREATING an engagement
+# were written straight into the database and never mentioned.
+POSTED.clear()
+call("/api/users", "POST",
+     {"username": "carol", "password": "carol-password-1"}, token=admin)
+st, _ = call("/api/projects", "POST",
+             {"code": "MEMB", "name": "Members test", "codename": "OSPREY",
+              "members": [{"username": "carol", "role": "user"}]}, token=admin)
+check("a member named on the create form is announced", st == 201
+      and sent("User `carol` joined the engagement as `user`") is not None,
+      f"{st} {str(POSTED)[:220]}")
+check("into that project's own channel",
+      (sent("User `carol` joined") or {}).get("channel") == "eng-osprey",
+      str((sent("User `carol` joined") or {}).get("channel")))
+check("and the creator's own admin grant stays quiet",
+      sent("`root` joined", 0.4) is None, str(POSTED)[:220])
+
+# "even if they don't have a slack handle yet" — carol has never mapped
+# one, and the fake workspace has never heard of her.
+check("nobody needs a mapped slack handle for the post to go out",
+      "carol" not in MEMBERS, str(MEMBERS))
+
+
+# ================================================================ digest
+# Targets are the opposite problem: they arrive in hundreds, so they are
+# counted on a five-minute timer and never announced one at a time.
+#
+# Driven in-process rather than through HTTP: the digest is a background
+# loop with no endpoint, and the alternative — adding one so a test could
+# poke it — would be API surface that exists only for the test. The suite
+# already has `app` importable and the same ODDJOB_DB the server is using,
+# so `tick()` runs against exactly the rows the endpoints above wrote.
+print("\n== the five-minute target digest ==")
+import asyncio
+from datetime import UTC, datetime, timedelta
+
+from app import timeline as timeline_mod
+
+check("alive flipping is not worth a notice",
+      not timeline_mod.is_notable("change", "alive: none → yes"))
+check("nor an OS fingerprint being rewritten",
+      not timeline_mod.is_notable("change", "os: none → Ubuntu 24.04; os_accuracy: none → 97"))
+check("but a rename is",
+      timeline_mod.is_notable("change", "host: \"old.acme.example\" → \"new.acme.example\""))
+check("and so is an address moving, because scope is written as ranges",
+      timeline_mod.is_notable("change", "ip_address: 10.0.0.1 → 10.0.0.9; alive: no → yes"))
+check("and the hacked flag",
+      timeline_mod.is_notable("change", "hacked: no → yes"))
+check("a hand-written status entry always counts",
+      timeline_mod.is_notable("status", "marked as compromised"))
+check("so does a note somebody wrote",
+      timeline_mod.is_notable("note", "left a shell here"))
+check("prose from a merge is counted rather than parsed as a field",
+      timeline_mod.is_notable("change", "merged old.acme.example into corp.com: 2 findings moved"))
+check("a rename written as prose counts too",
+      timeline_mod.is_notable("change", "named corp.com from a reverse lookup on 10.0.0.9"))
+check("a service appearing never reaches the digest",
+      not timeline_mod.is_notable("service", "nmap: 4 service(s) found"))
+check("nor a finding, which has its own slack path with a severity",
+      not timeline_mod.is_notable("vuln", "HIGH: SQL injection"))
+check("nor the discovery entry, which is already the ADDED half",
+      not timeline_mod.is_notable("discovered", "added to DGST by hand"))
+
+# One loop, reused. A fresh `asyncio.run` per call would leave the
+# aiosqlite pool holding connections bound to a loop that has closed.
+_loop = asyncio.new_event_loop()
+
+
+def tick(now=None) -> dict:
+    return _loop.run_until_complete(slack.digest.tick(now))
+
+
+call("/api/projects", "POST",
+     {"code": "DGST", "name": "Digest test", "codename": "KESTREL"}, token=admin)
+CH = "eng-kestrel"
+
+
+def digests() -> list[str]:
+    return [m.get("text") or "" for m in POSTED
+            if m.get("channel") == CH and "targets modified" in (m.get("text") or "")]
+
+
+POSTED.clear()
+first = tick()
+check("the first tick anchors every project rather than reporting history",
+      first.get("DGST") == "anchored", str(first))
+check("and posts nothing", digests() == [], str(digests()))
+
+POSTED.clear()
+check("a window in which nothing happened is quiet", tick().get("DGST") == "quiet")
+check("and posts NOTHING AT ALL — silence is the message", digests() == [],
+      str(digests()))
+
+POSTED.clear()
+for h in ("web01.acme.example", "web02.acme.example", "db01.acme.example"):
+    st, _ = call("/api/targets?project=DGST", "POST", {"host": h}, token=admin)
+r = tick()
+check("three targets added in one window are one post, not three",
+      len(digests()) == 1, str(digests()))
+check("counting all three", "`3` new targets added" in (digests() or [""])[0],
+      str(digests()))
+check("and nothing modified, because they are brand new",
+      "`0` targets modified" in (digests() or [""])[0], str(digests()))
+check("the tick says what it did", r.get("DGST") == "posted 3/0", str(r))
+
+# The whole point of the narrowing: a sweep marking hosts up must not
+# show up as "3 targets modified" every five minutes forever.
+POSTED.clear()
+for h in ("web01.acme.example", "web02.acme.example", "db01.acme.example"):
+    call(f"/api/targets/DGST/{h}", "PATCH", {"alive": True}, token=admin)
+check("a sweep flipping `alive` on every host is not a modification",
+      tick().get("DGST") == "quiet", str(digests()))
+check("so the channel stays silent through it", digests() == [], str(digests()))
+
+POSTED.clear()
+call("/api/targets/DGST/web01.acme.example", "PATCH", {"hacked": True}, token=admin)
+call("/api/targets/DGST/db01.acme.example", "PATCH", {"alive": False}, token=admin)
+tick()
+check("a host being marked compromised IS a modification",
+      len(digests()) == 1 and "`1` targets modified" in (digests() or [""])[0],
+      str(digests()))
+check("and the added count is zero, with the plural left as it is",
+      "`0` new targets added and `1` targets modified" in (digests() or [""])[0],
+      str(digests()))
+
+# Added and modified inside the same five minutes: counted once, as added.
+POSTED.clear()
+call("/api/targets?project=DGST", "POST",
+     {"host": "app01.acme.example"}, token=admin)
+call("/api/targets/DGST/app01.acme.example", "PATCH",
+     {"hacked": True}, token=admin)
+tick()
+check("a target added and then edited in one window counts once, as added",
+      "`1` new targets added and `0` targets modified" in (digests() or [""])[0],
+      str(digests()))
+
+# --- volume: the case the whole design exists for ----------------------
+print("-- 300 targets in one window --")
+POSTED.clear()
+bulk = {"project": "DGST", "targets": [
+    {"host": f"h{i:03d}.corp.com"} for i in range(300)]}
+st, br = call("/api/bulk", "POST", bulk, token=admin)
+check("300 targets land in one operation", st == 200
+      and (br or {}).get("created", {}).get("targets") == 300,
+      f"{st} {str(br)[:160]}")
+POSTED.clear()
+tick()
+check("300 new targets produce exactly ONE slack message",
+      len(digests()) == 1, f"{len(digests())} messages")
+check("naming the count and not the hosts",
+      "`300` new targets added" in (digests() or [""])[0], str(digests())[:200])
+check("and no hostname reaches the channel",
+      "corp.com" not in "".join(digests()), str(digests())[:200])
+check("the whole import is one line of channel traffic",
+      len([m for m in POSTED if m.get("channel") == CH]) == 1,
+      str([m.get("text") for m in POSTED if m.get("channel") == CH])[:200])
+
+# --- outage and restart ------------------------------------------------
+print("-- an outage holds the window rather than losing it --")
+POSTED.clear()
+call("/api/targets?project=DGST", "POST", {"host": "out01.acme.example"}, token=admin)
+SLACK_DOWN = True
+try:
+    r = tick()
+    check("a refused post does not consume the window",
+          r.get("DGST") == "failed", str(r))
+finally:
+    SLACK_DOWN = False
+POSTED.clear()
+call("/api/targets?project=DGST", "POST", {"host": "out02.acme.example"}, token=admin)
+tick()
+check("the next tick covers BOTH windows — nothing is silently lost",
+      "`2` new targets added" in (digests() or [""])[0], str(digests()))
+
+print("-- a restart does not replay or skip --")
+POSTED.clear()
+call("/api/targets?project=DGST", "POST", {"host": "res01.acme.example"}, token=admin)
+tick()
+check("one post for the window", "`1` new targets added" in (digests() or [""])[0],
+      str(digests()))
+POSTED.clear()
+# The watermark lives in the database, so a brand-new Digest object —
+# which is what a redeployed process has — picks up exactly where the
+# old one left off instead of re-counting or re-anchoring.
+fresh = slack.Digest()
+_loop.run_until_complete(fresh.tick())
+check("a fresh process re-counts nothing", digests() == [], str(digests()))
+
+print("-- an old watermark is clamped rather than dumped in one post --")
+POSTED.clear()
+far = datetime.now(UTC) + slack.DIGEST_MAX_LOOKBACK + timedelta(hours=2)
+r = tick(now=far)
+check("a window older than the cap still resolves", "DGST" in r, str(r))
+
+print("-- the worker starts and stops --")
+check("start is a no-op while the digest is switched off",
+      slack.DIGEST_ENABLED is False and (slack.digest.start() or
+                                         slack.digest.task is None),
+      f"enabled={slack.DIGEST_ENABLED} task={slack.digest.task}")
+
+
+async def _cycle():
+    w = slack.Digest()
+    import app.slack as _s
+    was, _s.DIGEST_ENABLED = _s.DIGEST_ENABLED, True
+    try:
+        w.start()
+        started = w.task is not None and not w.task.done()
+        await w.stop()
+        return started and w.task.cancelled()
+    finally:
+        _s.DIGEST_ENABLED = was
+
+
+check("and it does start, and cancels cleanly, when it is switched on",
+      _loop.run_until_complete(_cycle()))
+_loop.close()
 
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

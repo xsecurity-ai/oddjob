@@ -304,6 +304,15 @@ async def create_project(body: ProjectCreateFull,
 
     # Creator keeps admin, or they would immediately lose access to the thing
     # they just made.
+    #
+    # Deliberately NOT announced. "Engagement started" is posted into this
+    # same channel moments later and the person who started it being its
+    # admin is what that sentence means — a second line saying the creator
+    # joined their own project is the kind of noise that teaches people the
+    # membership posts are boilerplate. The ones worth reading are the
+    # grants made to somebody OTHER than the person doing the granting,
+    # and those are all announced. `routers/bulk.py` makes the same call
+    # for the same reason when it auto-creates a project.
     session.add(ProjectACL(project_id=pr.id, user_id=user.id, role="admin"))
 
     # ---- scope: kinds are derived, bad lines are named not fatal -------
@@ -322,6 +331,11 @@ async def create_project(body: ProjectCreateFull,
     wanted = {m.username.strip().lower(): m.role for m in body.members
               if m.username.strip()}
     wanted.pop(user.username, None)      # creator is already admin
+    #: Announced after the commit, not here. These rows are written inside
+    #: the same transaction as the project itself, and a transaction that
+    #: rolls back must not leave a channel claiming somebody was added to
+    #: an engagement that does not exist.
+    joined: list[tuple[str, str]] = []
     if wanted:
         found = {u.username: u for u in (await session.execute(
             select(User).where(User.username.in_(wanted)))).scalars()}
@@ -331,6 +345,7 @@ async def create_project(body: ProjectCreateFull,
                 member_errors.append(f"no user {uname!r} — not added")
                 continue
             session.add(ProjectACL(project_id=pr.id, user_id=u.id, role=role))
+            joined.append((u.username, role))
 
     await audit.record(session, "ui", "project.create", user=user,
                        project_code=pr.code,
@@ -382,6 +397,19 @@ async def create_project(body: ProjectCreateFull,
                                    created=made.created)
             else:
                 log.warning("could not create #%s: %s", pr.slack_channel, made.error)
+
+    # Members named on the create form. Silent until now: three places in
+    # this codebase build a ProjectACL and only two of them ever said so,
+    # which meant the most common way to add somebody to an engagement —
+    # listing them while creating it — produced no access-control record
+    # in the channel at all.
+    #
+    # Last, and on purpose. It is after the commit, so nobody is announced
+    # into an engagement that rolled back; and after the channel block
+    # above, so the posts land in a channel that exists rather than
+    # failing against one that is about to be created a line later.
+    for uname, role in joined:
+        await slack.announce_membership(session, pr, uname, was=None, now=role)
 
     row = (await session.execute(_counts_query().where(Project.id == pr.id))).first()
     scope_rows = (await session.execute(
