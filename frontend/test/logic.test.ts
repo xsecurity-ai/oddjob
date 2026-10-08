@@ -22,7 +22,9 @@ import { classifyScopeEntry, entryLabel } from '../src/lib/scopeEntry'
 import { makeScopePills, scopePills } from '../src/components/scopePills'
 import { cap, windowSlice } from '../src/lib/pillLayout'
 import { extraAddresses, splitVersion } from '../src/lib/cellFacts'
+import { parseDomains } from '../src/lib/domainInput'
 import scopeCases from './scope-cases.json'
+import domainCases from './domain-cases.json'
 
 let pass = 0, fail = 0
 const check = (label: string, cond: boolean, extra = '') => {
@@ -570,6 +572,34 @@ check('whitespace is not a version either', splitVersion('   ').label === null)
 // string for it would be worse than showing it whole.
 check('a version that is only the suffix is left intact',
       splitVersion('-dev-20261008').label === '-dev-20261008')
+
+console.log('\n== the enumerate box reads a paste the way the server will ==')
+// domain-cases.json is GENERATED from `EnumerateRequest.wanted` in
+// backend/app/routers/domains.py. The backend suite asserts the server
+// still answers this; here the port has to agree with the same table.
+// What travels to the server is the raw text, so every disagreement is
+// the box telling the operator something untrue about what will happen.
+{
+  const drift: string[] = []
+  for (const c of domainCases as { raw: string; wanted: string[] }[]) {
+    const got = parseDomains(c.raw)
+    if (JSON.stringify(got) !== JSON.stringify(c.wanted)) {
+      drift.push(`${JSON.stringify(c.raw)}: port ${JSON.stringify(got)} vs server ${JSON.stringify(c.wanted)}`)
+    }
+  }
+  check(`the port agrees with the server on all ${domainCases.length} cases`,
+        drift.length === 0, drift.slice(0, 3).join(' | '))
+}
+// The specific disagreement this replaced, kept as its own line so a
+// regression names itself rather than showing up as "case 7 differs".
+check('a single-label name counts, because the server queues it',
+      parseDomains('localhost').length === 1)
+check('a wildcard run is eaten whole, not one star',
+      parseDomains('**..acme.example')[0] === 'acme.example')
+check('a port stays attached, because the server keeps it',
+      parseDomains('acme.example:8443')[0] === 'acme.example:8443')
+check('the first spelling of a duplicate wins',
+      JSON.stringify(parseDomains('dup.example DUP.EXAMPLE')) === '["dup.example"]')
 
 console.log(`\n${'='.repeat(56)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(56)}`)
 process.exit(fail ? 1 : 0)

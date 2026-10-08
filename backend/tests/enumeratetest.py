@@ -1098,5 +1098,53 @@ st, r = call("/api/targets?project=CASE&page_size=50", token=admin)
 check("still one row", len((r or {}).get("items", [])) == 1,
       str([t["host"] for t in (r or {}).get("items", [])]))
 
+# ---------------------------------------------------------------------
+# The enumerate box and `wanted()` have to read a paste the same way
+# ---------------------------------------------------------------------
+# What travels from the dialog is the RAW text, so the server decides
+# what gets queued and the box only ever predicts it. The two had come
+# apart: the box required a dot, so a single-label name counted as zero
+# and left the Run button disabled for something `wanted()` would have
+# queued without complaint.
+#
+# frontend/test/domain-cases.json is the record of what `wanted()`
+# answers. This asserts the server still agrees with it; the frontend's
+# `npm run test:logic` asserts the port does. Change `wanted` and this
+# goes red, which is the reminder to regenerate the fixture and read the
+# diff -- it is a diff of what a pasted list MEANS.
+#
+# Regenerate with:
+#     cd backend && uv run python - <<'EOF'
+#     import json, pathlib
+#     from app.routers.domains import EnumerateRequest
+#     p = pathlib.Path("../frontend/test/domain-cases.json")
+#     out = [{"raw": c["raw"],
+#             "wanted": EnumerateRequest(domains=c["raw"]).wanted()}
+#            for c in json.loads(p.read_text())]
+#     p.write_text(json.dumps(out, indent=0) + "\n")
+#     EOF
+print("\n--- the box and the server read a paste the same way ---")
+from app.routers.domains import EnumerateRequest  # noqa: E402
+
+_fixture = (_pathlib.Path(__file__).resolve().parents[2]
+            / "frontend" / "test" / "domain-cases.json")
+if not _fixture.exists():
+    check("the shared domain-input fixture is present", False, str(_fixture))
+else:
+    _cases = json.loads(_fixture.read_text())
+    check("the fixture covers the corners", len(_cases) >= 20, f"{len(_cases)} cases")
+    _drift = []
+    for _c in _cases:
+        _got = EnumerateRequest(domains=_c["raw"]).wanted()
+        if _got != _c["wanted"]:
+            _drift.append(f"{_c['raw']!r}: {_got} vs {_c['wanted']}")
+    check(f"wanted() still answers the fixture on all {len(_cases)} cases",
+          not _drift, "; ".join(_drift[:3]))
+    # The single case the divergence was about. Named on its own so a
+    # regression says what broke rather than "case 7 differs".
+    check("a single-label name is queued, not dropped",
+          EnumerateRequest(domains="localhost").wanted() == ["localhost"])
+
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
