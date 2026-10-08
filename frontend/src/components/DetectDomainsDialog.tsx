@@ -29,14 +29,15 @@
  */
 import { useMemo, useState } from 'react'
 import {
-  Alert, Autocomplete, Box, Button, Checkbox, Chip, DialogActions,
-  DialogContent, FormControlLabel, Stack, TextField, Tooltip, Typography,
-  alpha,
+  Alert, Box, Button, Checkbox, Chip, DialogActions, DialogContent,
+  FormControlLabel, Stack, Tooltip, Typography, alpha,
 } from '@mui/material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
+import { isIpLiteral, validateHost } from '../lib/scopeEntry'
 import { neon, glow } from '../theme'
 import { Caveat, EnumerateDialog, FleetNotice } from './EnumerateBits'
+import { BY_ANY, PillInput, type Analyse } from './PillInput'
 import { useFleet } from './droneTasking'
 
 /** Commas, spaces, newlines. Operators paste from spreadsheets, scope
@@ -54,6 +55,61 @@ export function parseDomains(raw: string): string[] {
     out.push(v)
   }
   return out
+}
+
+/** `MAX_TASKS` in backend/app/routers/domains.py.
+ *
+ *  It means two different things on the two lists and only one of them
+ *  belongs in a warning here. A TYPED list over the cap is refused
+ *  outright, in both modes — the check runs on `body.wanted()` before
+ *  Kitchen Sink is even consulted — so it is worth saying before the
+ *  button is pressed rather than after a 422. The list the Kitchen Sink
+ *  WALK produces is not refused for being long: the overflow comes back
+ *  as `deferred` and the next run drains it. Warning about that would be
+ *  telling the operator to split something they did not write. */
+const MAX_PER_SUBMISSION = 200
+
+/** What the SERVER makes of one pasted piece — `EnumerateRequest.wanted`
+ *  in backend/app/routers/domains.py, not `parseDomains` above.
+ *
+ *  The two differ in corners (the server's `lstrip("*.")` eats a run of
+ *  leading stars and dots, this box's regex takes one `*.`), and it is
+ *  the server's reading that decides what gets queued: what travels is
+ *  the raw text, and `parseDomains` only ever counted it for the button.
+ *  A pill claiming a line is malformed when the server would enumerate
+ *  it happily is the client overruling the authority, so the pill uses
+ *  the authority's own normalisation. */
+function asServerReadsIt(raw: string): string {
+  const v = raw.trim().replace(/\.+$/, '').toLowerCase()
+    .replace(/^[*.]+/, '')
+  return v.replace(/^[a-z]+:\/\//, '').split('/')[0].split('?')[0]
+}
+
+/** Only the two refusals `enumerate_domains` actually issues are red.
+ *  Everything else it will at least attempt, so the pill says its piece
+ *  in muted text and gets out of the way. */
+const domainPills: Analyse = (lines) => {
+  const seen = new Set<string>()
+  return lines.map((raw) => {
+    const v = asServerReadsIt(raw)
+    if (!v) return { raw, problem: 'there is no domain here' }
+    if (isIpLiteral(v)) {
+      return { raw, problem: 'an address has no zone to enumerate' }
+    }
+    if (!validateHost(v)) return { raw, problem: 'not a well-formed hostname' }
+    if (seen.has(v)) return { raw, duplicate: true }
+    seen.add(v)
+    // A single label is a legal host and the server will queue it, so it
+    // is not a problem — but amass enumerates a zone, and `localhost` is
+    // not one. Worth a word, not a refusal.
+    if (!v.includes('.')) {
+      return { raw, kind: 'label',
+               note: 'a single label, not a zone — amass needs something '
+                     + 'like acme.example' }
+    }
+    return { raw, kind: 'zone',
+             note: v !== raw.trim() ? `enumerated as ${v}` : undefined }
+  })
 }
 
 export function DetectDomainsDialog({ project, onClose, seed = [], onQueued }: {
@@ -94,6 +150,15 @@ export function DetectDomainsDialog({ project, onClose, seed = [], onQueued }: {
     queryFn: () => api.domainRoots(project),
     enabled: !!project,
   })
+
+  // Roots not already in the box. Compared on the parsed form, so a root
+  // typed with a trailing dot or a scheme still counts as present and is
+  // not offered a second time.
+  const suggestions = useMemo(() => {
+    const have = new Set(typed)
+    return (roots.data ?? []).map((r) => r.domain)
+      .filter((d) => d && !have.has(d.toLowerCase())).slice(0, 10)
+  }, [roots.data, typed])
 
   const run = useMutation({
     mutationFn: () => api.enumerateDomains(project, domain, mode,
@@ -148,23 +213,76 @@ export function DetectDomainsDialog({ project, onClose, seed = [], onQueued }: {
             targets when each task reports — there is nothing to triage.
           </Caveat>
 
-          <Autocomplete
-            freeSolo options={(roots.data ?? []).map((r) => r.domain)}
-            inputValue={domain} onInputChange={(_, v) => setDomain(v)}
-            renderInput={(p) => (
-              <TextField {...p} label="Domains" multiline minRows={2} maxRows={6}
-                placeholder="corp.com, other.example&#10;one per line also fine"
-                helperText={typed.length
-                  ? `${typed.length} domain${typed.length === 1 ? '' : 's'} — `
-                    + typed.slice(0, 4).join(', ') + (typed.length > 4 ? '…' : '')
-                    + (kitchenSink ? ', walked back to their registrable domains'
-                                   : '')
-                  : kitchenSink
-                    ? 'Optional with Kitchen Sink on — anything typed here is '
-                      + 'walked alongside the hosts already on record.'
-                    : 'Commas, spaces and newlines all work; URLs and *. are trimmed.'} />
-            )}
-          />
+          {/* The count that used to be built into this helper line is
+              the pill summary now. What stays is the guidance the count
+              was carrying alongside it, including the Kitchen Sink
+              wording — with the walk on, this box stops being the whole
+              input and says so.
+
+              Deliberately NOT shown per pill: which registrable domain a
+              typed name walks back to. That needs a public-suffix list,
+              the server has one and the browser does not, and a chip
+              guessing `c.example` from `a.b.c.example` would be the
+              client inventing scope. The sentence says the walk happens;
+              the server says what it produced. */}
+          <PillInput
+            label="Domains" value={domain} onChange={setDomain}
+            analyse={domainPills} separator={BY_ANY} accent={neon.cyan}
+            placeholder="corp.com, other.example — one per line also fine"
+            helperText={kitchenSink
+              ? (typed.length
+                  ? 'Walked back to their registrable domains, alongside the '
+                    + 'hosts already on record.'
+                  : 'Optional with Kitchen Sink on — anything typed here is '
+                    + 'walked alongside the hosts already on record.')
+              : 'Commas, spaces and newlines all work; URLs and *. are trimmed.'} />
+
+          {/* The roots the project already touches. This was the options
+              list on an Autocomplete, which a chip input has nowhere to
+              put — and which only ever offered one completion at a time
+              anyway. As chips they can be added in any order and the
+              ones already in the box are not offered again.
+
+              Hidden under Kitchen Sink, because that is the same list.
+              The walk takes every host on record back to its registrable
+              domain, which is where these came from, so offering them is
+              offering to type out by hand the thing the checkbox was
+              just ticked to do. */}
+          {!kitchenSink && suggestions.length > 0 && (
+            <Stack direction="row" spacing={0.6} useFlexGap flexWrap="wrap"
+                   alignItems="center">
+              <Typography sx={{ fontSize: 10.5, color: neon.muted,
+                                letterSpacing: '0.08em' }}>
+                ALREADY IN THIS PROJECT
+              </Typography>
+              {suggestions.map((d) => (
+                <Chip key={d} size="small" clickable label={d}
+                  onClick={() => setDomain(domain.trim()
+                    ? `${domain.replace(/\s+$/, '')}\n${d}` : d)}
+                  sx={{ height: 20, fontSize: 10.5,
+                        fontFamily: `'Share Tech Mono', monospace`,
+                        color: neon.green,
+                        bgcolor: alpha(neon.green, 0.1),
+                        border: `1px solid ${alpha(neon.green, 0.4)}` }} />
+              ))}
+            </Stack>
+          )}
+
+          {typed.length > MAX_PER_SUBMISSION && (
+            <Alert severity="warning" variant="outlined" sx={{ fontSize: 11.5 }}>
+              {typed.length} domains typed. The server refuses a typed list
+              over {MAX_PER_SUBMISSION} outright — each becomes a task, and
+              a queue that long buries everything else this project needs
+              to run. Split it.
+              {kitchenSink
+                ? ' Kitchen Sink does not change that: the cap is lifted'
+                  + ' for the domains the walk finds, which overflow into'
+                  + ' the next run, but a list typed by hand is still'
+                  + ' refused because splitting it is something you can do'
+                  + ' and the walk cannot.'
+                : ''}
+            </Alert>
+          )}
 
           <Stack direction="row" spacing={1} alignItems="center">
             <Typography sx={{ fontSize: 12, color: neon.muted }}>Mode</Typography>

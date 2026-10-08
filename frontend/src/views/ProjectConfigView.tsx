@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert, Box, Button, Checkbox, Chip, CircularProgress, Dialog, DialogActions,
   DialogContent, DialogTitle, Divider, FormControlLabel, IconButton, MenuItem,
@@ -10,7 +10,9 @@ import GppBadIcon from '@mui/icons-material/GppBadOutlined'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type ScopeApplyResult } from '../lib/api'
 import { DeleteProjectCard } from '../components/DeleteProjectCard'
+import { PillInput } from '../components/PillInput'
 import { ProjectSlackCard } from '../components/ProjectSlackCard'
+import { makeScopePills } from '../components/scopePills'
 import { neon, glow } from '../theme'
 
 /**
@@ -73,6 +75,12 @@ export function ProjectConfigView({ project }: { project: string | null }) {
   const [addSubs, setAddSubs] = useState(false)
   const [countries, setCountries] = useState('')
   const [confirm, setConfirm] = useState<ScopeApplyResult | null>(null)
+  // Ticking the box changes what every fqdn line in the box MEANS,
+  // so the pills are built from it and not from a fixed `false`.
+  // Above the early returns below, because it is a hook; rebuilt
+  // only when the checkbox moves, because `Analyse` has to stay
+  // referentially stable or its memo rebuilds on every keystroke.
+  const scopeAnalyse = useMemo(() => makeScopePills(addSubs), [addSubs])
 
   const cfg = useQuery({
     queryKey: ['project-config', project],
@@ -358,11 +366,20 @@ export function ProjectConfigView({ project }: { project: string | null }) {
       <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
         <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap
                alignItems="flex-start">
-          <TextField size="small" label="Addresses, ranges, names, wildcards"
-            value={lines} multiline minRows={3} sx={{ flex: 2, minWidth: 300 }}
-            placeholder={'203.0.113.0/24\n2001:db8::/32\nportal.acme.example\n*.acme.example'}
-            helperText="One per line. The kind is derived. A leading ! puts that line on the other list."
-            onChange={(e) => setLines(e.target.value)} />
+          {/* The kind on each pill is derived by src/lib/scopeEntry.ts,
+              which is a port of the server's `classify` kept honest by a
+              shared fixture — so the chip says what the row below will
+              say once it is added, and not a second opinion about it.
+              That includes the subdomains box beside it: a name under a
+              tick renders through the same `entry_label` the table row,
+              the report and Slack use, so the chip and the row that
+              replaces it read identically. */}
+          <PillInput
+            label="Addresses, ranges, names, wildcards"
+            value={lines} onChange={setLines} analyse={scopeAnalyse}
+            accent={neon.cyan} sx={{ flex: 2, minWidth: 300 }}
+            placeholder="203.0.113.0/24, 2001:db8::/32, portal.acme.example, *.acme.example"
+            helperText="One per line. The kind is derived. A leading ! puts that line on the other list." />
           <Stack spacing={1.5} sx={{ minWidth: 230 }}>
             <TextField size="small" select label="Add to" value={addTo}
               onChange={(e) => setAddTo(e.target.value as 'in' | 'out')}>

@@ -30,16 +30,52 @@ import {
 } from '@mui/material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
+import { classifyScopeEntry } from '../lib/scopeEntry'
 import { neon } from '../theme'
 import {
   AgentChooser, Argv, Caveat, EnumerateDialog, FleetNotice, chipSx,
 } from './EnumerateBits'
+import { BY_ANY, PillInput, type Analyse } from './PillInput'
 import {
   needsRegion, queueEach, rawSockets, useFleet, type AgentChoice,
 } from './droneTasking'
 
 /** Above this, a discovery sweep is a decision rather than a click. */
 const LARGE = 4096
+
+/**
+ * Pills for the "or scan these" box.
+ *
+ * Nothing in here is ever a `problem`, and that is deliberate rather than
+ * lazy. `_queue_bulk` in backend/app/routers/agents.py validates exactly
+ * one thing about a subject — whether the project's scope allows it —
+ * and queues anything that passes. It does not ask whether the text is a
+ * host, a range or a sentence. So a red pill on this box would be the
+ * browser inventing a refusal the endpoint behind it does not make, and
+ * the operator would retype a perfectly queueable subject to satisfy it.
+ *
+ * What is genuinely useful here is the kind, because "I meant a /24 and
+ * it read a hostname" is a real mistake with a 16-million-address
+ * consequence. Where the shape is recognised the pill says so; where it
+ * is not, it says only that, in muted text, and the subject still goes.
+ */
+const subjectPills: Analyse = (lines) => {
+  const seen = new Set<string>()
+  return lines.map((raw) => {
+    // Keyed the way `parseSubjects` dedupes, because that list is what
+    // becomes one task per entry.
+    const key = raw.trim().toLowerCase().replace(/\.$/, '')
+    if (seen.has(key)) return { raw, duplicate: true }
+    seen.add(key)
+    const r = classifyScopeEntry(raw)
+    if (!r.ok) {
+      return { raw, note: 'not recognised as an address, a range or a '
+                          + 'name. It is still submitted — the scope '
+                          + 'check is what decides.' }
+    }
+    return { raw, kind: r.kind }
+  })
+}
 
 /** Mirrors the server's own parsing: one per line, or comma separated. */
 export function parseSubjects(raw: string): string[] {
@@ -269,17 +305,13 @@ export function ScanRangesDialog({ project, selected = [], onClose,
             </Box>
           )}
 
-          <TextField size="small" fullWidth multiline minRows={2} maxRows={6}
-            label="Or scan these" value={manual}
-            onChange={(e) => setManual(e.target.value)}
-            placeholder={'198.51.100.0/24\n203.0.113.10\nportal.acme.example'}
-            helperText={fromManual.length
-              ? `${fromManual.length} entr${fromManual.length === 1 ? 'y' : 'ies'}`
-                + ' — addresses, CIDRs and names all work. Scope still decides.'
-              : 'Addresses, CIDRs or names. One per line or comma separated. '
-                + 'Anything out of scope is refused when it is queued.'}
-            slotProps={{ htmlInput: { style: {
-              fontFamily: `'Share Tech Mono', monospace`, fontSize: 12.5 } } }} />
+          <PillInput
+            label="Or scan these" value={manual} onChange={setManual}
+            analyse={subjectPills} separator={BY_ANY} accent={neon.purple}
+            placeholder="198.51.100.0/24, 203.0.113.10, portal.acme.example"
+            helperText={'Addresses, CIDRs or names. One per line or comma '
+                        + 'separated. Anything out of scope is refused when '
+                        + 'it is queued.'} />
 
           <Alert severity="info" variant="outlined" sx={{ fontSize: 11.5 }}>
             A range is listed as uncovered when this project holds no target
