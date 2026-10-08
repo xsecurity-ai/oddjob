@@ -1033,6 +1033,40 @@ class ProjectScope(Base, TimestampMixin):
     kind: Mapped[str] = mapped_column(String(16))
     value: Mapped[str] = mapped_column(String(255))
     included: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: On an `fqdn`, whether the zone under it comes with it:
+    #: `acme.example` with this set covers `a.acme.example` and
+    #: `a.b.acme.example` too. Meaningless on every other kind — a
+    #: wildcard already says it and a range has no subdomains — and
+    #: scope.classify() drops it there rather than storing a claim the
+    #: row does not have.
+    #:
+    #: **Why a column and not two rows.** Ticking the box could instead
+    #: have written `acme.example` AND `*.acme.example`, with no schema
+    #: change at all. That is the cheaper build and it was rejected,
+    #: because a pair of independent rows is not the thing the operator
+    #: said:
+    #:
+    #:   - Untick is then "delete the other one too", and nothing in the
+    #:     table records which other one. Half of a pair deleted is a
+    #:     rule whose coverage changed with no trace that it ever had a
+    #:     second half — the same failure ScopeEntryPatch refuses `value`
+    #:     to avoid.
+    #:   - `add_scope` decides per VALUE, so a re-paste lands on the two
+    #:     rows separately. `acme.example` moving to the out list while
+    #:     `*.acme.example` is refused for being there already leaves the
+    #:     zone in a state nobody asked for. One row cannot half-apply.
+    #:   - The unique key is (project_id, value), so emitting
+    #:     `*.acme.example` would silently amend a wildcard row the
+    #:     project already had — flipping its list, or stamping this
+    #:     batch's country onto it.
+    #:
+    #: What the column cost instead: one migration, one field on three
+    #: schemas, and one more input to the matcher. That last is the real
+    #: price and it is paid in `_Side.add`, which expands the row into
+    #: the two dicts the matcher already had, so `match_name` itself is
+    #: unchanged. Reads are wrong in one place or not at all.
+    include_subdomains: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0", default=False)
     #: Which country this entry's addresses are in, ISO 3166-1 alpha-2,
     #: as DECLARED by the operator. This is the whole of Oddjob's
     #: geolocation: nothing resolves an address to a country, because

@@ -196,6 +196,203 @@ check("and a wildcard over a whole TLD is refused",
       any("TLD" in e for e in r["scope_errors"]), str(r["scope_errors"]))
 
 
+# ================================================== include subdomains
+# `*.acme.example` not covering `acme.example` is correct and is also a
+# trap: the operator pastes a scope document, gets the wildcard, and
+# meets the rule weeks later as a refusal on the apex that reads like a
+# bug. So the intent is expressible where the name is typed.
+#
+# One row, not two. The checks below care about three things in this
+# order: that it covers what it says, that OUT still beats it, and that
+# it never comes on by itself.
+print("\n== an FQDN entry can bring its subdomains ==")
+project("SUBS")
+st, r = add_scope("SUBS", lines=["acme.example"], include_subdomains=True)
+check("the entry is accepted", st == 200 and not r["scope_errors"],
+      str(r.get("scope_errors"))[:160])
+
+st, rows = call("/api/projects/SUBS/scope", token=admin)
+check("it is ONE row and not a silent pair", len(rows) == 1, str(rows)[:200])
+check("still kind 'fqdn', holding the name the operator typed",
+      rows[0]["kind"] == "fqdn" and rows[0]["value"] == "acme.example",
+      str(rows[0])[:160])
+check("and the intent is stored on it, so it is one thing to undo",
+      rows[0]["include_subdomains"] is True, str(rows[0])[:160])
+
+for host, want in (("acme.example", 201),        # the apex — the whole point
+                   ("a.acme.example", 201),
+                   ("deep.nested.acme.example", 201),
+                   # Identity-anchored, never substring. Each of these
+                   # ENDS with the letters of the entry or begins with
+                   # them, and none of them is under the zone.
+                   ("notacme.example", 422),
+                   ("xacme.example", 422),
+                   ("acme.example.evil.test", 422),
+                   ("example", 422)):
+    st, _ = add_target("SUBS", host)
+    check(f"{host} -> {want}", st == want, f"status={st}")
+
+print("\n-- without it, a name is still only itself --")
+project("NOSUBS")
+add_scope("NOSUBS", lines=["corp.com"])
+st, _ = add_target("NOSUBS", "corp.com")
+check("the name is in scope", st == 201, f"status={st}")
+st, _ = add_target("NOSUBS", "a.corp.com")
+check("its subdomain is not — the default did not move", st == 422,
+      f"status={st}")
+
+print("\n-- the flag is dropped on kinds that cannot answer it --")
+project("SUBKIND")
+st, r = add_scope("SUBKIND",
+                  lines=["203.0.113.0/24", "*.corp.com", "2001:db8::1"],
+                  include_subdomains=True)
+check("a mixed paste with the box ticked is not an error",
+      st == 200 and not r["scope_errors"], str(r.get("scope_errors"))[:160])
+st, rows = call("/api/projects/SUBKIND/scope", token=admin)
+check("and no range, address or wildcard row claims a rule it has not got",
+      all(e["include_subdomains"] is False for e in rows),
+      str([(e["value"], e["include_subdomains"]) for e in rows])[:200])
+st, _ = add_target("SUBKIND", "corp.com")
+check("the wildcard still does not cover its own apex", st == 422,
+      f"status={st}")
+
+print("\n-- out of scope still wins over a zone that is in scope --")
+project("SUBOUT")
+add_scope("SUBOUT", lines=["acme.example"], include_subdomains=True)
+add_scope("SUBOUT", lines=["secret.acme.example"], included=False)
+st, r = add_target("SUBOUT", "secret.acme.example")
+check("a barred name inside an in-scope zone is barred, not allowed",
+      st == 403, f"status={st}")
+check("and the out entry is named", "secret.acme.example" in str(r), str(r)[:170])
+st, _ = add_target("SUBOUT", "other.acme.example")
+check("its sibling in the same zone is fine", st == 201, f"status={st}")
+st, _ = add_target("SUBOUT", "acme.example")
+check("and so is the apex the entry was written as", st == 201, f"status={st}")
+
+# The other direction: the zone on the OUT list has to bar the whole
+# zone, including names an in-scope wildcard covers. A flag that
+# expanded only the in-list would bar less than it allows.
+project("SUBOUT2")
+add_scope("SUBOUT2", lines=["*.acme.example"])
+add_scope("SUBOUT2", lines=["acme.example"], included=False,
+          include_subdomains=True)
+st, r = add_target("SUBOUT2", "a.acme.example")
+check("a zone barred by an out entry beats the in-scope wildcard over it",
+      st == 403, f"status={st}")
+check("and the refusal says the entry carried its subdomains",
+      "+subdomains" in str(r), str(r)[:200])
+
+print("\n-- a declared country travels with the zone --")
+# Half a rule is the failure mode: if the attribution stopped at the
+# apex, the apex would be barred for being in DE and every name under
+# it would be unplaced and therefore NOT barred, out of one row.
+project("SUBGEO")
+add_scope("SUBGEO", lines=["acme.example"], country="de",
+          include_subdomains=True)
+add_scope("SUBGEO", countries=["de"], included=False)
+st, r = add_target("SUBGEO", "acme.example")
+check("the apex is barred by the country it was declared to be in",
+      st == 403, f"status={st}")
+st, r = add_target("SUBGEO", "a.acme.example")
+check("and so is a name under it — the row is not half-enforced",
+      st == 403, f"status={st}")
+check("for the same stated reason", "DE" in str(r), str(r)[:170])
+
+print("\n-- nothing widens by accident --")
+# The scenario this rule exists for: 400 lines re-pasted with the box
+# ticked for the sake of four new names. The other 396 are already
+# enforced as single names and must not quietly become whole zones.
+project("NOWIDEN")
+add_scope("NOWIDEN", lines=["corp.com", "portal.corp.com"])
+st, r = add_scope("NOWIDEN", lines=["corp.com", "new.example"],
+                  include_subdomains=True)
+check("re-adding an in-scope entry with the box ticked is REFUSED",
+      any("corp.com" in e and "NOT added" in e for e in r["scope_errors"]),
+      str(r["scope_errors"])[:260])
+st, _ = add_target("NOWIDEN", "a.corp.com")
+check("so the zone is still not in scope", st == 422, f"status={st}")
+st, rows = call("/api/projects/NOWIDEN/scope", token=admin)
+by_value = {e["value"]: e for e in rows}
+check("the stored entry is untouched",
+      by_value["corp.com"]["include_subdomains"] is False,
+      str(by_value["corp.com"])[:160])
+# Refusing one line must not cost the rest of the batch, same as a
+# line that fails to parse.
+check("but the new name in the same batch still landed, with its zone",
+      by_value.get("new.example", {}).get("include_subdomains") is True,
+      str(by_value.get("new.example"))[:160])
+st, _ = add_target("NOWIDEN", "a.new.example")
+check("and that one does cover its subdomains", st == 201, f"status={st}")
+
+# On the OUT list the same amendment only ever refuses MORE, so it
+# applies rather than being refused.
+project("WIDENOUT")
+add_scope("WIDENOUT", lines=["bad.example"], included=False)
+st, _ = add_target("WIDENOUT", "a.bad.example")
+check("a name under a barred apex starts out allowed", st == 201,
+      f"status={st}")
+st, r = add_scope("WIDENOUT", lines=["bad.example"], included=False,
+                  include_subdomains=True)
+check("adding subdomains to an OUT entry is applied, not refused",
+      not r["scope_errors"], str(r["scope_errors"])[:200])
+st, _ = add_target("WIDENOUT", "b.bad.example")
+check("and the whole zone is barred from then on", st == 403, f"status={st}")
+
+print("\n-- the per-entry patch is where widening is deliberate --")
+st, rows = call("/api/projects/NOWIDEN/scope", token=admin)
+eid = next(e["id"] for e in rows if e["value"] == "corp.com")
+st, r = call(f"/api/projects/NOWIDEN/scope/{eid}", "PATCH",
+             {"include_subdomains": True}, token=admin)
+check("naming one entry turns it on", st == 200
+      and r["include_subdomains"] is True, f"status={st} {str(r)[:140]}")
+st, _ = add_target("NOWIDEN", "b.corp.com")
+check("and the zone is in scope from then on", st == 201, f"status={st}")
+st, r = call(f"/api/projects/NOWIDEN/scope/{eid}", "PATCH",
+             {"include_subdomains": False}, token=admin)
+check("turning it back off is one act on one row", st == 200
+      and r["include_subdomains"] is False, f"status={st} {str(r)[:140]}")
+st, _ = add_target("NOWIDEN", "c.corp.com")
+check("and the zone is out again", st == 422, f"status={st}")
+check("the entry that was already there is still here, not replaced",
+      eid in [e["id"] for e in call("/api/projects/NOWIDEN/scope",
+                                    token=admin)[1]], f"id={eid}")
+
+cid = next((e["id"] for e in call("/api/projects/SUBKIND/scope", token=admin)[1]
+            if e["kind"] == "cidr"), None)
+st, r = call(f"/api/projects/SUBKIND/scope/{cid}", "PATCH",
+             {"include_subdomains": True}, token=admin)
+check("asking a range about its subdomains is refused, not silently ignored",
+      st == 422, f"status={st} {str(r)[:140]}")
+
+print("\n-- and it is a project-creation option too --")
+st, r = call("/api/projects", "POST",
+             {"code": "SUBNEW", "name": "SUBNEW",
+              "scope": ["acme.example", "203.0.113.0/24"],
+              "scope_include_subdomains": True}, token=admin)
+check("a project can be created with it", st in (200, 201),
+      f"status={st} {str(r)[:140]}")
+st, _ = add_target("SUBNEW", "a.acme.example")
+check("the zone is in scope from the moment it is created", st == 201,
+      f"status={st}")
+st, _ = add_target("SUBNEW", "acme.example")
+check("so is the apex", st == 201, f"status={st}")
+st, _ = add_target("SUBNEW", "notacme.example", ip_address="198.51.100.1")
+check("and nothing outside it came along", st == 422, f"status={st}")
+
+print("\n-- a Drone task is gated on it like everything else --")
+st, en = call("/api/agents?project=SUBOUT", "POST", {"name": "s1"}, token=admin)
+SAID = ((en or {}).get("agent") or {}).get("id")
+st, r = call(f"/api/agents/{SAID}/tasks?project=SUBOUT", "POST",
+             {"kind": "nmap", "args": {"targets": ["queued.acme.example"]}},
+             token=admin)
+check("a task against the zone is queued", st == 201, f"status={st} {str(r)[:120]}")
+st, r = call(f"/api/agents/{SAID}/tasks?project=SUBOUT", "POST",
+             {"kind": "nmap", "args": {"targets": ["secret.acme.example"]}},
+             token=admin)
+check("a task against the barred name inside it is refused", st == 403,
+      f"status={st}")
+
+
 # =========================================================== IPv6
 print("\n== IPv6 ==")
 project("V6")
@@ -507,6 +704,70 @@ check("an out-of-scope address is not rescued by an in-scope name",
 _l = _idx([("wildcard", "*.corp.com", True)])
 check("an address nothing has been observed at inherits nothing",
       not _l.check("198.51.100.7").allowed, _l.check("198.51.100.7").reason)
+
+
+print("\n== the index expands an FQDN+subdomains, and only that ==")
+# Below the HTTP layer, because these are claims about the matcher
+# itself: an entry that covers a zone is the same two lookups a name
+# and a wildcard would have been, and nothing else acquired one.
+from app.scope import Entry, entry_label  # noqa: E402
+
+
+def _sidx(*entries):
+    return ScopeIndex(entries)
+
+
+_m = _sidx(Entry("fqdn", "acme.example", True, True))
+check("the apex is matched as a name",
+      _m.inc.match_name("acme.example") == "acme.example",
+      str(_m.inc.names))
+check("the zone is matched by suffix",
+      _m.inc.match_name("a.b.acme.example") is not None,
+      str(_m.inc.suffixes))
+for miss in ("acme.example.evil.test", "notacme.example", "example",
+             "acmexexample", "b.acme.examplex"):
+    check(f"{miss} is not matched by the zone",
+          _m.inc.match_name(miss) is None, str(_m.inc.suffixes))
+
+# The flag on a kind that cannot carry it must add NOTHING. A suffix
+# accidentally derived from a CIDR or an address string would be a
+# rule the operator never wrote.
+_n = _sidx(Entry("cidr", "203.0.113.0/24", True, True),
+           Entry("ipv4", "198.51.100.7", True, True),
+           Entry("wildcard", "*.corp.com", True, True),
+           Entry("country", "jp", True, True))
+check("no suffix is derived from a range, an address or a country",
+      set(_n.inc.suffixes) == {".corp.com"}, str(_n.inc.suffixes))
+
+# Both spellings of the same coverage on one side. The verdict must be
+# identical either way; only the sentence differs, and it names the
+# entry the operator literally typed.
+_o = _sidx(Entry("wildcard", "*.acme.example", True),
+           Entry("fqdn", "acme.example", True, True))
+check("a zone written both ways is still just in scope",
+      _o.check("a.acme.example").allowed, _o.check("a.acme.example").reason)
+# Whichever order the rows load in, the entry blamed for a match is the
+# wildcard the operator typed out rather than the derived one. The
+# verdict never depended on this; which rule they are sent to edit does.
+for _pair in ((Entry("wildcard", "*.acme.example", True),
+               Entry("fqdn", "acme.example", True, True)),
+              (Entry("fqdn", "acme.example", True, True),
+               Entry("wildcard", "*.acme.example", True))):
+    _p = _sidx(*_pair)
+    check("the named entry is the wildcard, in either row order",
+          _p.inc.match_name("a.acme.example") == "*.acme.example",
+          str(_p.inc.suffixes))
+# On its own it names itself, labelled, so a refusal is actionable.
+_q = _sidx(Entry("fqdn", "acme.example", False, True))
+check("an out-of-scope zone names the entry that barred it",
+      "acme.example (+subdomains)" in _q.check("a.acme.example").reason,
+      _q.check("a.acme.example").reason)
+
+check("the label says so where a person reads it back",
+      entry_label("fqdn", "acme.example", True) == "acme.example (+subdomains)"
+      and entry_label("wildcard", "*.acme.example", True) == "*.acme.example"
+      and entry_label("cidr", "203.0.113.0/24", True) == "203.0.113.0/24",
+      entry_label("fqdn", "acme.example", True))
 
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 raise SystemExit(1 if fail else 0)
