@@ -15,18 +15,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 MAX_LIMIT = 100_000
 
 
-def apply_search(stmt: Select, q: str | None, columns: Sequence[Any]) -> Select:
+def apply_search(stmt: Select, q: str | None, columns: Sequence[Any],
+                 extra=None) -> Select:
     """Case-insensitive substring match across every listed column (OR).
 
     Numeric columns are cast to text so searching "443" matches a port as well
     as a banner mentioning 443 -- "full search" means the user should not have
     to know which column a value lives in.
+
+    `extra` is for the things that are no longer a column on the row
+    being searched. It takes the prepared `%needle%` and returns one
+    more clause to OR in — an EXISTS over a child table, typically.
+    A target's addresses live in their own table now, and leaving them
+    out of search would mean typing an address you can see in the grid
+    and getting nothing back.
     """
     if not q:
         return stmt
     needle = f"%{q.strip().lower()}%"
     clauses = [func.lower(func.cast(c, __import__("sqlalchemy").String)).like(needle)
                for c in columns]
+    if extra is not None:
+        clauses.append(extra(needle))
     return stmt.where(or_(*clauses))
 
 

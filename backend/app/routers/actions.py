@@ -88,7 +88,7 @@ async def request_action(service_id: int, body: ActionRequest,
     tgt = await session.get(Target, svc.target_id)
     if tgt is not None:
         await assert_allowed(session, tgt.project_id, tgt.host,
-                             f"probing {tgt.host}", ip=tgt.ip_address)
+                             f"probing {tgt.host}", ip=tgt.ip_addresses)
 
     busy = (await session.execute(
         select(Action).where(Action.service_id == service_id, Action.kind == body.kind,

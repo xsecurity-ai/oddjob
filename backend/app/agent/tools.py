@@ -50,9 +50,11 @@ from ..models import (
     Project,
     Service,
     Target,
+    TargetAddress,
     User,
     Vuln,
     WebAddress,
+    target_address_links,
 )
 from ..scopegate import check_task_targets, index_for
 from ..timeline import record
@@ -83,6 +85,12 @@ def _rows(items: list[dict], limit: int, total: int) -> dict:
 
 
 MAX_ROWS = 200
+
+#: How many engagements one "what lookups are waiting" question will
+#: walk when none is in view. Each project costs a few queries, and a
+#: site admin asking across two hundred of them wants an answer, not a
+#: timeout. The reply says when it stopped short.
+LOOKUP_PROJECT_CAP = 25
 
 
 def build(session: AsyncSession, project: Project | None, user: User,
@@ -168,7 +176,17 @@ def build(session: AsyncSession, project: Project | None, user: User,
         stmt = select(Target).where(scoped(Target.project_id))
         if search:
             like = f"%{search}%"
-            stmt = stmt.where(or_(Target.host.ilike(like), Target.ip_address.ilike(like),
+            # EXISTS over the address table, not a column and not a
+            # join: a host with four addresses that all match must come
+            # back once, and a join would return it four times.
+            at_address = (
+                select(TargetAddress.id)
+                .join(target_address_links,
+                      target_address_links.c.address_id == TargetAddress.id)
+                .where(target_address_links.c.target_id == Target.id,
+                       TargetAddress.address.ilike(like))
+                .exists())
+            stmt = stmt.where(or_(Target.host.ilike(like), at_address,
                                   Target.os.ilike(like), Target.notes.ilike(like)))
         if only_alive:
             stmt = stmt.where(Target.alive.is_(True))
@@ -178,7 +196,8 @@ def build(session: AsyncSession, project: Project | None, user: User,
             select(func.count()).select_from(stmt.subquery()))).scalar_one())
         n = max(1, min(int(limit), MAX_ROWS))
         rows = (await session.execute(stmt.order_by(Target.host).limit(n))).scalars().all()
-        return _rows([{"host": t.host, "ip": t.ip_address, "alive": t.alive,
+        return _rows([{"host": t.host, "ip": t.ip_address, "ips": t.ip_addresses,
+                      "alive": t.alive,
                        "compromised": t.hacked, "os": t.os} for t in rows], MAX_ROWS, total)
 
     async def get_host(host: str) -> dict:
@@ -215,7 +234,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
         # about to act, and the thing an inventory record never says:
         # every field it holds is a fact, and the gaps are silent.
         gaps = []
-        if t.ip_address is None and t.kind == "host":
+        if not t.ip_addresses and t.kind == "host":
             gaps.append("no address resolved for this name")
         if t.alive is None:
             gaps.append("never probed — liveness is unknown, not false")
@@ -228,7 +247,8 @@ def build(session: AsyncSession, project: Project | None, user: User,
                         "would make exploit matching possible")
 
         return {
-            "host": t.host, "ip": t.ip_address, "alive": t.alive,
+            "host": t.host, "ip": t.ip_address, "ips": t.ip_addresses,
+                      "alive": t.alive,
             "kind": t.kind, "provider": t.provider,
             "compromised": t.hacked, "os": t.os, "os_accuracy": t.os_accuracy,
             "notes": t.notes,
@@ -622,6 +642,76 @@ def build(session: AsyncSession, project: Project | None, user: User,
                 "last_seen": a.last_seen.isoformat() if a.last_seen else None})
         return {"agents": out, "count": len(out)}
 
+    async def _projects_in_view() -> list[Project]:
+        """Every engagement this question may touch, bounded by the scope.
+
+        `scoped()` is the single place that decides which projects the
+        caller can see, so this goes through it rather than re-deriving
+        the rule. A tool that worked out its own answer would be the
+        one place the bound did not apply, and that is the mistake in
+        this file that would matter outside it.
+        """
+        return list((await session.execute(
+            select(Project).where(scoped(Project.id))
+            .order_by(Project.code))).scalars().all())
+
+    async def lookup_results(limit: int = 50) -> dict:
+        """Finished DNS lookups and what the inventory will do with them."""
+        from ..routers.enumerate import lookup_decisions
+        projects = await _projects_in_view()
+        if len(projects) > LOOKUP_PROJECT_CAP:
+            projects = projects[:LOOKUP_PROJECT_CAP]
+        automatic: list[dict] = []
+        needs_you: list[dict] = []
+        nothing_to_pick: list[dict] = []
+        for pr in projects:
+            for _task, t, subject, field, options, partial, _note, d in \
+                    await lookup_decisions(session, pr):
+                row = {
+                    "project": pr.code, "subject": subject,
+                    "lookup": ("address → names" if field == "host"
+                               else "name → addresses"),
+                    "target": t.host, "returned": options,
+                }
+                if partial:
+                    row["partial"] = ("a source did not answer, so this list "
+                                      "is a floor and not a total")
+                if d.refused:
+                    row["not_allowed"] = d.refused
+                if d.verdict == "auto":
+                    automatic.append({**row, "will": d.plan,
+                                      "applies": d.apply})
+                elif d.verdict == "choice":
+                    needs_you.append({**row, "question": d.plan,
+                                      "candidates": d.apply})
+                else:
+                    nothing_to_pick.append({**row, "why": d.plan})
+        total = len(automatic) + len(needs_you) + len(nothing_to_pick)
+        return {
+            "automatic": automatic[:limit],
+            "needs_you": needs_you[:limit],
+            "nothing_to_pick": nothing_to_pick[:limit],
+            "total": total,
+            **({"not_every_project": (
+                f"only the first {LOOKUP_PROJECT_CAP} engagements were "
+                f"checked; open one to see the rest")}
+               if len(projects) == LOOKUP_PROJECT_CAP and pid is None else {}),
+            # Spelled out, because the distinction is the point and a
+            # model handed three lists with no explanation will present
+            # them as three kinds of to-do.
+            "how_to_read_this": (
+                "`automatic` applies itself — a host having several "
+                "addresses is not a decision, and neither is an "
+                "address-named row learning the one name it answers to. "
+                "`needs_you` is genuinely ambiguous: several names answer "
+                "at one address and nothing in the data says which owns "
+                "the row, or a resolver did not finish so we cannot tell "
+                "whether the address is shared. `nothing_to_pick` is "
+                "reported, not asked: the lookup found nothing, or the "
+                "scope list refused every name, or somebody already did. "
+                "Scope decides every name and address individually."),
+        }
+
     reads = [
         Tool("list_drone",
              "Drone agents on this engagement: where each is deployed, "
@@ -696,6 +786,21 @@ def build(session: AsyncSession, project: Project | None, user: User,
              "searchsploit, against the local Exploit-DB copy.",
              _obj({"query": {"type": "string"}, "limit": {"type": "integer"}},
                   ["query"]), search_exploits),
+        # Phrased for the questions people actually ask. The agent could
+        # already QUEUE a reverse-IP or nslookup lookup and then had no
+        # way to read what came back, so "what did that find?" and "add
+        # all the lookup results" both ended in the model saying it did
+        # not know what was meant. A tool nobody's phrasing matches is
+        # nearly as bad as no tool, so the wording carries the phrases.
+        Tool("lookup_results",
+             "What DNS lookups came back with, and what will happen to "
+             "each. Use for \"what lookups are waiting\", \"any lookup "
+             "results?\", \"did the reverse-IP finish\", \"which hostnames "
+             "did we find\", or before adding lookup results. Separates "
+             "the results that resolve themselves from the ones that "
+             "genuinely need a person to choose, and says why for each. "
+             "Read-only.",
+             _obj({"limit": {"type": "integer"}}), lookup_results),
     ]
     if not allow_writes:
         return reads
@@ -738,6 +843,49 @@ def build(session: AsyncSession, project: Project | None, user: User,
                      detail=notes or None, actor=f"agent({user.username})")
         await session.commit()
         return {"ok": True, "host": clean}
+
+    async def apply_lookup_results(**_) -> dict:
+        """Apply the lookup results that are not in doubt. Report the rest."""
+        from ..routers.enumerate import apply_auto, lookup_decisions
+        if pid is None or project is None:
+            return {"error": "applying lookup results needs one engagement "
+                             "in view; pick a project and ask again"}
+        # The same function the HTTP route and the Drone result handler
+        # call. Not a reimplementation: if the agent's path and the API
+        # path could disagree about what scope allows, that difference
+        # would be the bug, and sharing the function is the only way to
+        # be sure there is no difference to find.
+        report = await apply_auto(session, project)
+        await session.commit()
+
+        # What is LEFT is reported, never guessed at. An agent quietly
+        # deciding which of four hostnames takes over an address-named
+        # row is the exact failure this whole change is built to avoid,
+        # and it is worse through a chat window, where nobody sees the
+        # choice being made.
+        waiting = [
+            {"subject": subject, "target": t.host, "returned": options,
+             "question": d.plan, "candidates": d.apply}
+            for _task, t, subject, _field, options, _partial, _note, d
+            in await lookup_decisions(session, project)
+            if d.verdict == "choice"]
+        return {
+            "project": project.code,
+            "addresses_added": report.addresses_added,
+            "renamed": report.renamed,
+            "merged": report.merged,
+            "created": report.created,
+            "not_allowed": report.refused,
+            "still_needs_a_person": waiting,
+            "note": (
+                "Everything deterministic has been applied. Anything under "
+                "`still_needs_a_person` was NOT touched: which name takes "
+                "over an address-named row is a decision, and guessing it "
+                "sends future findings to the wrong host. Offer the "
+                "candidates and let them choose. `not_allowed` is what the "
+                "scope list refused — that is fixed by editing the scope "
+                "list, not here."),
+        }
 
     async def add_finding(host: str, title: str, severity: str = "info",
                           description: str = "") -> dict:
@@ -1122,6 +1270,17 @@ def build(session: AsyncSession, project: Project | None, user: User,
                                 "enum": ["critical", "high", "medium", "low", "info"]},
                    "description": {"type": "string"}},
                   ["host", "title"]), add_finding, writes=True),
+        Tool("apply_lookup_results",
+             "Add the lookup results: write every finished DNS lookup whose "
+             "answer is not in doubt into the inventory — addresses onto "
+             "the hosts that resolved to them, and a hostname onto a target "
+             "still named by its address. Use for \"add all the lookup "
+             "results\", \"apply the lookups\", \"add the hostnames we "
+             "found\". Safe to run twice. It does NOT decide the ambiguous "
+             "ones: those come back under `still_needs_a_person` with the "
+             "candidates, to be offered rather than chosen. Scope is "
+             "enforced on every name and address, exactly as in the UI.",
+             _obj({}), apply_lookup_results, writes=True),
     ]
 
 

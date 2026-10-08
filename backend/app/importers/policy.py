@@ -90,7 +90,7 @@ class Policy:
     def _refuse(self, host: str, reason: str) -> None:
         self.barred.setdefault(host, reason)
 
-    def scope_bars(self, host: str, ip: str | None = None) -> bool:
+    def scope_bars(self, host: str, ip=None) -> bool:
         """Is this host on the out-of-scope list?
 
         Asked of hosts the project already has as well as new ones. A
@@ -106,7 +106,7 @@ class Policy:
             return True
         return False
 
-    def scope_allows_new(self, host: str, ip: str | None = None) -> bool:
+    def scope_allows_new(self, host: str, ip=None) -> bool:
         """May this host be ADDED to the project?
 
         Separate from `scope_bars` because the in-scope list governs only
@@ -118,6 +118,9 @@ class Policy:
         judged on the name alone. That is the strict reading and the right
         one — otherwise a scan file adds hosts the allowlist exists to keep
         out, by the back door.
+
+        `ip` is one address or several: a scan reports a host at every
+        address it answered on, and all of them bear on the decision.
         """
         if self.scope is None:
             return True
@@ -127,7 +130,7 @@ class Policy:
         self._refuse(host, ruling.reason)
         return False
 
-    def resolve(self, host: str | None, ip: str | None = None) -> str | None:
+    def resolve(self, host: str | None, ip=None) -> str | None:
         """-> the target name to write against, or None to drop this row.
 
         A None means "the operator did not ask for this host, or is not

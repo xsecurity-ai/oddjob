@@ -37,7 +37,13 @@ export interface Target {
   kind: 'host' | 'mobile' | 'cloud'
   /** Which cloud, for kind=cloud. */
   provider: string | null
+  /** The first address observed, or null. A host legitimately has
+   *  several — an A record, a AAAA record, more behind a load balancer
+   *  — so this is a convenience for the places that can show one, and
+   *  `ip_addresses` is the whole truth. */
   ip_address: string | null
+  /** Every address, oldest observation first. */
+  ip_addresses: string[]
   /** Tri-state: true responding, false probed-no-response, null not probed. */
   alive: boolean | null
   hacked: boolean
@@ -1107,10 +1113,53 @@ export const api = {
       partial: boolean
       note: string | null
       finished_at: string | null
+      /** What the server will do with this, if anything.
+       *
+       *  auto     deterministic — `POST /api/enumerate/auto` applies it
+       *  choice   genuinely ambiguous; a person picks
+       *  blocked  nothing to pick. Scope refused it, somebody already
+       *           refused it, or the lookup came back empty. Reported,
+       *           never applied, and NOT a question — the fix is a
+       *           scope edit, not a dropdown. */
+      decision: 'auto' | 'choice' | 'blocked'
+      /** One sentence saying what will happen, or why nothing will. */
+      plan: string
+      /** The subset of `options` that would actually be written. */
+      applicable: string[]
+      /** Each entry that will not be, and why. Named, never counted. */
+      refused: Record<string, string>
     }>>('/api/enumerate/pending' + qs({ project })),
 
-  /** Write a chosen lookup answer onto the target. Refuses a rename that
-   *  would collide with another target rather than merging the two. */
+  /** Apply every lookup result whose answer is not in doubt.
+   *
+   *  Idempotent and safe on every refresh: the work list is derived
+   *  from what the inventory is still missing, so a second call with
+   *  nothing to do writes nothing. What counts as "not in doubt" is
+   *  decided server-side — adding an address to a host we already hold
+   *  never is, and anything that turns on an address being SHARED
+   *  stays with a person. */
+  enumerateAuto: (project: string) =>
+    req<{
+      /** host → the addresses it gained. */
+      addresses_added: Record<string, string[]>
+      /** Address-named rows that learned their name. */
+      renamed: Record<string, string>
+      /** Address-named rows folded into a target already held. */
+      merged: Record<string, string>
+      /** New targets created from the other names on a shared address. */
+      created: string[]
+      refused: Record<string, string>
+      /** Still a person's decision, with the question. */
+      deferred: Record<string, string>
+    }>('/api/enumerate/auto' + qs({ project }), { method: 'POST', body: '{}' }),
+
+  /** Write a chosen lookup answer onto the target.
+   *
+   *  An ADDRESS-named row taking a name the project already holds is
+   *  merged into it — the operator ruled that automatic, and it is low
+   *  risk because such a row is nearly always sparse. Two established
+   *  FQDNs still refuse with a 409 and point at /api/enumerate/merge,
+   *  where the plan is shown first. */
   enumerateResolve: (project: string, body: {
     host: string; field: 'host' | 'ip_address'; value: string
     /** Every name the lookup returned, not only the chosen one. The
@@ -1127,6 +1176,7 @@ export const api = {
   }) =>
     req<{
       host: string; ip_address: string | null
+      ip_addresses: string[]
       /** Named rather than counted: "3 added" with no list is not
        *  something anybody can check, and `out_of_scope` is the half
        *  that most needs reading. */

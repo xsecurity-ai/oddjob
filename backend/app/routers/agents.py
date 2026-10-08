@@ -43,10 +43,12 @@ from .. import agentcrypto, audit
 from ..db import get_session
 from ..events import broker
 from ..hosts import validate_host
+from ..lookups import LOOKUP_KINDS
 from ..models import Agent, AgentTask, Project, Setting, Target, User
 from ..scopegate import check_task_targets, index_for, refuse
 from ..security import get_current_user, new_agent_key, require_project, verify_key
 from ..timeline import record
+from .enumerate import apply_auto
 from .scans import HostDecision
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
@@ -2470,6 +2472,27 @@ async def submit_result(task_id: int, body: ResultIn,
             # ran and could not be filed is still evidence.
             t.import_result = json.dumps({"error": f"{type(e).__name__}: {e}"[:500]})
             await session.commit()
+
+    # A finished DNS lookup resolves itself, here, rather than waiting
+    # for somebody to open the Targets page. Most of what one returns
+    # stopped being a decision when addresses became many-to-many — a
+    # host with four addresses has four addresses — and what is left
+    # genuinely ambiguous is still queued for a person. The rule, and
+    # the argument for where the line falls, is in app/lookups.py.
+    if t.status == "done" and t.kind in LOOKUP_KINDS and (t.output or "").strip():
+        pr = await session.get(Project, t.project_id)
+        try:
+            rep = await apply_auto(session, pr, actor=f"drone:{a.name}")
+            await session.commit()
+            resolved = rep.model_dump()
+        except Exception as e:                   # noqa: BLE001
+            # Never fail the result submission over this. The agent has
+            # delivered its work and that must land; a lookup that could
+            # not be applied is still on the task, and the Targets page
+            # will offer it the next time anybody looks.
+            await session.rollback()
+            resolved = {"error": f"{type(e).__name__}: {e}"[:500]}
+        imported = {**(imported or {}), "lookup": resolved}
 
     if t.status == "done" and t.import_as and (t.output or "").strip():
         pr = await session.get(Project, t.project_id)

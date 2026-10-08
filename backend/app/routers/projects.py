@@ -650,7 +650,12 @@ class ViolationOut(BaseModel):
     """
     id: int
     host: str
+    #: The first address, and all of them. Both, because a host is
+    #: refused for a specific address as often as for its name, and a
+    #: violation report that showed one of four would leave the
+    #: operator looking for a rule that does not match what they see.
     ip_address: str | None = None
+    ip_addresses: list[str] = []
     verdict: str
     reason: str
     #: What goes with it if it is removed. Deleting a target cascades to
@@ -688,7 +693,7 @@ async def _violations(session: AsyncSession, pr: Project) -> list[ViolationOut]:
     rows = (await session.execute(
         select(Target).where(Target.project_id == pr.id)
         .order_by(Target.host))).scalars().all()
-    bad = [(t, idx.check(t.host, t.ip_address)) for t in rows]
+    bad = [(t, idx.check(t.host, t.ip_addresses)) for t in rows]
     bad = [(t, r) for t, r in bad if not r.allowed]
     if not bad:
         return []
@@ -703,6 +708,7 @@ async def _violations(session: AsyncSession, pr: Project) -> list[ViolationOut]:
             counts[(label, tid)] = n
     return [ViolationOut(
         id=t.id, host=t.host, ip_address=t.ip_address,
+        ip_addresses=t.ip_addresses,
         verdict=r.verdict, reason=r.reason,
         services=counts.get(("services", t.id), 0),
         vulns=counts.get(("vulns", t.id), 0),

@@ -5,10 +5,22 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import addresses
 from ..db import get_session
 from ..events import broker
 from ..hosts import normalise_host
-from ..models import Event, Implant, Poc, Project, Service, Target, User, Vuln
+from ..models import (
+    Event,
+    Implant,
+    Poc,
+    Project,
+    Service,
+    Target,
+    TargetAddress,
+    User,
+    Vuln,
+    target_address_links,
+)
 from ..models import Poc as PocM
 from ..models import Service as SvcM
 from ..models import Vuln as VulnM
@@ -72,6 +84,44 @@ _POC_KEYS = _keys(PocOut, "host", "project_code")
 _IMPLANT_KEYS = _keys(ImplantOut, "host", "project_code")
 
 
+#: Sentinel for "the caller did not send this key". `None` cannot do
+#: the job: clearing a target's address is a legitimate PATCH and sends
+#: exactly that.
+_UNSET = object()
+
+
+def _address_like(needle):
+    """Does any of this target's addresses contain the search text?
+
+    EXISTS rather than a join, because a target with four addresses
+    matching the needle must come back once. A join would return it
+    four times and the row count would be wrong before anyone noticed
+    the duplicates.
+    """
+    return (select(TargetAddress.id)
+            .join(target_address_links,
+                  target_address_links.c.address_id == TargetAddress.id)
+            .where(target_address_links.c.target_id == Target.id,
+                   func.lower(TargetAddress.address).like(needle))
+            .exists())
+
+
+def _first_address():
+    """The address to sort on: the first one observed.
+
+    The same one `Target.ip_address` shows, so sorting the column sorts
+    by what the column displays. Sorting by "any address" would put a
+    row in a different place depending on which of its four the
+    database reached first.
+    """
+    return (select(TargetAddress.address)
+            .join(target_address_links,
+                  target_address_links.c.address_id == TargetAddress.id)
+            .where(target_address_links.c.target_id == Target.id)
+            .order_by(target_address_links.c.id).limit(1)
+            .scalar_subquery())
+
+
 def _out(row) -> TargetOut:
     t = row[0]
     return TargetOut(
@@ -108,10 +158,12 @@ async def list_targets(
         stmt = stmt.where(Target.hacked == hacked)
     if alive is not None:
         stmt = stmt.where(Target.alive == alive)
-    stmt = apply_search(stmt, q, [Target.host, Target.ip_address, Target.os,
-                                  Target.notes, Target.tags, Project.code])
+    stmt = apply_search(stmt, q, [Target.host, Target.os,
+                                  Target.notes, Target.tags, Project.code],
+                        extra=_address_like)
     stmt = apply_sort(stmt, sort, order, {
-        "host": Target.host, "ip_address": Target.ip_address, "alive": Target.alive,
+        "host": Target.host, "ip_address": _first_address(),
+        "ip_addresses": _first_address(), "alive": Target.alive,
         "hacked": Target.hacked, "os": Target.os, "updated_at": Target.updated_at,
         "project_code": Project.code,
         "total_vulns": func.coalesce(v.c.total_vulns, 0),
@@ -203,12 +255,17 @@ async def create_target(body: TargetCreate, project: str = Query(..., descriptio
                              Target.host == body.host))).scalar_one_or_none()
     if dup:
         raise HTTPException(409, f"target {body.host!r} already in project {pr.code}")
+    # Every address, not just the first: a host whose second address is
+    # on the out-of-scope list is an out-of-scope host, and gating on
+    # one of four would be a gate with three holes in it.
     await assert_allowed(session, pr.id, body.host,
                          f"adding {body.host!r} to {pr.code}",
-                         ip=body.ip_address)
-    t = Target(project_id=pr.id, **body.model_dump())
+                         ip=body.ip_addresses)
+    fields = body.model_dump(exclude={"ip_address", "ip_addresses"})
+    t = Target(project_id=pr.id, **fields)
     session.add(t)
     await session.flush()
+    await addresses.attach(session, t, body.ip_addresses)
     await record(session, t.id, "discovered", f"added to {pr.code} by hand",
                  detail=t.notes or None, actor=user)
     await session.commit()
@@ -223,9 +280,33 @@ async def update_target(project: str, host: str, body: TargetUpdate,
                         session: AsyncSession = Depends(get_session)):
     t = await _find(session, project, host)
     patch = body.model_dump(exclude_unset=True)
+    # Addresses are not a column and `Target.ip_address` is read-only,
+    # so they come out of the patch before the setattr loop and go
+    # through `addresses.replace`. Folded into one key for the diff
+    # below, because "ip_addresses: 203.0.113.9 → 203.0.113.9,
+    # 203.0.113.10" is the change somebody wants to read; two near-
+    # identical lines because the caller happened to send both spellings
+    # is not.
+    wants = patch.pop("ip_addresses", None)
+    one = patch.pop("ip_address", _UNSET)
+    if wants is None and one is not _UNSET:
+        wants = [one] if one else []
     before = {k: getattr(t, k) for k in patch}
     for k, v in patch.items():
         setattr(t, k, v)
+    if wants is not None:
+        was = list(t.ip_addresses)
+        added, removed, invalid = await addresses.replace(session, t, wants)
+        if added or removed:
+            patch["ip_addresses"] = ", ".join(t.ip_addresses) or None
+            before["ip_addresses"] = ", ".join(was) or None
+        if invalid:
+            # Said out loud rather than silently dropped. "I pasted four
+            # addresses and three arrived" is the kind of thing that is
+            # only noticed weeks later, if at all.
+            await record(session, t.id, "note",
+                         "not recorded, not an IP address: "
+                         + ", ".join(invalid), actor=user)
 
     # A note is the thing people most want to find later, so it gets its own
     # entry carrying the text rather than being flattened into a field diff.

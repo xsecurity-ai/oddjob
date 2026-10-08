@@ -39,7 +39,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import ProjectScope, Target
+from .models import ProjectScope, Target, TargetAddress, target_address_links
 from .scope import BARRED, Ruling, ScopeIndex
 
 #: Status codes for each refusal. Distinct so a caller — and a test —
@@ -74,12 +74,29 @@ async def index_for(session: AsyncSession, project_id: int) -> ScopeIndex:
     # happened to say. A name nothing has resolved yet inherits
     # nothing, which is the honest answer.
     #
-    # Two columns, loaded once per operation like the rows above.
-    for host, ip in (await session.execute(
-            select(Target.host, Target.ip_address)
-            .where(Target.project_id == project_id,
-                   Target.ip_address.is_not(None)))).all():
-        idx.link(host, ip)
+    # Two columns, loaded once per operation like the rows above — now
+    # over the join, because a target has many addresses and an address
+    # has many targets. One row per observed pair.
+    #
+    # **This is where many-to-many could have become scope inheritance,
+    # and does not.** The pairs are richer than they used to be: a CDN
+    # address now links to every name the project has recorded at it,
+    # where before one target held one string. `ScopeIndex.check` walks
+    # these links exactly one step and asks whether the PARTNER matches
+    # the scope document DIRECTLY — never whether the partner is itself
+    # allowed, which would chain. So an in-scope name vouches for its
+    # CDN address, and that address vouches for nothing further: the
+    # other tenants sharing it match no entry of ours and stay outside.
+    # `tests/scopetest.py` pins this rather than leaving it to be true
+    # by construction.
+    for host, addr in (await session.execute(
+            select(Target.host, TargetAddress.address)
+            .join(target_address_links,
+                  target_address_links.c.target_id == Target.id)
+            .join(TargetAddress,
+                  TargetAddress.id == target_address_links.c.address_id)
+            .where(Target.project_id == project_id))).all():
+        idx.link(host, addr)
     return idx
 
 
@@ -90,8 +107,11 @@ def refuse(ruling: Ruling, what: str) -> HTTPException:
 
 
 async def assert_allowed(session: AsyncSession, project_id: int, host: str,
-                         what: str, ip: str | None = None) -> None:
+                         what: str, ip=None) -> None:
     """Raise unless this project may do something new with `host`.
+
+    `ip` is one address or a list of them — a host has as many as it
+    has, and all of them bear on the decision. See `ScopeIndex.check`.
 
     For the single-host paths. Anything handling a list should take an
     index once with `index_for` and check against it, or it issues one

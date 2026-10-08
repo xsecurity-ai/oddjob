@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import importers, slack
+from .. import addresses, importers, slack
 from ..db import SessionLocal, get_session
 from ..events import broker
 from ..hosts import InvalidHost, normalise_host
@@ -238,7 +238,11 @@ async def _host(session: AsyncSession, project: Project, ph: ParsedHost,
     # address goes with the name: a scope document written as ranges can
     # only recognise `web01.acme.example` by the address the scan found
     # it at.
-    allowed = policy.resolve(ph.host, ph.ip_address or ph.ipv6_address)
+    # Both addresses, not whichever is set. A scan that found a host at
+    # a v4 address and a barred v6 one is a scan of a barred host, and
+    # `or` would have let it through on the strength of the first.
+    found_addrs = [a for a in (ph.ip_address, ph.ipv6_address) if a]
+    allowed = policy.resolve(ph.host, found_addrs)
     if allowed is None:
         return None
     try:
@@ -251,7 +255,6 @@ async def _host(session: AsyncSession, project: Project, ph: ParsedHost,
         select(Target).where(Target.project_id == project.id,
                              Target.host == host))).scalar_one_or_none()
     fields = {
-        "ip_address": ph.ip_address or ph.ipv6_address,
         "alive": ph.alive, "os": ph.os, "os_accuracy": ph.os_accuracy,
         "mac_address": ph.mac_address, "mac_vendor": ph.mac_vendor,
         "hostnames": _j(ph.hostnames), "extra": _j(ph.extra),
@@ -270,6 +273,7 @@ async def _host(session: AsyncSession, project: Project, ph: ParsedHost,
                      f"discovered by {scan.label}"
                      + (f" as {ph.ip_address}" if ph.ip_address else ""),
                      detail=scan.args, actor=actor, source=source)
+        await addresses.attach(session, target, found_addrs)
     else:
         changed = []
         for key, new in fields.items():
@@ -277,9 +281,19 @@ async def _host(session: AsyncSession, project: Project, ph: ParsedHost,
             if new is None and old is not None:
                 continue
             if old != new:
-                if key in ("ip_address", "alive", "os"):
+                if key in ("alive", "os"):
                     changed.append(f"{key}: {old if old is not None else 'none'} → {new}")
                 setattr(target, key, new)
+        # ADD, never replace. This is where IPv6 used to be lost: the
+        # column held one string, so `ip_address or ipv6_address` kept
+        # the v4 and threw the v6 away, and a later IPv4-only scan of a
+        # dual-stacked host would have overwritten the v6 even if it had
+        # been kept. A scan not seeing an address is a fact about that
+        # scan's coverage; deleting the address would record it as a
+        # change to the host.
+        gained, _bad = await addresses.attach(session, target, found_addrs)
+        if gained:
+            changed.append("addresses added: " + ", ".join(gained))
         # Compromise is one-way here. Losing a beacon, or a later scan that
         # saw nothing, is not evidence the access is gone.
         if ph.hacked and not target.hacked:

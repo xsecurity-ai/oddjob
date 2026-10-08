@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .addresses import attach, normalise_address
 from .models import Event, Implant, Poc, Service, Target, Vuln, WebAddress
 
 
@@ -52,6 +53,11 @@ class Plan:
     #: Exchanges byte-identical to one the destination already holds.
     #: The only thing a merge actually removes.
     web_duplicates: int = 0
+    #: Addresses the destination does not have and would gain. Not a
+    #: "field filled": with addresses many-to-many there is no slot to
+    #: fill or to lose, so a merge is a union and nothing about the
+    #: source's addresses is ever dropped or overwritten.
+    addresses_gained: list[str] = field(default_factory=list)
     #: Scalar fields the destination would gain, as "field: value".
     fields_filled: list[str] = field(default_factory=list)
     #: Fields set on both and differing. The destination's is kept and
@@ -64,8 +70,35 @@ class Plan:
 
 #: Scalars worth carrying over. `host` is not here: which name survives
 #: is the whole point of the operation and is chosen by the caller.
-CARRY = ("ip_address", "os", "os_accuracy", "mac_address", "mac_vendor",
+#:
+#: Addresses are not here either, and no longer could be. They are not
+#: a scalar to keep or discard — the destination takes the union, which
+#: is the single most useful thing the many-to-many model buys a merge:
+#: folding `203.0.113.9` into `web01.acme.example` used to mean choosing
+#: between the address the row was named for and the address the name
+#: already had, and now means the host has both. See `_addresses`.
+CARRY = ("os", "os_accuracy", "mac_address", "mac_vendor",
          "provider", "notes", "tags")
+
+
+def _source_addresses(src: Target) -> list[str]:
+    """Every address the source row stands for, including its own name.
+
+    An address-named target is the case this matters for. `198.51.100.10`
+    as a `host` may carry nothing in `addresses` at all — the row IS the
+    address — so folding it into `web01.acme.example` without this would
+    delete the only record that the name was ever seen there, and with
+    it the scope link that the gate reads back out of the inventory.
+    """
+    out = list(src.ip_addresses)
+    if normalise_address(src.host) and src.host not in out:
+        out.append(src.host)
+    return out
+
+
+def _gained(src: Target, dst: Target) -> list[str]:
+    have = set(dst.ip_addresses)
+    return [a for a in _source_addresses(src) if a not in have]
 
 
 async def _svc_key(session: AsyncSession, target_id: int) -> dict[tuple, Service]:
@@ -127,6 +160,8 @@ async def plan(session: AsyncSession, src: Target, dst: Target) -> Plan:
             p.implant_conflicts.append(f"{i.framework}:{i.implant_id}")
         else:
             p.implants_moved += 1
+
+    p.addresses_gained = _gained(src, dst)
 
     for f in CARRY:
         a, b = getattr(src, f, None), getattr(dst, f, None)
@@ -206,6 +241,15 @@ async def merge(session: AsyncSession, src: Target, dst: Target,
             update(model).where(model.target_id == src.id)
             .values(target_id=dst.id))
 
+    # The union, not a choice. The source row is about to go, and an
+    # address it carried is an observed fact about this machine that
+    # nothing else records. `_source_addresses` is why the source's own
+    # name is in here when that name was an address.
+    gained = _source_addresses(src)
+    src.addresses.clear()
+    await session.flush()
+    await attach(session, dst, gained)
+
     for f in CARRY:
         a, b = getattr(src, f, None), getattr(dst, f, None)
         if a not in (None, "") and b in (None, ""):
@@ -229,6 +273,20 @@ def describe(p: Plan) -> str:
             bits.append(f"{n} {what}{'' if n == 1 else 's'}")
     moved = ", ".join(bits) or "nothing"
     out = [f"merged {p.source} into {p.destination}: {moved} moved"]
+    # Named on the FIRST line, not buried in the detail. A merge that
+    # arrives automatically — which an address-named row learning its
+    # name now does — must not be able to absorb an accumulated set of
+    # findings and summarise as "merged". Whoever reads this timeline in
+    # three weeks is asking "where did these come from", and the answer
+    # has to be the first thing they see.
+    if p.vulns_moved or p.pocs_moved:
+        out[0] += (f" — {p.source} was carrying "
+                   + " and ".join(
+                       f"{n} {w}{'' if n == 1 else 's'}"
+                       for n, w in ((p.vulns_moved, "finding"),
+                                    (p.pocs_moved, "PoC")) if n))
+    if p.addresses_gained:
+        out.append("addresses added: " + ", ".join(p.addresses_gained))
     if p.service_conflicts:
         out.append("ports seen on both, records combined: "
                    + ", ".join(p.service_conflicts))
