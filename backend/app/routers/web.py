@@ -32,7 +32,7 @@ from ..schemas import Page, WebAddressCreate, WebAddressOut, WebAddressUpdate, W
 from ..scopegate import assert_allowed
 from ..security import assert_role_for_target, get_current_user, visible_project_ids
 from ..timeline import record
-from ..weburl import BadUrl, exchange_key, merge_sources, url_key
+from ..weburl import BadUrl, exchange_key, merge_sources, stable_response, url_key
 from ..weburl import parse as parse_url
 
 router = APIRouter(prefix="/api/web", tags=["web"])
@@ -514,7 +514,14 @@ async def replay(web_id: int, body: ReplayIn,
     elapsed = int((_time.perf_counter() - started) * 1000)
 
     sent = body.raw[:REQ_CAP]
-    xk = exchange_key(method, url, sent, resp_text or None)
+    # `resp_text` above is the status line, every response header and the
+    # body — which means it carries this second's `Date`. Hashed raw, two
+    # byte-identical replays a second apart are two different exchanges
+    # and the dedup below never fires against a real server. The row still
+    # STORES the full text; only the identity is taken over the form with
+    # the clock removed. See `stable_response` for the exclusion list and
+    # for what choosing it costs.
+    xk = exchange_key(method, url, sent, stable_response(resp_text) or None)
     existing = (await session.execute(
         select(WebAddress).where(WebAddress.target_id == known.id,
                                  WebAddress.exchange_hash == xk))).scalar_one_or_none()

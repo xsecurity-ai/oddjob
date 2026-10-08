@@ -388,6 +388,30 @@ check("the replay groups under the same URL as the original",
       str((g3 or {}).get("items")))
 
 # An edited request that differs is another row; an identical one is not.
+#
+# This check used to pass by luck. The identity of an exchange is hashed
+# over the response text, and that text is the status line plus EVERY
+# response header plus the body — including `Date`, which has one-second
+# resolution and changes on its own. Both replays landing inside the same
+# second was the only thing making them equal, which a fast machine
+# arranges and a loaded CI runner does not: it failed there with
+# "16 vs 15" and passed on a re-run.
+#
+# So force the condition instead of hoping to avoid it. Wait until the
+# wall clock second has actually ticked over before replaying. The first
+# replay's `Date` was stamped at or before `_sec`, the second is stamped
+# strictly after it, so the two responses are guaranteed to differ — no
+# fixed sleep, no probability, and the wait is bounded by one second
+# (half of one on average).
+import time as _time
+
+_pk_resp = str((_pk or {}).get("response") or "")
+check("the replayed response really does carry a volatile Date header",
+      any(ln[:5].lower() == "date:" for ln in _pk_resp.splitlines()),
+      _pk_resp[:120])
+_sec = int(_time.time())
+while int(_time.time()) == _sec:
+    _time.sleep(0.02)
 st, rep2 = call(f"/api/web/{seed['id']}/replay", "POST", {"raw": _raw}, token=admin)
 check("replaying the identical request twice does not duplicate",
       (rep2 or {}).get("web", {}).get("id") == (rep or {}).get("web", {}).get("id"),
@@ -398,6 +422,55 @@ check("an edited request is a new row",
       (rep3 or {}).get("web", {}).get("id") not in
       (seed["id"], (rep or {}).get("web", {}).get("id")),
       str((rep3 or {}).get("web", {}).get("id")))
+
+# The end-to-end checks above prove the route is wired to the right rule.
+# These prove the rule, directly and without a clock: which differences
+# between two responses are the same exchange and which are new evidence.
+# The second one is the line that was NOT crossed — the cheap fix for the
+# Date bug is to hash only the status code and the body, and it would
+# make a header-only change invisible, which in this tool is frequently
+# the whole finding.
+print("-- what counts as the same answer --")
+from app.weburl import exchange_key as _xk  # noqa: E402
+from app.weburl import stable_response as _sr  # noqa: E402
+
+
+def _resp(*headers, body="hello"):
+    return ("HTTP/1.1 200 OK\r\n" + "".join(f"{h}\r\n" for h in headers)
+            + "\r\n" + body)
+
+
+def _same(a, b):
+    return _xk("GET", "https://h.example/x", "GET /x HTTP/1.1\r\n\r\n", _sr(a)) == \
+           _xk("GET", "https://h.example/x", "GET /x HTTP/1.1\r\n\r\n", _sr(b))
+
+
+_d1 = _resp("Date: Thu, 08 Oct 2026 12:00:00 GMT", "Server: nginx")
+_d2 = _resp("Date: Thu, 08 Oct 2026 12:00:01 GMT", "Server: nginx")
+check("two responses differing only in Date are the same exchange", _same(_d1, _d2))
+check("a raw hash of those two is NOT the same, which is the bug",
+      _xk("GET", "u", None, _d1) != _xk("GET", "u", None, _d2))
+check("a changed Server banner is still a different exchange",
+      not _same(_d1, _resp("Date: Thu, 08 Oct 2026 12:00:00 GMT", "Server: apache")))
+check("a changed body is still a different exchange",
+      not _same(_d1, _resp("Date: Thu, 08 Oct 2026 12:00:00 GMT", "Server: nginx",
+                           body="goodbye")))
+check("a rotating session cookie value is not a new exchange",
+      _same(_resp("Set-Cookie: sid=aaaa; Path=/; HttpOnly"),
+            _resp("Set-Cookie: sid=bbbb; Path=/; HttpOnly")))
+check("but losing HttpOnly on that cookie is",
+      not _same(_resp("Set-Cookie: sid=aaaa; Path=/; HttpOnly"),
+                _resp("Set-Cookie: sid=aaaa; Path=/")))
+check("a per-request id header is not a new exchange",
+      _same(_resp("X-Amzn-RequestId: 1111", "Cf-Ray: aaa-LHR"),
+            _resp("X-Amzn-RequestId: 2222", "Cf-Ray: bbb-LHR")))
+check("a changed Cache-Control is, because that is a policy not a clock",
+      not _same(_resp("Cache-Control: no-store"), _resp("Cache-Control: max-age=60")))
+check("a response capped mid-headers is still normalised",
+      _same("HTTP/1.1 200 OK\r\nDate: Thu, 08 Oct 2026 12:00:00 GMT\r\nServer: ng",
+            "HTTP/1.1 200 OK\r\nDate: Thu, 08 Oct 2026 12:00:09 GMT\r\nServer: ng"))
+check("an empty response is left alone rather than invented",
+      _sr("") == "" and _sr(None) is None)
 
 # Without this guard the endpoint is an authenticated open proxy.
 st, bad = call(f"/api/web/{seed['id']}/replay", "POST",
