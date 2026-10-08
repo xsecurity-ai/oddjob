@@ -11,7 +11,7 @@ import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import CircularProgress from '@mui/material/CircularProgress'
 import IconButton from '@mui/material/IconButton'
-import type { GridColDef } from '@mui/x-data-grid'
+import type { ColumnDef } from '../lib/columns'
 import { useQuery } from '@tanstack/react-query'
 import { useServerTable } from '../lib/useServerTable'
 import { api, type WebAddress, type WebGroup } from '../lib/api'
@@ -154,7 +154,7 @@ export function WebView({ project }: { project: string | null }) {
     return out
   }, [data?.items, expanded, children])
 
-  const columns: GridColDef<WebAddress>[] = [
+  const columns: ColumnDef<WebAddress>[] = [
     {
       field: 'url', headerName: 'URL', flex: 3, minWidth: 320,
       // Clicking offers the choice rather than assuming one: sometimes
@@ -266,6 +266,17 @@ export function WebView({ project }: { project: string | null }) {
         </Stack>
       ),
     },
+    // Hidden by default, and present so that `filterable` below is not a
+    // promise the table cannot keep: the API accepts a condition on each
+    // of these, and until they had columns there was no way to express
+    // one. Path in particular is how you ask for every /admin on the
+    // engagement without also matching the hostname.
+    { field: 'path', headerName: 'Path', flex: 1, minWidth: 160,
+      valueGetter: (v) => v ?? '' },
+    { field: 'content_type', headerName: 'Content type', width: 170,
+      valueGetter: (v) => v ?? '' },
+    { field: 'notes', headerName: 'Notes', flex: 1, minWidth: 160,
+      valueGetter: (v) => v ?? '' },
     { field: 'project_code', headerName: 'Project', width: 120 },
   ]
 
@@ -317,11 +328,14 @@ export function WebView({ project }: { project: string | null }) {
     <DataTable
       tableId="web"
       rows={rows}
-      columns={columns as GridColDef[]}
+      columns={columns as ColumnDef[]}
       loading={isLoading}
       error={error as Error | null}
       initialSort={{ field: 'url', sort: 'asc' }}
-      hiddenColumns={project ? { project_code: false } : undefined}
+      hiddenColumns={{
+        path: false, content_type: false, notes: false,
+        ...(project ? { project_code: false } : {}),
+      }}
       server={table}
       // A group row and the exchange it stands for share an id — the
       // group IS that exchange. The grid keys rows by id, so without a

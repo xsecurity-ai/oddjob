@@ -5,7 +5,7 @@ import CancelIcon from '@mui/icons-material/HighlightOff'
 import HelpIcon from '@mui/icons-material/HelpOutline'
 import SyncIcon from '@mui/icons-material/SyncOutlined'
 import TuneIcon from '@mui/icons-material/TuneOutlined'
-import type { GridColDef } from '@mui/x-data-grid'
+import type { ColumnDef } from '../lib/columns'
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Project } from '../lib/api'
@@ -35,7 +35,7 @@ export function ProjectsView({ onOpen, onConfigure }: {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['projects'] }),
   })
 
-  const columns: GridColDef<Project>[] = [
+  const columns: ColumnDef<Project>[] = [
     {
       // One identity column, not two. An engagement has a client code
       // (ACME) and an operation name (FALCON), and operators use
@@ -167,7 +167,7 @@ export function ProjectsView({ onOpen, onConfigure }: {
     <DataTable
       tableId="projects"
       rows={data?.items ?? []}
-      columns={columns as GridColDef[]}
+      columns={columns as ColumnDef[]}
       loading={isLoading}
       error={error as Error | null}
       initialSort={{ field: 'codename', sort: 'asc' }}
