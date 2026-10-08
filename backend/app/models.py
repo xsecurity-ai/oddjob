@@ -69,6 +69,13 @@ class TimestampMixin:
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 PROJECT_STATUSES = ("active", "paused", "complete", "archived")
 
+#: What `Project.auto_nmap` may be. Here rather than in
+#: app/automation.py because `schemas.py` validates against it and
+#: importing the worker module into the schemas to read one tuple is
+#: how an import cycle starts. The task arguments each choice maps to
+#: stay in automation.py, which is behaviour rather than vocabulary.
+NMAP_CHOICES = ("off", "top100", "full")
+
 
 class Project(Base, TimestampMixin):
     __tablename__ = "projects"
@@ -110,6 +117,41 @@ class Project(Base, TimestampMixin):
     #: machine the scanner has under it.
     drone_max_parallel: Mapped[int] = mapped_column(
         Integer, default=5, server_default="5")
+
+    # ------------------------------------------------- standing orders
+    #: Four policies the operator can leave running, so the obvious
+    #: follow-up to "a new host appeared" happens without anyone
+    #: remembering to ask for it. All default OFF: each one sends
+    #: packets at a client's estate, and a feature that starts scanning
+    #: because a row appeared is not something to inherit by upgrading.
+    #:
+    #: They are standing orders rather than triggers on insert. A
+    #: trigger only ever covers what arrives after it is switched on,
+    #: which means turning one on does nothing visible and the operator
+    #: concludes it is broken. These are evaluated against whatever is
+    #: outstanding, so switching one on drains the backlog too — paced,
+    #: see automation.PER_CYCLE.
+    #:
+    #: Every candidate still goes through the scope gate individually.
+    #: An automation that could queue one out-of-scope host is worse
+    #: than no automation, because nobody is watching it.
+
+    #: Hand every in-scope zone to amass once.
+    auto_amass: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false")
+    #: Resolve any hostname that has no address recorded.
+    auto_resolve_ips: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false")
+    #: Find names for any address-named host that has none.
+    auto_reverse_dns: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false")
+    #: "off" | "top100" | "full". Not a bool, because the difference
+    #: between the hundred commonest ports and all 65,535 is hours of
+    #: traffic at a client, and that is the operator's call to make
+    #: explicitly rather than a default hiding behind a checkbox.
+    auto_nmap: Mapped[str] = mapped_column(
+        String(16), default="off", server_default="off")
+
     name: Mapped[str] = mapped_column(String(255))
     client: Mapped[str | None] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text)
