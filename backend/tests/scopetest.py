@@ -769,5 +769,87 @@ check("the label says so where a person reads it back",
       and entry_label("cidr", "203.0.113.0/24", True) == "203.0.113.0/24",
       entry_label("fqdn", "acme.example", True))
 
+# ===================================================== the shared fixture
+#
+# The browser classifies a pasted scope line too. It has to: a pill that
+# can only say "line 217 is malformed" after a round trip is the textarea
+# this replaced. frontend/src/lib/scopeEntry.ts is a port of `classify`,
+# and a port that drifts is worse than no port at all — the operator
+# reconciles a client's scope document against a label that was never
+# what got stored.
+#
+# frontend/test/scope-cases.json is the record of what `classify` answers.
+# This section asserts the server still agrees with it; the frontend's
+# `npm run test:logic` asserts the port does. Change the rules in
+# scope.py and this goes red, which is the reminder to regenerate the
+# fixture and look at what moved — the diff is a diff of what a scope
+# list MEANS, so it wants reading rather than accepting.
+#
+# Each row carries the `subs` the flag was called with, because
+# `include_subdomains` changes the Entry and so has to be part of what
+# the two sides agree on — this section was added when `classify` took
+# one argument, and the day it took two is exactly the day a port
+# silently stops covering half of it.
+#
+# Regenerate with:
+#     cd backend && uv run python - <<'EOF'
+#     import json, pathlib
+#     from app.scope import classify
+#     p = pathlib.Path("../frontend/test/scope-cases.json")
+#     out = []
+#     for c in json.loads(p.read_text()):
+#         row = {"raw": c["raw"], "subs": c.get("subs", False)}
+#         try:
+#             e = classify(c["raw"], row["subs"])
+#             row.update(ok=True, kind=e.kind, value=e.value,
+#                        included=e.included,
+#                        include_subdomains=e.include_subdomains)
+#         except ValueError:
+#             row.update(ok=False)
+#         out.append(row)
+#     p.write_text(json.dumps(out, indent=0) + "\n")
+#     EOF
+from app.scope import classify  # noqa: E402
+
+_fixture = (_pathlib.Path(__file__).resolve().parents[2]
+            / "frontend" / "test" / "scope-cases.json")
+if not _fixture.exists():
+    check("the shared classification fixture is present", False, str(_fixture))
+else:
+    _cases = json.loads(_fixture.read_text())
+    _drift = []
+    for _c in _cases:
+        _subs = _c.get("subs", False)
+        try:
+            _e = classify(_c["raw"], _subs)
+            _got = {"ok": True, "kind": _e.kind, "value": _e.value,
+                    "included": _e.included,
+                    "include_subdomains": _e.include_subdomains}
+        except ValueError:
+            _got = {"ok": False}
+        _want = ({"ok": True, "kind": _c.get("kind"), "value": _c.get("value"),
+                  "included": _c.get("included"),
+                  "include_subdomains": _c.get("include_subdomains")}
+                 if _c["ok"] else {"ok": False})
+        if _got != _want:
+            _drift.append(f"{_c['raw']!r} subs={_subs}: recorded {_want}, "
+                          f"now {_got}")
+    check(f"classify() still matches all {len(_cases)} recorded verdicts "
+          f"the browser is held to", not _drift, "; ".join(_drift[:3]))
+    check("the fixture still covers every kind classify() can return",
+          all(any(c.get("kind") == k for c in _cases)
+              for k in ("cidr", "ipv4", "ipv6", "fqdn", "wildcard")))
+    # The flag is only ever carried on an fqdn, and the browser has to
+    # drop it on the other kinds for the same reason the server does —
+    # a pill that says "+subdomains" on a CIDR claims a rule the stored
+    # row does not have.
+    check("the fixture exercises the subdomains flag in both positions",
+          any(c.get("subs") for c in _cases)
+          and any(not c.get("subs") for c in _cases))
+    check("and pins that only an fqdn carries it",
+          any(c.get("include_subdomains") for c in _cases)
+          and all(c.get("kind") == "fqdn"
+                  for c in _cases if c.get("include_subdomains")))
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 raise SystemExit(1 if fail else 0)

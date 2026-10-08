@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useMemo, useState, type FormEvent } from 'react'
 import {
   Alert, Autocomplete, Box, Button, Checkbox, Chip, Dialog, DialogActions,
   DialogContent, DialogTitle, Divider, FormControlLabel, IconButton, MenuItem,
@@ -10,6 +10,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { neon, glow } from '../theme'
 import { sortedStrings } from '../lib/sortOptions'
+import { PillInput } from './PillInput'
+import { makeScopePills } from './scopePills'
 
 /**
  * New engagement. Any signed-in user may create one and becomes its admin.
@@ -86,6 +88,10 @@ export function NewProjectDialog({ onClose, onCreated }: {
   // wildcard rule is met at paste time, and an operator who learns it
   // later learns it as a refused scan on a host they thought they had.
   const [scopeSubs, setScopeSubs] = useState(false)
+  // Rebuilt only when the checkbox moves. `Analyse` has to be
+  // referentially stable or the memo it feeds rebuilds on every
+  // keystroke, which is the whole performance argument gone.
+  const scopeAnalyse = useMemo(() => makeScopePills(scopeSubs), [scopeSubs])
   const [slackToken, setSlackToken] = useState('')
   const [slackChannel, setSlackChannel] = useState('')
   const [delivery, setDelivery] = useState<Delivery>('site')
@@ -222,17 +228,22 @@ export function NewProjectDialog({ onClose, onCreated }: {
           {section('Scope', 'One per line. CIDR, IPv4, IPv6 and FQDN are detected automatically — '
             + 'prefix a line with ! or - to record it as an exclusion. Anything unparseable is '
             + 'reported back rather than silently dropped.')}
-          <TextField
-            size="small" fullWidth multiline minRows={5} value={scope}
-            onChange={(e) => setScope(e.target.value)}
-            placeholder={'10.0.0.0/24\n2001:db8::/32\nportal.acme.com\n!10.0.0.5'}
-            slotProps={{ htmlInput: { style: { fontFamily: `'Share Tech Mono', monospace`,
-                                               fontSize: 12.5 } } }} />
+          {/* The line count that used to sit under this box is part of
+              the input's own summary now, along with the kind breakdown
+              and anything the server will refuse — which is the thing a
+              400-line paste actually needs said about it. The subdomains
+              checkbox keeps its place beside it, and is wired into the
+              pills as well as into the payload: ticking it changes what
+              every fqdn line MEANS, so the chips have to say so at the
+              moment it is ticked rather than after the engagement is
+              created. */}
+          <PillInput
+            label="Scope" value={scope} onChange={setScope}
+            analyse={scopeAnalyse} accent={neon.cyan} minRows={5}
+            placeholder="203.0.113.0/24, 2001:db8::/32, portal.acme.example, !203.0.113.5"
+            helperText="One per line." />
           <Stack direction="row" spacing={2} alignItems="center"
                  flexWrap="wrap" useFlexGap sx={{ mt: -1 }}>
-            <Typography sx={{ fontSize: 11, color: neon.muted }}>
-              {scopeLines.length} line{scopeLines.length === 1 ? '' : 's'}
-            </Typography>
             <FormControlLabel
               control={<Checkbox size="small" checked={scopeSubs}
                          onChange={(e) => setScopeSubs(e.target.checked)} />}

@@ -1,0 +1,1043 @@
+[
+{
+"raw": "203.0.113.0/24",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "203.0.113.0/24",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "198.51.100.0/24",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "198.51.100.0/24",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "203.0.113.10",
+"subs": false,
+"ok": true,
+"kind": "ipv4",
+"value": "203.0.113.10",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "2001:db8::/32",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "2001:db8::/32",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "2001:db8::1",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "2001:db8::1",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "portal.acme.example",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "portal.acme.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "*.acme.example",
+"subs": false,
+"ok": true,
+"kind": "wildcard",
+"value": "*.acme.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "corp.com",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "corp.com",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "ACME.Example",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "acme.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "portal.acme.example.",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "portal.acme.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "  203.0.113.10  ",
+"subs": false,
+"ok": true,
+"kind": "ipv4",
+"value": "203.0.113.10",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "!203.0.113.5",
+"subs": false,
+"ok": true,
+"kind": "ipv4",
+"value": "203.0.113.5",
+"included": false,
+"include_subdomains": false
+},
+{
+"raw": "-203.0.113.5",
+"subs": false,
+"ok": true,
+"kind": "ipv4",
+"value": "203.0.113.5",
+"included": false,
+"include_subdomains": false
+},
+{
+"raw": "! 203.0.113.5",
+"subs": false,
+"ok": true,
+"kind": "ipv4",
+"value": "203.0.113.5",
+"included": false,
+"include_subdomains": false
+},
+{
+"raw": "!*.acme.example",
+"subs": false,
+"ok": true,
+"kind": "wildcard",
+"value": "*.acme.example",
+"included": false,
+"include_subdomains": false
+},
+{
+"raw": "-",
+"subs": false,
+"ok": false
+},
+{
+"raw": "!",
+"subs": false,
+"ok": false
+},
+{
+"raw": "!!203.0.113.5",
+"subs": false,
+"ok": false
+},
+{
+"raw": "-corp.com",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "corp.com",
+"included": false,
+"include_subdomains": false
+},
+{
+"raw": "203.0.113.5/24",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "203.0.113.0/24",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "203.0.113.255/24",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "203.0.113.0/24",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "2001:db8::1/32",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "2001:db8::/32",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "10.1.2.3/8",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "10.0.0.0/8",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "203.0.113.10/32",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "203.0.113.10/32",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "2001:db8::1/128",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "2001:db8::1/128",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "0.0.0.0/0",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "0.0.0.0/0",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "::/0",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "::/0",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "203.0.113.0/255.255.255.0",
+"subs": false,
+"ok": true,
+"kind": "ipv4",
+"value": "203.0.113.0",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "2001:db8::/nonsense",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "2001:db8::",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "203.0.113.0/24/8",
+"subs": false,
+"ok": true,
+"kind": "ipv4",
+"value": "203.0.113.0",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "acme.example/24",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "acme.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "acme.example/path",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "acme.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "acme.example/",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "acme.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "/24",
+"subs": false,
+"ok": false
+},
+{
+"raw": "0/0",
+"subs": false,
+"ok": false
+},
+{
+"raw": "https://portal.acme.example/login",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "portal.acme.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "http://203.0.113.10:8080/x",
+"subs": false,
+"ok": false
+},
+{
+"raw": "https://203.0.113.0/24",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "203.0.113.0/24",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "203.0.113.0/33",
+"subs": false,
+"ok": false
+},
+{
+"raw": "2001:db8::/129",
+"subs": false,
+"ok": false
+},
+{
+"raw": "203.0.113.0/024",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "203.0.113.0/24",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "203.0.113.0/-1",
+"subs": false,
+"ok": true,
+"kind": "ipv4",
+"value": "203.0.113.0",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "203.0.113.0/ 24",
+"subs": false,
+"ok": true,
+"kind": "ipv4",
+"value": "203.0.113.0",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "203.0.113",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "203.0.113",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "203.0.113.256",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "203.0.113.256",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "010.0.0.1",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "010.0.0.1",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "1.2.3.04",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "1.2.3.04",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "1.2.3.4.5",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "1.2.3.4.5",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "1.2.3.-4",
+"subs": false,
+"ok": false
+},
+{
+"raw": "0.0.0.0",
+"subs": false,
+"ok": true,
+"kind": "ipv4",
+"value": "0.0.0.0",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "255.255.255.255",
+"subs": false,
+"ok": true,
+"kind": "ipv4",
+"value": "255.255.255.255",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "::",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "::",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "::1",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "::1",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "fe80::1%eth0",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "fe80::1%eth0",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "fe80::1%",
+"subs": false,
+"ok": false
+},
+{
+"raw": "2001:DB8::1",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "2001:db8::1",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "2001:db8:0:0:1:0:0:1",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "2001:db8::1:0:0:1",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "2001:0db8:0000:0000:0000:0000:0000:0001",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "2001:db8::1",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "::ffff:203.0.113.1",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "::ffff:203.0.113.1",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "1:2:3:4:5:6:7:8",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "1:2:3:4:5:6:7:8",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "1:2:3:4:5:6:7",
+"subs": false,
+"ok": false
+},
+{
+"raw": "1:2:3:4:5:6:7:8:9",
+"subs": false,
+"ok": false
+},
+{
+"raw": "1::2::3",
+"subs": false,
+"ok": false
+},
+{
+"raw": ":1:2:3:4:5:6:7",
+"subs": false,
+"ok": false
+},
+{
+"raw": "1:2:3:4:5:6:7:",
+"subs": false,
+"ok": false
+},
+{
+"raw": "::ffff:203.0.113.256",
+"subs": false,
+"ok": false
+},
+{
+"raw": "2001:db8::g",
+"subs": false,
+"ok": false
+},
+{
+"raw": "fe80::1%eth0/64",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "fe80::/64",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "*.com",
+"subs": false,
+"ok": false
+},
+{
+"raw": "*",
+"subs": false,
+"ok": false
+},
+{
+"raw": "*.*.acme.example",
+"subs": false,
+"ok": false
+},
+{
+"raw": "a.*.example",
+"subs": false,
+"ok": false
+},
+{
+"raw": "*acme.example",
+"subs": false,
+"ok": false
+},
+{
+"raw": "*.203.0.113.0",
+"subs": false,
+"ok": true,
+"kind": "wildcard",
+"value": "*.203.0.113.0",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "*.",
+"subs": false,
+"ok": false
+},
+{
+"raw": "*.a.b",
+"subs": false,
+"ok": true,
+"kind": "wildcard",
+"value": "*.a.b",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "_dmarc.acme.example",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "_dmarc.acme.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "x.acme.example",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "x.acme.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "-bad.example",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "bad.example",
+"included": false,
+"include_subdomains": false
+},
+{
+"raw": "bad-.example",
+"subs": false,
+"ok": false
+},
+{
+"raw": "a..b.example",
+"subs": false,
+"ok": false
+},
+{
+"raw": "localhost",
+"subs": false,
+"ok": false
+},
+{
+"raw": "xn--bcher-kva.example",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "xn--bcher-kva.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+"subs": false,
+"ok": false
+},
+{
+"raw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "acme.example:8443",
+"subs": false,
+"ok": false
+},
+{
+"raw": "acme example",
+"subs": false,
+"ok": false
+},
+{
+"raw": "acme.example?x=1",
+"subs": false,
+"ok": false
+},
+{
+"raw": "acme_example.com",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "acme_example.com",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "under_score.acme.example",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "under_score.acme.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "1.2.3.4.example",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "1.2.3.4.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "123.example",
+"subs": false,
+"ok": true,
+"kind": "fqdn",
+"value": "123.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "",
+"subs": false,
+"ok": false
+},
+{
+"raw": "   ",
+"subs": false,
+"ok": false
+},
+{
+"raw": "\t",
+"subs": false,
+"ok": false
+},
+{
+"raw": "https://",
+"subs": false,
+"ok": false
+},
+{
+"raw": "://x",
+"subs": false,
+"ok": false
+},
+{
+"raw": "#comment",
+"subs": false,
+"ok": false
+},
+{
+"raw": "10.0.0.0 - 10.0.0.255",
+"subs": false,
+"ok": false
+},
+{
+"raw": "::ffff:203.0.113.1",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "::ffff:203.0.113.1",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "::ffff:cb00:7101",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "::ffff:203.0.113.1",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "::ffff:0.0.0.0",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "::ffff:0.0.0.0",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "::ffff:0:0",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "::ffff:0.0.0.0",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "0:0:0:0:0:ffff:1:2",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "::ffff:0.1.0.2",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "::fffe:1.2.3.4",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "::fffe:102:304",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "::ffff:0:0:0",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "::ffff:0:0:0",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "::ffff:203.0.113.1%eth0",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "::ffff:203.0.113.1%eth0",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "::ffff:1.2.3.4/96",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "::ffff:0.0.0.0/96",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "::ffff:1.2.3.4/120",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "::ffff:1.2.3.0/120",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "fe80::%eth0/64",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "fe80::%eth0/64",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "fe80::1%eth0/64",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "fe80::/64",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "fe80::%eth0/128",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "fe80::%eth0/128",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "fe80::1%eth0/128",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "fe80::1%eth0/128",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "fe80::%eth0/0",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "::/0",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "2001:db8::%x/32",
+"subs": false,
+"ok": true,
+"kind": "cidr",
+"value": "2001:db8::%x/32",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "2001:db8:0:0:1:0:0:1",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "2001:db8::1:0:0:1",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "1:0:0:2:0:0:0:3",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "1:0:0:2::3",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "0:0:1:0:0:0:0:1",
+"subs": false,
+"ok": true,
+"kind": "ipv6",
+"value": "0:0:1::1",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "portal.acme.example",
+"subs": true,
+"ok": true,
+"kind": "fqdn",
+"value": "portal.acme.example",
+"included": true,
+"include_subdomains": true
+},
+{
+"raw": "acme.example",
+"subs": true,
+"ok": true,
+"kind": "fqdn",
+"value": "acme.example",
+"included": true,
+"include_subdomains": true
+},
+{
+"raw": "ACME.Example",
+"subs": true,
+"ok": true,
+"kind": "fqdn",
+"value": "acme.example",
+"included": true,
+"include_subdomains": true
+},
+{
+"raw": "!portal.acme.example",
+"subs": true,
+"ok": true,
+"kind": "fqdn",
+"value": "portal.acme.example",
+"included": false,
+"include_subdomains": true
+},
+{
+"raw": "-corp.com",
+"subs": true,
+"ok": true,
+"kind": "fqdn",
+"value": "corp.com",
+"included": false,
+"include_subdomains": true
+},
+{
+"raw": "*.acme.example",
+"subs": true,
+"ok": true,
+"kind": "wildcard",
+"value": "*.acme.example",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "203.0.113.0/24",
+"subs": true,
+"ok": true,
+"kind": "cidr",
+"value": "203.0.113.0/24",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "203.0.113.10",
+"subs": true,
+"ok": true,
+"kind": "ipv4",
+"value": "203.0.113.10",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "2001:db8::1",
+"subs": true,
+"ok": true,
+"kind": "ipv6",
+"value": "2001:db8::1",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "2001:db8::/32",
+"subs": true,
+"ok": true,
+"kind": "cidr",
+"value": "2001:db8::/32",
+"included": true,
+"include_subdomains": false
+},
+{
+"raw": "https://portal.acme.example/login",
+"subs": true,
+"ok": true,
+"kind": "fqdn",
+"value": "portal.acme.example",
+"included": true,
+"include_subdomains": true
+},
+{
+"raw": "portal.acme.example.",
+"subs": true,
+"ok": true,
+"kind": "fqdn",
+"value": "portal.acme.example",
+"included": true,
+"include_subdomains": true
+},
+{
+"raw": "not a host!!",
+"subs": true,
+"ok": false
+},
+{
+"raw": "",
+"subs": true,
+"ok": false
+}
+]
