@@ -148,7 +148,17 @@ export function HealthView() {
   const dr = h.drones
 
   return (
-    <Box sx={{ p: 2 }}>
+    // Scrolls itself. The app shell sets `overflow: hidden` on body
+    // because every other view is a grid that scrolls its own viewport
+    // — but this one is a document: cards, then an audit table that is
+    // 520px tall the moment it is expanded. Without a scroller of its
+    // own, everything past the fold was simply unreachable.
+    //
+    // `minHeight: 0` as well as the overflow, or the flex parent in
+    // App.tsx sizes this to its content and there is nothing to
+    // scroll: a flex child's default `min-height: auto` refuses to
+    // shrink below its contents, so the overflow never triggers.
+    <Box sx={{ p: 2, flex: 1, minHeight: 0, overflowY: 'auto' }}>
       <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1.5 }}>
         <Typography sx={{
           fontFamily: `'Orbitron', sans-serif`, fontSize: 13, letterSpacing: '0.18em',
