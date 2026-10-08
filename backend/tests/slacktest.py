@@ -55,6 +55,10 @@ SLACK_DOWN = False
 #: Who is in the fake workspace. Anyone absent fails to resolve, which
 #: is what the "a failed invite is reported" check depends on.
 MEMBERS = ["wsu-person"]
+#: The bot's own Slack id, as `auth.test` reports it.
+BOT_ID = "UBOTSELF"
+#: What `conversations.replies` hands back, set per assertion below.
+THREAD: list[dict] = []
 
 
 class Fake(BaseHTTPRequestHandler):
@@ -66,6 +70,13 @@ class Fake(BaseHTTPRequestHandler):
         method = self.path.rsplit("/", 1)[-1]
         if method == "apps.connections.open":
             out = {"ok": True, "url": WS_URL}
+        elif method == "auth.test":
+            # Who the bot is. The inbound half refuses to answer at all
+            # without this: every loop-safety rule is anchored on being
+            # able to tell our own voice from everyone else's.
+            out = {"ok": True, "user_id": BOT_ID, "user": "oddjob"}
+        elif method == "conversations.replies":
+            out = {"ok": True, "messages": list(THREAD)}
         elif method == "conversations.info":
             out = {"ok": True, "channel": {"id": body.get("channel"),
                                            "name": CHANNEL_NAME}}
@@ -302,6 +313,15 @@ _ws_ready = _th.Event()
 
 
 SEND_MENTION = _th.Event()
+#: Events the test wants delivered, appended as each assertion needs one.
+#: A queue rather than a single flag, so the inbound half can be driven
+#: through more than one case per connection.
+OUTBOX: list[dict] = []
+
+
+def deliver(envelope_id, **event):
+    OUTBOX.append({"type": "events_api", "envelope_id": envelope_id,
+                   "payload": {"event": event}})
 
 
 async def _ws_handler(conn):
@@ -312,17 +332,12 @@ async def _ws_handler(conn):
         # mention assertion do not race each other.
         while not SEND_MENTION.is_set():
             await _aio.sleep(0.1)
-        await conn.send(_json.dumps({
-            "type": "events_api",
-            "envelope_id": "env-1",
-            "payload": {"event": {
-                "type": "app_mention",
-                "channel": "C999",
-                "ts": "1700000000.0001",
-                "user": "U42",
-                "text": "<@UBOT> how many targets does this engagement have?",
-            }},
-        }))
+        sent = 0
+        while True:
+            while sent < len(OUTBOX):
+                await conn.send(_json.dumps(OUTBOX[sent]))
+                sent += 1
+            await _aio.sleep(0.1)
 
     task = _aio.create_task(pusher())
     try:
@@ -377,8 +392,25 @@ if _HAVE_WS:
     check("the worker connects to Slack over the websocket", status is not None,
           str(status))
 
+    def arrives(within=25.0):
+        """Wait for one posted message, or None. Clears as it goes."""
+        end = time.time() + within
+        while time.time() < end:
+            if POSTED:
+                return POSTED[0]
+            time.sleep(0.2)
+        return None
+
+    def nothing_arrives(seconds=4.0):
+        """The opposite claim, and the one the loop safety rests on."""
+        time.sleep(seconds)
+        return not POSTED
+
     if status:
         POSTED.clear()
+        deliver("env-1", type="app_mention", channel="C999",
+                ts="1700000000.0001", user="U42",
+                text=f"<@{BOT_ID}> how many targets does this engagement have?")
         SEND_MENTION.set()
         # Acked first, then answered: Slack retries anything not
         # acknowledged within a few seconds and a model call is slower
@@ -388,23 +420,91 @@ if _HAVE_WS:
             time.sleep(0.2)
         check("the mention envelope is acknowledged", ACKED == ["env-1"], str(ACKED))
 
-        reply = sent("", within=25) if False else None
-        end = time.time() + 25
-        while time.time() < end and not POSTED:
-            time.sleep(0.2)
-        check("and a reply is posted", bool(POSTED), str(POSTED)[:160])
-        if POSTED:
-            r0 = POSTED[0]
+        r0 = arrives()
+        check("and a reply is posted", bool(r0), str(POSTED)[:160])
+        if r0:
             check("in the thread the question was asked in",
                   r0.get("thread_ts") == "1700000000.0001", str(r0.get("thread_ts")))
             check("to the channel it came from", r0.get("channel") == "C999",
                   str(r0.get("channel")))
-            # No model is configured in the test environment, so the
-            # honest answer is that it cannot answer — which still
-            # proves the whole inbound path ran.
-            check("and says why it cannot answer rather than staying silent",
-                  "configured" in (r0.get("text") or "").lower(),
-                  str(r0.get("text"))[:140])
+            # U42 is in the channel and is nobody in Oddjob. This is the
+            # whole inbound security posture in one assertion: being
+            # present in a Slack channel buys you nothing.
+            check("an unlinked sender is told to link their account and no more",
+                  "link" in (r0.get("text") or "").lower()
+                  and "oddjob" in (r0.get("text") or "").lower(),
+                  str(r0.get("text"))[:200])
+            check("and the refusal carries none of the engagement's data",
+                  "slk.example" not in (r0.get("text") or ""),
+                  str(r0.get("text"))[:200])
+
+        # A message with no mention in the channel. Nothing may happen:
+        # answering conversations we were not addressed in is the failure
+        # that gets a bot muted, and it is asserted as an ABSENCE.
+        POSTED.clear()
+        deliver("env-2", type="message", channel="C999", ts="1700000001.0001",
+                user="U42", text="how many targets does this engagement have?")
+        check("a channel message with no mention is not answered at all",
+              nothing_arrives(), str(POSTED)[:200])
+
+        # Our own voice coming back. The one that turns a channel into a
+        # loop if it is ever answered.
+        POSTED.clear()
+        deliver("env-3", type="message", channel="C999", ts="1700000002.0001",
+                user=BOT_ID, text=f"<@{BOT_ID}> what about now?")
+        check("the bot never answers itself", nothing_arrives(), str(POSTED)[:200])
+
+        POSTED.clear()
+        deliver("env-4", type="message", channel="C999", ts="1700000003.0001",
+                user="U43", bot_id="B7", text=f"<@{BOT_ID}> and now?")
+        check("nor another bot", nothing_arrives(), str(POSTED)[:200])
+
+        POSTED.clear()
+        deliver("env-5", type="message", subtype="message_changed",
+                channel="C999", ts="1700000004.0001", user="U42",
+                text=f"<@{BOT_ID}> rewritten after the fact")
+        check("nor an edit of a message it already saw",
+              nothing_arrives(), str(POSTED)[:200])
+
+        # The same mention twice — Slack redelivering an envelope it did
+        # not see acked. Exactly one reply.
+        POSTED.clear()
+        deliver("env-6", type="app_mention", channel="C999",
+                ts="1700000005.0001", user="U42", text=f"<@{BOT_ID}> hello?")
+        deliver("env-6b", type="app_mention", channel="C999",
+                ts="1700000005.0001", user="U42", text=f"<@{BOT_ID}> hello?")
+        arrives()
+        time.sleep(3.0)
+        check("a redelivered envelope is answered once, not twice",
+              len(POSTED) == 1, str(len(POSTED)))
+
+        # A thread reply with no mention, in a thread the bot is in. The
+        # thread is fetched whole — the fake serves THREAD — and answered.
+        POSTED.clear()
+        THREAD[:] = [{"user": "U42", "ts": "1700000000.0001",
+                      "text": f"<@{BOT_ID}> how many targets?"},
+                     {"user": BOT_ID, "ts": "1700000000.0002",
+                      "text": "I cannot answer that yet"},
+                     {"user": "U42", "ts": "1700000006.0001",
+                      "text": "and which are alive?"}]
+        deliver("env-7", type="message", channel="C999", ts="1700000006.0001",
+                thread_ts="1700000000.0001", user="U42",
+                text="and which are alive?")
+        r7 = arrives()
+        check("a follow-up in a thread it is in needs no second mention",
+              bool(r7), str(POSTED)[:200])
+        if r7:
+            check("and the answer still goes in that thread",
+                  r7.get("thread_ts") == "1700000000.0001",
+                  str(r7.get("thread_ts")))
+
+        # The same thread, but the reply is aimed at a person.
+        POSTED.clear()
+        deliver("env-8", type="message", channel="C999", ts="1700000007.0001",
+                thread_ts="1700000000.0001", user="U42",
+                text="<@U77> can you take a look?")
+        check("but a thread reply addressed to someone else is left alone",
+              nothing_arrives(), str(POSTED)[:200])
 else:
     check("websockets is installed", False, "cannot exercise socket mode")
 

@@ -126,6 +126,22 @@ async def _call(token: str, method: str, payload: dict) -> dict:
             return {"ok": False, "error": f"non-JSON reply ({r.status_code})"}
 
 
+async def call(token: str, method: str, payload: dict) -> dict:
+    """One Slack API call, as a dict. Never raises.
+
+    The inbound half (`slackchat.py`) needs `auth.test`,
+    `conversations.info` and `conversations.replies`, none of which has
+    a wrapper here and none of which deserves one — they are reads with
+    no formatting to do. This is `_call` with its exceptions turned into
+    the same `{"ok": false, "error": …}` shape Slack itself returns for
+    a refusal, so one branch handles both.
+    """
+    try:
+        return await _call(token, method, payload)
+    except Exception as e:                       # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}
+
+
 async def post(token: str | None, channel: str | None, text: str,
                thread_ts: str | None = None,
                blocks: list[dict[str, Any]] | None = None) -> Posted:
