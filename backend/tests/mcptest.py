@@ -430,8 +430,11 @@ check("no targets is caught here, not by the server",
 sw = run(M.enumerate_drones("MCPT", "httpx",
                             "web.acme.example 198.51.100.11 bad.corp.com"))
 check("a sweep queues one task per host", sw.get("queued") == 2, sw)
+refused = sw.get("refused", {})
+if not isinstance(refused, dict):
+    refused = {}
 check("...and names what scope refused rather than failing the batch",
-      "bad.corp.com" in sw.get("refused", {}), sw.get("refused"))
+      "bad.corp.com" in refused, refused)
 
 q = run(M.drone_queue("MCPT"))
 check("drone_queue shows the waiting work", q["total"] == 3, q)
