@@ -182,6 +182,7 @@ drone run --server https://oddjob.internal --enroll-token drone_...
 | `--call-in-key` | `DRONE_CALL_IN_KEY` | for call-in mode |
 | `--advertise` | `DRONE_ADVERTISE` | URL Oddjob should use to reach `--listen` |
 | `--workdir` | `DRONE_WORKDIR` | identity and spool live here |
+| `--public-ip-url` | `DRONE_PUBLIC_IP_URL` | asked once at registration what our public address is; `off` to ask nobody |
 | `--name` | | what it is called in the UI |
 | `--regions` | | comma-separated, for `geo` routing |
 | `--heartbeat` | | default 15s |
@@ -211,8 +212,39 @@ drone check      # what this host can do, as JSON, and exit
 ```
 
 Reports the platform, whether raw sockets are available, which tools are
-present and which are missing — without enrolling, connecting or sending
-anything.
+present and which are missing — without enrolling or contacting Oddjob.
+
+It does make one request of its own: to `ifconfig.me`, asking what this
+host's traffic looks like from outside. That is the only answer that
+survives NAT and containers, and the routing table cannot produce it.
+Nothing but the bare request is sent, but it *is* a connection to a
+third party from the client's network, so it is switchable off:
+
+```bash
+DRONE_PUBLIC_IP_URL=off drone check    # or --public-ip-url ''
+```
+
+### Which machine is which
+
+Two pairs of fields, because in each pair the two halves answer
+different questions and they disagree in exactly the cases that matter.
+
+`platform` is `runtime.GOOS` — what the binary is. `host_platform` is
+the machine underneath: a Linux container on WSL2 on a Windows Server
+VM reports `platform: linux`, `host_platform: windows`, rendered
+`linux (container on windows)`. When the host cannot be determined —
+inside Docker Desktop's LinuxKit VM, for instance, which looks the same
+on macOS and on Windows — `host_platform` is **empty**, not guessed.
+`host_platform_source` carries the evidence so the claim can be checked.
+
+`outbound_ip` is the address, and `outbound_ip_source` is where the
+number came from: `public-service` (asked from outside), `host-route`
+(this host's routing table), `container-host-netns` (a container
+sharing the host's namespace, so still the host's address),
+`container-internal` (the container's own address, which means nothing
+outside this machine), `interface`, or `unknown`. Read the address
+without the source and a `172.17.0.3` looks exactly like a real egress
+address.
 
 ---
 
