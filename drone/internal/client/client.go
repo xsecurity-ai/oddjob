@@ -64,6 +64,9 @@ func New(base, key string, insecure bool) *Client {
 
 // Register tells the server what this agent is. Idempotent.
 type RegisterReq struct {
+	//: runtime.GOOS: what this binary is. Correct for choosing a
+	//: binary or an install snippet, and the wrong answer to "which
+	//: machine is the Windows one" — see HostPlatform.
 	Platform   string            `json:"platform"`
 	Arch       string            `json:"arch"`
 	Version    string            `json:"version"`
@@ -79,8 +82,28 @@ type RegisterReq struct {
 	//: What the agent sees of itself. The server only ever sees the
 	//: last hop the connection came from, which behind NAT or a
 	//: tunnel is not the agent at all.
-	OutboundIP string   `json:"outbound_ip,omitempty"`
-	Interfaces []string `json:"interfaces,omitempty"`
+	OutboundIP string `json:"outbound_ip,omitempty"`
+	//: How OutboundIP was arrived at: an external service, the local
+	//: routing table, or a container's private namespace. Sent because
+	//: the three are not interchangeable and the number alone cannot
+	//: be told apart — a container address used to arrive here looking
+	//: exactly like an egress address.
+	OutboundIPSource string `json:"outbound_ip_source,omitempty"`
+	//: What qualifies it: which lookup failed, what the address is
+	//: not. Prose, for a tooltip rather than a column.
+	OutboundIPNote string   `json:"outbound_ip_note,omitempty"`
+	Interfaces     []string `json:"interfaces,omitempty"`
+	//: The OS of the machine underneath, where that differs from
+	//: Platform: a Linux container on WSL2 on Windows Server reports
+	//: platform=linux, host_platform=windows. Empty when it could not
+	//: be determined, which is deliberately distinct from "linux".
+	HostPlatform string `json:"host_platform,omitempty"`
+	//: The evidence for HostPlatform, so the claim can be checked.
+	HostPlatformSource string `json:"host_platform_source,omitempty"`
+	//: The container runtime this agent is inside, empty if none was
+	//: detected. Absence of a marker is not proof of absence of a
+	//: container.
+	Container string `json:"container,omitempty"`
 }
 
 type RegisterResp struct {

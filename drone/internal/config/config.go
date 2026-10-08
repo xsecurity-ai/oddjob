@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/xsecurity-ai/oddjob/drone/internal/recon"
 )
 
 // Version is stamped at build time with -ldflags.
@@ -63,6 +65,19 @@ type Config struct {
 	// AllowPlaintext permits a non-loopback http:// server. Opt-in and
 	// announced, because the thing it gives up is quiet.
 	AllowPlaintext bool
+
+	// PublicIPURL is the service asked, once at registration, what
+	// this host's traffic looks like from outside. Nothing but the
+	// bare request is sent, and the answer is the only one that
+	// survives NAT — the routing table cannot see past the first hop,
+	// and in a container it cannot see past the container.
+	//
+	// Settable so it can be pointed at infrastructure of our own, and
+	// emptiable (DRONE_PUBLIC_IP_URL=off) because on a quiet
+	// engagement a single connection to a third party may be more
+	// exposure than the address is worth. Empty falls straight to the
+	// local answer, labelled as local.
+	PublicIPURL string
 }
 
 // hasSavedIdentity reports whether a previous run already enrolled.
@@ -148,11 +163,12 @@ func Defaults() *Config {
 		host = "drone"
 	}
 	return &Config{
-		Name:       fmt.Sprintf("%s-%s", host, runtime.GOOS),
-		Heartbeat:  15 * time.Second,
-		Listen:     "",
-		WorkDir:    defaultWorkDir(),
-		MaxSilence: 12 * time.Hour,
+		Name:        fmt.Sprintf("%s-%s", host, runtime.GOOS),
+		Heartbeat:   15 * time.Second,
+		Listen:      "",
+		WorkDir:     defaultWorkDir(),
+		MaxSilence:  12 * time.Hour,
+		PublicIPURL: recon.DefaultPublicIPURL,
 	}
 }
 
@@ -202,6 +218,18 @@ func (c *Config) FromEnv() {
 	}
 	if c.Advertise == "" {
 		c.Advertise = env("ADVERTISE")
+	}
+	// Same rule again, and "off" is spelled out rather than being the
+	// empty string: an empty DRONE_PUBLIC_IP_URL is indistinguishable
+	// from an unset one, and "I did not set this" must not silently
+	// mean "I turned this off".
+	if v := env("PUBLIC_IP_URL"); v != "" && c.PublicIPURL == Defaults().PublicIPURL {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "off", "none", "disabled":
+			c.PublicIPURL = ""
+		default:
+			c.PublicIPURL = v
+		}
 	}
 	// Same rule as WORKDIR: the environment only fills what the flag
 	// left at its default. "0" is a deliberate value here, meaning
