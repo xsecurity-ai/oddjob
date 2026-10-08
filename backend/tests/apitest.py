@@ -164,15 +164,18 @@ print("\n== unknown api path 404s as JSON ==")
 st, body = call("/api/definitely-not-a-thing")
 check("404 not HTML", st == 404, f"status={st}")
 
-print("\n== a trailing slash on an api path is tolerated, not 404'd ==")
+print("\n== a trailing slash on an api path is SERVED, not redirected ==")
 # `/api/agents/?project=X` read as "no such endpoint" while
-# `/api/agents` worked, because the SPA catch-all matched first and
-# swallowed the redirect FastAPI would otherwise have issued.
+# `/api/agents` worked: the SPA catch-all matched first and swallowed
+# the redirect FastAPI would otherwise have issued.
 #
-# The reason this matters more than a tidy 404: a 301 cached by a
-# browser outlives whatever produced it. A client that cached the
-# slashed form keeps asking for it, and no amount of fixing the server
-# reaches that client unless the slashed form is answered.
+# Redirecting was the obvious fix and it was wrong. What produced the
+# slashed URL was a proxy emitting a 301 -- and a 301 is PERMANENT, so
+# browsers cache it and keep replaying it after the proxy is fixed.
+# Answering with a redirect back gives the browser two redirects
+# pointing at each other, which is ERR_TOO_MANY_REDIRECTS and reaches
+# a fetch() as "Failed to fetch". Serving the path leaves nothing to
+# loop against.
 import urllib.request as _ur                                        # noqa: E402
 
 _noredir = _ur.build_opener(type("NoRedirect", (_ur.HTTPRedirectHandler,), {
@@ -180,9 +183,6 @@ _noredir = _ur.build_opener(type("NoRedirect", (_ur.HTTPRedirectHandler,), {
 
 
 def _raw_status(path):
-    # Authenticated, because the gatekeeper allowlists the UNSLASHED
-    # form only and would answer 401 before the route is reached. The
-    # real case is an authenticated browser, which is exactly this.
     rq = urllib.request.Request(BASE + path)
     rq.add_header("Authorization", f"Bearer {TOKEN}")
     try:
@@ -193,21 +193,21 @@ def _raw_status(path):
 
 
 _st, _loc = _raw_status("/api/stats/")
-check("a slashed api path redirects rather than 404ing",
-      _st in (307, 308), f"status={_st}")
-check("to the same path without the slash",
-      (_loc or "").endswith("/api/stats"), str(_loc))
-# 307 and not 302: an enrolment POST that silently became a GET would
-# look like the endpoint rejecting the body.
-check("with a status that preserves the method", _st == 307, f"status={_st}")
+check("a slashed api path is served directly", _st == 200, f"status={_st}")
+check("and does NOT redirect — a cached 301 pointing the other way "
+      "would make that an infinite loop", _loc is None, str(_loc))
 
-_st, _loc = _raw_status("/api/stats/?project=APITEST")
-check("and carries the query string through",
-      (_loc or "").endswith("/api/stats?project=APITEST"), str(_loc))
+_st, _ = _raw_status("/api/stats/?project=APITEST")
+check("the query string survives the rewrite", _st == 200, f"status={_st}")
 
-# Still a 404 when there is genuinely nothing there — one hop, no loop.
+# Still 404 when there is genuinely nothing there.
 st, _ = call("/api/definitely-not-a-thing/")
 check("a slashed path that does not exist still 404s", st == 404,
+      f"status={st}")
+# The gate matches exact paths, so normalising has to happen OUTSIDE it
+# or a slashed public path is refused before it is ever routed.
+st, _ = call("/api/auth/setup-required/")
+check("and the gatekeeper sees the normalised path too", st == 200,
       f"status={st}")
 
 print(f"\n{'='*52}\n  {ok} passed, {fail} failed\n{'='*52}")
