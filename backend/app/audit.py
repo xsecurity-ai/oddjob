@@ -55,7 +55,7 @@ DEFAULT_RETAIN_DAYS = 7
 #: `/api/auth/magic/<redacted>` and keeps its shape for reading.
 _SECRET_PREFIXES = (
     "/api/auth/magic/",
-    "/api/agents/enroll/",
+    "/api/ghosts/enroll/",
 )
 
 #: Anything that LOOKS like a credential wherever it appears. The prefix
@@ -63,7 +63,7 @@ _SECRET_PREFIXES = (
 #: this is the backstop: long opaque segments, and the two key formats
 #: this application issues.
 _SECRETISH = re.compile(
-    r"^(?:drone_[A-Za-z0-9_\-]+"          # agent keys
+    r"^(?:ghost_[A-Za-z0-9_\-]+"          # agent keys
     r"|ojk_[A-Za-z0-9_\-]+"              # api keys
     r"|[A-Za-z0-9_\-]{24,})$"            # any long opaque blob
 )

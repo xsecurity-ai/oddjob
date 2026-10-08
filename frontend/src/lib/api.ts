@@ -281,12 +281,12 @@ export interface UnknownHost {
 }
 export interface HostDecision { action: 'add' | 'map' | 'reject'; target?: string }
 
-/** A Drone instance. Bound to exactly one project, for its whole life. */
-/** A task as the tasks table shows it. Distinct from `DroneTask`,
+/** A Ghost instance. Bound to exactly one project, for its whole life. */
+/** A task as the tasks table shows it. Distinct from `GhostTask`,
  *  which is the per-agent record: this one carries the pooled tasks
  *  no agent owns, and the words an operator reads rather than the
  *  words the column stores. */
-export interface DroneTaskRow {
+export interface GhostTaskRow {
   id: number
   kind: string
   subject: string
@@ -307,7 +307,7 @@ export interface DroneTaskRow {
   requested_by: string | null
 }
 
-export interface DroneAgent {
+export interface GhostAgent {
   id: number
   project_code: string
   name: string
@@ -326,11 +326,11 @@ export interface DroneAgent {
    *  until it has reported. */
   capacity: number | null
   capacity_reason: string | null
-  /** The effective limit: the operator's per-drone override if set,
+  /** The effective limit: the operator's per-ghost override if set,
    *  otherwise the agent's own assessment, with the project ceiling
    *  on top of either. What the dispatcher honours. */
   max_parallel: number
-  /** The operator's number for this one drone, null when the agent is
+  /** The operator's number for this one ghost, null when the agent is
    *  deciding. Separate from `max_parallel`, which is the result —
    *  they differ whenever the project ceiling is the binding one, and
    *  a box showing 5 when somebody typed 8 is how a control stops
@@ -344,7 +344,7 @@ export interface DroneAgent {
   outbound_ip: string | null
   /** How it got there: public-service, host-route,
    *  container-host-netns, container-internal, interface, unknown.
-   *  Null from a Drone too old to say. The six are not
+   *  Null from a Ghost too old to say. The six are not
    *  interchangeable — `container-internal` is a private address that
    *  will appear in nobody's logs — and they are all the same shape,
    *  so the label is the only thing that tells them apart. */
@@ -385,7 +385,7 @@ export interface DroneAgent {
 }
 /** Shown once, at enrollment. None of it is recoverable afterwards. */
 export interface AgentEnrolled {
-  agent: DroneAgent
+  agent: GhostAgent
   callback_key: string
   call_in_key: string
   /** One-time. The agent trades it for a keypair it generates itself. */
@@ -395,7 +395,7 @@ export interface AgentEnrolled {
    *  take tasking from this instance. */
   server_public_key: string
 }
-export interface DroneRouting {
+export interface GhostRouting {
   mode: 'mesh' | 'primary' | 'geo'
   /** Who is serving right now in primary mode. Derived from live
    *  heartbeats — an observation, not a setting. */
@@ -408,7 +408,7 @@ export interface DroneRouting {
    *  the two is what runs. */
   max_parallel: number
 }
-export interface DroneTask {
+export interface GhostTask {
   id: number
   agent_id: number
   project_code: string
@@ -424,7 +424,7 @@ export interface DroneTask {
   started_at: string | null
   finished_at: string | null
 }
-export const DRONE_KINDS = ['nmap', 'masscan', 'amass', 'gobuster', 'nuclei',
+export const GHOST_KINDS = ['nmap', 'masscan', 'amass', 'gobuster', 'nuclei',
   'httpx', 'nslookup', 'reverse_ip'] as const
 export interface WebPacket {
   id: number; url: string; method: string | null; status_code: number | null
@@ -770,18 +770,18 @@ export const api = {
   /** Every task on the engagement, newest first. The per-agent list
    *  answers "what has this scanner done"; this answers "what is
    *  happening here", which is the question with a queue in it. */
-  droneTasks: (project: string) =>
-    req<DroneTaskRow[]>('/api/agents/tasks' + qs({ project })),
+  ghostTasks: (project: string) =>
+    req<GhostTaskRow[]>('/api/agents/tasks' + qs({ project })),
 
   /** Put a failed task back in the queue by hand. The automatic retry
    *  stops after two; this is what happens once a person has looked. */
-  retryDroneTask: (project: string, id: number) =>
-    req<DroneTaskRow>(`/api/agents/tasks/${id}/retry` + qs({ project }),
+  retryGhostTask: (project: string, id: number) =>
+    req<GhostTaskRow>(`/api/agents/tasks/${id}/retry` + qs({ project }),
                   { method: 'POST' }),
 
   /** Everything waiting to run on this project, oldest first — the
    *  pool and work addressed to one agent that has not taken it. */
-  droneQueue: (project: string) => req<Array<{
+  ghostQueue: (project: string) => req<Array<{
     id: number; kind: string; subject: string
     args: Record<string, unknown>
     agent_id: number | null; agent_name: string | null
@@ -792,7 +792,7 @@ export const api = {
   /** Take a queued task back out. Refused once an agent has it: the
    *  scan is already running and deleting the row would only lose the
    *  result. */
-  cancelDroneTask: (project: string, id: number) =>
+  cancelGhostTask: (project: string, id: number) =>
     req<void>(`/api/agents/tasks/${id}` + qs({ project }),
               { method: 'DELETE' }),
 
@@ -937,10 +937,10 @@ export const api = {
     req<Target>(`/api/targets/${encodeURIComponent(project)}/${encodeURIComponent(host)}`,
       { method: 'PATCH', body: JSON.stringify(body) }),
 
-  // Drone agents. Every call is project-scoped because an agent is:
+  // Ghost agents. Every call is project-scoped because an agent is:
   // enrolled into one project, tasked only from that project, and its
   // results import only there.
-  agents: (project: string) => req<DroneAgent[]>('/api/agents' + qs({ project })),
+  agents: (project: string) => req<GhostAgent[]>('/api/agents' + qs({ project })),
   enrollAgent: (project: string, body: {
     name: string; connection_mode?: string; target_os?: string; notes?: string
   }) =>
@@ -951,12 +951,12 @@ export const api = {
    *  regions only in `geo`. */
   patchAgent: (project: string, id: number, body: {
     name?: string; priority?: number; regions?: string; notes?: string
-    /** Tasks this drone may run at once. `0` clears the override and
+    /** Tasks this ghost may run at once. `0` clears the override and
      *  hands the decision back to the agent — `undefined` means "not
      *  supplied", so there has to be an explicit value for "undo". */
     parallel_override?: number
   }) =>
-    req<DroneAgent>(`/api/agents/${id}` + qs({ project }),
+    req<GhostAgent>(`/api/agents/${id}` + qs({ project }),
       { method: 'PATCH', body: JSON.stringify(body) }),
   /** Rotate an agent's keys, keeping its record and history.
    *
@@ -965,7 +965,7 @@ export const api = {
    *  the agent is dead until someone redeems the returned token on
    *  the host. The response says what to do there. */
   reenrollAgent: (project: string, id: number) => req<{
-    agent: DroneAgent
+    agent: GhostAgent
     enroll_token: string
     enroll_expires_at: string
     server_public_key: string
@@ -976,30 +976,30 @@ export const api = {
   /** Stop it. Keeps the agent and everything it found; see the backend
    *  route for why this is not a delete. */
   killAgent: (project: string, id: number) =>
-    req<DroneAgent>(`/api/agents/${id}/kill` + qs({ project }), { method: 'POST' }),
+    req<GhostAgent>(`/api/agents/${id}/kill` + qs({ project }), { method: 'POST' }),
   deleteAgent: (project: string, id: number) =>
     req<void>(`/api/agents/${id}` + qs({ project }), { method: 'DELETE' }),
 
-  droneDownloads: () => req<{
+  ghostDownloads: () => req<{
     builds: Array<{ os: string; arch: string; name: string
                     available: boolean; bytes: number }>
     any: boolean
   }>('/api/agents/downloads'),
   /** The binary itself is a normal authenticated GET; the cookie goes
    *  with it, so a plain link works and the browser streams it. */
-  droneDownloadUrl: (goos: string, arch: string) =>
+  ghostDownloadUrl: (goos: string, arch: string) =>
     `/api/agents/download/${encodeURIComponent(goos)}/${encodeURIComponent(arch)}`,
   reachAgent: (project: string, id: number) =>
     req<{ ok: boolean; detail: string; status: Record<string, unknown> | null }>(
       `/api/agents/${id}/reach` + qs({ project }), { method: 'POST' }),
 
-  droneRouting: (project: string) =>
-    req<DroneRouting>('/api/agents/routing' + qs({ project })),
+  ghostRouting: (project: string) =>
+    req<GhostRouting>('/api/agents/routing' + qs({ project })),
   /** Either field alone: changing the parallelism must not require
    *  restating the routing mode. */
-  setDroneRouting: (project: string,
+  setGhostRouting: (project: string,
                    body: { mode?: string; max_parallel?: number }) =>
-    req<DroneRouting>('/api/agents/routing' + qs({ project }),
+    req<GhostRouting>('/api/agents/routing' + qs({ project }),
       { method: 'PUT', body: JSON.stringify(body) }),
   /** One task per subject, created server-side in one request.
    *
@@ -1017,16 +1017,16 @@ export const api = {
                                region: region || undefined }) }),
 
   /** Queue for the project rather than a named agent, so the routing
-   *  mode decides which Drone runs it. */
+   *  mode decides which Ghost runs it. */
   queuePooledTask: (project: string, kind: string,
                     args: Record<string, unknown>, region?: string) =>
-    req<DroneTask>('/api/agents/tasks' + qs({ project }),
+    req<GhostTask>('/api/agents/tasks' + qs({ project }),
       { method: 'POST', body: JSON.stringify({ kind, args, region }) }),
 
   agentTasks: (project: string, id: number, limit = 50) =>
-    req<DroneTask[]>(`/api/agents/${id}/tasks` + qs({ project, limit })),
+    req<GhostTask[]>(`/api/agents/${id}/tasks` + qs({ project, limit })),
   queueTask: (project: string, id: number, kind: string, args: Record<string, unknown>) =>
-    req<DroneTask>(`/api/agents/${id}/tasks` + qs({ project }),
+    req<GhostTask>(`/api/agents/${id}/tasks` + qs({ project }),
       { method: 'POST', body: JSON.stringify({ kind, args }) }),
   // The step that makes a scan count: a result arrives with no operator
   // attached, so anything the project has not seen is surveyed and
@@ -1119,7 +1119,7 @@ export const api = {
   // that does not merge. Consumers derive them with
   // `Awaited<ReturnType<typeof api.enumeratePending>>[number]`.
 
-  /** Finished Drone lookups whose answer the inventory does not carry yet.
+  /** Finished Ghost lookups whose answer the inventory does not carry yet.
    *
    *  The raw task output is not on TaskOut and should not be — the agent
    *  list would then haul every scan's output — so the server reads it
@@ -1413,7 +1413,7 @@ export interface HealthBlock {
  *  describe` string from before that reports `v0.1.0-14-gdeadbee`.
  *  Those rows sort to the bottom and are shown as unorderable rather
  *  than as the oldest version, because they are not comparable at all. */
-export interface DroneVersionRow {
+export interface GhostVersionRow {
   version: string
   count: number
   /** Whether this is the same version Oddjob itself is running. */
@@ -1425,18 +1425,18 @@ export interface DroneVersionRow {
 }
 
 /** What the fleet is running, which is not the same question as what
- *  the newest drone is running. A fleet split across three versions is
+ *  the newest ghost is running. A fleet split across three versions is
  *  the thing a site admin needs to see; "the newest one is 0.1.0" says
  *  nothing about the two that are not. */
-export interface DroneFleetVersions {
+export interface GhostFleetVersions {
   state: HealthState
   note: string | null
   /** Newest first. Unparseable versions last — see `parsed`. */
-  versions: DroneVersionRow[]
+  versions: GhostVersionRow[]
   distinct: number
-  /** Drones that reported a version. */
+  /** Ghosts that reported a version. */
   reported: number
-  /** Drones that have not. Counted separately and never folded into a
+  /** Ghosts that have not. Counted separately and never folded into a
    *  bucket: "we do not know" is a third answer. */
   unreported: number
   newest: string | null
@@ -1466,15 +1466,15 @@ export interface SiteHealth {
   slack: HealthBlock
   slack_socket: { connected: boolean; last: string | null }
   smtp: HealthBlock & { host?: string | null }
-  drones: HealthBlock & {
-    drones: Array<{ id: number; name: string; state: string; last_seen: string | null
+  ghosts: HealthBlock & {
+    ghosts: Array<{ id: number; name: string; state: string; last_seen: string | null
                     age_seconds: number | null; missing_tools: string | null
-                    /** Null when the drone has never reported one. */
+                    /** Null when the ghost has never reported one. */
                     version: string | null }>
     by_state: Record<string, number>
     queue: Record<string, number>
     queued_over_an_hour: number
-    versions: DroneFleetVersions
+    versions: GhostFleetVersions
   }
   audit: HealthBlock & { newest: string | null; retain_days?: unknown }
 }

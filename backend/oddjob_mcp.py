@@ -52,7 +52,7 @@ and a stale `AGENT_ONLY` entry catches a deletion.
 
 The drift this is built to stop already happened once — eighteen of the
 agent's twenty-two tools had no equivalent here, including the entire
-Drone subsystem — and it happened because the only thing keeping the two
+Ghost subsystem — and it happened because the only thing keeping the two
 aligned was somebody noticing. Nobody noticed for eighteen tools.
 
 **When this test fails because a new agent tool appeared, that is the
@@ -96,7 +96,7 @@ def _key() -> str:
 mcp = MCPServer("oddjob",
                 instructions="Engagement data store: projects, targets, "
                              "ports/services, vulns and PoCs, scope, "
-                             "domain enumeration and the Drone agent fleet. "
+                             "domain enumeration and the Ghost agent fleet. "
                              "All access is scoped by the API key's "
                              "per-project ACL.")
 
@@ -246,8 +246,8 @@ def _bare(rows: Any, fields: tuple[str, ...] | None, limit: int) -> Any:
     Several routers return `list[X]` rather than `Page[X]` — the agents
     router does it for every read, and so do the scope and domain routes.
     They carry no `total`, so the count here IS the total and saying so
-    is the difference between "there are four drones" and "I was shown
-    four drones".
+    is the difference between "there are four ghosts" and "I was shown
+    four ghosts".
     """
     if _failed(rows):
         return rows
@@ -777,9 +777,9 @@ async def add_target_note(project: str, host: str, text: str) -> Any:
 
 
 # =================================================================== the fleet
-# Everything below talks to /api/agents, which the product calls Drone. The
+# Everything below talks to /api/ghosts, which the product calls Ghost. The
 # whole subsystem was invisible over MCP until now: you could not see a
-# drone, task one, check a task or enrol one, which is half of what Oddjob
+# ghost, task one, check a task or enrol one, which is half of what Oddjob
 # does.
 #
 # Two things about this router that will bite a client and are not visible
@@ -792,17 +792,17 @@ async def add_target_note(project: str, host: str, text: str) -> Any:
 #     attaches a note saying so, because "no such project" to an operator
 #     looking at the project in their browser is a wrong answer.
 #
-# Deliberately NOT exposed here: /api/agents/enroll, /register, /retired,
+# Deliberately NOT exposed here: /api/ghosts/enroll, /register, /retired,
 # /heartbeat, /tasks/{id}/start and /tasks/{id}/result. Those authenticate
-# with an AGENT credential — an Ed25519 request signature or a drone_ key —
-# not with a user API key, and they are the drone's side of the protocol.
+# with an AGENT credential — an Ed25519 request signature or a ghost_ key —
+# not with a user API key, and they are the ghost's side of the protocol.
 # A user key is refused by them anyway, so a tool for them could only ever
 # return 401; wrapping them would be offering the model a lever attached to
 # nothing.
 # ----------------------------------------------------------------------------
-@tool(agent_equivalent="list_drone")
-async def list_drones(project: str) -> Any:
-    """The Drone agents on an engagement, and what each can actually do.
+@tool(agent_equivalent="list_ghost")
+async def list_ghosts(project: str) -> Any:
+    """The Ghost agents on an engagement, and what each can actually do.
 
     Read these together, because tasking decisions turn on them:
 
@@ -812,13 +812,13 @@ async def list_drones(project: str) -> Any:
     * `raw_sockets` (the agent's `privileged` flag) — without it masscan
       cannot run and nmap silently falls back to a connect scan, which
       changes what tasking is worth sending rather than failing it.
-    * `cannot_run` — task kinds this drone has no tool for, and
+    * `cannot_run` — task kinds this ghost has no tool for, and
       `missing_tools` says why each install failed.
     * `host_platform` and `container` — the machine UNDERNEATH the agent,
       where that differs from the binary's own platform. Both are omitted
-      when the drone could not tell; a missing `host_platform` must not be
+      when the ghost could not tell; a missing `host_platform` must not be
       read as "linux".
-    * `address` and `address_source` — a drone finds its outbound address
+    * `address` and `address_source` — a ghost finds its outbound address
       in one of several ways, and a container's private address and a real
       egress address are the same shape. Only `address_source` says which
       one you are looking at, so a question like "what will the client see
@@ -826,7 +826,7 @@ async def list_drones(project: str) -> Any:
     * `max_parallel`, `work_in_flight`, `running` — how much it is already
       carrying before you add to it.
     """
-    rows = await _req("GET", "/api/agents", params={"project": project})
+    rows = await _req("GET", "/api/ghosts", params={"project": project})
     if _failed(rows):
         return rows
     out = []
@@ -854,7 +854,7 @@ async def list_drones(project: str) -> Any:
             "last_seen": a.get("last_seen"),
         }
         # Omitted rather than sent as null. A key that is absent reads as
-        # "the drone could not tell us"; a key present and null reads to a
+        # "the ghost could not tell us"; a key present and null reads to a
         # model as a value it may reason about, and it is not one.
         for k, src in (("host_platform", "host_platform"),
                        ("host_platform_source", "host_platform_source"),
@@ -872,75 +872,75 @@ async def list_drones(project: str) -> Any:
 
 
 @tool()
-async def drone_task_kinds() -> Any:
-    """The task kinds a Drone can be given, and which tool each one needs.
+async def ghost_task_kinds() -> Any:
+    """The task kinds a Ghost can be given, and which tool each one needs.
 
     `by_kind` maps a kind to the binary that must be installed for it;
     null means the kind needs no external tool. `required` is the set a
-    fully-equipped drone carries. Cross-check against `cannot_run` on a
-    specific drone before tasking it.
+    fully-equipped ghost carries. Cross-check against `cannot_run` on a
+    specific ghost before tasking it.
     """
-    return await _req("GET", "/api/agents/tools")
+    return await _req("GET", "/api/ghosts/tools")
 
 
 @tool()
-async def drone_routing(project: str) -> Any:
+async def ghost_routing(project: str) -> Any:
     """How this engagement hands pooled work out, and how much is waiting.
 
-    `mode` is mesh (first drone to ask takes it), primary (the highest
-    priority eligible drone takes everything) or geo (a task runs only
+    `mode` is mesh (first ghost to ask takes it), primary (the highest
+    priority eligible ghost takes everything) or geo (a task runs only
     where its `region` matches). `unassigned_tasks` is the pool depth.
     """
-    return await _req("GET", "/api/agents/routing", params={"project": project})
+    return await _req("GET", "/api/ghosts/routing", params={"project": project})
 
 
 @tool()
-async def drone_queue(project: str, limit: int = 100) -> Any:
+async def ghost_queue(project: str, limit: int = 100) -> Any:
     """Work waiting to start, oldest first.
 
-    `agent_id: null` means the task is in the project pool and no drone
-    has claimed it. A queue that is not draining with drones online is
+    `agent_id: null` means the task is in the project pool and no ghost
+    has claimed it. A queue that is not draining with ghosts online is
     usually a routing mismatch — a geo project with tasks carrying no
-    region, or a kind no online drone has the tool for.
+    region, or a kind no online ghost has the tool for.
     """
-    return _bare(await _req("GET", "/api/agents/queue",
+    return _bare(await _req("GET", "/api/ghosts/queue",
                             params={"project": project, "limit": 1000}),
                  ("id", "kind", "subject", "agent_id", "agent_name", "region",
                   "requested_by", "created_at"), limit)
 
 
 @tool()
-async def list_drone_tasks(project: str, limit: int = 100) -> Any:
-    """Drone tasks across the whole engagement, newest first.
+async def list_ghost_tasks(project: str, limit: int = 100) -> Any:
+    """Ghost tasks across the whole engagement, newest first.
 
-    Includes pooled tasks no drone ever took. `state` is the readable
+    Includes pooled tasks no ghost ever took. `state` is the readable
     form — awaiting, in progress, complete, failed — and `raw_status` is
     the stored one. `notes` carries why a task failed or why it went back
     in the queue, which is the field worth reading first.
     """
-    return _bare(await _req("GET", "/api/agents/tasks",
+    return _bare(await _req("GET", "/api/ghosts/tasks",
                             params={"project": project, "limit": 5000}),
                  ("id", "kind", "subject", "state", "raw_status", "agent_id",
                   "agent_name", "attempts", "created_at", "started_at",
                   "finished_at", "notes", "requested_by"), limit)
 
 
-@tool(agent_equivalent="drone_task_status")
-async def drone_task_status(project: str, task_id: int) -> Any:
-    """How one Drone task is getting on, and whether its results need a decision.
+@tool(agent_equivalent="ghost_task_status")
+async def ghost_task_status(project: str, task_id: int) -> Any:
+    """How one Ghost task is getting on, and whether its results need a decision.
 
     Two calls, because the API has no route for a single task: the
     engagement-wide list carries the state and the failure reason, and
-    the per-drone list is the only thing that carries `args` and
-    `import_result`. A pooled task that no drone ever claimed has no
-    per-drone row at all, so the richer half is simply absent and says
+    the per-ghost list is the only thing that carries `args` and
+    `import_result`. A pooled task that no ghost ever claimed has no
+    per-ghost row at all, so the richer half is simply absent and says
     so rather than reporting an empty import.
 
     `needs_decision` means the scan brought back hosts the project does
     not have, and strict mode held the whole import rather than creating
-    them. Nothing is imported until you answer — see import_drone_task.
+    them. Nothing is imported until you answer — see import_ghost_task.
     """
-    rows = await _req("GET", "/api/agents/tasks",
+    rows = await _req("GET", "/api/ghosts/tasks",
                       params={"project": project, "limit": 5000})
     if _failed(rows):
         return rows
@@ -955,10 +955,10 @@ async def drone_task_status(project: str, task_id: int) -> Any:
                                    "notes", "requested_by")}
     if not row.get("agent_id"):
         out["detail_available"] = False
-        out["note"] = ("still in the project pool, so there is no per-drone "
+        out["note"] = ("still in the project pool, so there is no per-ghost "
                        "record and no import result yet")
         return out
-    full = await _req("GET", f"/api/agents/{row['agent_id']}/tasks",
+    full = await _req("GET", f"/api/ghosts/{row['agent_id']}/tasks",
                       params={"project": project, "limit": 500})
     if _failed(full):
         out["detail_available"] = False
@@ -966,11 +966,11 @@ async def drone_task_status(project: str, task_id: int) -> Any:
         return out
     rich = next((t for t in full if t.get("id") == int(task_id)), None)
     if rich is None:
-        # It was requeued to the pool after this drone had it, so the
-        # per-drone list no longer carries it. Saying nothing here would
+        # It was requeued to the pool after this ghost had it, so the
+        # per-ghost list no longer carries it. Saying nothing here would
         # read as "no import result", which is a different claim.
         out["detail_available"] = False
-        out["note"] = ("this task is no longer attached to the drone that ran "
+        out["note"] = ("this task is no longer attached to the ghost that ran "
                        "it — a retry returns a task to the pool — so its args "
                        "and import result could not be read")
         return out
@@ -989,35 +989,35 @@ async def drone_task_status(project: str, task_id: int) -> Any:
     return out
 
 
-@tool(agent_equivalent="task_drone", writes=True)
-async def task_drone(project: str, kind: str, targets: str,
+@tool(agent_equivalent="task_ghost", writes=True)
+async def task_ghost(project: str, kind: str, targets: str,
                      agent_id: int | None = None, ports: str | None = None,
                      region: str | None = None) -> Any:
-    """Queue ONE scan, on a named Drone or on the project's pool.
+    """Queue ONE scan, on a named Ghost or on the project's pool.
 
-    `kind` is one of drone_task_kinds — nmap, masscan, amass, gobuster,
+    `kind` is one of ghost_task_kinds — nmap, masscan, amass, gobuster,
     gospider, nuclei, httpx, nslookup, reverse_ip. `targets` is hosts or
     ranges, space or comma separated.
 
     Leave `agent_id` out to queue to the pool and let the project's
     routing choose; a geo-routed project then needs a `region`. Results
-    import automatically when the drone reports back.
+    import automatically when the ghost reports back.
 
     The project's scope gate is applied ALL-OR-NOTHING here: one target
     outside scope refuses the whole task with a 403 or 422. That is
-    deliberate, and it is why enumerate_drones exists — a sweep wants one
+    deliberate, and it is why enumerate_ghosts exists — a sweep wants one
     task per host so a single refusal stays a single refusal.
 
     `install` and `shell` are refused by this tool. Installing software
     on, or running arbitrary commands on, a privileged process inside a
     client's network is not something to do because a sentence asked for
-    it; queue those from the Drone page where the allowlist and the drone
+    it; queue those from the Ghost page where the allowlist and the ghost
     are both in front of you.
     """
     k = (kind or "").strip().lower()
     if k in ("install", "shell"):
         return {"error": f"{k} is not available through MCP. Queue it from the "
-                         f"Drone page, where the allowlist and the agent are "
+                         f"Ghost page, where the allowlist and the agent are "
                          f"both in front of you."}
     hosts = [t for t in (targets or "").replace(",", " ").split() if t]
     if not hosts:
@@ -1026,13 +1026,13 @@ async def task_drone(project: str, kind: str, targets: str,
     if (ports or "").strip():
         args["ports"] = ports.strip()
     body = {"kind": k, "args": args, "region": (region or "").strip().lower() or None}
-    path = (f"/api/agents/{agent_id}/tasks" if agent_id is not None
-            else "/api/agents/tasks")
+    path = (f"/api/ghosts/{agent_id}/tasks" if agent_id is not None
+            else "/api/ghosts/tasks")
     return await _req("POST", path, params={"project": project}, json=body)
 
 
-@tool(agent_equivalent="enumerate_drones", writes=True)
-async def enumerate_drones(project: str, kind: str, hosts: str,
+@tool(agent_equivalent="enumerate_ghosts", writes=True)
+async def enumerate_ghosts(project: str, kind: str, hosts: str,
                            agent_id: int | None = None,
                            ports: str | None = None,
                            region: str | None = None) -> Any:
@@ -1058,7 +1058,7 @@ async def enumerate_drones(project: str, kind: str, hosts: str,
     k = (kind or "").strip().lower()
     if k in ("install", "shell"):
         return {"error": f"{k} is never queued as a sweep. It belongs on the "
-                         f"Drone page, where the allowlist and the agent are "
+                         f"Ghost page, where the allowlist and the agent are "
                          f"both in front of you."}
     subjects = [h for h in (hosts or "").replace(",", " ").split() if h]
     if not subjects:
@@ -1066,7 +1066,7 @@ async def enumerate_drones(project: str, kind: str, hosts: str,
     args: dict[str, Any] = {}
     if (ports or "").strip():
         args["ports"] = ports.strip()
-    return await _req("POST", "/api/agents/tasks/bulk",
+    return await _req("POST", "/api/ghosts/tasks/bulk",
                       params={"project": project},
                       json={"kind": k, "subjects": subjects, "args": args,
                             "agent_id": agent_id,
@@ -1074,40 +1074,40 @@ async def enumerate_drones(project: str, kind: str, hosts: str,
 
 
 @tool(writes=True)
-async def retry_drone_task(project: str, task_id: int) -> Any:
-    """Put a FAILED Drone task back in the queue.
+async def retry_ghost_task(project: str, task_id: int) -> Any:
+    """Put a FAILED Ghost task back in the queue.
 
     Only a failed task can be restarted; anything else answers 409. The
-    task returns to the POOL even if it was addressed to one drone, so
-    routing picks again — which is usually what you want when the drone
+    task returns to the POOL even if it was addressed to one ghost, so
+    routing picks again — which is usually what you want when the ghost
     that failed it is the reason it failed.
     """
-    return await _req("POST", f"/api/agents/tasks/{task_id}/retry",
+    return await _req("POST", f"/api/ghosts/tasks/{task_id}/retry",
                       params={"project": project})
 
 
 @tool(writes=True, destructive=True)
-async def cancel_drone_task(project: str, task_id: int) -> Any:
-    """Delete a QUEUED Drone task that has not started.
+async def cancel_ghost_task(project: str, task_id: int) -> Any:
+    """Delete a QUEUED Ghost task that has not started.
 
     Refused with a 409 once the task is running, and rightly: deleting
     the row here would not stop the scan — it is already executing on the
-    drone — and would only throw away the result when it reports. Killing
-    the drone is what stops work that has started.
+    ghost — and would only throw away the result when it reports. Killing
+    the ghost is what stops work that has started.
     """
-    return await _req("DELETE", f"/api/agents/tasks/{task_id}",
+    return await _req("DELETE", f"/api/ghosts/tasks/{task_id}",
                       params={"project": project})
 
 
 @tool(writes=True)
-async def import_drone_task(project: str, agent_id: int, task_id: int,
+async def import_ghost_task(project: str, agent_id: int, task_id: int,
                             decisions: dict | None = None,
                             mode: str = "strict") -> Any:
-    """Import a finished Drone task's output, answering any held decisions.
+    """Import a finished Ghost task's output, answering any held decisions.
 
     A scan that came back with hosts the project does not have is held
-    rather than imported, because a drone pointed slightly wide creates
-    targets belonging to someone else. drone_task_status reports those
+    rather than imported, because a ghost pointed slightly wide creates
+    targets belonging to someone else. ghost_task_status reports those
     under `unknown_hosts`.
 
     `decisions` maps host -> {"action": "add"|"map"|"reject", "target":
@@ -1115,52 +1115,52 @@ async def import_drone_task(project: str, agent_id: int, task_id: int,
     task's output is not consumed, so you may run this again with
     different decisions.
     """
-    return await _req("POST", f"/api/agents/{agent_id}/tasks/{task_id}/import",
+    return await _req("POST", f"/api/ghosts/{agent_id}/tasks/{task_id}/import",
                       params={"project": project},
                       json={"decisions": decisions or {}, "mode": mode})
 
 
-@tool(agent_equivalent="enroll_drone", writes=True)
-async def enroll_drone(project: str, name: str, target_os: str = "linux",
+@tool(agent_equivalent="enroll_ghost", writes=True)
+async def enroll_ghost(project: str, name: str, target_os: str = "linux",
                        connection_mode: str = "callback") -> Any:
-    """Create a Drone agent and return the one-time command to run on the host.
+    """Create a Ghost agent and return the one-time command to run on the host.
 
     ADMIN on the project. Enrolling creates something that will run
     privileged commands on a machine inside a client's network and send
     their output here, which is an admin's decision rather than a
     contributor's.
 
-    `callback` means the drone dials out to Oddjob and needs no inbound
+    `callback` means the ghost dials out to Oddjob and needs no inbound
     reachability; `call_in` means Oddjob calls it, and it must advertise
     a reachable address.
 
     EVERY SECRET IN THE RESPONSE IS SHOWN ONCE. `enroll_token` is good
-    for two hours and is traded by the drone for a keypair it generates
+    for two hours and is traded by the ghost for a keypair it generates
     itself, after which it will only take tasking from this Oddjob.
     `callback_key` and `call_in_key` cannot be read back. Losing them
-    means re-enrolling, which invalidates the running drone immediately.
+    means re-enrolling, which invalidates the running ghost immediately.
 
     The name you pass gets a short random suffix, so the agent created is
     not the name you asked for — read it back from the response.
     """
-    return await _req("POST", "/api/agents", params={"project": project},
+    return await _req("POST", "/api/ghosts", params={"project": project},
                       json={"name": name, "target_os": target_os,
                             "connection_mode": connection_mode})
 
 
 @tool(writes=True, destructive=True)
-async def kill_drone(project: str, agent_id: int) -> Any:
-    """Disable a Drone and fail everything it was carrying. Admin on the project.
+async def kill_ghost(project: str, agent_id: int) -> Any:
+    """Disable a Ghost and fail everything it was carrying. Admin on the project.
 
     Its credential is refused from this moment, so a scan that was
     running could not report a result even if it finished. Queued work is
     marked cancelled and in-flight work is marked failed with that said
-    plainly in the error — the drone is not asked politely to stop, it is
+    plainly in the error — the ghost is not asked politely to stop, it is
     locked out.
 
     This does not delete the agent or its task history.
     """
-    return await _req("POST", f"/api/agents/{agent_id}/kill",
+    return await _req("POST", f"/api/ghosts/{agent_id}/kill",
                       params={"project": project})
 
 
@@ -1208,7 +1208,7 @@ async def enumerate_domains(project: str, domains: str = "",
     At most 200 tasks are queued in one call; the rest come back in
     `deferred`.
 
-    Needs at least one drone ONLINE — enumeration is drone work, and the
+    Needs at least one ghost ONLINE — enumeration is ghost work, and the
     call is refused with a 409 rather than queueing into a fleet that
     cannot run it.
     """
@@ -1316,7 +1316,7 @@ async def whoami() -> Any:
 
 @tool()
 async def site_health() -> Any:
-    """Deployment health: database, feeds, Slack, SMTP, the drone fleet, audit.
+    """Deployment health: database, feeds, Slack, SMTP, the ghost fleet, audit.
 
     SITE ADMIN ONLY — an ordinary key gets a 403, which is the correct
     answer and not a fault.

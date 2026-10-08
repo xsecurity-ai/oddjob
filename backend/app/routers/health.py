@@ -143,7 +143,7 @@ async def _feed(session: AsyncSession, source: str, label: str) -> dict:
             "resume_from": st.cursor}
 
 
-async def _drones(session: AsyncSession) -> dict:
+async def _ghosts(session: AsyncSession) -> dict:
     """The fleet, and the work it is or is not getting through."""
     from .agents import OFFLINE_AFTER, _stale
 
@@ -181,7 +181,7 @@ async def _drones(session: AsyncSession) -> dict:
 
     # Work that has stopped moving. Queued-and-unassigned is normal for
     # a moment and a problem after an hour, and it is invisible from any
-    # single drone's row.
+    # single ghost's row.
     stuck = int((await session.execute(
         select(func.count()).select_from(AgentTask)
         .where(AgentTask.status == "queued",
@@ -197,17 +197,17 @@ async def _drones(session: AsyncSession) -> dict:
         state = "idle"
     else:
         state = "ok"
-    return {"state": state, "drones": rows, "by_state": states,
+    return {"state": state, "ghosts": rows, "by_state": states,
             # The fleet's versions, summarised from the same list of
             # agents the rows came from rather than from a second
             # query. One read, so the card and the rows under it
-            # cannot disagree about which drones exist.
+            # cannot disagree about which ghosts exist.
             "versions": servicehealth.fleet_versions(
                 (a.version for a in agents), server_version=VERSION),
             "queue": queue, "queued_over_an_hour": stuck,
             "offline_after_seconds": int(OFFLINE_AFTER.total_seconds()),
-            "note": ("no drones are enrolled" if not agents
-                     else "no drone has checked in" if online == 0
+            "note": ("no ghosts are enrolled" if not agents
+                     else "no ghost has checked in" if online == 0
                      else f"{stuck} task(s) queued over an hour" if stuck
                      else None)}
 
@@ -309,7 +309,7 @@ async def site_health(_: User = Depends(require_site_admin),
         "slack_socket": socket,
         "workers": workers,
         "smtp": smtp,
-        "drones": await _drones(session),
+        "ghosts": await _ghosts(session),
         "audit": {
             "state": "ok" if audit_newest else "unused",
             "newest": audit_newest.isoformat() if audit_newest else None,

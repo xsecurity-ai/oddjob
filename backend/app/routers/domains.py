@@ -137,7 +137,7 @@ async def roots(project: str = Query(...),
 
     There was a third: domains the offline generator had already
     guessed under. That generator is gone — enumeration is amass on a
-    drone now, and whether it has run is a question about tasks, not
+    ghost now, and whether it has run is a question about tasks, not
     about a table here. `searched` stays in the response and is always
     false, so an older client does not break on its absence.
 
@@ -148,7 +148,7 @@ async def roots(project: str = Query(...),
     hosts = await known_hosts(session, pr.id)
     # `searched` used to mean "the offline generator has already
     # guessed under this". There is no generator now — enumeration is
-    # amass on a drone, and whether that has run is a question about
+    # amass on a ghost, and whether that has run is a question about
     # tasks, not about this table.
     searched: set[str] = set()
 
@@ -249,7 +249,7 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
                             pr: Project = Depends(require_project("user")),
                             user: User = Depends(get_current_user),
                             session: AsyncSession = Depends(get_session)):
-    """Hand a list of domains to Drone, and file what comes back.
+    """Hand a list of domains to Ghost, and file what comes back.
 
     This replaced an offline generator that extrapolated from patterns
     the estate already showed and handed back hypotheses for a person
@@ -312,7 +312,7 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
         # Refused rather than queued. Work accepted with nothing to run
         # it sits looking submitted, which reads as a broken scan.
         raise HTTPException(
-            409, "no Drone agent is online for this project, so there is "
+            409, "no Ghost agent is online for this project, so there is "
                  "nothing to run the enumeration. Bring one up and submit "
                  "again.")
 

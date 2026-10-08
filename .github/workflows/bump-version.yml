@@ -11,8 +11,8 @@
 # Everything else READS that file:
 #
 #   backend/app/version.py       the Health view's "Oddjob version"
-#   drone/Makefile, Dockerfiles  stamped into the agent binaries, so
-#                                every drone reports it on register
+#   ghost/Makefile, Dockerfiles  stamped into the agent binaries, so
+#                                every ghost reports it on register
 #   images.yml                   part of the content key, so a bump is
 #                                a rebuild, and stamped into the
 #                                org.opencontainers.image.version label
@@ -157,6 +157,6 @@ jobs:
             echo "— VERSION is part of the content key — and stamps it into the"
             echo "binaries and the \`org.opencontainers.image.version\` label."
             echo "Run \`promote\` once \`:develop\` or \`:nightly\` has moved to"
-            echo "publish \`cr0n1c/oddjob:v$NEXT\` and \`cr0n1c/drone:v$NEXT\`"
+            echo "publish \`cr0n1c/oddjob:v$NEXT\` and \`cr0n1c/ghost:v$NEXT\`"
             echo "and the matching git tag."
           } >> "$GITHUB_STEP_SUMMARY"

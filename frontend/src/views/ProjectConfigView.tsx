@@ -349,7 +349,7 @@ export function ProjectConfigView({ project }: { project: string | null }) {
           <>
             <strong>These lists are enforced.</strong> Out-of-scope beats
             in-scope: a host on both is barred, and nothing in this project
-            may touch it — including tasking sent to a Drone agent.
+            may touch it — including tasking sent to a Ghost agent.
             {data.allowlist_active
               ? ' An in-scope list exists, so the project may not acquire'
                 + ' any host outside it. Hosts it already has are untouched.'

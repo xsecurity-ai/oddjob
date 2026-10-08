@@ -16,7 +16,7 @@ cd "$(git rev-parse --show-toplevel)"
 IMAGE=hadolint/hadolint:v2.15.1
 
 fail=0
-for f in Dockerfile drone/Dockerfile; do
+for f in Dockerfile ghost/Dockerfile; do
     # `-t style` is the strictest threshold — every rule fails.
     # .hadolint.yaml sets the same thing; passing it here means the
     # hook does not quietly become more lenient if that file moves.

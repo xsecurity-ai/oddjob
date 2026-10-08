@@ -17,7 +17,7 @@ import { DetectDomainsDialog } from '../components/DetectDomainsDialog'
 import {
   EnumerateMenu, TargetRowActions, type EnumerateAction, type RowAction,
 } from '../components/EnumerateMenu'
-import { isLive } from '../components/droneTasking'
+import { isLive } from '../components/ghostTasking'
 import {
   FqdnPickerDialog, openChoices, useAutoApplySingles,
 } from '../components/FqdnPickerDialog'
@@ -146,7 +146,7 @@ export function TargetsView({ project }: { project: string | null }) {
   })
   // `isLive`, not `status === 'online'`: an agent part-way through a
   // scan reports `busy`, and treating that as "not there" made this
-  // page say no agents while the Drone page showed two working.
+  // page say no agents while the Ghost page showed two working.
   const live = (agents.data ?? []).filter(isLive)
   const enrolled = (agents.data ?? []).length
 

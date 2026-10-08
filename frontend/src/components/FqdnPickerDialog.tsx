@@ -568,7 +568,7 @@ export function FqdnPickerDialog({ project, rows, loading, error, auto,
           )}
 
           <Alert severity="info" variant="outlined" sx={{ fontSize: 11.5 }}>
-            Built from the output of finished Drone lookups. A host having
+            Built from the output of finished Ghost lookups. A host having
             several addresses is not a question, so those are recorded
             without asking. What is left here turns on an address being
             SHARED — several names answer at it and nothing in the data says

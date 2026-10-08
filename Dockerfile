@@ -23,8 +23,8 @@ COPY frontend/ ./
 RUN npm run build
 
 
-# -------------------------------------------------------- drone agents
-# The agent binaries the UI hands out when deploying a Drone. Built here
+# -------------------------------------------------------- ghost agents
+# The agent binaries the UI hands out when deploying a Ghost. Built here
 # so an operator can download one from the Oddjob they are already
 # logged into, rather than being sent to find a release elsewhere and
 # having to trust whatever they find.
@@ -38,10 +38,10 @@ RUN npm run build
 # for every target, so the six binaries are byte-identical regardless
 # of what the compiler runs on. Emulating the toolchain to produce
 # them was pure cost.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS drone
-WORKDIR /build/drone
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS ghost
+WORKDIR /build/ghost
 
-COPY drone/go.mod drone/go.sum ./
+COPY ghost/go.mod ghost/go.sum ./
 RUN go mod download
 
 # The repository-root VERSION file, into the Go build directory, so the
@@ -63,20 +63,20 @@ RUN go mod download
 # fails if one carries it.
 COPY VERSION ./VERSION
 
-COPY drone/ ./
+COPY ghost/ ./
 RUN set -eu; \
     ver="$(tr -d '[:space:]' < VERSION)"; \
     [ -n "$ver" ] || { echo "VERSION is empty"; exit 1; }; \
-    echo "stamping drone binaries as $ver"; \
+    echo "stamping ghost binaries as $ver"; \
     for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 \
              windows/amd64 windows/arm64; do \
       os="${t%/*}"; arch="${t#*/}"; \
-      out="dist/drone-$os-$arch"; \
+      out="dist/ghost-$os-$arch"; \
       [ "$os" = windows ] && out="$out.exe"; \
       CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
         go build -trimpath \
-          -ldflags "-s -w -X github.com/xsecurity-ai/oddjob/drone/internal/config.Version=$ver" \
-          -o "$out" ./cmd/drone; \
+          -ldflags "-s -w -X github.com/xsecurity-ai/oddjob/ghost/internal/config.Version=$ver" \
+          -o "$out" ./cmd/ghost; \
     done; \
     ls -l dist/
 
@@ -175,13 +175,13 @@ COPY --from=deps --chown=10001:10001 /opt/venv /opt/venv
 #     rather than appending a `-dev-` suffix. The image cannot
 #     accidentally claim to be a development build, because the thing
 #     that marks one is absent by construction.
-#   * It is the same file the drone stage above stamped into the agent
+#   * It is the same file the ghost stage above stamped into the agent
 #     binaries, from the same build context, so the server and the
 #     agents it hands out cannot disagree.
 COPY --chown=10001:10001 VERSION /app/VERSION
 COPY --chown=10001:10001 backend/ /app/backend/
 COPY --from=ui --chown=10001:10001 /build/frontend/dist /app/frontend/dist
-COPY --from=drone --chown=10001:10001 /build/drone/dist /app/drone-dist
+COPY --from=ghost --chown=10001:10001 /build/ghost/dist /app/ghost-dist
 COPY --chown=10001:10001 docker/entrypoint.py /usr/local/bin/entrypoint.py
 
 # `data` holds the session-signing key, which has to outlive the

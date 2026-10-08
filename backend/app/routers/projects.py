@@ -951,7 +951,7 @@ async def deletion_preview(pr: Project = Depends(require_project("admin")),
         #: record leaves them authenticating against nothing, forever,
         #: with nobody watching the logs they write.
         "agent_warning": (
-            f"{agents} Drone agent(s) belong to this project and will be "
+            f"{agents} Ghost agent(s) belong to this project and will be "
             f"deleted with it. Any that are still running will keep trying "
             f"to connect and will never succeed. Kill them first if you "
             f"want them to stop cleanly." if agents else ""),

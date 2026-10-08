@@ -19,7 +19,7 @@ at all — it reports green for a path nobody is watching.
 `fleet_versions()` at the bottom is the one thing here that is not a
 record of an attempt. It lives in this module rather than in the router
 because it is a pure function of a list of strings — no session, no
-request — which makes it the only part of the drone-version summary a
+request — which makes it the only part of the ghost-version summary a
 test can hold still and assert on. routers/health.py stays an assembler
 that fetches rows and calls things; the judgement about what a split
 fleet means belongs somewhere it can be exercised directly.
@@ -130,10 +130,10 @@ def describe(row: ServiceHealth | None, *,
 # ---------------------------------------------------------- versions
 #
 # What the fleet is actually running, which is a different question
-# from what the newest drone is running. A site admin chasing "this
-# task behaves differently depending on which drone takes it" needs to
+# from what the newest ghost is running. A site admin chasing "this
+# task behaves differently depending on which ghost takes it" needs to
 # see the split; "the newest one is 0.1.0" tells them nothing, because
-# the drone that misbehaved is one of the other two.
+# the ghost that misbehaved is one of the other two.
 
 #: `X.Y.Z`, with semver's optional pre-release and build-metadata
 #: tails. Anchored, so a version that is merely version-shaped — an
@@ -189,10 +189,10 @@ def semver_key(v: str) -> tuple:
 
 def fleet_versions(versions: Iterable[str | None], *,
                    server_version: str | None = None) -> dict:
-    """Which versions the drones are running, and how many on each.
+    """Which versions the ghosts are running, and how many on each.
 
-    `versions` is one entry per enrolled drone, straight off
-    `Agent.version` — including the Nones. A drone that has never told
+    `versions` is one entry per enrolled ghost, straight off
+    `Agent.version` — including the Nones. A ghost that has never told
     us its version is counted separately and never folded into a
     bucket: "we do not know what that one is running" is a third
     answer, and quietly dropping those rows would make a fleet of ten
@@ -238,7 +238,7 @@ def fleet_versions(versions: Iterable[str | None], *,
     if total == 0:
         state = "unused"
     elif unreported or len(rows) > 1:
-        # Yellow, not red. A split fleet and a silent drone are both
+        # Yellow, not red. A split fleet and a silent ghost are both
         # things to go and look at, and neither is an outage — calling
         # them failing is how a page teaches people to ignore it.
         state = "idle"
@@ -246,12 +246,12 @@ def fleet_versions(versions: Iterable[str | None], *,
         state = "ok"
 
     if total == 0:
-        note = "no drones are enrolled"
+        note = "no ghosts are enrolled"
     elif unreported and len(rows) > 1:
-        note = (f"{len(rows)} versions in use, and {unreported} drone(s) have "
+        note = (f"{len(rows)} versions in use, and {unreported} ghost(s) have "
                 f"not reported one")
     elif unreported:
-        note = f"{unreported} drone(s) have not reported a version"
+        note = f"{unreported} ghost(s) have not reported a version"
     elif len(rows) > 1:
         note = f"the fleet is split across {len(rows)} versions"
     else:

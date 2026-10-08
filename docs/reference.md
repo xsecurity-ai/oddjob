@@ -1067,7 +1067,7 @@ is asked to label each, and anything unlabelled is asked for again.
 
 | | gated on |
 |---|---|
-| adding a target, filing a finding, adding a note, queueing Drone work | *Let the agent change data* **and** the engagement named in *Engagements the bot may change data on, from Slack* |
+| adding a target, filing a finding, adding a note, queueing Ghost work | *Let the agent change data* **and** the engagement named in *Engagements the bot may change data on, from Slack* |
 | adding someone to the engagement (at `user`) | *Let the agent change data*, and the sender holding at least `user` there |
 | changing anyone's role | the above **and** the sender holding an **admin grant on that engagement** |
 

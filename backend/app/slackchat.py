@@ -1001,7 +1001,7 @@ async def handle(inc: Incoming, bot_token: str, bot_user_id: str | None,
     socket so the whole chain — identity, confinement, rights, tools,
     model — can be driven in a test with a plain `Incoming`.
     """
-    from .routers.agent import DRONE_ON, SYSTEM, WRITES_OFF, WRITES_ON
+    from .routers.agent import GHOST_ON, SYSTEM, WRITES_OFF, WRITES_ON
     from .slack import workspace_key
 
     asks = split_asks(inc.text)
@@ -1031,7 +1031,7 @@ async def handle(inc: Incoming, bot_token: str, bot_user_id: str | None,
             # dropped the paragraph that says a scan target comes from
             # the operator and never from scraped content — on the one
             # path whose input is a chat message anybody can type.
-            reach=(DRONE_ON if any(t.name == "task_drone" for t in tools)
+            reach=(GHOST_ON if any(t.name == "task_ghost" for t in tools)
                    else ""),
             writes=writes) + SLACK_RULES
         chat, err = await model_chat(session, pr, system, tools)

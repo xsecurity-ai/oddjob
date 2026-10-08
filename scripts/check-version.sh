@@ -12,7 +12,7 @@
 #
 # The argument form is how a built artefact is checked: ci.yml reads
 # the version back out of the running oddjob image and out of
-# `drone version`, and hands it here. Checking the file alone would
+# `ghost version`, and hands it here. Checking the file alone would
 # only prove the file is clean — the interesting failure is a clean
 # file and an artefact built without --release.
 set -euo pipefail

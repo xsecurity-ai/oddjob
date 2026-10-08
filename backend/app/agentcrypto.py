@@ -1,4 +1,4 @@
-"""Mutual Ed25519 identity for Drone agents.
+"""Mutual Ed25519 identity for Ghost agents.
 
 A bearer key proves only that the caller read a secret from somewhere.
 Copy it off the agent's disk and you are the agent; copy it out of the
@@ -46,10 +46,10 @@ CLOCK_SKEW = 300
 #: Settings key holding this instance's private identity.
 SERVER_KEY_SETTING = "agent_server_identity"
 
-SIG_HEADER = "X-Drone-Signature"
-AGENT_HEADER = "X-Drone-Agent"
-TS_HEADER = "X-Drone-Timestamp"
-NONCE_HEADER = "X-Drone-Nonce"
+SIG_HEADER = "X-Ghost-Signature"
+AGENT_HEADER = "X-Ghost-Agent"
+TS_HEADER = "X-Ghost-Timestamp"
+NONCE_HEADER = "X-Ghost-Nonce"
 
 
 # --------------------------------------------------------- confidentiality
@@ -82,7 +82,7 @@ SEAL_VERSION = "v1"
 #: Settings key holding this instance's X25519 private half.
 SERVER_KEX_SETTING = "agent_server_kex"
 
-SEALED_HEADER = "X-Drone-Sealed"
+SEALED_HEADER = "X-Ghost-Sealed"
 
 
 def b64(raw: bytes) -> str:
@@ -140,6 +140,12 @@ def shared_key(private_b64: str, peer_public_b64: str) -> bytes:
     priv = X25519PrivateKey.from_private_bytes(unb64(private_b64))
     peer = X25519PublicKey.from_public_bytes(unb64(peer_public_b64))
     secret = priv.exchange(peer)
+    # Still "drone", deliberately. This is a wire constant, not
+    # vocabulary: the agent was renamed to ghost and the bytes on the
+    # wire were not, because changing them buys a nicer-looking string
+    # and costs compatibility with every sealed body in flight. The
+    # rename swept this up automatically on both sides at once, and
+    # the ghost's fixed test vector is what caught it.
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
                 info=f"oddjob/drone seal {SEAL_VERSION}".encode()).derive(secret)
 

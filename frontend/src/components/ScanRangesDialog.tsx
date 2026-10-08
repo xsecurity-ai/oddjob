@@ -38,7 +38,7 @@ import {
 import { BY_ANY, PillInput, type Analyse } from './PillInput'
 import {
   needsRegion, queueEach, rawSockets, useFleet, type AgentChoice,
-} from './droneTasking'
+} from './ghostTasking'
 
 /** Above this, a discovery sweep is a decision rather than a click. */
 const LARGE = 4096
@@ -223,7 +223,7 @@ export function ScanRangesDialog({ project, selected = [], onClose,
       }
 
       if (onQueued) onQueued(msg); else setDone(msg)
-      // Closed on success, because the answer arrives on the Drones
+      // Closed on success, because the answer arrives on the Ghosts
       // page and there is nothing further to do here. Left open when
       // something was refused — that is the case worth reading.
       onClose()

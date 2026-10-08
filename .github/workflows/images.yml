@@ -1,4 +1,4 @@
-# Published images for oddjob and drone.
+# Published images for oddjob and ghost.
 #
 # Three triggers, three moving pointers, one build:
 #
@@ -23,12 +23,12 @@
 #
 # The two images are not symmetric, and this is the part worth reading:
 #
-#   drone  <- drone/
-#   oddjob <- backend/ frontend/ docker/ Dockerfile AND drone/
+#   ghost  <- ghost/
+#   oddjob <- backend/ frontend/ docker/ Dockerfile AND ghost/
 #
-# because the oddjob image compiles the drone binaries into itself for
-# the download endpoint. A drone-only change therefore rebuilds both,
-# which is exactly what a naive `paths: drone/**` filter on the oddjob
+# because the oddjob image compiles the ghost binaries into itself for
+# the download endpoint. A ghost-only change therefore rebuilds both,
+# which is exactly what a naive `paths: ghost/**` filter on the oddjob
 # job would get wrong.
 #
 # ------------------------------------------------- why a retag branch
@@ -93,9 +93,9 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
-      drone_key: ${{ steps.k.outputs.drone_key }}
+      ghost_key: ${{ steps.k.outputs.ghost_key }}
       oddjob_key: ${{ steps.k.outputs.oddjob_key }}
-      drone_build: ${{ steps.k.outputs.drone_build }}
+      ghost_build: ${{ steps.k.outputs.ghost_build }}
       oddjob_build: ${{ steps.k.outputs.oddjob_build }}
       pointer: ${{ steps.k.outputs.pointer }}
       dated: ${{ steps.k.outputs.dated }}
@@ -114,7 +114,7 @@ jobs:
           # The version is an input to both images — it is stamped
           # into the Go binaries and into the OCI labels — so it has to
           # be part of both keys. Without it, a release that only bumps
-          # VERSION changes no tree under `drone/`, the key is
+          # VERSION changes no tree under `ghost/`, the key is
           # unchanged, this job takes the retag path, and `:nightly`
           # ends up pointing at bytes whose label still says the old
           # number. promote.yml then reads that label and puts the old
@@ -127,12 +127,12 @@ jobs:
           # when the contents change and not otherwise. Commit SHAs
           # would rebuild on every merge, which is the thing being
           # avoided.
-          drone_key=$(
-            { git rev-parse "HEAD:drone"
+          ghost_key=$(
+            { git rev-parse "HEAD:ghost"
               printf 'version=%s\n' "$version"
             } | sha256sum | cut -c1-16)
           odd_tree=$(
-            { git rev-parse "HEAD:backend" "HEAD:frontend" "HEAD:docker" "HEAD:drone"
+            { git rev-parse "HEAD:backend" "HEAD:frontend" "HEAD:docker" "HEAD:ghost"
               git rev-parse "HEAD:Dockerfile"
               printf 'version=%s\n' "$version"
             } | sha256sum | cut -c1-16)
@@ -152,7 +152,7 @@ jobs:
             dated="develop-$(git rev-parse --short HEAD)"
           fi
           {
-            echo "drone_key=$drone_key"
+            echo "ghost_key=$ghost_key"
             echo "oddjob_key=$odd_tree"
             echo "pointer=$pointer"
             echo "dated=$dated"
@@ -166,7 +166,7 @@ jobs:
             if docker manifest inspect "docker.io/cr0n1c/$1:src-$2" >/dev/null 2>&1
             then echo false; else echo true; fi
           }
-          echo "drone_build=$(need drone "$drone_key")"   >> "$GITHUB_OUTPUT"
+          echo "ghost_build=$(need ghost "$ghost_key")"   >> "$GITHUB_OUTPUT"
           echo "oddjob_build=$(need oddjob "$odd_tree")"  >> "$GITHUB_OUTPUT"
 
       - name: Say what will happen
@@ -181,7 +181,7 @@ jobs:
             echo ""
             echo "| image | source key | action |"
             echo "|---|---|---|"
-            echo "| drone | \`${{ steps.k.outputs.drone_key }}\` | ${{ steps.k.outputs.drone_build == 'true' && 'build' || 'retag existing' }} |"
+            echo "| ghost | \`${{ steps.k.outputs.ghost_key }}\` | ${{ steps.k.outputs.ghost_build == 'true' && 'build' || 'retag existing' }} |"
             echo "| oddjob | \`${{ steps.k.outputs.oddjob_key }}\` | ${{ steps.k.outputs.oddjob_build == 'true' && 'build' || 'retag existing' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -196,7 +196,7 @@ jobs:
   # claims to serve both.
   build:
     needs: plan
-    if: needs.plan.outputs.drone_build == 'true' || needs.plan.outputs.oddjob_build == 'true'
+    if: needs.plan.outputs.ghost_build == 'true' || needs.plan.outputs.oddjob_build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -212,20 +212,20 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: drone
-        id: drone
-        if: needs.plan.outputs.drone_build == 'true'
+      - name: ghost
+        id: ghost
+        if: needs.plan.outputs.ghost_build == 'true'
         uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
         with:
-          context: ./drone
+          context: ./ghost
           platforms: linux/${{ matrix.arch }}
-          # The drone image's build context is `drone/`, which does not
+          # The ghost image's build context is `ghost/`, which does not
           # contain the repository-root VERSION file and cannot without
           # creating a second copy of it. So the version is handed in.
           # It came from `scripts/version.sh --release` in the plan job
           # above, which read that one file.
           build-args: |
-            DRONE_VERSION=${{ needs.plan.outputs.version }}
+            GHOST_VERSION=${{ needs.plan.outputs.version }}
           # Labels, not tags. A version TAG means "this was released",
           # and only promote.yml says that — see its header. A version
           # LABEL means "these bytes were built from VERSION = X",
@@ -247,8 +247,8 @@ jobs:
             org.opencontainers.image.version=${{ needs.plan.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            ai.xsecurity.source-key=${{ needs.plan.outputs.drone_key }}
-          outputs: type=image,name=docker.io/cr0n1c/drone,push-by-digest=true,name-canonical=true,push=true
+            ai.xsecurity.source-key=${{ needs.plan.outputs.ghost_key }}
+          outputs: type=image,name=docker.io/cr0n1c/ghost,push-by-digest=true,name-canonical=true,push=true
           # Registry, not type=gha. GitHub's Actions cache is 10 GB for
           # the whole repository with LRU eviction, and `mode=max` on
           # four scopes here plus two in CI does not fit — they evict
@@ -256,8 +256,8 @@ jobs:
           # looks exactly like having no cache at all. A cache ref in
           # the registry has no such cap, and is shared across
           # branches and runners rather than per-repo-per-key.
-          cache-from: type=registry,ref=docker.io/cr0n1c/drone:buildcache-${{ matrix.arch }}
-          cache-to: type=registry,ref=docker.io/cr0n1c/drone:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
+          cache-from: type=registry,ref=docker.io/cr0n1c/ghost:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=docker.io/cr0n1c/ghost:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
 
       - name: oddjob
         id: oddjob
@@ -268,7 +268,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           # No build-args: this context is the repository root, so the
           # Dockerfile reads VERSION out of it directly. The labels are
-          # here for the same reason as on the drone image above —
+          # here for the same reason as on the ghost image above —
           # promote.yml reads them rather than recomputing anything.
           labels: |
             org.opencontainers.image.version=${{ needs.plan.outputs.version }}
@@ -276,7 +276,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             ai.xsecurity.source-key=${{ needs.plan.outputs.oddjob_key }}
           outputs: type=image,name=docker.io/cr0n1c/oddjob,push-by-digest=true,name-canonical=true,push=true
-          # Registry for the same reason as drone above. `image-manifest`
+          # Registry for the same reason as ghost above. `image-manifest`
           # so Docker Hub accepts it as an ordinary tag rather than
           # rejecting the OCI index form.
           cache-from: type=registry,ref=docker.io/cr0n1c/oddjob:buildcache-${{ matrix.arch }}
@@ -287,7 +287,7 @@ jobs:
       # loser's architecture silently vanishes from the manifest.
       - name: Hand the digests to the merge
         env:
-          DRONE_DIGEST: ${{ steps.drone.outputs.digest }}
+          GHOST_DIGEST: ${{ steps.ghost.outputs.digest }}
           ODDJOB_DIGEST: ${{ steps.oddjob.outputs.digest }}
           ARCH: ${{ matrix.arch }}
         run: |
@@ -296,7 +296,7 @@ jobs:
           # Empty when that image did not need building. Written only
           # when there is something to write, so the merge can tell
           # "not built this run" from "built and lost".
-          [ -z "$DRONE_DIGEST" ]  || echo "$DRONE_DIGEST"  > "/tmp/digests/drone-$ARCH"
+          [ -z "$GHOST_DIGEST" ]  || echo "$GHOST_DIGEST"  > "/tmp/digests/ghost-$ARCH"
           [ -z "$ODDJOB_DIGEST" ] || echo "$ODDJOB_DIGEST" > "/tmp/digests/oddjob-$ARCH"
           ls -l /tmp/digests
 
@@ -335,9 +335,9 @@ jobs:
 
       - name: Name the images
         env:
-          DRONE_KEY: ${{ needs.plan.outputs.drone_key }}
+          GHOST_KEY: ${{ needs.plan.outputs.ghost_key }}
           ODDJOB_KEY: ${{ needs.plan.outputs.oddjob_key }}
-          DRONE_BUILD: ${{ needs.plan.outputs.drone_build }}
+          GHOST_BUILD: ${{ needs.plan.outputs.ghost_build }}
           ODDJOB_BUILD: ${{ needs.plan.outputs.oddjob_build }}
           POINTER: ${{ needs.plan.outputs.pointer }}
           DATED: ${{ needs.plan.outputs.dated }}
@@ -348,5 +348,5 @@ jobs:
             echo "| image | tags | digest | how |"
             echo "|---|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
-          .github/scripts/publish.sh drone  "$DRONE_KEY"  "$DRONE_BUILD"
+          .github/scripts/publish.sh ghost  "$GHOST_KEY"  "$GHOST_BUILD"
           .github/scripts/publish.sh oddjob "$ODDJOB_KEY" "$ODDJOB_BUILD"

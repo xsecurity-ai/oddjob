@@ -29,7 +29,7 @@ import ExpandLessIcon from '@mui/icons-material/ExpandLess'
 import SearchIcon from '@mui/icons-material/Search'
 import { useQuery } from '@tanstack/react-query'
 import {
-  api, type AuditFilter, type DroneFleetVersions, type HealthBlock, type HealthState,
+  api, type AuditFilter, type GhostFleetVersions, type HealthBlock, type HealthState,
 } from '../lib/api'
 import { neon, glow } from '../theme'
 
@@ -170,7 +170,7 @@ export function HealthView() {
   }
   const h = health.data!
   const db = h.database
-  const dr = h.drones
+  const dr = h.ghosts
 
   return (
     // Scrolls itself. The app shell sets `overflow: hidden` on body
@@ -265,7 +265,7 @@ export function HealthView() {
           ) : null}
         </Card>
 
-        <Card title="Drones" state={dr.state}
+        <Card title="Ghosts" state={dr.state}
           lines={[
             ['online', String((dr.by_state?.online ?? 0) + (dr.by_state?.busy ?? 0))],
             ['offline', String(dr.by_state?.offline ?? 0)],
@@ -276,7 +276,7 @@ export function HealthView() {
           ]}>
           {dr.queued_over_an_hour ? (
             <Alert severity="warning" sx={{ mt: 1.2, py: 0, fontSize: 11 }}>
-              {dr.queued_over_an_hour} task(s) queued over an hour — no drone has
+              {dr.queued_over_an_hour} task(s) queued over an hour — no ghost has
               taken them
             </Alert>
           ) : null}
@@ -285,7 +285,7 @@ export function HealthView() {
           ) : null}
         </Card>
 
-        <DroneVersionsCard fleet={dr.versions} />
+        <GhostVersionsCard fleet={dr.versions} />
 
         <Card title="Server" state="ok"
           lines={[
@@ -332,26 +332,26 @@ export function HealthView() {
 
 /** Which versions the fleet is actually running, and how many on each.
  *
- *  Not "the newest drone is on 0.1.0". A site admin chasing "this task
- *  behaves differently depending on which drone takes it" needs the
- *  split — the drone that misbehaved is one of the other two, and a
+ *  Not "the newest ghost is on 0.1.0". A site admin chasing "this task
+ *  behaves differently depending on which ghost takes it" needs the
+ *  split — the ghost that misbehaved is one of the other two, and a
  *  single maximum hides it completely. So every version in use gets a
  *  row with a count, newest first.
  *
- *  Drones that have never reported a version are counted on their own
+ *  Ghosts that have never reported a version are counted on their own
  *  line and never folded into a bucket. "We do not know what that one
  *  is running" is a third answer, and a fleet of ten with four silent
  *  ones must not read as a tidy fleet of six. The agent has sent
  *  `version` on register for a long time, so in practice this is an
  *  agent created in the UI that has not yet enrolled, or one built
  *  before the field existed. Either way it is a gap, not a zero. */
-function DroneVersionsCard({ fleet }: { fleet: DroneFleetVersions }) {
+function GhostVersionsCard({ fleet }: { fleet: GhostFleetVersions }) {
   const rows = fleet.versions ?? []
   return (
-    <Card title="Drone versions" state={fleet.state}
+    <Card title="Ghost versions" state={fleet.state}
       lines={[
         ['versions in use', String(fleet.distinct)],
-        ['drones reporting', String(fleet.reported)],
+        ['ghosts reporting', String(fleet.reported)],
         // Shown even when it is zero, so the line's absence never has
         // to be interpreted. A missing row and a row saying 0 read
         // identically to somebody skimming, and only one of them is
@@ -387,7 +387,7 @@ function DroneVersionsCard({ fleet }: { fleet: DroneFleetVersions }) {
               ) : null}
             </Stack>
             <Typography sx={{ fontSize: 12, whiteSpace: 'nowrap' }}>
-              {r.count} {r.count === 1 ? 'drone' : 'drones'}
+              {r.count} {r.count === 1 ? 'ghost' : 'ghosts'}
             </Typography>
           </Stack>
         ))}
@@ -398,13 +398,13 @@ function DroneVersionsCard({ fleet }: { fleet: DroneFleetVersions }) {
               no version reported
             </Typography>
             <Typography sx={{ fontSize: 12, whiteSpace: 'nowrap', opacity: 0.6 }}>
-              {fleet.unreported} {fleet.unreported === 1 ? 'drone' : 'drones'}
+              {fleet.unreported} {fleet.unreported === 1 ? 'ghost' : 'ghosts'}
             </Typography>
           </Stack>
         ) : null}
         {rows.length === 0 && fleet.unreported === 0 ? (
           <Typography sx={{ fontSize: 11, opacity: 0.6 }}>
-            No drones are enrolled, so there is nothing to compare. That is a
+            No ghosts are enrolled, so there is nothing to compare. That is a
             statement about this installation, not about the fleet.
           </Typography>
         ) : null}
@@ -442,7 +442,7 @@ function AuditTable() {
     queryFn: () => api.auditLog(filter),
   })
 
-  const SOURCES = ['ui', 'backend', 'middleware', 'drone', 'agent']
+  const SOURCES = ['ui', 'backend', 'middleware', 'ghost', 'agent']
 
   return (
     <Box sx={{ mt: 1.5 }}>

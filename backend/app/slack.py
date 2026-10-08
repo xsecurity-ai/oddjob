@@ -534,14 +534,14 @@ async def welcome(session, project, token: str) -> str:
         # Stated, not omitted. Somebody reading this needs to know that
         # nothing can be scanned yet, which is not the same as nothing
         # having been scanned.
-        lines.append("*Drone:* no agents enrolled — nothing can run until "
+        lines.append("*Ghost:* no agents enrolled — nothing can run until "
                      "one is.")
     else:
-        mode = (project.drone_mode or "mesh").lower()
+        mode = (project.ghost_mode or "mesh").lower()
         how = {"mesh": "load-balanced across all of them",
                "primary": "one at a time, next in line takes over",
                "geo": "routed by region"}.get(mode, mode)
-        lines.append(f"*Drone:* {len(live)} of {len(agents)} online · "
+        lines.append(f"*Ghost:* {len(live)} of {len(agents)} online · "
                      f"`{mode}` — {how}")
         for a in agents[:WELCOME_AGENT_LIMIT]:
             mark = {"online": ":large_green_circle:",

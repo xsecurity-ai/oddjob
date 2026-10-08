@@ -7,7 +7,7 @@ an implementation — different transport, different auth — and for a while
 nothing at all held them together except somebody noticing.
 
 Nobody noticed. Eighteen of the agent's twenty-two tools ended up with no
-MCP equivalent, including every single Drone tool, which is to say that
+MCP equivalent, including every single Ghost tool, which is to say that
 half the product was invisible to an MCP client while the README said it
 was not.
 
@@ -26,7 +26,7 @@ land in the agent, this suite goes red, and that is the handover notice.
 Add the MCP tool or add a waiver with a reason. Do not delete the check.
 
 The second half drives the tools against a live server, because a manifest
-that lines up perfectly and 404s on every call is worth nothing. The Drone
+that lines up perfectly and 404s on every call is worth nothing. The Ghost
 tools get the most attention: they are the new ones, and the fleet routes
 are the ones whose `?project=` requirement does not appear in the OpenAPI
 schema, so a wrong path there fails at runtime and nowhere earlier.
@@ -143,15 +143,15 @@ check("read-only tools are annotated read-only",
 check("every tool is a coroutine function",
       all(inspect.iscoroutinefunction(r.fn) for r in MANIFEST.values()))
 
-print("\n--- the Drone subsystem is reachable over MCP ---")
+print("\n--- the Ghost subsystem is reachable over MCP ---")
 # The specific regression: this whole group was missing. Named one by one
 # rather than counted, so deleting one fails here instead of quietly
 # lowering a total.
-for n in ("list_drones", "enroll_drone", "task_drone", "enumerate_drones",
-          "drone_task_status", "list_drone_tasks", "drone_queue",
-          "drone_routing", "drone_task_kinds", "retry_drone_task",
-          "cancel_drone_task", "import_drone_task", "kill_drone"):
-    check(f"drone tool present: {n}", n in MANIFEST)
+for n in ("list_ghosts", "enroll_ghost", "task_ghost", "enumerate_ghosts",
+          "ghost_task_status", "list_ghost_tasks", "ghost_queue",
+          "ghost_routing", "ghost_task_kinds", "retry_ghost_task",
+          "cancel_ghost_task", "import_ghost_task", "kill_ghost"):
+    check(f"ghost tool present: {n}", n in MANIFEST)
 
 print("\n--- work merged recently is represented ---")
 for n, why in (("enumerate_domains", "Kitchen Sink Lookup"),
@@ -167,12 +167,12 @@ check("Kitchen Sink is described, not just wired",
       "kitchen_sink" in inspect.getdoc(M.enumerate_domains).lower())
 check("scope entries expose include_subdomains",
       "include_subdomains" in inspect.signature(M.add_scope).parameters)
-check("drone host identity is surfaced",
+check("ghost host identity is surfaced",
       all(k in src for k in ("host_platform", "container", "outbound_ip_source")))
 check("site_health is not field-filtered, so a new version key survives",
       "_req(\"GET\", \"/api/health/site\")" in src)
 
-print("\n--- the drone's own protocol routes are not offered ---")
+print("\n--- the ghost's own protocol routes are not offered ---")
 # These authenticate with an agent credential, not a user API key. A tool
 # for one could only ever return 401, and offering the model a lever
 # attached to nothing is worse than offering nothing.
@@ -181,11 +181,11 @@ print("\n--- the drone's own protocol routes are not offered ---")
 # are absent, and a grep over the source would read that explanation as
 # the very thing it is explaining.
 requested = set(re.findall(r'_req\(\s*"[A-Z]+",\s*f?"([^"]+)"', src))
-for p in ("/api/agents/register", "/api/agents/heartbeat",
-          "/api/agents/retired", "/api/agents/enroll",
-          "/api/agents/enrol"):
+for p in ("/api/ghosts/register", "/api/ghosts/heartbeat",
+          "/api/ghosts/retired", "/api/ghosts/enroll",
+          "/api/ghosts/enrol"):
     check(f"not wrapped: {p}", p not in requested)
-check("no drone-protocol task route is wrapped",
+check("no ghost-protocol task route is wrapped",
       not any(x.endswith(("/result", "/start")) for x in requested), requested)
 
 print("\n--- the README says what the server actually does ---")
@@ -368,10 +368,10 @@ check("roots walk a host back to its registrable domain",
 check("roots say where each came from",
       all(r["source"] in ("targets", "scope") for r in roots["items"]))
 ks = run(M.enumerate_domains("MCPT", kitchen_sink=True))
-# No drone is enrolled yet, so this must refuse rather than queue work
+# No ghost is enrolled yet, so this must refuse rather than queue work
 # into a fleet that cannot run it. A 409 here is the correct behaviour
 # and the tool description says so.
-check("kitchen sink refuses with no drone online",
+check("kitchen sink refuses with no ghost online",
       ks.get("error") == "HTTP 409", ks)
 cands = run(M.domain_candidates("MCPT"))
 check("domain_candidates reads clean with nothing found yet",
@@ -380,20 +380,20 @@ check("promote on an empty list is refused, not silently a no-op",
       "error" in run(M.promote_domain_candidates("MCPT", [])))
 
 print("\n--- the fleet ---")
-d0 = run(M.list_drones("MCPT"))
-check("list_drones on an empty fleet", d0["count"] == 0, d0)
-kinds = run(M.drone_task_kinds())
-check("drone_task_kinds lists the kinds",
+d0 = run(M.list_ghosts("MCPT"))
+check("list_ghosts on an empty fleet", d0["count"] == 0, d0)
+kinds = run(M.ghost_task_kinds())
+check("ghost_task_kinds lists the kinds",
       {"nmap", "masscan", "amass", "nuclei", "httpx"} <= set(kinds["by_kind"]), kinds)
 check("...and which tool each needs", kinds["by_kind"]["nmap"] == "nmap")
 check("...and that some need none", kinds["by_kind"]["nslookup"] is None)
-rt = run(M.drone_routing("MCPT"))
-check("drone_routing reports the mode", rt["mode"] in ("mesh", "primary", "geo"), rt)
+rt = run(M.ghost_routing("MCPT"))
+check("ghost_routing reports the mode", rt["mode"] in ("mesh", "primary", "geo"), rt)
 
-enr = run(M.enroll_drone("MCPT", "probe", target_os="linux"))
-check("enroll_drone creates an agent", enr.get("agent", {}).get("id"), enr)
+enr = run(M.enroll_ghost("MCPT", "probe", target_os="linux"))
+check("enroll_ghost creates an agent", enr.get("agent", {}).get("id"), enr)
 check("...and returns a one-time enrol token", enr.get("enroll_token", "").strip() != "")
-check("...and the server's public key for the drone to pin",
+check("...and the server's public key for the ghost to pin",
       enr.get("server_public_key", "").strip() != "")
 # The name is rewritten with a random suffix. A caller that assumed
 # otherwise would address every later call to an agent that does not
@@ -403,8 +403,8 @@ check("...under a name that is not quite the one asked for",
       and enr["agent"]["name"] != "probe", enr["agent"]["name"])
 aid = enr["agent"]["id"]
 
-d1 = run(M.list_drones("MCPT"))
-check("list_drones now sees it", d1["count"] == 1, d1)
+d1 = run(M.list_ghosts("MCPT"))
+check("list_ghosts now sees it", d1["count"] == 1, d1)
 a = d1["agents"][0]
 check("...with its raw-socket capability stated", "raw_sockets" in a)
 check("...and what it cannot run", isinstance(a["cannot_run"], list))
@@ -414,20 +414,20 @@ check("...and no enrolment secret anywhere in the listing",
       enr["enroll_token"] not in json.dumps(d1))
 
 print("\n--- tasking ---")
-t = run(M.task_drone("MCPT", "nmap", "web.acme.example", agent_id=aid))
-check("task_drone queues against a named drone", t.get("id"), t)
+t = run(M.task_ghost("MCPT", "nmap", "web.acme.example", agent_id=aid))
+check("task_ghost queues against a named ghost", t.get("id"), t)
 tid = t.get("id")
 check("...with the target in its args", t["args"]["targets"] == ["web.acme.example"])
-oos = run(M.task_drone("MCPT", "nmap", "web.corp.com", agent_id=aid))
+oos = run(M.task_ghost("MCPT", "nmap", "web.corp.com", agent_id=aid))
 check("a target outside scope refuses the whole task", "error" in oos, oos)
 check("install is refused before a request is sent",
-      run(M.task_drone("MCPT", "install", "x"))["error"].startswith("install"))
+      run(M.task_ghost("MCPT", "install", "x"))["error"].startswith("install"))
 check("shell is refused before a request is sent",
-      run(M.task_drone("MCPT", "shell", "x"))["error"].startswith("shell"))
+      run(M.task_ghost("MCPT", "shell", "x"))["error"].startswith("shell"))
 check("no targets is caught here, not by the server",
-      run(M.task_drone("MCPT", "nmap", "   "))["error"] == "no targets given")
+      run(M.task_ghost("MCPT", "nmap", "   "))["error"] == "no targets given")
 
-sw = run(M.enumerate_drones("MCPT", "httpx",
+sw = run(M.enumerate_ghosts("MCPT", "httpx",
                             "web.acme.example 198.51.100.11 bad.corp.com"))
 check("a sweep queues one task per host", sw.get("queued") == 2, sw)
 refused = sw.get("refused", {})
@@ -436,44 +436,44 @@ if not isinstance(refused, dict):
 check("...and names what scope refused rather than failing the batch",
       "bad.corp.com" in refused, refused)
 
-q = run(M.drone_queue("MCPT"))
-check("drone_queue shows the waiting work", q["total"] == 3, q)
+q = run(M.ghost_queue("MCPT"))
+check("ghost_queue shows the waiting work", q["total"] == 3, q)
 check("...oldest first", q["items"][0]["id"] == tid, q["items"][0])
-lt = run(M.list_drone_tasks("MCPT"))
-check("list_drone_tasks shows them all", lt["total"] == 3, lt)
+lt = run(M.list_ghost_tasks("MCPT"))
+check("list_ghost_tasks shows them all", lt["total"] == 3, lt)
 check("...newest first", lt["items"][0]["id"] > lt["items"][-1]["id"])
 
-ts = run(M.drone_task_status("MCPT", tid))
-check("drone_task_status finds the task", ts["id"] == tid, ts)
+ts = run(M.ghost_task_status("MCPT", tid))
+check("ghost_task_status finds the task", ts["id"] == tid, ts)
 check("...reports a readable state", ts["state"] == "awaiting", ts)
-check("...and its args, from the per-drone record",
+check("...and its args, from the per-ghost record",
       ts.get("args", {}).get("targets") == ["web.acme.example"], ts)
 check("...and that nothing is waiting on a decision yet",
       ts["needs_decision"] is False)
 check("an unknown task id is an error, not an empty result",
-      "error" in run(M.drone_task_status("MCPT", 999999)))
+      "error" in run(M.ghost_task_status("MCPT", 999999)))
 
-pooled = run(M.task_drone("MCPT", "nmap", "web.acme.example"))
-pts = run(M.drone_task_status("MCPT", pooled["id"]))
+pooled = run(M.task_ghost("MCPT", "nmap", "web.acme.example"))
+pts = run(M.ghost_task_status("MCPT", pooled["id"]))
 check("a pooled task says its detail is unavailable rather than empty",
       pts["detail_available"] is False and "pool" in pts["note"], pts)
 
 print("\n--- stopping work ---")
-check("cancel_drone_task deletes a queued task",
-      run(M.cancel_drone_task("MCPT", pooled["id"])).get("ok") is True)
-check("...and it is gone", "error" in run(M.drone_task_status("MCPT", pooled["id"])))
+check("cancel_ghost_task deletes a queued task",
+      run(M.cancel_ghost_task("MCPT", pooled["id"])).get("ok") is True)
+check("...and it is gone", "error" in run(M.ghost_task_status("MCPT", pooled["id"])))
 check("retry refuses a task that has not failed",
-      run(M.retry_drone_task("MCPT", tid)).get("error") == "HTTP 409")
-k = run(M.kill_drone("MCPT", aid))
-check("kill_drone disables the drone", k.get("status") == "disabled", k)
-after = run(M.drone_task_status("MCPT", tid))
+      run(M.retry_ghost_task("MCPT", tid)).get("error") == "HTTP 409")
+k = run(M.kill_ghost("MCPT", aid))
+check("kill_ghost disables the ghost", k.get("status") == "disabled", k)
+after = run(M.ghost_task_status("MCPT", tid))
 check("...and fails the work it was carrying, saying so plainly",
       after["state"] == "failed" and "killed" in (after["notes"] or ""), after)
 
 print("\n--- site health ---")
 sh = run(M.site_health())
 check("site_health reaches a site admin's view", "database" in sh, sorted(sh)[:6])
-check("...and reports the fleet", "drones" in sh)
+check("...and reports the fleet", "ghosts" in sh)
 # Returned verbatim on purpose: the server/fleet version rollup is being
 # added right now, and a field filter written today would drop it on the
 # day it lands. This asserts the passthrough, not the keys.
@@ -488,11 +488,11 @@ k2 = call("/api/auth/keys?name=mcp2", "POST", token=tok2)[1]["key"]
 os.environ["ODDJOB_API_KEY"] = k2
 check("site_health is refused to a key that is not a site admin",
       run(M.site_health()).get("error") == "HTTP 403", run(M.site_health()))
-check("a key with no role on a project cannot read its drones",
-      run(M.list_drones("MCPT")).get("error") == "HTTP 404")
+check("a key with no role on a project cannot read its ghosts",
+      run(M.list_ghosts("MCPT")).get("error") == "HTTP 404")
 check("...nor its scope", run(M.list_scope("MCPT")).get("error") == "HTTP 404")
-check("...nor task one of its drones",
-      run(M.task_drone("MCPT", "nmap", "web.acme.example")).get("error")
+check("...nor task one of its ghosts",
+      run(M.task_ghost("MCPT", "nmap", "web.acme.example")).get("error")
       == "HTTP 404")
 os.environ["ODDJOB_API_KEY"] = key["key"]
 

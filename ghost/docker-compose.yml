@@ -1,0 +1,97 @@
+# Deploying one Ghost.
+#
+# Separate from the repository's root compose file on purpose: that one
+# brings up Oddjob and its database, and this runs somewhere else
+# entirely — on a host inside the network being assessed, often with
+# nothing in common with the server but a route to it.
+#
+#   1. Create the agent in Oddjob (Ghosts → Deploy a Ghost). Copy the
+#      one-time enrollment token.
+#   2. GHOST_SERVER=https://oddjob.example GHOST_ENROLL_TOKEN=... \
+#        docker compose up -d
+#   3. The token is spent on first run. From then on the identity in
+#      the volume is what authenticates, and the variable can go.
+
+services:
+  ghost:
+    build: .
+    image: ghost-agent
+    container_name: ghost
+    restart: unless-stopped
+
+    # Everything dropped, two added back. SYN scanning, OS detection
+    # and masscan need CAP_NET_RAW; without it masscan refuses and nmap
+    # quietly falls back to a connect scan, which is a different scan
+    # from the one the report will say was run. The agent checks what
+    # it actually holds and tells the server, so a missing capability
+    # shows up in the UI rather than in a misleading report — but it is
+    # still better to grant it than to discover the gap later.
+    cap_drop: [ALL]
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+
+    # Host networking, deliberately. On a bridge the container's
+    # traffic is NATed through the Docker host, so every packet the
+    # client sees comes from one address that is not the agent's, and
+    # the agent's own idea of its address is a private bridge IP that
+    # appears nowhere in their logs. For an engagement that breaks
+    # attribution on both ends. It also means the agent can reach the
+    # networks the host can, which is usually the entire reason this
+    # host was chosen.
+    #
+    # Docker Desktop on macOS and Windows does not implement this; the
+    # agent still runs and still reports honestly, it just scans from
+    # the VM. Linux is where an agent belongs anyway.
+    network_mode: host
+
+    environment:
+      # Where to report. No default: an agent that does not know is
+      # useless, and a baked-in one is how an agent copied between
+      # engagements ends up talking to the wrong client's server.
+      GHOST_SERVER: ${GHOST_SERVER:?set GHOST_SERVER to the Oddjob URL}
+      # One-time, from the deploy wizard. Unset after first run.
+      GHOST_ENROLL_TOKEN: ${GHOST_ENROLL_TOKEN:-}
+      GHOST_WORKDIR: /var/lib/ghost/work
+      # How many tasks at once. Unset (or 0) sizes from the host, which
+      # is right almost always -- see "How many tasks at once" in the
+      # README before raising it.
+      #
+      # In a container the sizing reads this container's cgroup limit
+      # as well as /proc/meminfo (which is the HOST's) and takes the
+      # smaller, so `mem_limit` is respected without being repeated
+      # here. Set this only to override both.
+      GHOST_PARALLEL: ${GHOST_PARALLEL:-0}
+
+    command:
+      - run
+      - --name
+      - ${GHOST_NAME:-ghost-docker}
+      - --heartbeat
+      - ${GHOST_HEARTBEAT:-15s}
+
+    volumes:
+      # The agent's private key and any results it has not managed to
+      # deliver yet. The enrollment token is single-use, so losing this
+      # means creating the agent again in Oddjob; losing the spool
+      # means losing results for scans that already ran against the
+      # client's estate. A named volume, not a bind mount, so it is not
+      # accidentally committed or synced.
+      - ghost-state:/var/lib/ghost/work
+
+    # Scanning is bursty and masscan is deliberately greedy. Bounded so
+    # an agent cannot take the host it was placed on out of service —
+    # which would be an incident on someone else's network.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  ghost-state:

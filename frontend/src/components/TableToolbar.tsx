@@ -4,7 +4,7 @@
  * Two things here are safety features rather than conveniences.
  *
  * **It is unconditional.** The old toolbar only appeared when the view
- * supplied an action, a note or write access, so `DroneTasksTable` — a
+ * supplied an action, a note or write access, so `GhostTasksTable` — a
  * queue that is read-only by nature — had no search box, no filters and
  * no column control at all. A table with no way to filter it is not a
  * simpler table, it is a table you have to read by eye.

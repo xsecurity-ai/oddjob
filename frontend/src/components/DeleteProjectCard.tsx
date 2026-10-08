@@ -87,7 +87,7 @@ export function DeleteProjectCard({ project }: { project: string }) {
                 {([
                   [p.targets, 'target'], [p.services, 'service'],
                   [p.vulns, 'finding'], [p.pocs, 'proof-of-concept'],
-                  [p.credentials, 'credential'], [p.agents, 'Drone agent'],
+                  [p.credentials, 'credential'], [p.agents, 'Ghost agent'],
                 ] as Array<[number, string]>)
                   .filter(([n]) => n > 0)
                   .map(([n, what]) => (

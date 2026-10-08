@@ -186,8 +186,8 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-  drone:
-    name: drone builds for every target
+  ghost:
+    name: ghost builds for every target
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -195,7 +195,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26'
-          cache-dependency-path: drone/go.sum
+          cache-dependency-path: ghost/go.sum
 
       # The release version, from the one file that decides it. Used
       # both as the agent image's build argument and as the value the
@@ -205,7 +205,7 @@ jobs:
         run: echo "version=$(scripts/version.sh --release)" >> "$GITHUB_OUTPUT"
 
       - name: Formatted
-        working-directory: drone
+        working-directory: ghost
         run: |
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
@@ -213,11 +213,11 @@ jobs:
           fi
 
       - name: Vet
-        working-directory: drone
+        working-directory: ghost
         run: go vet ./...
 
       - name: Tests
-        working-directory: drone
+        working-directory: ghost
         run: go test -race ./...
 
       # The agent is only useful if it reaches the host it is needed
@@ -225,7 +225,7 @@ jobs:
       # stops compiling is found here rather than at the point someone
       # needs a Windows binary.
       - name: Cross-compile every release target
-        working-directory: drone
+        working-directory: ghost
         # ODDJOB_RELEASE=1 so these are built the way a release is
         # built — bare version, no `-dev-` suffix. The step below
         # proves it, and the one after that proves the suffix still
@@ -249,26 +249,26 @@ jobs:
       - name: Build the agent image
         uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
         with:
-          context: ./drone
+          context: ./ghost
           load: true
-          tags: drone-agent
+          tags: ghost-agent
           # The same build argument images.yml passes, from the same
           # script and the same file. The agent image's context is
-          # `drone/`, which has no VERSION in it — see the comment
-          # above the ARG in drone/Dockerfile.
+          # `ghost/`, which has no VERSION in it — see the comment
+          # above the ARG in ghost/Dockerfile.
           build-args: |
-            DRONE_VERSION=${{ steps.ver.outputs.version }}
-          cache-from: type=gha,scope=ci-drone
-          cache-to: type=gha,scope=ci-drone,mode=max
+            GHOST_VERSION=${{ steps.ver.outputs.version }}
+          cache-from: type=gha,scope=ci-ghost
+          cache-to: type=gha,scope=ci-ghost,mode=max
 
       # The agent image is how most people will actually deploy this,
       # and it has already hidden one bug the binaries could not: file
       # capabilities that are present and not effective.
       - name: The agent image can raw-socket
-        working-directory: drone
+        working-directory: ghost
         run: |
           docker run --rm --cap-drop=ALL --cap-add=NET_RAW --cap-add=NET_ADMIN \
-            drone-agent check > /tmp/check.json || true
+            ghost-agent check > /tmp/check.json || true
           cat /tmp/check.json
           python3 - <<'EOF'
           import json
@@ -281,31 +281,31 @@ jobs:
           EOF
 
       - name: The binaries are static
-        working-directory: drone
+        working-directory: ghost
         run: |
           # A dynamically linked agent fails on the older glibc it will
           # meet in the field, which is exactly where it cannot be
           # debugged.
-          if file dist/drone-linux-amd64 | grep -q 'dynamically linked'; then
-            file dist/drone-linux-amd64; exit 1
+          if file dist/ghost-linux-amd64 | grep -q 'dynamically linked'; then
+            file dist/ghost-linux-amd64; exit 1
           fi
-          ./dist/drone-linux-amd64 version
+          ./dist/ghost-linux-amd64 version
 
-      # The version a drone reports is the one an operator uses to
+      # The version a ghost reports is the one an operator uses to
       # answer "which agent produced this scan", so it is checked out
       # of the artefact rather than trusted from the Makefile.
       #
-      # `drone version` prints "drone <ver> (os/arch, goVER)". The
+      # `ghost version` prints "ghost <ver> (os/arch, goVER)". The
       # second field is the version; cut it out rather than regex the
       # line, so a change to the surrounding text fails loudly here
       # instead of quietly matching nothing.
       - name: The release binaries carry a release version
-        working-directory: drone
+        working-directory: ghost
         env:
           WANT: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          got=$(./dist/drone-linux-amd64 version | awk '{print $2}')
+          got=$(./dist/ghost-linux-amd64 version | awk '{print $2}')
           ../scripts/check-version.sh "$got"
           if [ "$got" != "$WANT" ]; then
             echo "::error::the binary says $got and VERSION says $WANT." >&2
@@ -321,8 +321,8 @@ jobs:
           WANT: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          got=$(docker run --rm --entrypoint /usr/local/bin/drone \
-                  drone-agent version | awk '{print $2}')
+          got=$(docker run --rm --entrypoint /usr/local/bin/ghost \
+                  ghost-agent version | awk '{print $2}')
           scripts/check-version.sh "$got"
           if [ "$got" != "$WANT" ]; then
             echo "::error::the image says $got and VERSION says $WANT." >&2
@@ -336,11 +336,11 @@ jobs:
       # arrangement exists to prevent. A guard that cannot fail is not
       # a guard.
       - name: A plain build is still marked as a dev build
-        working-directory: drone
+        working-directory: ghost
         run: |
           set -euo pipefail
           make build
-          got=$(./drone version | awk '{print $2}')
+          got=$(./ghost version | awk '{print $2}')
           echo "unreleased build reports $got"
           case "$got" in
             *-dev-*) ;;
@@ -350,7 +350,7 @@ jobs:
                echo "::error::notice a dev build wearing a release number." >&2
                exit 1 ;;
           esac
-          rm -f drone
+          rm -f ghost
 
   docker:
     name: image builds and the stack comes up
@@ -468,7 +468,7 @@ jobs:
       # and the one that matters is whichever is weaker.
       #
       # This job checks the FILE and the SCRIPT. The checks that a
-      # built artefact carries a release version live in the `drone`
+      # built artefact carries a release version live in the `ghost`
       # and `docker` jobs, where the artefacts are — a clean file and
       # an image built without --release is the interesting failure,
       # and nothing here could see it.
@@ -556,7 +556,7 @@ jobs:
     timeout-minutes: 15
     # golangci-lint only analyses the host GOOS, so a linux-only run
     # never opens mem_darwin.go, priv_windows.go or priv_notlinux.go —
-    # the same blind spot the `drone` job's cross-compile step exists
+    # the same blind spot the `ghost` job's cross-compile step exists
     # to close.
     strategy:
       fail-fast: false
@@ -567,7 +567,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26'
-          cache-dependency-path: drone/go.sum
+          cache-dependency-path: ghost/go.sum
 
       # The linter version is pinned as well as the action: a new
       # golangci-lint release adds checks, and an unpinned one turns a
@@ -577,7 +577,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
         with:
           version: v2.14.0
-          working-directory: drone
+          working-directory: ghost
 
   frontend-lint:
     name: frontend lint
@@ -626,9 +626,9 @@ jobs:
 
       # Runs even if the step above failed, so one push reports both
       # files rather than making you fix one to see the other.
-      - name: Drone agent image
+      - name: Ghost agent image
         if: '!cancelled()'
         uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
-          dockerfile: drone/Dockerfile
+          dockerfile: ghost/Dockerfile
           config: .hadolint.yaml

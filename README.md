@@ -20,16 +20,16 @@ every collaboration platform that were worth keeping, taken honestly and
 put in one place: Faraday's importer breadth, Dradis's reporting,
 Ghostwriter's engagement structure, the proxy-history handling you only
 get from living in Burp... plus the things none of them do, like an agent
-that can read and write the engagement, and Drones.
+that can read and write the engagement, and Ghosts.
 
 **You can use it two ways, and the second is optional:**
 
 | | what you run | what you get |
 |---|---|---|
 | **As a reporter** | Oddjob alone | Import what your tools already produced. Triage, deduplicate, merge, write findings, generate the report. Nothing of yours ever touches the target. |
-| **As an active engagement** | Oddjob **+ Drones** | The above, plus enumeration you drive from the UI. Drones run the scanners, on your infrastructure, and the results import themselves. |
+| **As an active engagement** | Oddjob **+ Ghosts** | The above, plus enumeration you drive from the UI. Ghosts run the scanners, on your infrastructure, and the results import themselves. |
 
-If you only ever import files, you never need a Drone. The whole agent
+If you only ever import files, you never need a Ghost. The whole agent
 side is additive and there is no degraded mode, no nagging, and no feature
 that stops working because you did not deploy one.
 
@@ -48,7 +48,7 @@ that stops working because you did not deploy one.
                  ┌────────────────────┼────────────────────┐
                  │                    │                    │
             ┌────┴────┐          ┌────┴────┐          ┌────┴────┐
-            │ DRONE 1 │          │ DRONE 2 │          │ DRONE 3 │
+            │ GHOST 1 │          │ GHOST 2 │          │ GHOST 3 │
             │ us-east │          │   eu    │          │  japan  │
             └────┬────┘          └────┬────┘          └────┬────┘
                  │                    │                    │
@@ -60,16 +60,16 @@ that stops working because you did not deploy one.
             ── the client's estate, from the egress you chose ──
 ```
 
-Oddjob holds the queue. Drones ask for work, run it, and send results
-back, which import themselves into the project. A Drone **dials out**,
+Oddjob holds the queue. Ghosts ask for work, run it, and send results
+back, which import themselves into the project. A Ghost **dials out**,
 nothing listens on the internet, and nothing needs to be exposed to add
 one.
 
-Drones are **tied to a project**. A Drone enrolled on ACME takes tasking
+Ghosts are **tied to a project**. A Ghost enrolled on ACME takes tasking
 from ACME, and everything it finds lands in ACME. It cannot be borrowed
 by another engagement.
 
-→ **[Drones have their own README](drone/README.md)** which includes what they are,
+→ **[Ghosts have their own README](ghost/README.md)** which includes what they are,
 how to deploy one safely, and the rules about where they may be
 installed.
 
@@ -91,7 +91,7 @@ you have no written authorization to test is a crime in most countries,
 and scope exists in this tool precisely because "I thought it was in
 scope" is not a defence.
 
-The project's scope lists are enforced, not advisory: a Drone will refuse
+The project's scope lists are enforced, not advisory: a Ghost will refuse
 a target outside them, and the refusal is recorded.
 
 ---
@@ -114,7 +114,7 @@ session.
 
 That is the whole install. You get PostgreSQL rather than SQLite which
 matters the moment a long import and a background worker want to write at
-the same time and the UI already built, and the Drone binaries for every
+the same time and the UI already built, and the Ghost binaries for every
 platform built and ready to hand out.
 
 ### From a checkout, if you must
@@ -165,36 +165,36 @@ traffic including session cookies. Read [SECURITY.md](SECURITY.md).
 
 ---
 
-## Drones
+## Ghosts
 
-A Drone is the **forward-deployed enumeration** half: a single static
+A Ghost is the **forward-deployed enumeration** half: a single static
 binary that runs on *your* attack infrastructure, takes tasking from
 Oddjob, runs the scanners, and sends the results home to import
 themselves.
 
 ```bash
-# In Oddjob: Drones → Deploy a Drone. Copy the enrollment token, then:
-docker run -d --name drone --restart unless-stopped \
+# In Oddjob: Ghosts → Deploy a Ghost. Copy the enrollment token, then:
+docker run -d --name ghost --restart unless-stopped \
   --network host \
   --cap-drop=ALL --cap-add=NET_RAW --cap-add=NET_ADMIN \
-  -e DRONE_SERVER=https://oddjob.internal \
-  -e DRONE_ENROLL_TOKEN=drone_... \
-  -v drone-state:/var/lib/drone/work drone-agent \
-  run --name edge-01 --workdir /var/lib/drone/work
+  -e GHOST_SERVER=https://oddjob.internal \
+  -e GHOST_ENROLL_TOKEN=ghost_... \
+  -v ghost-state:/var/lib/ghost/work ghost-agent \
+  run --name edge-01 --workdir /var/lib/ghost/work
 ```
 
-**`--network host` is not decoration.** Leave it off and the Drone sits on
+**`--network host` is not decoration.** Leave it off and the Ghost sits on
 a private bridge network: it cannot receive a reverse shell, an SSRF
 callback or any other inbound connection, it reports an address that
 appears in nobody's logs, and it cannot reach the other networks the host
 is on. Scanning still works. Catching anything does not. The trade-off —
 `NET_ADMIN` then applies to the host's network stack — is written out in
-the [Drone README](drone/README.md).
+the [Ghost README](ghost/README.md).
 
-**Drones go on infrastructure you control and nowhere else.** Never on a
+**Ghosts go on infrastructure you control and nowhere else.** Never on a
 host you have compromised. The reasoning, the deployment modes, the
 routing policies and region configuration are all in the
-**[Drone README](drone/README.md)** read it before deploying one.
+**[Ghost README](ghost/README.md)** read it before deploying one.
 
 ---
 
@@ -236,8 +236,8 @@ project" may mean "not yours".
 | **Ports & services** | `list_ports` `list_services` `port_summary` `explore` |
 | **Findings & web** | `list_vulns` `add_finding` `list_web_addresses` `list_web_urls` `list_credentials` |
 | **Importing** | `import_formats` `import_report` `import_nmap` `bulk_import` |
-| **Drone — fleet** | `list_drones` `enroll_drone` `kill_drone` `drone_routing` `drone_task_kinds` |
-| **Drone — work** | `task_drone` `enumerate_drones` `drone_queue` `list_drone_tasks` `drone_task_status` `retry_drone_task` `cancel_drone_task` `import_drone_task` |
+| **Ghost — fleet** | `list_ghosts` `enroll_ghost` `kill_ghost` `ghost_routing` `ghost_task_kinds` |
+| **Ghost — work** | `task_ghost` `enumerate_ghosts` `ghost_queue` `list_ghost_tasks` `ghost_task_status` `retry_ghost_task` `cancel_ghost_task` `import_ghost_task` |
 | **Domains** | `domain_roots` `enumerate_domains` `domain_candidates` `promote_domain_candidates` `reject_domain_candidates` |
 | **Lookups** | `pending_lookups` `apply_lookups` |
 | **Exploits** | `search_exploits` `service_leads` `exploit_leads` `get_cve` `feed_status` |
@@ -273,7 +273,7 @@ Oddjob has two of them, and they are not the same program:
 | | runs | reaches | auth | used for |
 |---|---|---|---|---|
 | **MCP server** | wherever your MCP client runs | Oddjob's HTTP API | an API key, and exactly the ACL that key has | driving the engagement from your editor |
-| **In-platform agent** | inside Oddjob | its own database, and Drones | the session, with the project fixed by the caller | answering questions in the UI and over Slack |
+| **In-platform agent** | inside Oddjob | its own database, and Ghosts | the session, with the project fixed by the caller | answering questions in the UI and over Slack |
 
 The in-platform agent is configured in Site Config and is read-only
 unless writes are explicitly enabled. See [The agent](#the-agent).
@@ -295,7 +295,7 @@ today, `rank_targets`, because its scoring weights live in the agent and
 a second copy of a scoring rule is the drift rather than a fix for it.
 
 This exists because the hand-maintained version failed: eighteen of the
-agent's twenty-two tools had drifted out of MCP, the entire Drone
+agent's twenty-two tools had drifted out of MCP, the entire Ghost
 subsystem among them, and nothing said so. **A failure in that suite is
 the mechanism working.**
 
@@ -384,7 +384,7 @@ another's data.
 Socket Mode means the app opens the connection outward, so nothing has to
 be exposed to the internet.
 
-### Tasking Drones from the assistant
+### Tasking Ghosts from the assistant
 
 With writes enabled, the agent can queue enumeration itself — including
 sweeps across the project's own inventory, rather than hosts you type in:
@@ -409,10 +409,10 @@ Three things it will not do, whatever it is asked:
 
 - **`shell` and `install` are never queued by the assistant.** Running
   commands on, or installing software onto, a privileged process inside
-  a client's network belongs on the Drone page, where the allowlist and
+  a client's network belongs on the Ghost page, where the allowlist and
   the agent are both in front of you.
 - **It cannot reach past the scope gate.** Tasking goes through the same
-  check as the Drone page, because a scan you could not queue by hand
+  check as the Ghost page, because a scan you could not queue by hand
   must not become queueable by asking for it in a sentence.
 - **It will not silently skip things.** Assets that are not network
   hosts — an S3 ARN, a cloud resource id — are dropped and *named*.
@@ -476,8 +476,8 @@ semver triple. Everything else reads it and nothing else decides it.
 VERSION                      0.0.1
   |
   |-- backend/app/version.py        Health view: "Oddjob version"
-  |-- drone/Makefile, Dockerfiles   -ldflags into config.Version, so
-  |                                 every Drone reports it on register
+  |-- ghost/Makefile, Dockerfiles   -ldflags into config.Version, so
+  |                                 every Ghost reports it on register
   |-- images.yml                    part of the image content key, and
   |                                 the org.opencontainers.image.version
   |                                 label on what it publishes
@@ -487,7 +487,7 @@ VERSION                      0.0.1
 
 **Site health** shows Oddjob's own version and what the fleet is
 running — every version in use with a count, newest first, and a
-separate line for Drones that have not reported one. A fleet split
+separate line for Ghosts that have not reported one. A fleet split
 across three versions is the thing worth seeing; "the newest one"
 hides the two that are not.
 
@@ -500,7 +500,7 @@ build or release anything.
 
 Then **promote** turns a published image into a release: it reads the
 version off the image's own label, retags that **digest** as
-`cr0n1c/oddjob:vX.Y.Z` / `:X.Y.Z` and the same for `cr0n1c/drone`, and
+`cr0n1c/oddjob:vX.Y.Z` / `:X.Y.Z` and the same for `cr0n1c/ghost`, and
 pushes the matching git tag onto the commit the image was built from.
 It never rebuilds — the released bytes are the bytes that were running
 overnight — and it computes no version of its own.
@@ -523,14 +523,14 @@ build time, so the same source always produces the same string.
 ```bash
 scripts/version.sh             # 0.0.1-dev-1759900000
 scripts/version.sh --release   # 0.0.1
-ODDJOB_RELEASE=1 make release  # in drone/, builds the bare version
+ODDJOB_RELEASE=1 make release  # in ghost/, builds the bare version
 ```
 
 The default is the dev suffix on purpose: forgetting the flag costs a
 `-dev-` on a local binary, and forgetting it the other way round would
 publish an unreleasable version. `scripts/check-version.sh` is what
 stops that happening — it runs in the pre-commit hook, in CI's
-`version` job, in the `drone` and `docker` jobs against the actual
+`version` job, in the `ghost` and `docker` jobs against the actual
 built artefacts, and in `promote` before anything is tagged.
 
 ## Tests

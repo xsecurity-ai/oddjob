@@ -11,8 +11,8 @@
 # everything else in this repository *reads* it:
 #
 #   backend/app/version.py      walks up for VERSION, same rules below
-#   drone/Makefile              stamps config.Version via -ldflags
-#   Dockerfile, drone/Dockerfile    build arg, baked into the image
+#   ghost/Makefile              stamps config.Version via -ldflags
+#   Dockerfile, ghost/Dockerfile    build arg, baked into the image
 #   .github/workflows/images.yml    stamps the OCI version label
 #   .github/workflows/promote.yml   reads it back off the image
 #
@@ -40,7 +40,7 @@
 # spelled `-dev-<seconds>`. `0.0.1-dev-1759900000` parses as semver,
 # sorts BELOW `0.0.1` (a pre-release precedes its release, which is the
 # correct ordering for an unreleased build of it), and is still obvious
-# to a human reading a table of drones.
+# to a human reading a table of ghosts.
 #
 # ---------------------------------------------- release is explicit
 #
@@ -65,7 +65,7 @@ esac
 
 # Resolved from this script's own location rather than from $PWD or
 # from `git rev-parse --show-toplevel`: the Makefile calls it from
-# drone/, CI calls it from the root, and a Docker build has no git at
+# ghost/, CI calls it from the root, and a Docker build has no git at
 # all. The file sits beside scripts/, and that is true in every one of
 # those cases.
 here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)

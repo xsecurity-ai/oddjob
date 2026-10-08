@@ -470,7 +470,7 @@ class ScopeIndex:
         **Nothing here performs a lookup, and nothing here may.** Resolving
         an address to a country means handing a client's target list to a
         third-party geolocation service, which is a disclosure of the
-        engagement itself — see the same decision for Drone `geo` routing in
+        engagement itself — see the same decision for Ghost `geo` routing in
         models.Agent.regions. So the attribution is operator-declared: a
         country written onto a scope entry says "this range is in JP", and
         that statement, held locally, is what resolves every address it

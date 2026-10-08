@@ -1,5 +1,5 @@
 /**
- * Hand domains to a Drone and have amass go and look.
+ * Hand domains to a Ghost and have amass go and look.
  *
  * This used to guess. It extrapolated hostnames from patterns already
  * in the project — `admin.` under one zone because `admin.` existed
@@ -39,7 +39,7 @@ import { asServerReadsIt, parseDomains } from '../lib/domainInput'
 import { neon, glow } from '../theme'
 import { Caveat, EnumerateDialog, FleetNotice } from './EnumerateBits'
 import { BY_ANY, PillInput, type Analyse } from './PillInput'
-import { useFleet } from './droneTasking'
+import { useFleet } from './ghostTasking'
 
 /** `MAX_TASKS` in backend/app/routers/domains.py.
  *
@@ -157,7 +157,7 @@ export function DetectDomainsDialog({ project, onClose, seed = [], onQueued }: {
       }
       onQueued?.(`Queued ${r.queued.length} amass enumeration`
                  + `${r.queued.length === 1 ? '' : 's'} across `
-                 + `${r.agents_online} online drone`
+                 + `${r.agents_online} online ghost`
                  + `${r.agents_online === 1 ? '' : 's'}`
                  + (kitchenSink ? ` from ${r.considered} domain`
                                   + `${r.considered === 1 ? '' : 's'} walked`
@@ -176,7 +176,7 @@ export function DetectDomainsDialog({ project, onClose, seed = [], onQueued }: {
       <DialogContent sx={{ pt: 1 }}>
         <Stack spacing={2}>
           <Caveat>
-            Runs <code>amass enum</code> on a Drone, one task per domain.
+            Runs <code>amass enum</code> on a Ghost, one task per domain.
             Everything it returns resolved, so the names are filed as
             targets when each task reports — there is nothing to triage.
           </Caveat>

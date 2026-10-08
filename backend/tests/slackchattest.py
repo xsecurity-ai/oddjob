@@ -810,7 +810,7 @@ check("add_target is not even offered when the engagement is not opted in",
       "add_target" not in {t.name for t in tools_a}, str(sorted(
           t.name for t in tools_a)))
 check("nor add_finding", "add_finding" not in {t.name for t in tools_a})
-check("nor drone tasking", "task_drone" not in {t.name for t in tools_a})
+check("nor ghost tasking", "task_ghost" not in {t.name for t in tools_a})
 
 OPTED = {"agent.allow_writes": True, "slack.chat_write_projects": "AAA"}
 az_w, tools_w = run(schemas("USLACKALICE", "CAAA", "eng-aaa", OPTED))

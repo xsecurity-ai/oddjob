@@ -121,16 +121,16 @@ repos:
         name: gofmt
         language: system
         pass_filenames: false
-        files: ^drone/.*\.go$
+        files: ^ghost/.*\.go$
         # CI gates on this separately from the linter, and it is
         # instant, so it is worth its own hook with its own message.
-        entry: bash -c 'cd drone && out=$(gofmt -l .) && [ -z "$out" ] || { echo "gofmt would change:"; echo "$out"; exit 1; }'
+        entry: bash -c 'cd ghost && out=$(gofmt -l .) && [ -z "$out" ] || { echo "gofmt would change:"; echo "$out"; exit 1; }'
 
       - id: go-lint
         name: golangci-lint (linux, darwin, windows)
         language: system
         pass_filenames: false
-        files: ^drone/.*\.(go|mod|sum|yml)$
+        files: ^ghost/.*\.(go|mod|sum|yml)$
         # All three, because golangci-lint only analyses the host GOOS
         # and ci.yml runs a matrix of exactly these. A Mac never
         # compiles mem_linux.go, so three gosec findings in it passed
@@ -139,7 +139,7 @@ repos:
         #
         # Cheap after the first: the build cache is shared, so the
         # second and third pass are around a second each.
-        entry: bash -c 'cd drone && for os in linux darwin windows; do
+        entry: bash -c 'cd ghost && for os in linux darwin windows; do
           GOOS=$os golangci-lint run || { echo "  ^ GOOS=$os"; exit 1; }; done'
 
       - id: frontend-lint

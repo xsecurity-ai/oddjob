@@ -1,4 +1,4 @@
-"""Drone agent enrollment, tasking, result delivery and adjudication.
+"""Ghost agent enrollment, tasking, result delivery and adjudication.
 
 The shape under test is the one an agent actually walks: enroll from the
 UI, register with the key, heartbeat until a task is handed over, mark it
@@ -37,7 +37,7 @@ def call(p, m="GET", b=None, token=None, key=None):
     if b is not None:
         r.data = json.dumps(b).encode(); r.add_header("Content-Type", "application/json")
     if token: r.add_header("Authorization", f"Bearer {token}")
-    if key: r.add_header("X-Drone-Key", key)
+    if key: r.add_header("X-Ghost-Key", key)
     try:
         with urllib.request.urlopen(r, timeout=60) as x:
             raw = x.read(); return x.status, (json.loads(raw) if raw else None)
@@ -78,7 +78,7 @@ admin = call("/api/auth/setup", "POST",
 call("/api/projects", "POST", {"code": "AGENT", "name": "Agent test"}, token=admin)
 
 print("== enrollment ==")
-st, en = call("/api/agents?project=AGENT", "POST",
+st, en = call("/api/ghosts?project=AGENT", "POST",
               {"name": "test-agent"}, token=admin)
 check("enroll accepted", st == 201, f"status={st} {str(en)[:140]}")
 KEY = (en or {}).get("callback_key")
@@ -89,36 +89,36 @@ check("and a separate call-in key, so the two directions are not one secret",
       isinstance((en or {}).get("call_in_key"), str)
       and (en or {}).get("call_in_key") != KEY)
 
-st, again = call("/api/agents?project=AGENT", "GET", token=admin)
+st, again = call("/api/ghosts?project=AGENT", "GET", token=admin)
 check("the keys are not readable afterwards",
       st == 200 and not any(k in json.dumps(again)
                             for k in (KEY, (en or {}).get("call_in_key"))),
       str(again)[:120])
 
 print("== the key is the credential ==")
-st, _ = call("/api/agents/heartbeat", "POST", {}, key="not-a-real-key")
+st, _ = call("/api/ghosts/heartbeat", "POST", {}, key="not-a-real-key")
 check("a wrong agent key is refused", st in (401, 403), f"status={st}")
-st, _ = call("/api/agents/heartbeat", "POST", {})
+st, _ = call("/api/ghosts/heartbeat", "POST", {})
 check("no agent key is refused", st in (401, 403), f"status={st}")
 
-st, reg = call("/api/agents/register", "POST",
+st, reg = call("/api/ghosts/register", "POST",
                {"platform": "linux", "arch": "amd64", "version": "test",
                 "hostname": "droplet", "privileged": True,
                 "tools": {"nmap": "7.94"}}, key=KEY)
 check("register with the key works", st == 200, f"status={st} {str(reg)[:120]}")
 
 print("== tasking ==")
-st, _ = call(f"/api/agents/{AID}/tasks?project=AGENT", "POST",
+st, _ = call(f"/api/ghosts/{AID}/tasks?project=AGENT", "POST",
              {"kind": "definitely-not-a-tool", "args": {}}, token=admin)
 check("an unknown kind is refused by the server, not the agent", st == 422,
       f"status={st}")
 
-st, _ = call(f"/api/agents/{AID}/tasks?project=AGENT", "POST",
+st, _ = call(f"/api/ghosts/{AID}/tasks?project=AGENT", "POST",
              {"kind": "install", "args": {"tools": ["nmap; rm -rf /"]}},
              token=admin)
 check("install refuses anything off the allowlist", st == 422, f"status={st}")
 
-st, task = call(f"/api/agents/{AID}/tasks?project=AGENT", "POST",
+st, task = call(f"/api/ghosts/{AID}/tasks?project=AGENT", "POST",
                 {"kind": "nmap",
                  "args": {"targets": ["scanme.example.org"], "ports": "22,80,9929"}},
                 token=admin)
@@ -127,31 +127,31 @@ TID = (task or {}).get("id")
 check("nmap tasks import as nmap", (task or {}).get("import_as") == "nmap",
       str((task or {}).get("import_as")))
 
-st, hb = call("/api/agents/heartbeat", "POST", {}, key=KEY)
+st, hb = call("/api/ghosts/heartbeat", "POST", {}, key=KEY)
 check("heartbeat hands over the queued task",
       st == 200 and (hb or {}).get("task", {}).get("id") == TID, str(hb)[:140])
 
-st, hb2 = call("/api/agents/heartbeat", "POST", {}, key=KEY)
+st, hb2 = call("/api/ghosts/heartbeat", "POST", {}, key=KEY)
 check("a claimed task is not handed out twice",
       st == 200 and not (hb2 or {}).get("task"), str(hb2)[:140])
 
 print("== the queue is held until the agent says it is ready ==")
 # Agents beat throughout a scan now, so a beat is not a request for
 # work. A second task must stay in the queue while the first is out.
-st, t2 = call(f"/api/agents/{AID}/tasks?project=AGENT", "POST",
+st, t2 = call(f"/api/ghosts/{AID}/tasks?project=AGENT", "POST",
               {"kind": "nslookup", "args": {"targets": ["example.org"]}},
               token=admin)
 T2 = (t2 or {}).get("id")
 check("a second task is queued", st == 201, f"status={st}")
 
-st, hb3 = call("/api/agents/heartbeat", "POST",
+st, hb3 = call("/api/ghosts/heartbeat", "POST",
                {"ready": False, "running_task": TID}, key=KEY)
 check("an agent that says it is busy is given nothing",
       st == 200 and not (hb3 or {}).get("task"), str(hb3)[:140])
 check("and is told what it is still holding",
       TID in ((hb3 or {}).get("holding") or []), str(hb3)[:140])
 
-st, agl = call("/api/agents?project=AGENT", token=admin)
+st, agl = call("/api/ghosts?project=AGENT", token=admin)
 me = next((x for x in agl if x["id"] == AID), {})
 check("the second task shows as queued against it",
       me.get("queued_tasks") == 1, str(me.get("queued_tasks")))
@@ -160,17 +160,17 @@ check("while the first shows as in flight",
 
 # An old agent sends no body at all. It must not be handed a second
 # task either, or the guard would be opt-in by the thing it guards.
-st, hb4 = call("/api/agents/heartbeat", "POST", {}, key=KEY)
+st, hb4 = call("/api/ghosts/heartbeat", "POST", {}, key=KEY)
 check("an agent that says nothing is still held, not trusted",
       st == 200 and not (hb4 or {}).get("task"), str(hb4)[:140])
 
-st, _ = call(f"/api/agents/tasks/{TID}/result", "POST",
+st, _ = call(f"/api/ghosts/tasks/{TID}/result", "POST",
              {"status": "done", "output": "{}", "stderr": "",
               "summary": "done", "exit_code": 0}, key=KEY)
-st, hb5 = call("/api/agents/heartbeat", "POST", {"ready": True}, key=KEY)
+st, hb5 = call("/api/ghosts/heartbeat", "POST", {"ready": True}, key=KEY)
 check("once the first is reported, the next is handed over",
       (hb5 or {}).get("task", {}).get("id") == T2, str(hb5)[:140])
-st, _ = call(f"/api/agents/tasks/{T2}/result", "POST",
+st, _ = call(f"/api/ghosts/tasks/{T2}/result", "POST",
              {"status": "done", "output": "[]", "stderr": "",
               "summary": "done", "exit_code": 0}, key=KEY)
 
@@ -178,27 +178,27 @@ print("== several at once, bounded by the project and by the host ==")
 # The project sets a ceiling; the agent reports what its host can
 # stand. The lower wins, because either one saying "no more" is a
 # reason not to send more.
-st, r = call("/api/agents/routing?project=AGENT", "PUT",
+st, r = call("/api/ghosts/routing?project=AGENT", "PUT",
              {"max_parallel": 4}, token=admin)
 check("the ceiling is settable", st == 200 and r.get("max_parallel") == 4,
       str(r)[:120])
-st, r = call("/api/agents/routing?project=AGENT", token=admin)
+st, r = call("/api/ghosts/routing?project=AGENT", token=admin)
 check("and is read back", r.get("max_parallel") == 4, str(r)[:120])
 
-st, en3 = call("/api/agents?project=AGENT", "POST",
+st, en3 = call("/api/ghosts?project=AGENT", "POST",
                {"name": "wide", "target_os": "linux"}, token=admin)
 WID = ((en3 or {}).get("agent") or {}).get("id")
 WKEY = (en3 or {}).get("callback_key")
 made = []
 for i in range(6):
-    st, t = call(f"/api/agents/{WID}/tasks?project=AGENT", "POST",
+    st, t = call(f"/api/ghosts/{WID}/tasks?project=AGENT", "POST",
                  {"kind": "nslookup", "args": {"targets": [f"h{i}.example"]}},
                  token=admin)
     made.append((t or {}).get("id"))
 check("six tasks are queued for it", all(made), str(made))
 
 # Says it can run 8; the project allows 4.
-st, hb = call("/api/agents/heartbeat", "POST",
+st, hb = call("/api/ghosts/heartbeat", "POST",
               {"ready": True, "running_tasks": [], "slots_free": 8,
                "capacity": 8, "capacity_reason": "8 cores"}, key=WKEY)
 got = [t["id"] for t in (hb or {}).get("tasks", [])]
@@ -207,23 +207,23 @@ check("but never more than the project allows", len(got) == 4, str(got))
 check("and the single-task field still carries the first",
       (hb or {}).get("task", {}).get("id") == got[0], str(hb)[:120])
 
-st, hb = call("/api/agents/heartbeat", "POST",
+st, hb = call("/api/ghosts/heartbeat", "POST",
               {"ready": False, "running_tasks": got, "slots_free": 0,
                "capacity": 8}, key=WKEY)
 check("at capacity it gets nothing more",
       not (hb or {}).get("tasks"), str(hb)[:140])
 
 # Finish one: exactly one slot opens, so exactly one more goes out.
-st, _ = call(f"/api/agents/tasks/{got[0]}/result", "POST",
+st, _ = call(f"/api/ghosts/tasks/{got[0]}/result", "POST",
              {"status": "done", "output": "[]", "stderr": "",
               "summary": "done", "exit_code": 0}, key=WKEY)
-st, hb = call("/api/agents/heartbeat", "POST",
+st, hb = call("/api/ghosts/heartbeat", "POST",
               {"ready": True, "running_tasks": got[1:], "slots_free": 1,
                "capacity": 8}, key=WKEY)
 check("one finishing frees exactly one slot",
       len((hb or {}).get("tasks", [])) == 1, str(hb)[:140])
 
-st, agl = call("/api/agents?project=AGENT", token=admin)
+st, agl = call("/api/ghosts?project=AGENT", token=admin)
 me = next((x for x in agl if x["id"] == WID), {})
 check("the agent reports what it decided it can run",
       me.get("capacity") == 8, str(me.get("capacity")))
@@ -236,34 +236,34 @@ check("the fleet shows WHAT is running, not just how many",
       len(me.get("running") or []) == 4
       and all(r.get("subject") for r in me["running"]), str(me.get("running"))[:200])
 
-print("\n== an operator can set one drone's parallelism ==")
+print("\n== an operator can set one ghost's parallelism ==")
 # Its own project. Enrolling agents into AGENT perturbs the fleet
 # counts a later section asserts on, and a test that breaks a distant
 # one is worse than a longer setup here.
 call("/api/projects", "POST", {"code": "OVR", "name": "Override"}, token=admin)
-_st, _rt = call("/api/agents/routing?project=OVR", "PUT",
+_st, _rt = call("/api/ghosts/routing?project=OVR", "PUT",
                 {"max_parallel": 4}, token=admin)
 check("the engagement ceiling is set for this section",
       (_rt or {}).get("max_parallel") == 4, f"{_st} {str(_rt)[:100]}")
 
 
 def _ovr_agent(name):
-    st, en = call("/api/agents?project=OVR", "POST",
+    st, en = call("/api/ghosts?project=OVR", "POST",
                   {"name": name, "target_os": "linux"}, token=admin)
     return ((en or {}).get("agent") or {}).get("id"), (en or {}).get("callback_key")
 
 
 OID, OKEY = _ovr_agent("override")
 for _i in range(8):
-    call(f"/api/agents/{OID}/tasks?project=OVR", "POST",
+    call(f"/api/ghosts/{OID}/tasks?project=OVR", "POST",
          {"kind": "nslookup", "args": {"targets": [f"ov{_i}.example"]}},
          token=admin)
 
 # Three numbers: the agent says 1, the engagement allows 4, and an
 # operator is about to say this particular box should do more.
-st, r = call(f"/api/agents/{OID}?project=OVR", "PATCH",
+st, r = call(f"/api/ghosts/{OID}?project=OVR", "PATCH",
              {"parallel_override": 2}, token=admin)
-check("the override is settable per drone", st == 200, f"{st} {str(r)[:120]}")
+check("the override is settable per ghost", st == 200, f"{st} {str(r)[:120]}")
 check("...and reported as the operator's number, not the result",
       (r or {}).get("parallel_override") == 2, str(r)[:160])
 check("...and the effective number follows it",
@@ -271,12 +271,12 @@ check("...and the effective number follows it",
 
 # Above what the agent thinks: the operator wins, because one who sets
 # 8 and sees 1 with no explanation concludes the control is broken.
-st, r = call(f"/api/agents/{OID}?project=OVR", "PATCH",
+st, r = call(f"/api/ghosts/{OID}?project=OVR", "PATCH",
              {"parallel_override": 8}, token=admin)
 check("an override above the agent's own assessment is honoured",
       (r or {}).get("parallel_override") == 8, str(r)[:160])
 # ...but the engagement ceiling is about the CLIENT, not the box, and
-# no per-drone number talks its way past it.
+# no per-ghost number talks its way past it.
 check("the engagement ceiling still applies on top",
       (r or {}).get("max_parallel") == 4, str(r)[:160])
 
@@ -284,7 +284,7 @@ check("the engagement ceiling still applies on top",
 # `slots_free` from its OWN capacity, so honouring that while an
 # override is set clamps the override back to what the agent already
 # believed: the setting moves in the database and nothing happens.
-st, hb = call("/api/agents/heartbeat", "POST",
+st, hb = call("/api/ghosts/heartbeat", "POST",
               {"ready": True, "running_tasks": [], "slots_free": 1,
                "capacity": 1, "capacity_reason": "1 core"}, key=OKEY)
 check("a stale slots_free does not clamp the override",
@@ -293,14 +293,14 @@ check("a stale slots_free does not clamp the override",
 check("and the effective number goes down so the agent agrees next time",
       (hb or {}).get("max_parallel") == 4, str(hb)[:160])
 
-st, r = call(f"/api/agents/{OID}?project=OVR", "PATCH",
+st, r = call(f"/api/ghosts/{OID}?project=OVR", "PATCH",
              {"parallel_override": 0}, token=admin)
 check("zero hands the decision back to the agent",
       (r or {}).get("parallel_override") is None, str(r)[:160])
 check("...and the agent's own assessment governs again",
       (r or {}).get("max_parallel") == 1, str(r)[:160])
 
-st, _ = call(f"/api/agents/{OID}?project=OVR", "PATCH",
+st, _ = call(f"/api/ghosts/{OID}?project=OVR", "PATCH",
              {"parallel_override": 999}, token=admin)
 check("an absurd number is refused rather than stored", st == 422, st)
 
@@ -308,10 +308,10 @@ check("an absurd number is refused rather than stored", st == 422, st)
 # agent's own count is still what the dispatcher honours.
 SID, SKEY = _ovr_agent("selfpaced")
 for _i in range(4):
-    call(f"/api/agents/{SID}/tasks?project=OVR", "POST",
+    call(f"/api/ghosts/{SID}/tasks?project=OVR", "POST",
          {"kind": "nslookup", "args": {"targets": [f"sp{_i}.example"]}},
          token=admin)
-st, hb = call("/api/agents/heartbeat", "POST",
+st, hb = call("/api/ghosts/heartbeat", "POST",
               {"ready": True, "running_tasks": [], "slots_free": 1,
                "capacity": 1, "capacity_reason": "1 core"}, key=SKEY)
 check("with no override the agent's own count still governs",
@@ -320,53 +320,53 @@ check("with no override the agent's own count still governs",
 
 # An agent that says nothing is from before any of this and is held to
 # one at a time: a guard the thing it guards can opt out of is no guard.
-st, en4 = call("/api/agents?project=AGENT", "POST",
+st, en4 = call("/api/ghosts?project=AGENT", "POST",
                {"name": "quiet", "target_os": "linux"}, token=admin)
 QID = ((en4 or {}).get("agent") or {}).get("id")
 QKEY = (en4 or {}).get("callback_key")
 for i in range(3):
-    call(f"/api/agents/{QID}/tasks?project=AGENT", "POST",
+    call(f"/api/ghosts/{QID}/tasks?project=AGENT", "POST",
          {"kind": "nslookup", "args": {"targets": [f"q{i}.example"]}},
          token=admin)
-st, hb = call("/api/agents/heartbeat", "POST", {}, key=QKEY)
+st, hb = call("/api/ghosts/heartbeat", "POST", {}, key=QKEY)
 check("a silent agent is still given exactly one",
       len((hb or {}).get("tasks", [])) == 1, str(hb)[:140])
 
 # Retired before leaving: the routing tests further down count how many
 # agents are eligible, and two fixtures left online would be counted.
 for fixture in (WID, QID):
-    call(f"/api/agents/{fixture}/kill?project=AGENT", "POST", {}, token=admin)
-call("/api/agents/routing?project=AGENT", "PUT", {"max_parallel": 5},
+    call(f"/api/ghosts/{fixture}/kill?project=AGENT", "POST", {}, token=admin)
+call("/api/ghosts/routing?project=AGENT", "PUT", {"max_parallel": 5},
      token=admin)
 
 print("== killing an agent does not strand what it was running ==")
 # A killed agent's credential is refused from that moment, so it can
 # never deliver a result. Leaving its task `running` meant a scan that
 # could not finish looked like one still in progress, for good.
-st, en2 = call("/api/agents?project=AGENT", "POST",
+st, en2 = call("/api/ghosts?project=AGENT", "POST",
                {"name": "doomed", "target_os": "linux"}, token=admin)
 DID = ((en2 or {}).get("agent") or {}).get("id")
-st, dt = call(f"/api/agents/{DID}/tasks?project=AGENT", "POST",
+st, dt = call(f"/api/ghosts/{DID}/tasks?project=AGENT", "POST",
               {"kind": "nslookup", "args": {"targets": ["x.example"]}},
               token=admin)
 DT = (dt or {}).get("id")
 check("a task is queued against it", st == 201, f"status={st}")
-st, _ = call(f"/api/agents/{DID}/kill?project=AGENT", "POST", {}, token=admin)
+st, _ = call(f"/api/ghosts/{DID}/kill?project=AGENT", "POST", {}, token=admin)
 check("the agent is killed", st == 200, f"status={st}")
-st, tl = call(f"/api/agents/{DID}/tasks?project=AGENT", token=admin)
+st, tl = call(f"/api/ghosts/{DID}/tasks?project=AGENT", token=admin)
 row = next((x for x in (tl or []) if x["id"] == DT), {})
 check("its queued task is closed out, not left waiting",
       row.get("status") == "failed", str(row)[:140])
 check("and says why", "killed" in str(row.get("error", "")), str(row.get("error"))[:120])
-st, q = call("/api/agents/queue?project=AGENT", token=admin)
+st, q = call("/api/ghosts/queue?project=AGENT", token=admin)
 check("so it is gone from the queue",
       DT not in [x["id"] for x in (q or [])], str(q)[:120])
 
 print("== one task per target, created in one request ==")
-# A single task holding 1,738 names is one unit of work: one Drone does
+# A single task holding 1,738 names is one unit of work: one Ghost does
 # all of it, a failure anywhere loses the lot, and the queue depth says
 # 1 when there are 1,738 things to do.
-st, r = call("/api/agents/tasks/bulk?project=AGENT", "POST",
+st, r = call("/api/ghosts/tasks/bulk?project=AGENT", "POST",
              {"kind": "nslookup",
               "subjects": ["a.example", "b.example", "c.example",
                            "a.example"]},   # the duplicate is dropped
@@ -375,7 +375,7 @@ check("a bulk create is accepted", st == 201, f"status={st} {str(r)[:120]}")
 check("one task per target, deduplicated",
       (r or {}).get("queued") == 3, str(r)[:140])
 
-st, rows = call("/api/agents/tasks?project=AGENT", token=admin)
+st, rows = call("/api/ghosts/tasks?project=AGENT", token=admin)
 mine = [x for x in (rows or []) if x["id"] in set((r or {}).get("ids", []))]
 check("each task carries exactly one target",
       all(x["subject"] in ("a.example", "b.example", "c.example") for x in mine)
@@ -387,17 +387,17 @@ check("and they are pooled, so the fleet can share them",
 call("/api/projects", "POST",
      {"code": "BULKSCOPE", "name": "Bulk scope",
       "scope": ["10.9.0.0/24", "!10.9.0.5"]}, token=admin)
-st, r = call("/api/agents/tasks/bulk?project=BULKSCOPE", "POST",
+st, r = call("/api/ghosts/tasks/bulk?project=BULKSCOPE", "POST",
              {"kind": "nmap", "subjects": ["10.9.0.4", "10.9.0.5", "10.9.0.6"]},
              token=admin)
 check("the in-scope targets are queued", (r or {}).get("queued") == 2, str(r)[:140])
 check("and the excluded one is refused by name, not as an error",
       "10.9.0.5" in ((r or {}).get("refused") or {}), str(r)[:180])
 
-st, r = call("/api/agents/tasks/bulk?project=AGENT", "POST",
+st, r = call("/api/ghosts/tasks/bulk?project=AGENT", "POST",
              {"kind": "nonsense", "subjects": ["a.example"]}, token=admin)
 check("an unknown kind is still refused", st == 422, f"status={st}")
-st, r = call("/api/agents/tasks/bulk?project=AGENT", "POST",
+st, r = call("/api/ghosts/tasks/bulk?project=AGENT", "POST",
              {"kind": "install", "subjects": ["nmap"]}, token=admin)
 check("install is not a per-subject kind", st == 422, f"status={st}")
 
@@ -410,7 +410,7 @@ call("/api/projects", "POST",
      {"code": "TLINE", "name": "Timeline"}, token=admin)
 call("/api/targets?project=TLINE", "POST",
      {"host": "timeline.acme.example"}, token=admin)
-st, _ = call("/api/agents/tasks?project=TLINE", "POST",
+st, _ = call("/api/ghosts/tasks?project=TLINE", "POST",
              {"kind": "nmap", "args": {"targets": ["timeline.acme.example"],
                                        "ports": "80,443"}}, token=admin)
 check("the task is queued", st == 201, f"status={st}")
@@ -420,12 +420,12 @@ evs = tl if isinstance(tl, list) else (tl or {}).get("items", [])
 blob = json.dumps(evs)
 check("the target's timeline records it", "nmap queued" in blob, blob[:200])
 check("with the ports it will actually use", "80,443" in blob, blob[:200])
-check("and that no Drone owns it yet", "project pool" in blob, blob[:200])
+check("and that no Ghost owns it yet", "project pool" in blob, blob[:200])
 check("attributed to whoever asked", "root" in blob, blob[:160])
 
 # Recorded at QUEUE time: a scan that was started and never came back
 # is exactly the case where you want to know it was started.
-st, rows = call("/api/agents/tasks?project=TLINE", token=admin)
+st, rows = call("/api/ghosts/tasks?project=TLINE", token=admin)
 mine = [r for r in (rows or []) if r["subject"] == "timeline.acme.example"]
 check("while the task itself is still only queued",
       mine and mine[0]["state"] == "awaiting", str(mine)[:120])
@@ -433,7 +433,7 @@ check("while the task itself is still only queued",
 # Bulk goes on each target's own timeline, not one shared entry.
 for h in ("bulk-a.acme.example", "bulk-b.acme.example"):
     call("/api/targets?project=TLINE", "POST", {"host": h}, token=admin)
-call("/api/agents/tasks/bulk?project=TLINE", "POST",
+call("/api/ghosts/tasks/bulk?project=TLINE", "POST",
      {"kind": "nslookup",
       "subjects": ["bulk-a.acme.example", "bulk-b.acme.example"]},
      token=admin)
@@ -446,7 +446,7 @@ for h in ("bulk-a.acme.example", "bulk-b.acme.example"):
 # A task against something the project does not hold has no timeline
 # to write to, and inventing one would be inventing a target.
 before = call("/api/targets?project=TLINE&page_size=500", token=admin)[1]["total"]
-call("/api/agents/tasks?project=TLINE", "POST",
+call("/api/ghosts/tasks?project=TLINE", "POST",
      {"kind": "nmap", "args": {"targets": ["203.0.113.0/24"]}}, token=admin)
 after = call("/api/targets?project=TLINE&page_size=500", token=admin)[1]["total"]
 check("a task against a range invents no target", before == after,
@@ -458,29 +458,29 @@ print("== reverse lookups are handed the names to resolve ==")
 # the agent keeps the ones that land on the address. Attached when the
 # task is HANDED OUT, not when it is queued: one task per address means
 # storing the same list once per task otherwise.
-st, en8 = call("/api/agents?project=AGENT", "POST",
+st, en8 = call("/api/ghosts?project=AGENT", "POST",
                {"name": "revlookup", "target_os": "linux"}, token=admin)
 RID = ((en8 or {}).get("agent") or {}).get("id")
 RKEY = (en8 or {}).get("callback_key")
-call("/api/agents/register", "POST", {"platform": "linux", "arch": "amd64"},
+call("/api/ghosts/register", "POST", {"platform": "linux", "arch": "amd64"},
      key=RKEY)
 call("/api/targets?project=AGENT", "POST",
      {"host": "known-one.acme.example"}, token=admin)
 call("/api/targets?project=AGENT", "POST",
      {"host": "known-two.acme.example"}, token=admin)
 
-st, rt = call(f"/api/agents/{RID}/tasks?project=AGENT", "POST",
+st, rt = call(f"/api/ghosts/{RID}/tasks?project=AGENT", "POST",
               {"kind": "reverse_ip", "args": {"targets": ["198.51.100.77"]}},
               token=admin)
 RT = (rt or {}).get("id")
 check("a reverse lookup is queued", st == 201, f"status={st}")
 
-st, stored = call(f"/api/agents/{RID}/tasks?project=AGENT", token=admin)
+st, stored = call(f"/api/ghosts/{RID}/tasks?project=AGENT", token=admin)
 row = next((x for x in (stored or []) if x["id"] == RT), {})
 check("the stored arguments do NOT carry the candidate list",
       "candidates" not in (row.get("args") or {}), str(row.get("args"))[:120])
 
-st, hb = call("/api/agents/heartbeat", "POST",
+st, hb = call("/api/ghosts/heartbeat", "POST",
               {"ready": True, "running_tasks": [], "slots_free": 2,
                "capacity": 2}, key=RKEY)
 handed = next((t for t in (hb or {}).get("tasks", []) if t["id"] == RT), {})
@@ -492,10 +492,10 @@ check("and they are the project's own names",
       str(cands[:4]))
 check("addresses are not offered as names to resolve",
       not any(c.replace(".", "").isdigit() for c in cands), str(cands[:4]))
-call(f"/api/agents/{RID}/kill?project=AGENT", "POST", {}, token=admin)
+call(f"/api/ghosts/{RID}/kill?project=AGENT", "POST", {}, token=admin)
 
 print("== an agent is not given work it cannot run ==")
-st, tl = call("/api/agents/tools", token=admin)
+st, tl = call("/api/ghosts/tools", token=admin)
 check("the required tool list is published", st == 200
       and "nuclei" in (tl or {}).get("required", []), str(tl)[:160])
 check("and says which kind needs which",
@@ -503,16 +503,16 @@ check("and says which kind needs which",
 check("while naming the kinds that need nothing",
       (tl or {}).get("by_kind", {}).get("nslookup") is None, str(tl)[:200])
 
-st, en6 = call("/api/agents?project=AGENT", "POST",
+st, en6 = call("/api/ghosts?project=AGENT", "POST",
                {"name": "toolless", "target_os": "linux"}, token=admin)
 TLID = ((en6 or {}).get("agent") or {}).get("id")
 TLKEY = (en6 or {}).get("callback_key")
 # Registers with nmap only, and says it could not get nuclei.
-call("/api/agents/register", "POST",
+call("/api/ghosts/register", "POST",
      {"platform": "linux", "arch": "amd64", "tools": {"nmap": "7.94"},
       "missing_tools": {"nuclei": "no package manager found"}}, key=TLKEY)
 
-st, agl = call("/api/agents?project=AGENT", token=admin)
+st, agl = call("/api/ghosts?project=AGENT", token=admin)
 me = next((x for x in agl if x["id"] == TLID), {})
 check("what it could not get is recorded",
       (me.get("missing_tools") or {}).get("nuclei") == "no package manager found",
@@ -524,29 +524,29 @@ check("without claiming it cannot do what it can",
 
 # Pooled nuclei work is left alone for an agent that has it, rather
 # than handed over to fail three times.
-st, pooled_t = call("/api/agents/tasks?project=AGENT", "POST",
+st, pooled_t = call("/api/ghosts/tasks?project=AGENT", "POST",
                     {"kind": "nuclei", "args": {"targets": ["http://a.example"]}},
                     token=admin)
 PT = (pooled_t or {}).get("id")
-st, hb = call("/api/agents/heartbeat", "POST",
+st, hb = call("/api/ghosts/heartbeat", "POST",
               {"ready": True, "running_tasks": [], "slots_free": 4,
                "capacity": 4}, key=TLKEY)
 got = [t["id"] for t in (hb or {}).get("tasks", [])]
 check("pooled work it cannot run is not handed to it", PT not in got, str(got))
-st, q = call("/api/agents/queue?project=AGENT", token=admin)
+st, q = call("/api/ghosts/queue?project=AGENT", token=admin)
 check("and stays in the queue for an agent that can",
       PT in [x["id"] for x in (q or [])], str(q)[:140])
 
 # Addressed to it by name, though, is a different thing: nothing about
 # this agent is going to change, so waiting forever helps nobody.
-st, addressed = call(f"/api/agents/{TLID}/tasks?project=AGENT", "POST",
+st, addressed = call(f"/api/ghosts/{TLID}/tasks?project=AGENT", "POST",
                      {"kind": "nuclei", "args": {"targets": ["http://b.example"]}},
                      token=admin)
 AT = (addressed or {}).get("id")
-call("/api/agents/heartbeat", "POST",
+call("/api/ghosts/heartbeat", "POST",
      {"ready": True, "running_tasks": [], "slots_free": 4, "capacity": 4},
      key=TLKEY)
-row = next((r for r in call("/api/agents/tasks?project=AGENT", token=admin)[1]
+row = next((r for r in call("/api/ghosts/tasks?project=AGENT", token=admin)[1]
             if r["id"] == AT), {})
 check("work addressed to it that it cannot run fails rather than waiting",
       row.get("state") == "failed", str(row)[:140])
@@ -555,45 +555,45 @@ check("naming the tool and what to do instead",
       and "pool" in (row.get("notes") or ""), str(row.get("notes"))[:170])
 
 # An agent that has never said what it has is not starved.
-st, en7 = call("/api/agents?project=AGENT", "POST",
+st, en7 = call("/api/ghosts?project=AGENT", "POST",
                {"name": "silent-tools", "target_os": "linux"}, token=admin)
 SID = ((en7 or {}).get("agent") or {}).get("id")
 SKEY = (en7 or {}).get("callback_key")
-call("/api/agents/register", "POST", {"platform": "linux", "arch": "amd64"},
+call("/api/ghosts/register", "POST", {"platform": "linux", "arch": "amd64"},
      key=SKEY)
-st, hb = call("/api/agents/heartbeat", "POST",
+st, hb = call("/api/ghosts/heartbeat", "POST",
               {"ready": True, "running_tasks": [], "slots_free": 4,
                "capacity": 4}, key=SKEY)
 check("an agent that reported no inventory is still given work",
       PT in [t["id"] for t in (hb or {}).get("tasks", [])],
       str((hb or {}).get("tasks"))[:140])
 for fixture in (TLID, SID):
-    call(f"/api/agents/{fixture}/kill?project=AGENT", "POST", {}, token=admin)
+    call(f"/api/ghosts/{fixture}/kill?project=AGENT", "POST", {}, token=admin)
 
 print("== a failed task goes back in the queue, twice ==")
-st, en5 = call("/api/agents?project=AGENT", "POST",
+st, en5 = call("/api/ghosts?project=AGENT", "POST",
                {"name": "flaky", "target_os": "linux"}, token=admin)
 FID = ((en5 or {}).get("agent") or {}).get("id")
 FKEY = (en5 or {}).get("callback_key")
-st, ft = call(f"/api/agents/{FID}/tasks?project=AGENT", "POST",
+st, ft = call(f"/api/ghosts/{FID}/tasks?project=AGENT", "POST",
               {"kind": "nslookup", "args": {"targets": ["flap.example"]}},
               token=admin)
 FT = (ft or {}).get("id")
 
 
 def fail_once(note="the resolver timed out"):
-    call("/api/agents/heartbeat", "POST",
+    call("/api/ghosts/heartbeat", "POST",
          {"ready": True, "running_tasks": []}, key=FKEY)
-    return call(f"/api/agents/tasks/{FT}/result", "POST",
+    return call(f"/api/ghosts/tasks/{FT}/result", "POST",
                 {"status": "failed", "output": "", "stderr": "",
                  "summary": "failed", "exit_code": 1, "error": note},
                 key=FKEY)
 
 
-call("/api/agents/heartbeat", "POST", {"ready": True, "running_tasks": []},
+call("/api/ghosts/heartbeat", "POST", {"ready": True, "running_tasks": []},
      key=FKEY)
 fail_once()
-st, rows = call("/api/agents/tasks?project=AGENT", token=admin)
+st, rows = call("/api/ghosts/tasks?project=AGENT", token=admin)
 row = next((r for r in (rows or []) if r["id"] == FT), {})
 check("the first failure puts it back in the queue",
       row.get("state") == "awaiting", str(row)[:160])
@@ -604,14 +604,14 @@ check("and back in the POOL, not on the agent that just failed it",
       row.get("agent_id") is None, str(row.get("agent_id")))
 
 fail_once()
-row = next((r for r in call("/api/agents/tasks?project=AGENT", token=admin)[1]
+row = next((r for r in call("/api/ghosts/tasks?project=AGENT", token=admin)[1]
             if r["id"] == FT), {})
 check("the second failure requeues it too", row.get("state") == "awaiting",
       str(row)[:140])
 check("attempt two", row.get("attempts") == 2, str(row.get("attempts")))
 
 fail_once()
-row = next((r for r in call("/api/agents/tasks?project=AGENT", token=admin)[1]
+row = next((r for r in call("/api/ghosts/tasks?project=AGENT", token=admin)[1]
             if r["id"] == FT), {})
 check("the third failure stops: two retries, then it waits for a person",
       row.get("state") == "failed", str(row)[:140])
@@ -620,16 +620,16 @@ check("and says so rather than just going quiet",
       str(row.get("notes"))[:160])
 
 print("-- a wrong request is not retried at all --")
-st, bt = call(f"/api/agents/{FID}/tasks?project=AGENT", "POST",
+st, bt = call(f"/api/ghosts/{FID}/tasks?project=AGENT", "POST",
               {"kind": "amass", "args": {"domain": "a.example"}}, token=admin)
 BT = (bt or {}).get("id")
-call("/api/agents/heartbeat", "POST", {"ready": True, "running_tasks": []},
+call("/api/ghosts/heartbeat", "POST", {"ready": True, "running_tasks": []},
      key=FKEY)
-call(f"/api/agents/tasks/{BT}/result", "POST",
+call(f"/api/ghosts/tasks/{BT}/result", "POST",
      {"status": "failed", "output": "", "stderr": "", "summary": "failed",
       "exit_code": 1, "error": "amass takes one domain per task; got 3"},
      key=FKEY)
-row = next((r for r in call("/api/agents/tasks?project=AGENT", token=admin)[1]
+row = next((r for r in call("/api/ghosts/tasks?project=AGENT", token=admin)[1]
             if r["id"] == BT), {})
 # Retrying this somewhere else produces the same answer, more slowly.
 check("a failure about the request fails immediately",
@@ -640,7 +640,7 @@ check("and says it was not retryable",
       "not retryable" in (row.get("notes") or ""), str(row.get("notes"))[:140])
 
 print("-- restarting one by hand --")
-st, back = call(f"/api/agents/tasks/{FT}/retry?project=AGENT", "POST", {}, token=admin)
+st, back = call(f"/api/ghosts/tasks/{FT}/retry?project=AGENT", "POST", {}, token=admin)
 check("a failed task can be restarted", st == 200, f"status={st} {str(back)[:110]}")
 check("it is awaiting again", (back or {}).get("state") == "awaiting",
       str(back)[:120])
@@ -649,19 +649,19 @@ check("the counter resets — a person has judged it worth another go",
 check("and the note keeps what went before",
       "previously" in ((back or {}).get("notes") or ""),
       str((back or {}).get("notes"))[:140])
-st, err = call(f"/api/agents/tasks/{FT}/retry?project=AGENT", "POST", {}, token=admin)
+st, err = call(f"/api/ghosts/tasks/{FT}/retry?project=AGENT", "POST", {}, token=admin)
 check("restarting one that is already queued is refused", st == 409,
       f"status={st}")
-call(f"/api/agents/{FID}/kill?project=AGENT", "POST", {}, token=admin)
+call(f"/api/ghosts/{FID}/kill?project=AGENT", "POST", {}, token=admin)
 
 print("== the queue can be looked at and taken back out ==")
-st, t3 = call("/api/agents/tasks?project=AGENT", "POST",
+st, t3 = call("/api/ghosts/tasks?project=AGENT", "POST",
               {"kind": "amass", "args": {"domain": "queued.example"}},
               token=admin)
 T3 = (t3 or {}).get("id")
 check("a pooled task is queued", st == 201, f"status={st} {str(t3)[:110]}")
 
-st, queue = call("/api/agents/queue?project=AGENT", token=admin)
+st, queue = call("/api/ghosts/queue?project=AGENT", token=admin)
 check("the queue lists it", st == 200
       and T3 in [q["id"] for q in (queue or [])], str(queue)[:160])
 row = next((q for q in (queue or []) if q["id"] == T3), {})
@@ -671,27 +671,27 @@ check("and that no agent owns it yet",
       row.get("agent_id") is None and row.get("agent_name") is None, str(row)[:160])
 check("and who asked for it", row.get("requested_by") == "root", str(row)[:160])
 
-st, _ = call(f"/api/agents/tasks/{T3}?project=AGENT", "DELETE", token=admin)
+st, _ = call(f"/api/ghosts/tasks/{T3}?project=AGENT", "DELETE", token=admin)
 check("a queued task can be cancelled", st == 204, f"status={st}")
-st, queue = call("/api/agents/queue?project=AGENT", token=admin)
+st, queue = call("/api/ghosts/queue?project=AGENT", token=admin)
 check("and leaves the queue", T3 not in [q["id"] for q in (queue or [])],
       str(queue)[:140])
 
 # Deleting a row would not stop a scan that is already running on
 # somebody's network — it would only lose the result when it reports.
-st, err = call(f"/api/agents/tasks/{TID}?project=AGENT", "DELETE", token=admin)
+st, err = call(f"/api/ghosts/tasks/{TID}?project=AGENT", "DELETE", token=admin)
 check("a task an agent already holds is not cancellable", st == 409,
       f"status={st}")
 check("and says to kill the agent instead",
       "kill the agent" in str(err).lower(), str(err)[:160])
-st, _ = call("/api/agents/tasks/999999?project=AGENT", "DELETE", token=admin)
+st, _ = call("/api/ghosts/tasks/999999?project=AGENT", "DELETE", token=admin)
 check("an unknown task is 404", st == 404, f"status={st}")
 
 print("== result delivery ==")
-st, _ = call(f"/api/agents/tasks/{TID}/start", "POST", {}, key=KEY)
+st, _ = call(f"/api/ghosts/tasks/{TID}/start", "POST", {}, key=KEY)
 check("task marked running", st == 200, f"status={st}")
 
-st, done = call(f"/api/agents/tasks/{TID}/result", "POST",
+st, done = call(f"/api/ghosts/tasks/{TID}/result", "POST",
                 {"status": "done", "output": NMAP, "stderr": "",
                  "summary": "nmap over 1 target(s)", "exit_code": 0},
                 key=KEY)
@@ -706,16 +706,16 @@ check("and it says which host it is asking about",
           for u in imp.get("unknown_hosts") or []), str(imp.get("unknown_hosts"))[:120])
 
 print("== adjudication: the step that makes the scan count ==")
-st, _ = call(f"/api/agents/{AID}/tasks/{TID}/import?project=AGENT", "POST",
+st, _ = call(f"/api/ghosts/{AID}/tasks/{TID}/import?project=AGENT", "POST",
              {"decisions": {"scanme.example.org": {"action": "add"}}})
 check("adjudication needs a session, not just an agent key", st == 401,
       f"status={st}")
 
-st, _ = call(f"/api/agents/{AID}/tasks/{TID}/import?project=AGENT", "POST",
+st, _ = call(f"/api/ghosts/{AID}/tasks/{TID}/import?project=AGENT", "POST",
              {"decisions": {"scanme.example.org": {"action": "add"}}}, key=KEY)
 check("an agent cannot adjudicate its own result", st == 401, f"status={st}")
 
-st, fin = call(f"/api/agents/{AID}/tasks/{TID}/import?project=AGENT", "POST",
+st, fin = call(f"/api/ghosts/{AID}/tasks/{TID}/import?project=AGENT", "POST",
                {"decisions": {"scanme.example.org": {"action": "add"}}},
                token=admin)
 check("adjudication accepted", st == 200, f"status={st} {str(fin)[:140]}")
@@ -736,7 +736,7 @@ check("the services are readable afterwards", ports == [22, 80, 9929],
 print("== re-running an adjudication ==")
 # A held upload is consumed on use; a task result is not, because the
 # first answer is the one most likely to map a host to the wrong target.
-st, redo = call(f"/api/agents/{AID}/tasks/{TID}/import?project=AGENT", "POST",
+st, redo = call(f"/api/ghosts/{AID}/tasks/{TID}/import?project=AGENT", "POST",
                 {"decisions": {"scanme.example.org": {"action": "add"}}},
                 token=admin)
 check("the task output survives for a second attempt", st == 200, f"status={st}")
@@ -749,28 +749,28 @@ check("still three services, not six",
       len(rows2) == 3 if isinstance(rows2, list) else False, str(len(rows2)))
 
 print("== results that are not importable ==")
-st, t2 = call(f"/api/agents/{AID}/tasks?project=AGENT", "POST",
+st, t2 = call(f"/api/ghosts/{AID}/tasks?project=AGENT", "POST",
               {"kind": "nslookup", "args": {"targets": ["example.org"]}},
               token=admin)
 T2 = (t2 or {}).get("id")
 check("lookup tasks have no import format", (t2 or {}).get("import_as") is None,
       str((t2 or {}).get("import_as")))
-call("/api/agents/heartbeat", "POST", {}, key=KEY)
-call(f"/api/agents/tasks/{T2}/result", "POST",
+call("/api/ghosts/heartbeat", "POST", {}, key=KEY)
+call(f"/api/ghosts/tasks/{T2}/result", "POST",
      {"status": "done", "output": '[{"query":"example.org","a":["203.0.113.1"]}]',
       "summary": "resolved 1 of 1", "exit_code": 0}, key=KEY)
-st, _ = call(f"/api/agents/{AID}/tasks/{T2}/import?project=AGENT", "POST",
+st, _ = call(f"/api/ghosts/{AID}/tasks/{T2}/import?project=AGENT", "POST",
              {"decisions": {}}, token=admin)
 check("adjudicating a non-scan result is refused clearly", st == 409,
       f"status={st}")
 
 print("== a failed scan is not an empty scan ==")
-st, t3 = call(f"/api/agents/{AID}/tasks?project=AGENT", "POST",
+st, t3 = call(f"/api/ghosts/{AID}/tasks?project=AGENT", "POST",
               {"kind": "nmap", "args": {"targets": ["scanme.example.org"]}},
               token=admin)
 T3 = (t3 or {}).get("id")
-call("/api/agents/heartbeat", "POST", {}, key=KEY)
-st, bad = call(f"/api/agents/tasks/{T3}/result", "POST",
+call("/api/ghosts/heartbeat", "POST", {}, key=KEY)
+st, bad = call(f"/api/ghosts/tasks/{T3}/result", "POST",
                {"status": "failed", "output": "", "exit_code": 1,
                 "stderr": "You cannot use -F (fast scan) with -p",
                 "error": "nmap did not complete: You cannot use -F with -p"},
@@ -781,7 +781,7 @@ check("a failed result is not imported as a clean empty scan",
 # The first failure sends it back to the POOL, so it is deliberately no
 # longer on the agent that failed it — which is where this used to look
 # for it. The project-wide list is the one that can see a pooled task.
-st, lst = call("/api/agents/tasks?project=AGENT", token=admin)
+st, lst = call("/api/ghosts/tasks?project=AGENT", token=admin)
 row = next((t for t in (lst or []) if t["id"] == T3), {})
 check("and the failure is visible with its reason",
       "-F" in (row.get("notes") or ""), str(row.get("notes"))[:90])
@@ -817,9 +817,9 @@ def signed(priv, agent_id, method, path, body: bytes):
     ts, nonce = str(int(time.time())), secrets.token_urlsafe(12)
     msg = "\n".join([method.upper(), path,
                      hashlib.sha256(body or b"").hexdigest(), ts, nonce]).encode()
-    return {"X-Drone-Agent": str(agent_id), "X-Drone-Timestamp": ts,
-            "X-Drone-Nonce": nonce,
-            "X-Drone-Signature": base64.b64encode(priv.sign(msg)).decode()}
+    return {"X-Ghost-Agent": str(agent_id), "X-Ghost-Timestamp": ts,
+            "X-Ghost-Nonce": nonce,
+            "X-Ghost-Signature": base64.b64encode(priv.sign(msg)).decode()}
 
 
 def raw(path, method="GET", body=None, headers=None):
@@ -838,7 +838,7 @@ def raw(path, method="GET", body=None, headers=None):
         except Exception: return e.code, b[:300]
 
 
-st, en2 = call("/api/agents?project=AGENT", "POST",
+st, en2 = call("/api/ghosts?project=AGENT", "POST",
                {"name": "signed-agent", "connection_mode": "callback",
                 "target_os": "linux"}, token=admin)
 check("enroll returns a one-time token", st == 201 and bool(en2.get("enroll_token")),
@@ -854,19 +854,19 @@ check("an agent with no identity yet is marked pending",
       and en2["agent"]["has_identity"] is False)
 A2 = en2["agent"]["id"]
 
-st, _ = call("/api/agents?project=AGENT", "POST",
+st, _ = call("/api/ghosts?project=AGENT", "POST",
              {"name": "bad-mode", "connection_mode": "carrier-pigeon"}, token=admin)
 check("an unknown connection mode is refused", st == 422, f"status={st}")
 
 priv, pub = keypair()
-st, _ = raw("/api/agents/enroll", "POST",
+st, _ = raw("/api/ghosts/enroll", "POST",
             {"enroll_token": "not-the-token", "public_key": pub})
 check("a wrong enrollment token is refused", st == 401, f"status={st}")
-st, _ = raw("/api/agents/enroll", "POST",
+st, _ = raw("/api/ghosts/enroll", "POST",
             {"enroll_token": en2["enroll_token"], "public_key": "not-base64!!"})
 check("a malformed public key is refused", st == 422, f"status={st}")
 
-st, claimed = raw("/api/agents/enroll", "POST",
+st, claimed = raw("/api/ghosts/enroll", "POST",
                   {"enroll_token": en2["enroll_token"], "public_key": pub})
 check("the token exchanges for an identity", st == 200, f"status={st} {str(claimed)[:120]}")
 check("and the agent learns which project it serves",
@@ -874,56 +874,56 @@ check("and the agent learns which project it serves",
 check("and gets the same server key to pin",
       (claimed or {}).get("server_public_key") == en2["server_public_key"])
 
-st, _ = raw("/api/agents/enroll", "POST",
+st, _ = raw("/api/ghosts/enroll", "POST",
             {"enroll_token": en2["enroll_token"], "public_key": pub})
 check("the token is burned and cannot be reused", st in (401, 409), f"status={st}")
 
 print("== signatures, and no downgrade ==")
-st, _ = raw("/api/agents/heartbeat", "POST", {},
-            headers=signed(priv, A2, "POST", "/api/agents/heartbeat",
+st, _ = raw("/api/ghosts/heartbeat", "POST", {},
+            headers=signed(priv, A2, "POST", "/api/ghosts/heartbeat",
                            json.dumps({}).encode()))
 check("a signed heartbeat is accepted", st == 200, f"status={st}")
 
-st, _ = call("/api/agents/heartbeat", "POST", {}, key=en2["callback_key"])
+st, _ = call("/api/ghosts/heartbeat", "POST", {}, key=en2["callback_key"])
 check("once it has an identity, the bearer key alone is refused", st == 401,
       f"status={st} — a downgrade here would make the signature decorative")
 
 other, _ = keypair()
-st, _ = raw("/api/agents/heartbeat", "POST", {},
-            headers=signed(other, A2, "POST", "/api/agents/heartbeat",
+st, _ = raw("/api/ghosts/heartbeat", "POST", {},
+            headers=signed(other, A2, "POST", "/api/ghosts/heartbeat",
                            json.dumps({}).encode()))
 check("a signature from the wrong key is refused", st == 401, f"status={st}")
 
-h = signed(priv, A2, "POST", "/api/agents/heartbeat", json.dumps({}).encode())
-st, _ = raw("/api/agents/heartbeat", "POST", {}, headers=h)
-st2, _ = raw("/api/agents/heartbeat", "POST", {}, headers=h)
+h = signed(priv, A2, "POST", "/api/ghosts/heartbeat", json.dumps({}).encode())
+st, _ = raw("/api/ghosts/heartbeat", "POST", {}, headers=h)
+st2, _ = raw("/api/ghosts/heartbeat", "POST", {}, headers=h)
 check("a replayed request is refused", st == 200 and st2 == 401,
       f"first={st} replay={st2}")
 
-h2 = signed(priv, A2, "POST", "/api/agents/heartbeat", json.dumps({}).encode())
-st, _ = raw("/api/agents/register", "POST", {"platform": "linux"}, headers=h2)
+h2 = signed(priv, A2, "POST", "/api/ghosts/heartbeat", json.dumps({}).encode())
+st, _ = raw("/api/ghosts/register", "POST", {"platform": "linux"}, headers=h2)
 check("a signature is bound to the path it was made for", st == 401,
       f"status={st}")
 
-old = signed(priv, A2, "POST", "/api/agents/heartbeat", json.dumps({}).encode())
-old["X-Drone-Timestamp"] = str(int(time.time()) - 4000)
-st, _ = raw("/api/agents/heartbeat", "POST", {}, headers=old)
+old = signed(priv, A2, "POST", "/api/ghosts/heartbeat", json.dumps({}).encode())
+old["X-Ghost-Timestamp"] = str(int(time.time()) - 4000)
+st, _ = raw("/api/ghosts/heartbeat", "POST", {}, headers=old)
 check("a stale timestamp is refused", st == 401, f"status={st}")
 
 print("== killing an agent ==")
-st, t9 = call(f"/api/agents/{A2}/tasks?project=AGENT", "POST",
+st, t9 = call(f"/api/ghosts/{A2}/tasks?project=AGENT", "POST",
               {"kind": "nmap", "args": {"targets": ["a.example"]}}, token=admin)
-st, killed = call(f"/api/agents/{A2}/kill?project=AGENT", "POST", {}, token=admin)
+st, killed = call(f"/api/ghosts/{A2}/kill?project=AGENT", "POST", {}, token=admin)
 check("kill is accepted", st == 200, f"status={st} {str(killed)[:100]}")
 check("and the agent is disabled", (killed or {}).get("status") == "disabled")
-st, lst = call(f"/api/agents/{A2}/tasks?project=AGENT", token=admin)
+st, lst = call(f"/api/ghosts/{A2}/tasks?project=AGENT", token=admin)
 row = next((t for t in (lst or []) if t["id"] == (t9 or {}).get("id")), {})
 check("queued work is cancelled rather than left to run later",
       row.get("status") == "failed" and "cancelled" in (row.get("error") or ""),
       f"{row.get('status')} / {str(row.get('error'))[:50]}")
 
-st, hb = raw("/api/agents/heartbeat", "POST", {},
-             headers=signed(priv, A2, "POST", "/api/agents/heartbeat",
+st, hb = raw("/api/ghosts/heartbeat", "POST", {},
+             headers=signed(priv, A2, "POST", "/api/ghosts/heartbeat",
                             json.dumps({}).encode()))
 check("a killed agent is told to shut down, not merely refused",
       st == 200 and (hb or {}).get("shutdown") is True, f"status={st} {str(hb)[:100]}")
@@ -931,11 +931,11 @@ check("a killed agent is told to shut down, not merely refused",
 print("== deleting an agent must not destroy its evidence ==")
 # Those tasks hold real nmap output. The FK is SET NULL precisely so
 # this does not take it with it.
-st, before = call(f"/api/agents/{AID}/tasks?project=AGENT", token=admin)
+st, before = call(f"/api/ghosts/{AID}/tasks?project=AGENT", token=admin)
 kept = [t["id"] for t in (before or []) if t.get("status") == "done"]
 check("the agent has finished work to lose", len(kept) > 0, str(len(kept)))
 
-st, _ = call(f"/api/agents/{AID}?project=AGENT", "DELETE", token=admin)
+st, _ = call(f"/api/ghosts/{AID}?project=AGENT", "DELETE", token=admin)
 check("delete goes through", st == 204, f"status={st}")
 
 # The services imported from that scan are the point: they must still
@@ -952,11 +952,11 @@ print("== routing across several agents ==")
 fleet = {}
 for nm, prio, regions in (("tokyo", 50, "jp"), ("dublin", 10, "eu"),
                           ("virginia", 20, "us-east")):
-    st, e = call("/api/agents?project=AGENT", "POST", {"name": nm}, token=admin)
+    st, e = call("/api/ghosts?project=AGENT", "POST", {"name": nm}, token=admin)
     pv, pb = keypair()
-    raw("/api/agents/enroll", "POST",
+    raw("/api/ghosts/enroll", "POST",
         {"enroll_token": e["enroll_token"], "public_key": pb})
-    call(f"/api/agents/{e['agent']['id']}?project=AGENT", "PATCH",
+    call(f"/api/ghosts/{e['agent']['id']}?project=AGENT", "PATCH",
          {"priority": prio, "regions": regions}, token=admin)
     fleet[nm] = {"id": e["agent"]["id"], "priv": pv}
 
@@ -974,7 +974,7 @@ def finish(nm, status="done", output="[]"):
     if tid is None:
         return
     a = fleet[nm]
-    path = f"/api/agents/tasks/{tid}/result"
+    path = f"/api/ghosts/tasks/{tid}/result"
     body = {"status": status, "output": output, "stderr": "",
             "summary": "done", "exit_code": 0}
     raw(path, "POST", body,
@@ -988,9 +988,9 @@ def beat(nm, ready=True):
         finish(nm)
     a = fleet[nm]
     payload = {"ready": ready, "running_task": holding.get(nm, 0)}
-    st, hb = raw("/api/agents/heartbeat", "POST", payload,
+    st, hb = raw("/api/ghosts/heartbeat", "POST", payload,
                  headers=signed(a["priv"], a["id"], "POST",
-                                "/api/agents/heartbeat",
+                                "/api/ghosts/heartbeat",
                                 json.dumps(payload).encode()))
     got = ((hb or {}).get("task") or {}).get("id")
     if got:
@@ -1002,13 +1002,13 @@ def pooled(kind="nslookup", region=None, targets=("a.example",)):
     body = {"kind": kind, "args": {"targets": list(targets)}}
     if region:
         body["region"] = region
-    return call("/api/agents/tasks?project=AGENT", "POST", body, token=admin)
+    return call("/api/ghosts/tasks?project=AGENT", "POST", body, token=admin)
 
 
 for nm in fleet:
     beat(nm)  # all three now count as online
 
-st, r = call("/api/agents/routing?project=AGENT", token=admin)
+st, r = call("/api/ghosts/routing?project=AGENT", token=admin)
 check("a project defaults to mesh", st == 200 and r["mode"] == "mesh", str(r)[:100])
 check("and sees all three as eligible", r["eligible"] == 3, str(r["eligible"]))
 
@@ -1023,7 +1023,7 @@ st, hb = beat("dublin")
 check("and it is not handed out twice", not (hb or {}).get("task"), str(hb)[:110])
 
 print("-- primary --")
-st, r = call("/api/agents/routing?project=AGENT", "PUT", {"mode": "primary"},
+st, r = call("/api/ghosts/routing?project=AGENT", "PUT", {"mode": "primary"},
              token=admin)
 check("mode switches to primary", st == 200 and r["mode"] == "primary", str(r)[:90])
 check("the lowest priority agent is primary",
@@ -1037,10 +1037,10 @@ st, hb = beat("dublin")
 check("the primary is", (hb or {}).get("task", {}).get("id") == t["id"],
       str(hb)[:110])
 
-st, _ = call(f"/api/agents/{fleet['dublin']['id']}/kill?project=AGENT", "POST",
+st, _ = call(f"/api/ghosts/{fleet['dublin']['id']}/kill?project=AGENT", "POST",
              {}, token=admin)
 beat("virginia"); beat("tokyo")
-st, r = call("/api/agents/routing?project=AGENT", token=admin)
+st, r = call("/api/ghosts/routing?project=AGENT", token=admin)
 check("killing the primary elects the next by priority, with nothing stored",
       str(r["current_primary_name"]).startswith("virginia-"), str(r)[:140])
 st, t = pooled()
@@ -1049,7 +1049,7 @@ check("and the new primary picks up the work",
       (hb or {}).get("task", {}).get("id") == t["id"], str(hb)[:110])
 
 print("-- geo --")
-call("/api/agents/routing?project=AGENT", "PUT", {"mode": "geo"}, token=admin)
+call("/api/ghosts/routing?project=AGENT", "PUT", {"mode": "geo"}, token=admin)
 st, err = pooled(region=None)
 check("in geo mode a pooled task without a region is refused", st == 422,
       f"status={st} {str(err)[:100]}")
@@ -1067,17 +1067,17 @@ for nm in ("tokyo", "virginia"):
     st2, hb = beat(nm)
     check(f"{nm} refuses work for a region it does not serve",
           not (hb or {}).get("task"), str(hb)[:90])
-st, r = call("/api/agents/routing?project=AGENT", token=admin)
+st, r = call("/api/ghosts/routing?project=AGENT", token=admin)
 check("and the task is still visibly waiting, not quietly run elsewhere",
       r["unassigned_tasks"] >= 1, str(r)[:120])
 
-st, _ = call("/api/agents/routing?project=AGENT", "PUT", {"mode": "anarchy"},
+st, _ = call("/api/ghosts/routing?project=AGENT", "PUT", {"mode": "anarchy"},
              token=admin)
 check("an unknown routing mode is refused", st == 422, f"status={st}")
 
 print("-- a named agent still wins --")
-call("/api/agents/routing?project=AGENT", "PUT", {"mode": "primary"}, token=admin)
-st, direct = call(f"/api/agents/{fleet['tokyo']['id']}/tasks?project=AGENT", "POST",
+call("/api/ghosts/routing?project=AGENT", "PUT", {"mode": "primary"}, token=admin)
+st, direct = call(f"/api/ghosts/{fleet['tokyo']['id']}/tasks?project=AGENT", "POST",
                   {"kind": "nslookup", "args": {"targets": ["b.example"]}},
                   token=admin)
 st, hb = beat("tokyo")
@@ -1243,7 +1243,7 @@ async def _enum(**kw):
     async with _SL() as s:
         pr = (await s.execute(_sel(_P).limit(1))).scalars().first()
         u = (await s.execute(_sel(_U).limit(1))).scalars().first()
-        tool = {t.name: t for t in _build(s, pr, u, True)}["enumerate_drones"]
+        tool = {t.name: t for t in _build(s, pr, u, True)}["enumerate_ghosts"]
         before = (await s.execute(_sel(_func.count()).select_from(_AT)
                                   .where(_AT.project_id == pr.id))).scalar_one()
         out = await tool.fn(**kw)
@@ -1293,18 +1293,18 @@ check("and said out loud rather than quietly removed",
       str(_r.get("not_network_hosts")))
 
 print("== agent binaries ==")
-st, dl = call("/api/agents/downloads", token=admin)
+st, dl = call("/api/ghosts/downloads", token=admin)
 check("the download list is served", st == 200 and "builds" in (dl or {}),
       f"status={st}")
 check("it names all six targets", len((dl or {}).get("builds", [])) == 6,
       str(len((dl or {}).get("builds", []))))
-st, _ = call("/api/agents/downloads")
+st, _ = call("/api/ghosts/downloads")
 check("and needs a session", st == 401, f"status={st}")
-st, _ = call("/api/agents/download/plan9/mips", token=admin)
+st, _ = call("/api/ghosts/download/plan9/mips", token=admin)
 check("an unknown platform is refused clearly", st == 404, f"status={st}")
 
 print("== reaching into an agent ==")
-st, err = call(f"/api/agents/{A2}/reach?project=AGENT", "POST", {}, token=admin)
+st, err = call(f"/api/ghosts/{A2}/reach?project=AGENT", "POST", {}, token=admin)
 check("reaching an agent that never advertised an address is refused", st == 409,
       f"status={st} {str(err)[:80]}")
 
@@ -1335,6 +1335,11 @@ def derive(priv, peer_pub_b64):
                       fromlist=["X25519PublicKey"]).X25519PublicKey
     secret = priv.exchange(peer.from_public_bytes(_b64.b64decode(peer_pub_b64)))
     return HKDF(algorithm=_hashes.SHA256(), length=32, salt=None,
+                # Still "drone": a wire constant, not vocabulary. This
+                # is the agent's half of the derivation written out
+                # independently, which is the point -- if the server
+                # ever changes it, this goes red rather than both
+                # moving together and nobody noticing.
                 info=b"oddjob/drone seal v1").derive(secret)
 
 
@@ -1343,11 +1348,11 @@ def binding(direction, aid, method, path, ts, nonce):
                        path, ts, nonce]).encode()
 
 
-st, en3 = call("/api/agents?project=AGENT", "POST", {"name": "sealed"}, token=admin)
+st, en3 = call("/api/ghosts?project=AGENT", "POST", {"name": "sealed"}, token=admin)
 A3 = en3["agent"]["id"]
 spriv3, spub3 = keypair()
 kpriv3, kpub3 = kexpair()
-st, claimed3 = raw("/api/agents/enroll", "POST",
+st, claimed3 = raw("/api/ghosts/enroll", "POST",
                    {"enroll_token": en3["enroll_token"], "public_key": spub3,
                     "kex_public_key": kpub3})
 check("enrollment accepts a key-agreement half", st == 200, f"status={st}")
@@ -1372,22 +1377,22 @@ def sealed_call(path, body, method="POST", aid=None, key=None, bind_path=None):
     wire = env.encode()
     msg = "\n".join([method.upper(), path,
                       hashlib.sha256(wire).hexdigest(), ts, nonce]).encode()
-    h = {"X-Drone-Agent": str(aid), "X-Drone-Timestamp": ts,
-         "X-Drone-Nonce": nonce,
-         "X-Drone-Signature": _b64.b64encode(spriv3.sign(msg)).decode(),
-         "X-Drone-Sealed": "v1"}
+    h = {"X-Ghost-Agent": str(aid), "X-Ghost-Timestamp": ts,
+         "X-Ghost-Nonce": nonce,
+         "X-Ghost-Signature": _b64.b64encode(spriv3.sign(msg)).decode(),
+         "X-Ghost-Sealed": "v1"}
     r = urllib.request.Request(BASE + path, method=method, data=wire)
     r.add_header("Content-Type", "application/json")
     for k, v in h.items():
         r.add_header(k, v)
     try:
         with urllib.request.urlopen(r, timeout=60) as x:
-            return x.status, x.read(), x.headers.get("X-Drone-Sealed"), ts, nonce
+            return x.status, x.read(), x.headers.get("X-Ghost-Sealed"), ts, nonce
     except urllib.error.HTTPError as e:
-        return e.code, e.read(), e.headers.get("X-Drone-Sealed"), ts, nonce
+        return e.code, e.read(), e.headers.get("X-Ghost-Sealed"), ts, nonce
 
 
-st, body3, sealhdr, ts3, nonce3 = sealed_call("/api/agents/heartbeat", {})
+st, body3, sealhdr, ts3, nonce3 = sealed_call("/api/ghosts/heartbeat", {})
 check("a sealed, signed heartbeat is accepted", st == 200, f"status={st}")
 check("and the reply comes back sealed too", sealhdr == "v1", str(sealhdr))
 check("the reply is not readable as JSON",
@@ -1396,36 +1401,36 @@ check("the reply is not readable as JSON",
 rawb = _b64.b64decode(body3)
 opened = ChaCha20Poly1305(KEY3).decrypt(
     rawb[:12], rawb[12:],
-    binding("res", A3, "POST", "/api/agents/heartbeat", ts3, nonce3))
+    binding("res", A3, "POST", "/api/ghosts/heartbeat", ts3, nonce3))
 check("and opens to the answer with our key", json.loads(opened).get("ok") is True,
       opened[:80])
 
 print("-- no downgrade --")
-st, _ = raw("/api/agents/heartbeat", "POST", {},
-            headers=signed(spriv3, A3, "POST", "/api/agents/heartbeat",
+st, _ = raw("/api/ghosts/heartbeat", "POST", {},
+            headers=signed(spriv3, A3, "POST", "/api/ghosts/heartbeat",
                            json.dumps({}).encode()))
 check("an agent that can seal may not send in the clear", st == 401,
       f"status={st} — otherwise an attacker just omits the header")
 
 other_priv, other_pub = kexpair()
 wrong = derive(other_priv, claimed3["server_kex_public_key"])
-st, _, _, _, _ = sealed_call("/api/agents/heartbeat", {}, key=wrong)
+st, _, _, _, _ = sealed_call("/api/ghosts/heartbeat", {}, key=wrong)
 check("a body sealed with the wrong key does not open", st == 401, f"status={st}")
 
-st, _, _, _, _ = sealed_call("/api/agents/heartbeat", {},
-                             bind_path="/api/agents/register")
+st, _, _, _, _ = sealed_call("/api/ghosts/heartbeat", {},
+                             bind_path="/api/ghosts/register")
 check("a body bound to another route does not open here", st == 401,
       f"status={st}")
 
 print("-- a real result, and what a watcher would see --")
-st, t3 = call(f"/api/agents/{A3}/tasks?project=AGENT", "POST",
+st, t3 = call(f"/api/ghosts/{A3}/tasks?project=AGENT", "POST",
               {"kind": "nmap", "args": {"targets": ["scanme.example.org"]}},
               token=admin)
 T3 = t3["id"]
-sealed_call("/api/agents/heartbeat", {})
-sealed_call(f"/api/agents/tasks/{T3}/result",
+sealed_call("/api/ghosts/heartbeat", {})
+sealed_call(f"/api/ghosts/tasks/{T3}/result",
             {"status": "done", "output": NMAP, "exit_code": 0})
-st, lst = call(f"/api/agents/{A3}/tasks?project=AGENT", token=admin)
+st, lst = call(f"/api/ghosts/{A3}/tasks?project=AGENT", token=admin)
 row = next((t for t in (lst or []) if t["id"] == T3), {})
 check("a sealed scan result arrives intact", row.get("status") == "done",
       str(row.get("status")))
@@ -1456,47 +1461,47 @@ async def _age_heartbeat(agent_id, seconds):
         await s.commit()
 
 
-st, enb = call("/api/agents?project=AGENT", "POST", {"name": "longscan"},
+st, enb = call("/api/ghosts?project=AGENT", "POST", {"name": "longscan"},
                token=admin)
 AB = enb["agent"]["id"]
 KB = enb["callback_key"]
-call("/api/agents/register", "POST",
+call("/api/ghosts/register", "POST",
      {"platform": "linux", "arch": "amd64", "privileged": True}, key=KB)
 
-st, tb = call(f"/api/agents/{AB}/tasks?project=AGENT", "POST",
+st, tb = call(f"/api/ghosts/{AB}/tasks?project=AGENT", "POST",
               {"kind": "nmap", "args": {"targets": ["slow.example"]}}, token=admin)
-call("/api/agents/heartbeat", "POST", {}, key=KB)          # claims it
-call(f"/api/agents/tasks/{tb['id']}/start", "POST", {}, key=KB)
+call("/api/ghosts/heartbeat", "POST", {}, key=KB)          # claims it
+call(f"/api/ghosts/tasks/{tb['id']}/start", "POST", {}, key=KB)
 
 _asyncio.run(_age_heartbeat(AB, 600))                       # ten minutes
 
-st, rows = call("/api/agents?project=AGENT", token=admin)
+st, rows = call("/api/ghosts?project=AGENT", token=admin)
 me = next((a for a in (rows or []) if a["id"] == AB), {})
 check("an agent mid-task reads as busy, not offline",
       me.get("status") == "busy", str(me.get("status")))
 check("and its in-flight count says why", me.get("running_tasks") == 1,
       str(me.get("running_tasks")))
 
-st, rt = call("/api/agents/routing?project=AGENT", token=admin)
+st, rt = call("/api/ghosts/routing?project=AGENT", token=admin)
 check("a busy agent still counts as present for routing",
       (rt or {}).get("eligible", 0) >= 1, str(rt)[:110])
 
 # Now finish it: with nothing in flight and a stale heartbeat, offline
 # is the right answer and must still be reachable.
-call(f"/api/agents/tasks/{tb['id']}/result", "POST",
+call(f"/api/ghosts/tasks/{tb['id']}/result", "POST",
      {"status": "done", "output": "", "exit_code": 0}, key=KB)
 _asyncio.run(_age_heartbeat(AB, 600))
-st, rows = call("/api/agents?project=AGENT", token=admin)
+st, rows = call("/api/ghosts?project=AGENT", token=admin)
 me = next((a for a in (rows or []) if a["id"] == AB), {})
 check("once idle and stale, it is offline again",
       me.get("status") == "offline", str(me.get("status")))
 
 
 print("== completed and failed counts ==")
-st, enc = call("/api/agents?project=AGENT", "POST", {"name": "counter"},
+st, enc = call("/api/ghosts?project=AGENT", "POST", {"name": "counter"},
                token=admin)
 AC, KC = enc["agent"]["id"], enc["callback_key"]
-call("/api/agents/register", "POST",
+call("/api/ghosts/register", "POST",
      {"platform": "linux", "arch": "amd64"}, key=KC)
 
 
@@ -1510,12 +1515,12 @@ def run_one(status):
     that sticks on the first attempt; the requeue path is covered
     above, on its own.
     """
-    st, t = call(f"/api/agents/{AC}/tasks?project=AGENT", "POST",
+    st, t = call(f"/api/ghosts/{AC}/tasks?project=AGENT", "POST",
                  {"kind": "nslookup", "args": {"targets": ["x.example"]}},
                  token=admin)
-    call("/api/agents/heartbeat", "POST", {"ready": True, "running_tasks": []},
+    call("/api/ghosts/heartbeat", "POST", {"ready": True, "running_tasks": []},
          key=KC)
-    call(f"/api/agents/tasks/{t['id']}/result", "POST",
+    call(f"/api/ghosts/tasks/{t['id']}/result", "POST",
          {"status": status, "output": "[]",
           "exit_code": 0 if status == "done" else 1,
           "error": None if status == "done"
@@ -1528,7 +1533,7 @@ for _ in range(3):
 for _ in range(2):
     run_one("failed")
 
-st, rows = call("/api/agents?project=AGENT", token=admin)
+st, rows = call("/api/ghosts?project=AGENT", token=admin)
 me = next((a for a in (rows or []) if a["id"] == AC), {})
 check("completed counts only what succeeded", me.get("completed_tasks") == 3,
       str(me.get("completed_tasks")))
@@ -1539,9 +1544,9 @@ check("and failures are counted separately, not folded in",
 check("the two are distinguishable, so a broken agent is visible",
       me.get("completed_tasks") != me.get("failed_tasks"),
       f"{me.get('completed_tasks')} / {me.get('failed_tasks')}")
-st, fresh = call("/api/agents?project=AGENT", "POST", {"name": "never-run"},
+st, fresh = call("/api/ghosts?project=AGENT", "POST", {"name": "never-run"},
                  token=admin)
-st, rows = call("/api/agents?project=AGENT", token=admin)
+st, rows = call("/api/ghosts?project=AGENT", token=admin)
 nr = next((a for a in (rows or []) if a["id"] == fresh["agent"]["id"]), {})
 check("an agent that has run nothing counts nothing",
       nr.get("completed_tasks") == 0 and nr.get("failed_tasks") == 0,
@@ -1552,20 +1557,20 @@ print("== re-enrolling an existing agent ==")
 # For rotating keys, and for bringing an agent enrolled before
 # end-to-end encryption onto the sealed channel without throwing away
 # everything it has done.
-st, enr = call("/api/agents?project=AGENT", "POST", {"name": "rotate-me"},
+st, enr = call("/api/ghosts?project=AGENT", "POST", {"name": "rotate-me"},
                token=admin)
 AR = enr["agent"]["id"]
 rpriv, rpub = keypair()
 rkpriv, rkpub = kexpair()
-raw("/api/agents/enrol", "POST",
+raw("/api/ghosts/enrol", "POST",
     {"enroll_token": enr["enroll_token"], "public_key": rpub,
      "kex_public_key": rkpub})
-st, _ = raw("/api/agents/heartbeat", "POST", {},
-            headers=signed(rpriv, AR, "POST", "/api/agents/heartbeat",
+st, _ = raw("/api/ghosts/heartbeat", "POST", {},
+            headers=signed(rpriv, AR, "POST", "/api/ghosts/heartbeat",
                            json.dumps({}).encode()))
 check("the original identity works", st in (200, 401), f"status={st}")
 
-st, again = call(f"/api/agents/{AR}/reenroll?project=AGENT", "POST", {},
+st, again = call(f"/api/ghosts/{AR}/reenroll?project=AGENT", "POST", {},
                  token=admin)
 check("re-enrolling issues a fresh token", st == 200 and
       bool((again or {}).get("enroll_token")), f"status={st}")
@@ -1593,21 +1598,21 @@ check("the response says what to do on the host",
 
 # The old key must stop working at once. A rotation that leaves the
 # previous key usable has rotated nothing.
-st, _ = raw("/api/agents/heartbeat", "POST", {},
-            headers=signed(rpriv, AR, "POST", "/api/agents/heartbeat",
+st, _ = raw("/api/ghosts/heartbeat", "POST", {},
+            headers=signed(rpriv, AR, "POST", "/api/ghosts/heartbeat",
                            json.dumps({}).encode()))
 check("the superseded key is refused immediately", st == 401, f"status={st}")
 
 npriv, npub = keypair()
 nkpriv, nkpub = kexpair()
-st, claimed = raw("/api/agents/enrol", "POST",
+st, claimed = raw("/api/ghosts/enrol", "POST",
                   {"enroll_token": again["enroll_token"], "public_key": npub,
                    "kex_public_key": nkpub})
 check("the new token redeems", st == 200, f"status={st}")
 check("and the channel is sealed this time",
       (claimed or {}).get("sealing") is True, str(claimed)[:110])
 
-st, rows = call("/api/agents?project=AGENT", token=admin)
+st, rows = call("/api/ghosts?project=AGENT", token=admin)
 me = next((a for a in (rows or []) if a["id"] == AR), {})
 check("the agent now reports sealed", me.get("sealed") is True,
       str(me.get("sealed")))
@@ -1617,7 +1622,7 @@ check("the agent now reports sealed", me.get("sealed") is True,
 # always went out unauthenticated. Written as what it does. Narrowing it
 # to a write-role caller needs a write-role user this suite does not
 # create, so the stronger claim is not made here.
-st, _ = call(f"/api/agents/{AR}/reenroll?project=AGENT", "POST", {}, token=None)
+st, _ = call(f"/api/ghosts/{AR}/reenroll?project=AGENT", "POST", {}, token=None)
 check("re-enrolling is refused without credentials",
       st in (401, 403), f"status={st}")
 
@@ -1629,9 +1634,9 @@ print("\n== enrolment appends a discriminator to the name ==")
 # intermittently failing auth rather than as two, one of them an orphan.
 import re as _re
 
-st, e1 = call("/api/agents?project=AGENT", "POST",
+st, e1 = call("/api/ghosts?project=AGENT", "POST",
               {"name": "kodi", "connection_mode": "callback"}, token=admin)
-st2, e2 = call("/api/agents?project=AGENT", "POST",
+st2, e2 = call("/api/ghosts?project=AGENT", "POST",
                {"name": "kodi", "connection_mode": "callback"}, token=admin)
 n1 = (e1 or {}).get("agent", {}).get("name", "")
 n2 = (e2 or {}).get("agent", {}).get("name", "")
@@ -1645,67 +1650,67 @@ check("two agents enrolled under one name do not collide", n1 != n2, f"{n1} {n2}
 # The suffix exists for the name nobody chose; re-imposing it on one
 # somebody did choose would be the tool arguing with its operator.
 rid = (e2 or {}).get("agent", {}).get("id")
-st, ren = call(f"/api/agents/{rid}?project=AGENT", "PATCH",
+st, ren = call(f"/api/ghosts/{rid}?project=AGENT", "PATCH",
                {"name": "scanner"}, token=admin)
 check("a manual rename is honoured exactly, with no suffix added",
       (ren or {}).get("name") == "scanner", str((ren or {}).get("name")))
 
-st, ren2 = call(f"/api/agents/{rid}?project=AGENT", "PATCH",
+st, ren2 = call(f"/api/ghosts/{rid}?project=AGENT", "PATCH",
                 {"name": "  spaced out  "}, token=admin)
 check("and is trimmed but not otherwise rewritten",
       (ren2 or {}).get("name") == "spaced out", str((ren2 or {}).get("name")))
 
-st, ren3 = call(f"/api/agents/{rid}?project=AGENT", "PATCH",
+st, ren3 = call(f"/api/ghosts/{rid}?project=AGENT", "PATCH",
                 {"name": "scanner-aaaaaa"}, token=admin)
 check("a name that looks like a suffixed one is kept as typed",
       (ren3 or {}).get("name") == "scanner-aaaaaa", str((ren3 or {}).get("name")))
 
 # An empty rename is "no change", not "erase the name" -- an agent with
 # no name cannot be told apart from another in any list it appears in.
-st, ren4 = call(f"/api/agents/{rid}?project=AGENT", "PATCH",
+st, ren4 = call(f"/api/ghosts/{rid}?project=AGENT", "PATCH",
                 {"name": "   "}, token=admin)
 check("an all-whitespace rename leaves the name alone",
       (ren4 or {}).get("name") == "scanner-aaaaaa", str((ren4 or {}).get("name")))
 
-st, ren5 = call(f"/api/agents/{rid}?project=AGENT", "PATCH",
+st, ren5 = call(f"/api/ghosts/{rid}?project=AGENT", "PATCH",
                 {"name": "x" * 400}, token=admin)
 check("an overlong name is bounded rather than erroring",
       st == 200 and len((ren5 or {}).get("name", "")) <= 128,
       f"status={st} len={len((ren5 or {}).get('name',''))}")
 
-print("\n== a killed drone confirms it actually went ==")
+print("\n== a killed ghost confirms it actually went ==")
 # Pressing Kill records an intention. This records what happened, and
-# they are different facts: a drone killed while its host was powered
+# they are different facts: a ghost killed while its host was powered
 # off never confirms, and the tools really are still on that machine.
-st, renr = call("/api/agents?project=AGENT", "POST", {"name": "retire-me"},
+st, renr = call("/api/ghosts?project=AGENT", "POST", {"name": "retire-me"},
                 token=admin)
 RID = renr["agent"]["id"]
 qpriv, qpub = keypair()
-raw("/api/agents/enrol", "POST",
+raw("/api/ghosts/enrol", "POST",
     {"enroll_token": renr["enroll_token"], "public_key": qpub})
 
-st, before = call("/api/agents?project=AGENT", token=admin)
+st, before = call("/api/ghosts?project=AGENT", token=admin)
 _row = [a for a in (before or []) if a["id"] == RID]
-check("a live drone has no retirement recorded",
+check("a live ghost has no retirement recorded",
       _row and _row[0].get("retired_at") is None, str(_row[:1])[:120])
 
-st, _ = call(f"/api/agents/{RID}/kill?project=AGENT", "POST", {}, token=admin)
+st, _ = call(f"/api/ghosts/{RID}/kill?project=AGENT", "POST", {}, token=admin)
 check("kill is accepted", st == 200, f"status={st}")
 
 _body = json.dumps({"reason": "killed from Oddjob",
                     "removed": ["nuclei", "httpx"], "kept": ["nmap"],
                     "failed": ["gobuster: apt is locked"]}).encode()
-st, _why = raw("/api/agents/retired", "POST",
+st, _why = raw("/api/ghosts/retired", "POST",
                json.loads(_body),
-               headers=signed(qpriv, RID, "POST", "/api/agents/retired", _body))
+               headers=signed(qpriv, RID, "POST", "/api/ghosts/retired", _body))
 # This route has to be on the gatekeeper's allowlist as well as having
 # its own agent-key dependency; without that it answers "not
-# authenticated" before the endpoint is ever reached, and a drone can
+# authenticated" before the endpoint is ever reached, and a ghost can
 # never report that it shut down.
-check("a KILLED drone can still report that it shut down", st == 200,
+check("a KILLED ghost can still report that it shut down", st == 200,
       f"status={st} {str(_why)[:160]}")
 
-st, after = call("/api/agents?project=AGENT", token=admin)
+st, after = call("/api/ghosts?project=AGENT", token=admin)
 _r = [a for a in (after or []) if a["id"] == RID]
 check("the confirmation is recorded", _r and _r[0].get("retired_at"),
       str(_r[:1])[:140])
@@ -1721,31 +1726,31 @@ check("what it deliberately left alone", _cl.get("kept") == ["nmap"], str(_cl))
 # The list that actually matters -- cleanup still owed by hand.
 check("and what it could NOT remove",
       _cl.get("failed") == ["gobuster: apt is locked"], str(_cl))
-check("the drone stays killed, it cannot un-kill itself by retiring",
+check("the ghost stays killed, it cannot un-kill itself by retiring",
       _r and _r[0].get("status") == "disabled", str(_r and _r[0].get("status")))
 
-st, _ = raw("/api/agents/retired", "POST", {"reason": "nice try"})
+st, _ = raw("/api/ghosts/retired", "POST", {"reason": "nice try"})
 check("an unsigned retirement is refused", st in (401, 403), f"status={st}")
 
 # ============================================= which machine, which address
-# Two reports that looked right and were not. A drone in Docker said
+# Two reports that looked right and were not. A ghost in Docker said
 # its address was 172.17.0.2, which rendered in the same column as
 # every genuine egress address — an operator copying that into an
 # incident notification would hand the client a number from a private
-# namespace. And a drone on Windows Server said `linux`, truthfully of
+# namespace. And a ghost on Windows Server said `linux`, truthfully of
 # the binary inside the container and wrongly of the machine.
 #
 # The agent works both out; the server's job is to keep the two
 # answers apart instead of flattening them into one.
-print("\n== a drone says which machine it is on, and where its address came from ==")
+print("\n== a ghost says which machine it is on, and where its address came from ==")
 
-st, hostie = call("/api/agents?project=AGENT", "POST", {"name": "in-a-box"},
+st, hostie = call("/api/ghosts?project=AGENT", "POST", {"name": "in-a-box"},
                   token=admin)
 HKEY = (hostie or {}).get("callback_key")
-# By id, not by name: enrolment appends a random suffix so two drones
+# By id, not by name: enrolment appends a random suffix so two ghosts
 # called "scanner" do not become one.
 HID = ((hostie or {}).get("agent") or {}).get("id")
-st, _ = call("/api/agents/register", "POST",
+st, _ = call("/api/ghosts/register", "POST",
              {"platform": "linux", "arch": "amd64", "version": "test",
               "hostname": "wsl-box", "privileged": False,
               "outbound_ip": "172.17.0.2",
@@ -1755,17 +1760,17 @@ st, _ = call("/api/agents/register", "POST",
               "host_platform": "windows",
               "host_platform_source": "WSL2 kernel (5.15.0-microsoft-standard)",
               "container": "docker"}, key=HKEY)
-check("a drone can report what is underneath it", st == 200, f"status={st}")
+check("a ghost can report what is underneath it", st == 200, f"status={st}")
 
 
-def drone(aid):
+def ghost(aid):
     """By id. Enrolment appends a random suffix to the name, so two
-    drones called "scanner" do not become one."""
-    st, rows = call("/api/agents?project=AGENT", token=admin)
+    ghosts called "scanner" do not become one."""
+    st, rows = call("/api/ghosts?project=AGENT", token=admin)
     return next((a for a in (rows or []) if a["id"] == aid), None)
 
 
-a = drone(HID)
+a = ghost(HID)
 check("the binary's platform is still reported as it was",
       (a or {}).get("platform") == "linux", str((a or {}).get("platform")))
 # The whole point. Both are true and they answer different questions:
@@ -1789,14 +1794,14 @@ check("with the note saying which lookup failed",
       "ifconfig.me" in ((a or {}).get("outbound_ip_note") or ""),
       str((a or {}).get("outbound_ip_note")))
 
-print("-- an older drone says nothing, which is not the same as 'no' --")
-st, plain = call("/api/agents?project=AGENT", "POST", {"name": "bare-metal"},
+print("-- an older ghost says nothing, which is not the same as 'no' --")
+st, plain = call("/api/ghosts?project=AGENT", "POST", {"name": "bare-metal"},
                  token=admin)
 PKEY = (plain or {}).get("callback_key")
 PID = ((plain or {}).get("agent") or {}).get("id")
-call("/api/agents/register", "POST",
+call("/api/ghosts/register", "POST",
      {"platform": "linux", "arch": "amd64", "hostname": "metal"}, key=PKEY)
-a = drone(PID)
+a = ghost(PID)
 # Null, never defaulted to `platform`. A server that filled this in
 # from the binary's own OS would be asserting "this is a Linux
 # machine" on no evidence -- which is exactly the bug, restated.
@@ -1810,17 +1815,17 @@ check("and the source of an unreported address is null too",
       str((a or {}).get("outbound_ip_source")))
 
 print("-- a later register corrects an earlier answer --")
-# Register is idempotent and runs on every reconnect, so a drone moved
+# Register is idempotent and runs on every reconnect, so a ghost moved
 # out of its container has to be able to withdraw what it said before.
 # Leaving the stale `docker` behind would be worse than never having
 # recorded it.
-call("/api/agents/register", "POST",
+call("/api/ghosts/register", "POST",
      {"platform": "linux", "arch": "amd64", "hostname": "wsl-box",
       "outbound_ip": "203.0.113.9", "outbound_ip_source": "public-service",
       "host_platform": "linux",
       "host_platform_source": "Linux kernel, no WSL or Docker Desktop markers"},
      key=HKEY)
-a = drone(HID)
+a = ghost(HID)
 check("the new address replaces the container one",
       (a or {}).get("outbound_ip") == "203.0.113.9",
       str((a or {}).get("outbound_ip")))

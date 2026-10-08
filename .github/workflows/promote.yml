@@ -10,7 +10,7 @@
 # Versions live in git tags, not in Docker Hub tag listings. Hub tags
 # get deleted, retention-pruned and hand-edited; a git tag is signed
 # history and is also what somebody checks out to reproduce a release.
-# Both are published — `cr0n1c/oddjob:v0.0.2` and `cr0n1c/drone:v0.0.2`
+# Both are published — `cr0n1c/oddjob:v0.0.2` and `cr0n1c/ghost:v0.0.2`
 # exist so a deployment can pin to a version — but the git tag is the
 # record and the Hub tags are a convenience over it.
 #
@@ -78,7 +78,7 @@ on:
       image:
         description: 'Which image'
         type: choice
-        options: [both, oddjob, drone]
+        options: [both, oddjob, ghost]
         default: both
       from:
         # `nightly` rather than `develop`: a nightly has had a night of
@@ -130,7 +130,7 @@ jobs:
 
           # Spelled out rather than `[ ... ] && images+=(...)`: under
           # `set -e` that form exits the step when the test is false,
-          # so selecting only `drone` would have silently selected
+          # so selecting only `ghost` would have silently selected
           # nothing. This is the same bug the old retag step carried a
           # comment about; it is repeated here because the shape is
           # just as tempting the second time.
@@ -138,8 +138,8 @@ jobs:
           if [ "$WHICH" = "both" ] || [ "$WHICH" = "oddjob" ]; then
             images+=(oddjob)
           fi
-          if [ "$WHICH" = "both" ] || [ "$WHICH" = "drone" ]; then
-            images+=(drone)
+          if [ "$WHICH" = "both" ] || [ "$WHICH" = "ghost" ]; then
+            images+=(ghost)
           fi
           if [ ${#images[@]} -eq 0 ]; then
             echo "::error::no image selected" >&2; exit 1
@@ -302,7 +302,7 @@ jobs:
           FROM: ${{ inputs.from }}
           HEAD_VERSION: ${{ steps.v.outputs.head_version }}
           ODDJOB_REVISION: ${{ steps.v.outputs.oddjob_revision }}
-          DRONE_REVISION: ${{ steps.v.outputs.drone_revision }}
+          GHOST_REVISION: ${{ steps.v.outputs.ghost_revision }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
@@ -313,7 +313,7 @@ jobs:
           # out v0.0.2 to reproduce the release" is only true if the
           # tag is on the commit whose tree produced those bytes, and
           # main has usually moved on by the time anybody promotes.
-          rev="${ODDJOB_REVISION:-$DRONE_REVISION}"
+          rev="${ODDJOB_REVISION:-$GHOST_REVISION}"
           if [ -z "$rev" ] || ! git cat-file -e "$rev^{commit}" 2>/dev/null; then
             echo "::warning::no usable revision label (${rev:-none}); tagging HEAD instead"
             rev=$(git rev-parse HEAD)
