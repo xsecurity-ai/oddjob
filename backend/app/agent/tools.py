@@ -625,7 +625,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
         except ValueError:
             return {}
 
-    async def list_drone(**_) -> dict:
+    async def list_ghost(**_) -> dict:
         """The agents deployed on this engagement."""
         if pid is None:
             return {"error": "listing agents needs one engagement in view"}
@@ -735,11 +735,11 @@ def build(session: AsyncSession, project: Project | None, user: User,
         }
 
     reads = [
-        Tool("list_drone",
-             "Drone agents on this engagement: where each is deployed, "
+        Tool("list_ghost",
+             "Ghost agents on this engagement: where each is deployed, "
              "whether it can raw-socket scan, what tools it has, and what "
              "it is working on.",
-             _obj({}), list_drone),
+             _obj({}), list_ghost),
         Tool("list_projects",
              "The engagements you can see, with a target count for each. "
              "Use this first when asked about more than one engagement, or "
@@ -872,7 +872,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
         if pid is None or project is None:
             return {"error": "applying lookup results needs one engagement "
                              "in view; pick a project and ask again"}
-        # The same function the HTTP route and the Drone result handler
+        # The same function the HTTP route and the Ghost result handler
         # call. Not a reimplementation: if the agent's path and the API
         # path could disagree about what scope allows, that difference
         # would be the bug, and sharing the function is the only way to
@@ -925,8 +925,8 @@ def build(session: AsyncSession, project: Project | None, user: User,
         await session.commit()
         return {"ok": True, "host": t.host, "title": title}
 
-    # ------------------------------------------------------ drone writes
-    async def task_drone(kind: str, targets: str, agent: str = "",
+    # ------------------------------------------------------ ghost writes
+    async def task_ghost(kind: str, targets: str, agent: str = "",
                         ports: str = "", region: str = "") -> dict:
         """Queue work for an agent, or for the project's pool."""
         from ..routers.agents import TASK_KINDS
@@ -941,7 +941,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
             # a privileged process inside a client network is not
             # something to do because a sentence asked for it.
             return {"error": f"{kind} is not available through the "
-                             f"assistant; queue it yourself from the Drone "
+                             f"assistant; queue it yourself from the Ghost "
                              f"page, where the allowlist and the agent are "
                              f"both in front of you"}
         hosts = [t for t in re.split(r"[\s,]+", targets or "") if t]
@@ -961,7 +961,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
         args: dict = {"targets": hosts}
         if ports.strip():
             args["ports"] = ports.strip()
-        # Same gate as the Drone page, reached the same way. A scan the
+        # Same gate as the Ghost page, reached the same way. A scan the
         # operator could not queue by hand must not become queueable by
         # asking for it in a sentence.
         idx = await index_for(session, pid)
@@ -995,7 +995,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
         "hosts": "exactly the hosts given in `hosts`",
     }
 
-    async def enumerate_drones(kind: str, select: str = "unscanned",
+    async def enumerate_ghosts(kind: str, select: str = "unscanned",
                                technology: str = "", hosts: str = "",
                                ports: str = "", agent: str = "",
                                region: str = "", limit: int = 500,
@@ -1030,7 +1030,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
             # privileged process inside a client network is not
             # something to do because a sentence asked for it.
             return {"error": f"{kind} is never queued by the assistant. It "
-                             f"belongs on the Drone page, where the allowlist "
+                             f"belongs on the Ghost page, where the allowlist "
                              f"and the agent are both in front of you"}
 
         sel = (select or "").strip().lower()
@@ -1154,7 +1154,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
                                else "the project pool — routing will pick",
                 "note": "one task per host; results import as each reports back"}
 
-    async def drone_task_status(task_id: int) -> dict:
+    async def ghost_task_status(task_id: int) -> dict:
         if pid is None:
             return {"error": "needs one engagement in view"}
         t = await session.get(AgentTask, int(task_id))
@@ -1174,7 +1174,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
                 "unknown_hosts": [u.get("host") for u in
                                   (imp or {}).get("unknown_hosts", [])]}
 
-    async def enroll_drone(name: str, target_os: str = "linux",
+    async def enroll_ghost(name: str, target_os: str = "linux",
                          connection_mode: str = "callback") -> dict:
         """Create an agent and return what the operator must run."""
         from ..routers.agents import ENROLL_TTL, server_identity
@@ -1186,7 +1186,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
             # commands on a machine and send their output here. A
             # contributor asking nicely is not the same as an admin
             # deciding.
-            return {"error": "enrolling a Drone is an admin action on this "
+            return {"error": "enrolling a Ghost is an admin action on this "
                              "project; ask someone with that role"}
         if target_os not in ("linux", "darwin", "windows"):
             return {"error": "target_os is linux, darwin or windows"}
@@ -1213,7 +1213,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
             # that it will not be shown again.
             "enroll_token": tok_raw,
             "expires_at": expires.isoformat(),
-            "run": (f"drone run --server <this oddjob url> "
+            "run": (f"ghost run --server <this oddjob url> "
                     f"--enroll {tok_raw} --name {a.name}"),
             "note": ("this token is shown once and is good for a short "
                      "while; the agent trades it for a keypair it makes "
@@ -1223,8 +1223,8 @@ def build(session: AsyncSession, project: Project | None, user: User,
         }
 
     return reads + [
-        Tool("task_drone",
-             "Queue a scan on a Drone agent. Name an agent to pin the work "
+        Tool("task_ghost",
+             "Queue a scan on a Ghost agent. Name an agent to pin the work "
              "to it, or leave it out to let the project's routing choose. "
              "Results import automatically when the agent reports back.",
              _obj({"kind": {"type": "string",
@@ -1238,13 +1238,13 @@ def build(session: AsyncSession, project: Project | None, user: User,
                              "description": "agent name; omit for the pool"},
                    "ports": {"type": "string"},
                    "region": {"type": "string"}},
-                  ["kind", "targets"]), task_drone, writes=True),
-        Tool("enumerate_drones",
+                  ["kind", "targets"]), task_ghost, writes=True),
+        Tool("enumerate_ghosts",
              "Queue enumeration across the project's own targets — one "
              "task per host, picked by selection rather than listed by "
              "hand: all, unscanned, web, hacked, technology, or an "
              "explicit host list. PREVIEWS by default; pass confirm=true "
-             "to actually queue. Use this for a sweep, and task_drone for "
+             "to actually queue. Use this for a sweep, and task_ghost for "
              "one specific scan.",
              _obj({"kind": {"type": "string",
                             "description": "nmap, masscan, amass, gobuster, "
@@ -1264,21 +1264,21 @@ def build(session: AsyncSession, project: Project | None, user: User,
                    "limit": {"type": "integer"},
                    "confirm": {"type": "boolean",
                                "description": "false previews, true queues"}},
-                  ["kind"]), enumerate_drones, writes=True),
-        Tool("drone_task_status",
-             "How a queued Drone task is getting on, and whether its results "
+                  ["kind"]), enumerate_ghosts, writes=True),
+        Tool("ghost_task_status",
+             "How a queued Ghost task is getting on, and whether its results "
              "are waiting on a decision about unknown hosts.",
              _obj({"task_id": {"type": "integer"}}, ["task_id"]),
-             drone_task_status),
-        Tool("enroll_drone",
-             "Create a new Drone agent for this engagement and return the "
+             ghost_task_status),
+        Tool("enroll_ghost",
+             "Create a new Ghost agent for this engagement and return the "
              "one-time command to run on the host. Admin only.",
              _obj({"name": {"type": "string"},
                    "target_os": {"type": "string",
                                  "enum": ["linux", "darwin", "windows"]},
                    "connection_mode": {"type": "string",
                                        "enum": ["callback", "call_in"]}},
-                  ["name"]), enroll_drone, writes=True),
+                  ["name"]), enroll_ghost, writes=True),
         Tool("add_note", "Append a note to a host's timeline.",
              _obj({"host": {"type": "string"}, "note": {"type": "string"}},
                   ["host", "note"]), add_note, writes=True),

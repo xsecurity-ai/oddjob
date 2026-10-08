@@ -46,15 +46,15 @@ PUBLIC_EXACT = {
     "/api/auth/google/callback",
     "/api/auth/google/status",
     # See PUBLIC_PREFIX: these carry an agent key, not a session.
-    "/api/agents/register",
-    "/api/agents/heartbeat",
-    # A drone's last message, saying it has stopped and what it
+    "/api/ghosts/register",
+    "/api/ghosts/heartbeat",
+    # A ghost's last message, saying it has stopped and what it
     # uninstalled. It arrives from an agent that has just been killed,
     # which is the whole point of it.
-    "/api/agents/retired",
+    "/api/ghosts/retired",
     # The one-time token is the credential here; there is no identity yet.
-    "/api/agents/enroll",
-    "/api/agents/enrol",      # the old spelling, still answered
+    "/api/ghosts/enroll",
+    "/api/ghosts/enrol",      # the old spelling, still answered
 }
 
 PUBLIC_PREFIX = (
@@ -62,14 +62,14 @@ PUBLIC_PREFIX = (
     "/api/auth/magic/",    # redeeming a link arrives with no session yet
 )
 
-# Drone agents. NOT unauthenticated — they authenticate with an agent key,
+# Ghost agents. NOT unauthenticated — they authenticate with an agent key,
 # which this middleware knows nothing about, so the route's own dependency
 # has to be the thing that checks. Matched exactly rather than by a
-# "/api/agents/tasks/" prefix: under a prefix, every route later added
+# "/api/ghosts/tasks/" prefix: under a prefix, every route later added
 # below it is public by default, and the one that gets added is an
 # operator-facing one. The two routes an agent actually calls are both
-# of the form /api/agents/tasks/{int}/{verb}, so say that.
-PUBLIC_AGENT_ROUTE = re.compile(r"^/api/agents/tasks/\d+/(start|result)$")
+# of the form /api/ghosts/tasks/{int}/{verb}, so say that.
+PUBLIC_AGENT_ROUTE = re.compile(r"^/api/ghosts/tasks/\d+/(start|result)$")
 
 
 def is_public(path: str) -> bool:

@@ -256,7 +256,7 @@ if DB and _pathlib.Path(DB).exists():
 print("\n== each origin is addressable on its own ==")
 # The common narrowing, as a URL rather than a query whose spelling has
 # to be remembered. Same handlers, same filters; the path pins `source`.
-for origin in ("middleware", "ui", "drone", "backend"):
+for origin in ("middleware", "ui", "ghost", "backend"):
     st, j = call(f"/audit/{origin}/json?limit=200", token=admin)
     check(f"/audit/{origin}/json answers", st == 200, f"status={st}")
     check(f"/audit/{origin}/json returns only {origin}",
@@ -273,19 +273,19 @@ for origin in ("middleware", "ui", "drone", "backend"):
 # The path is the more specific statement of intent, so it wins. A
 # query that disagreed used to be the kind of thing that silently
 # returned the wrong rows.
-st, j = call("/audit/drone/json?source=ui&limit=50", token=admin)
+st, j = call("/audit/ghost/json?source=ui&limit=50", token=admin)
 check("the path beats a contradicting ?source=",
-      all(e["source"] == "drone" for e in (j or {}).get("entries", []))
-      and (j or {}).get("source") == "drone", str(j)[:140])
+      all(e["source"] == "ghost" for e in (j or {}).get("entries", []))
+      and (j or {}).get("source") == "ghost", str(j)[:140])
 
 # An empty page for a typo looks exactly like a quiet day, which is the
 # wrong thing for an audit tool to imply.
-st, r = call("/audit/drone-agent/json", token=admin)
+st, r = call("/audit/ghost-agent/json", token=admin)
 check("an unknown origin is a 404, not an empty page", st == 404, f"status={st}")
 check("and the 404 names the valid origins",
-      all(w in str(r) for w in ("middleware", "ui", "drone", "backend")), str(r)[:170])
+      all(w in str(r) for w in ("middleware", "ui", "ghost", "backend")), str(r)[:170])
 
-st, r = call("/audit/drone/json")
+st, r = call("/audit/ghost/json")
 check("the per-origin routes are admin-only too", st in (401, 403), f"status={st}")
 st, r = call("/audit/ui/json", token=plain)
 check("and refuse an ordinary user", st == 403, f"status={st}")
@@ -299,7 +299,7 @@ check("and says what it does not record",
 print("\n== every documented type answers in both formats ==")
 # The contract is /audit/$type/$format for four types and two formats.
 # A combination that 404s is a documented URL that does not exist.
-for t in ("ui", "backend", "middleware", "drone"):
+for t in ("ui", "backend", "middleware", "ghost"):
     st, _ = call(f"/audit/{t}/json", token=admin)
     check(f"/audit/{t}/json", st == 200, f"status={st}")
     st, b = call(f"/audit/{t}/log", token=admin, raw=True)
@@ -451,7 +451,7 @@ print("\n== the health page ==")
 st, h = call("/api/health/site", token=admin)
 check("site health is served to a site admin", st == 200, f"status={st}")
 for _k in ("database", "cve_feed", "exploit_feed", "slack", "smtp",
-           "drones", "audit", "server"):
+           "ghosts", "audit", "server"):
     check(f"it reports {_k}", _k in (h or {}), str(list((h or {}).keys()))[:120])
 check("the database is reachable and says how fast",
       (h or {}).get("database", {}).get("state") == "ok"
@@ -514,24 +514,24 @@ check("and says plainly whether this is an unreleased build",
       _srv.get("dev") == ("-dev-" in (_srv.get("version") or "")),
       f"version={_srv.get('version')} dev={_srv.get('dev')}")
 
-_dv = (h or {}).get("drones", {}).get("versions")
+_dv = (h or {}).get("ghosts", {}).get("versions")
 check("the fleet's versions are summarised on the health page",
       isinstance(_dv, dict) and isinstance(_dv.get("versions"), list),
       str(_dv)[:140])
 check("and the summary knows what the server is running",
       (_dv or {}).get("server_version") == _VER, str((_dv or {}).get("server_version")))
-check("every drone row carries its reported version, or null",
-      all("version" in d for d in (h or {}).get("drones", {}).get("drones", [])),
-      str((h or {}).get("drones", {}).get("drones"))[:140])
+check("every ghost row carries its reported version, or null",
+      all("version" in d for d in (h or {}).get("ghosts", {}).get("ghosts", [])),
+      str((h or {}).get("ghosts", {}).get("ghosts"))[:140])
 
 # The aggregate itself, as a pure function, because the interesting
-# cases are a mixed fleet and the server has one drone at best.
+# cases are a mixed fleet and the server has one ghost at best.
 _f = _fv(["0.0.1", "0.0.1", "0.1.0", None, "", "dev"], server_version="0.0.1")
 check("every version in use gets its own row", _f["distinct"] == 3, str(_f["versions"]))
 check("with a count, so a split fleet is visible rather than averaged",
       [(r["version"], r["count"]) for r in _f["versions"]][0] == ("0.1.0", 1),
       str(_f["versions"]))
-check("a drone that has reported nothing is counted apart",
+check("a ghost that has reported nothing is counted apart",
       _f["unreported"] == 2, str(_f))
 check("and is never folded into a version bucket",
       sum(r["count"] for r in _f["versions"]) == 4, str(_f["versions"]))
@@ -543,14 +543,14 @@ check("rows say whether they match the server",
       [r["matches_server"] for r in _f["versions"]] == [False, True, False],
       str(_f["versions"]))
 check("and how much of the fleet does", _f["matching_server"] == 2, str(_f))
-# Yellow, not red. Neither a split fleet nor a silent drone is an
+# Yellow, not red. Neither a split fleet nor a silent ghost is an
 # outage, and calling them failing is how a page teaches people to
 # stop looking at it.
 check("a split fleet is flagged without being called failing",
       _f["state"] == "idle", str(_f["state"]))
-check("one version, every drone reporting, is ok",
+check("one version, every ghost reporting, is ok",
       _fv(["0.1.0", "0.1.0"])["state"] == "ok", str(_fv(["0.1.0", "0.1.0"])))
-check("no drones at all is 'never used', not 'ok'",
+check("no ghosts at all is 'never used', not 'ok'",
       _fv([])["state"] == "unused" and _fv([])["newest"] is None, str(_fv([])))
 check("a dev build is marked as one",
       _fv(["0.0.1-dev-1759900000"])["versions"][0]["dev"] is True,

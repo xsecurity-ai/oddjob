@@ -121,23 +121,29 @@ export function StandingOrders({ project }: { project: string }) {
         </Tooltip>
       ))}
 
-      <Tooltip title={'Scans hosts that have never been scanned. Top 100 is '
-        + "nmap's own fast list; Full TCP is all 65,535 ports and is hours "
-        + 'of traffic at the far end.'}>
-        <Stack direction="row" spacing={0.7} alignItems="center">
-          <Box sx={{ fontSize: 11.5, color: neon.text }}>nmap new hosts</Box>
-          <Select size="small" value={nmap} disabled={!admin || busy}
-            onChange={(e) => save.mutate({ auto_nmap: e.target.value })}
-            sx={{ fontSize: 11.5, height: 26,
-                  color: nmap === 'off' ? neon.muted : neon.yellow }}>
-            {NMAP.map((o) => (
-              <MenuItem key={o.value} value={o.value} sx={{ fontSize: 11.5 }}>
-                {o.label}
-              </MenuItem>
-            ))}
-          </Select>
-        </Stack>
-      </Tooltip>
+      {/* The tooltip is on the LABEL, not around the whole control.
+          Wrapping the Select meant the balloon was still open when the
+          menu dropped, and it covered the options you were trying to
+          pick — the explanation obscuring the thing it explains. */}
+      <Stack direction="row" spacing={0.7} alignItems="center">
+        <Tooltip title={'Scans hosts that have never been scanned. Top 100 is '
+          + "nmap's own fast list; Full TCP is all 65,535 ports and is hours "
+          + 'of traffic at the far end.'}>
+          <Box sx={{ fontSize: 11.5, color: neon.text, cursor: 'help' }}>
+            nmap new hosts
+          </Box>
+        </Tooltip>
+        <Select size="small" value={nmap} disabled={!admin || busy}
+          onChange={(e) => save.mutate({ auto_nmap: e.target.value })}
+          sx={{ fontSize: 11.5, height: 26,
+                color: nmap === 'off' ? neon.muted : neon.yellow }}>
+          {NMAP.map((o) => (
+            <MenuItem key={o.value} value={o.value} sx={{ fontSize: 11.5 }}>
+              {o.label}
+            </MenuItem>
+          ))}
+        </Select>
+      </Stack>
 
       {busy && <CircularProgress size={13} sx={{ color: neon.muted }} />}
       {save.isError && (

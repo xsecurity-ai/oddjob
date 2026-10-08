@@ -556,7 +556,7 @@ check('no addresses is zero, not minus one', extraAddresses([]) === 0)
 check('an absent array does not throw', extraAddresses(undefined) === 0)
 check('...nor a null one', extraAddresses(null) === 0)
 
-console.log('\n== a drone version says which build it is ==')
+console.log('\n== a ghost version says which build it is ==')
 check('a release shows as itself', splitVersion('0.1.0').label === '0.1.0')
 check('a release is not marked dev', splitVersion('0.1.0').dev === false)
 const dv = splitVersion('0.1.0-dev-20261008T174500Z')

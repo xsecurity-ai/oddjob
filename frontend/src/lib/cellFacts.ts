@@ -20,7 +20,7 @@ export function extraAddresses(all: string[] | null | undefined): number {
   return Math.max(0, (all?.length ?? 0) - 1)
 }
 
-/** Split a drone version into what to show and whether it is a dev build.
+/** Split a ghost version into what to show and whether it is a dev build.
  *
  *  `scripts/version.sh` appends `-dev-<commit time>` to a build that is
  *  not a release, and the suffix is long enough to push the useful part

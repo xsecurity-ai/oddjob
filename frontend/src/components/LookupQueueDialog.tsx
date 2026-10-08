@@ -1,5 +1,5 @@
 /**
- * Queue a DNS lookup on a Drone agent — address to name, or name to
+ * Queue a DNS lookup on a Ghost agent — address to name, or name to
  * address — and say where the answer will come from.
  *
  * Reverse lookup is not just PTR. The agent asks a third-party reverse-IP
@@ -15,7 +15,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query'
 import { neon } from '../theme'
 import { AgentChooser, Caveat, EnumerateDialog, FleetNotice } from './EnumerateBits'
-import { needsRegion, queueEach, useFleet, type AgentChoice } from './droneTasking'
+import { needsRegion, queueEach, useFleet, type AgentChoice } from './ghostTasking'
 
 export type LookupKind = 'reverse_ip' | 'nslookup'
 
@@ -57,7 +57,7 @@ export function LookupQueueDialog({ project, kind, subjects, onClose,
     setBusy(true); setErr(null)
     try {
       // One task per subject. A single task holding 1,738 names is one
-      // unit of work: one Drone does all of it while the rest of the
+      // unit of work: one Ghost does all of it while the rest of the
       // fleet idles, a failure anywhere loses the lot, and the only
       // progress visible is "running" until every last one is done.
       const { ids, failed } = await queueEach(project, agent, kind, list,
@@ -69,7 +69,7 @@ export function LookupQueueDialog({ project, kind, subjects, onClose,
       const noun = `${reverse ? 'address' : 'name'}${ids.length === 1 ? '' : 'es'}`
       const msg = `Queued ${ids.length} task${ids.length === 1 ? '' : 's'}, one `
               + `per ${reverse ? 'address' : 'name'}, over ${ids.length} ${noun}. `
-              + `Results are applied as each Drone reports back wherever the `
+              + `Results are applied as each Ghost reports back wherever the `
               + `answer is not in doubt; what is genuinely ambiguous waits `
               + `for you on this page. Scope decides every name and address `
               + `on its own either way.`

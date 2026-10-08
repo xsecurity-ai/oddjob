@@ -242,8 +242,8 @@ app.add_middleware(
 class ApiSlash:
     """Route `/api/foo/` as `/api/foo`. A rewrite, NOT a redirect.
 
-    `/api/agents/?project=X` used to answer "no such endpoint" while
-    `/api/agents` worked, because the SPA catch-all matched first and
+    `/api/ghosts/?project=X` used to answer "no such endpoint" while
+    `/api/ghosts` worked, because the SPA catch-all matched first and
     swallowed the redirect FastAPI would otherwise have issued.
 
     Redirecting was the obvious fix and it was wrong. What produced the
@@ -342,7 +342,7 @@ if _DIST.is_dir():
     #: same URL works whether you paste it into a tab or into curl.
     #:
     #: This MUST match GLOBAL ∪ SCOPED in frontend/src/lib/route.ts. It is
-    #: a second copy of a list that lives there, and it drifted: `drone`
+    #: a second copy of a list that lives there, and it drifted: `ghost`
     #: and `settings` were added to the app and not here, so every deep
     #: link and every refresh on those pages answered 404 while the page
     #: worked perfectly if you navigated to it. `webtest.py` reads the
@@ -350,7 +350,7 @@ if _DIST.is_dir():
     #: added will be added in one place again.
     SPA_ROUTES = ("projects", "targets", "services", "web", "vulns",
                   "credentials", "reports", "import", "config", "users",
-                  "profile", "drones", "settings", "health")
+                  "profile", "ghosts", "settings", "health")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(request: Request, full_path: str):

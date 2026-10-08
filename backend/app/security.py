@@ -242,7 +242,7 @@ async def assert_role_for_target(session: AsyncSession, user: User,
 
 
 # ------------------------------------------------------------ agent keys
-#: Drone keys are 256 bits of randomness that we generate, not passwords
+#: Ghost keys are 256 bits of randomness that we generate, not passwords
 #: a person chose, and they are checked on every heartbeat.
 #:
 #: So SHA-256 and not argon2. Argon2 is deliberately slow to make
@@ -251,7 +251,7 @@ async def assert_role_for_target(session: AsyncSession, user: User,
 #: be paid on every poll by every agent. The comparison is still
 #: constant-time, because the hash is the thing an attacker would try
 #: to match.
-AGENT_KEY_PREFIX = "drone_"
+AGENT_KEY_PREFIX = "ghost_"
 
 
 def new_agent_key() -> tuple[str, str]:

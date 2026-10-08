@@ -233,7 +233,7 @@ async def drive():
         pr = (await s.execute(
             select(Project).where(Project.code == "AUTO2"))).scalar_one()
 
-        # No drone: nothing is queued at all, however much is outstanding.
+        # No ghost: nothing is queued at all, however much is outstanding.
         n = await run_once(s, pr)
         check("with no agent online nothing is queued", n == {}, n)
 
@@ -283,7 +283,7 @@ async def zones():
     async with SessionLocal() as s:
         pr = (await s.execute(
             select(Project).where(Project.code == "ZONES"))).scalar_one()
-        s.add(Agent(project_id=pr.id, name="zone-drone", status="online",
+        s.add(Agent(project_id=pr.id, name="zone-ghost", status="online",
                     callback_key_hash="z" * 64))
         # The apex AS A TARGET. The API would refuse to create it --
         # `*.zone.acme.example` does not cover the apex -- so it is

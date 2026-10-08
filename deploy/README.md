@@ -19,7 +19,7 @@ Read this before exposing it, not after.
             │  :443 TLS   ┌─────────┐   127.0.0.1:8000  ┌──────────┐
    browser ─┼────────────►│  nginx  ├──────────────────►│  oddjob  │
             │             └─────────┘                   └────┬─────┘
-   drones  ─┘              rate limits                       │ db:5432
+   ghosts  ─┘              rate limits                       │ db:5432
                            TLS                          ┌────▼─────┐
                                                         │ postgres │
                                                         └──────────┘
@@ -110,10 +110,10 @@ password-guessing target.
 
 ---
 
-## Drones
+## Ghosts
 
-Drones reach Oddjob over the same public name, and nothing about them
-needs to change beyond `DRONE_SERVER=https://YOUR-HOST`. They are
+Ghosts reach Oddjob over the same public name, and nothing about them
+needs to change beyond `GHOST_SERVER=https://YOUR-HOST`. They are
 deliberately **not** inside the login rate-limit zone: a fleet
 heartbeats every few seconds and submits results in bursts after a long
 scan, and throttling that drops findings from work that has already run
@@ -192,7 +192,7 @@ because an unrelated `:latest` moved.
 
 ## Which image to run
 
-CI publishes to Docker Hub as `cr0n1c/oddjob` and `cr0n1c/drone`, both
+CI publishes to Docker Hub as `cr0n1c/oddjob` and `cr0n1c/ghost`, both
 `linux/amd64` and `linux/arm64`:
 
 | tag | moves | what it is |

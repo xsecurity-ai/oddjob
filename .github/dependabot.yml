@@ -87,7 +87,7 @@ updates:
   # that runs on someone else's network had no dependency updates at
   # all, which is the opposite of the order you would choose.
   - package-ecosystem: gomod
-    directory: /drone
+    directory: /ghost
     schedule:
       interval: weekly
       day: monday
@@ -95,8 +95,8 @@ updates:
       default-days: 7
     open-pull-requests-limit: 3
     groups:
-      drone-minor-and-patch:
+      ghost-minor-and-patch:
         update-types: [minor, patch]
-    labels: [dependencies, drone]
+    labels: [dependencies, ghost]
     commit-message:
-      prefix: "deps(drone)"
+      prefix: "deps(ghost)"

@@ -1,5 +1,5 @@
 /**
- * Queue an nmap run on a Drone agent, in words rather than flags.
+ * Queue an nmap run on a Ghost agent, in words rather than flags.
  *
  * The flags are shown as secondary text because the operator has to be
  * able to check them, but the choices are named for what they do. The
@@ -22,7 +22,7 @@ import {
 import {
   NMAP_DEFAULTS, nmapPlan, queue, queueEach, rawSockets, needsRegion,
   useFleet, type AgentChoice, type NmapOptions,
-} from './droneTasking'
+} from './ghostTasking'
 
 /** Label plus its flag, so both readings are available at a glance. */
 function Flag({ text, flag }: { text: string; flag: string }) {
@@ -91,7 +91,7 @@ export function NmapScanDialog({ project, targets, onClose, onQueued }: {
       }
       const msg = (`Queued ${ids.length} task${ids.length === 1 ? '' : 's'}, one `
               + `per target. ${ids.length === 1 ? 'It is' : 'They are'} waiting `
-              + `for an agent, not running yet — the Drone page shows when `
+              + `for an agent, not running yet — the Ghost page shows when `
               + `${ids.length === 1 ? 'it starts' : 'they start'}.`
               + (failed.length
                  ? ` ${failed.length} refused: ${failed[0].subject} — `
@@ -132,7 +132,7 @@ export function NmapScanDialog({ project, targets, onClose, onQueued }: {
             </RadioGroup>
             <Caveat>
               A SYN scan needs raw sockets and the agent may not have them —
-              the Drone list reports that as <i>privileged</i>. The agent picks
+              the Ghost list reports that as <i>privileged</i>. The agent picks
               the scan type itself from what it can do; Oddjob cannot override
               it either way.
             </Caveat>
@@ -195,7 +195,7 @@ export function NmapScanDialog({ project, targets, onClose, onQueued }: {
           </Tooltip>
           <Caveat>
             What this can actually do is install <b>nmap</b> on the agent, which
-            brings its script library with it. Drone has no way to fetch an
+            brings its script library with it. Ghost has no way to fetch an
             individual NSE script, so a script that is not in that library will
             still be missing and nmap will say so.
           </Caveat>

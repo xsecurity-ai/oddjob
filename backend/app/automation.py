@@ -26,7 +26,7 @@ failed lookup is a deliberate act and stays a manual one.
 
 **Paced.** PER_CYCLE candidates per policy per project per cycle, so
 switching a policy on in a project with four thousand hosts drains over
-hours rather than queueing four thousand scans in one go. The drone
+hours rather than queueing four thousand scans in one go. The ghost
 queue would survive that; the client's network is the thing that would
 not.
 
@@ -247,7 +247,7 @@ async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
     if not want:
         return {}
 
-    # Nothing is queued at all with no drone to run it. The tasks would
+    # Nothing is queued at all with no ghost to run it. The tasks would
     # sit in the queue and be perfectly valid, but "25 queued" against
     # an empty fleet every minute is a queue nobody asked for by the
     # time anyone brings an agent up.

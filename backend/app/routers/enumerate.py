@@ -1,4 +1,4 @@
-"""Turning Drone lookups back into inventory, and naming what has not been scanned.
+"""Turning Ghost lookups back into inventory, and naming what has not been scanned.
 
 Two questions the Targets page asks that nothing could answer.
 
@@ -480,7 +480,7 @@ async def _decide_others(session: AsyncSession, pr: Project, user: User,
                      detail=(f"{body.value} answers to this name as well as "
                              f"to the one chosen. Nothing has been probed at "
                              f"it — it is a lead, added deliberately."),
-                     actor=user, source="drone:reverse_ip")
+                     actor=user, source="ghost:reverse_ip")
         added.append(n)
 
     for n in sorted(want_add | want_deny):
@@ -542,7 +542,7 @@ async def _take_name(session: AsyncSession, pr: Project, user: User | None,
         t.host = name
         await record(session, t.id, "change",
                      f"named {name} from a reverse lookup on {was}",
-                     actor=user or who, source="drone:reverse_ip")
+                     actor=user or who, source="ghost:reverse_ip")
         return "renamed"
 
     done = await merge_mod.merge(
@@ -554,11 +554,11 @@ async def _take_name(session: AsyncSession, pr: Project, user: User | None,
                 f"project already held, so the two were one host all "
                 f"along and the address-named row was folded in "
                 f"automatically.\n\n{summary}"),
-        actor=user or who, source="drone:reverse_ip")
+        actor=user or who, source="ghost:reverse_ip")
     # Also in the installation audit trail. A merge deletes a row, and
     # the timeline that would have explained it goes with it; this is
     # the only place that still names what was absorbed.
-    await audit.record(session, "ui" if user else "drone", "target.merge",
+    await audit.record(session, "ui" if user else "ghost", "target.merge",
                        user=user, username=None if user else who,
                        project_code=pr.code,
                        detail=summary.replace("\n", "; ")[:4000])
@@ -602,7 +602,7 @@ async def _note_others(session: AsyncSession, target_id: int, subject: str,
                 "is usually shared hosting or a load balancer — but "
                 "each is a lead and none is in scope merely because "
                 "it appeared here:\n\n" + body),
-        source="drone:reverse_ip")
+        source="ghost:reverse_ip")
 
 
 @router.post("/resolve")
@@ -694,7 +694,7 @@ async def resolve(body: ResolveIn, project: str = Query(...),
             await record(session, t.id, "change",
                          "addresses added: " + ", ".join(got)
                          + " (forward lookup)",
-                         actor=user, source="drone:nslookup")
+                         actor=user, source="ghost:nslookup")
     else:
         raise HTTPException(422, "field is host or ip_address")
 
@@ -829,7 +829,7 @@ async def apply_auto(session: AsyncSession, pr: Project, *,
     than computed once and replayed.
     """
     # The agent path has no person behind it. `actor` is then the
-    # drone's own name, which is the honest answer to "who did this"
+    # ghost's own name, which is the honest answer to "who did this"
     # and the one worth having when a rename looks wrong.
     who = actor or (user.username if user else "system")
     report = AutoReport()
@@ -867,7 +867,7 @@ async def apply_auto(session: AsyncSession, pr: Project, *,
                             f"{', '.join(options)}. A host having several "
                             f"addresses is not a question, so these were "
                             f"recorded without asking.{floor}"),
-                    actor=user or who, source="drone:nslookup")
+                    actor=user or who, source="ghost:nslookup")
                 progress = True
                 continue
 
@@ -926,7 +926,7 @@ async def _add_leads(session: AsyncSession, pr: Project, user: User | None,
                              f"Nothing has been probed at it — it is a lead, "
                              f"and it is here because it matches this "
                              f"project's scope list in its own right."),
-                     actor=user or who, source="drone:reverse_ip")
+                     actor=user or who, source="ghost:reverse_ip")
         row = (await session.execute(
             select(DomainCandidate)
             .where(DomainCandidate.project_id == pr.id,

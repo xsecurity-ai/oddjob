@@ -684,7 +684,7 @@ for h in ("one.acme.example", "two.acme.example", "three.acme.example"):
 call("/api/vulns?project=RUNNING", "POST",
      {"host": "one.acme.example", "title": "Weak ciphers",
       "severity": "medium"}, token=admin)
-st, a = call("/api/agents?project=RUNNING", "POST",
+st, a = call("/api/ghosts?project=RUNNING", "POST",
              {"name": "quarry-01"}, token=admin)
 check("an agent is enrolled for it", st in (200, 201), f"{st} {str(a)[:90]}")
 

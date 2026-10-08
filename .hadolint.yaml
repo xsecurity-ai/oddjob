@@ -1,6 +1,6 @@
 # hadolint configuration — https://github.com/hadolint/hadolint
 #
-# Scope: `Dockerfile` (the Oddjob app image) and `drone/Dockerfile` (the
+# Scope: `Dockerfile` (the Oddjob app image) and `ghost/Dockerfile` (the
 # enumeration agent). Both are linted in CI by the `dockerfile lint` job.
 #
 # The bar here is the same one ci.yml sets for pinned action SHAs: a rule
@@ -15,7 +15,7 @@ failure-threshold: style
 ignored:
   # DL3018 — "Pin versions in apk add: use `apk add <pkg>=<version>`".
   #
-  # Both `apk add` calls in drone/Dockerfile run on Chainguard's
+  # Both `apk add` calls in ghost/Dockerfile run on Chainguard's
   # wolfi-base, and Wolfi is a rolling repository: its APKINDEX carries
   # exactly one version of each package and keeps no archive of the
   # previous ones. A pin is therefore not a pin, it is an expiry date —

@@ -1,6 +1,6 @@
-"""Drone agents: enrollment, the task queue, and results coming home.
+"""Ghost agents: enrollment, the task queue, and results coming home.
 
-**The agent dials out.** Drone opens a websocket to the server and keeps
+**The agent dials out.** Ghost opens a websocket to the server and keeps
 it open; the server never has to reach it. That is what makes it work
 from a client's network, behind NAT, with nothing listening. The
 reverse path — the server calling into the agent — exists for waking
@@ -51,7 +51,7 @@ from ..timeline import record
 from .enumerate import apply_auto
 from .scans import HostDecision
 
-router = APIRouter(prefix="/api/agents", tags=["agents"])
+router = APIRouter(prefix="/api/ghosts", tags=["ghosts"])
 
 # The abandoned-task release below logs what it released, and the name it
 # logged through was never bound in this module -- so the one path that
@@ -80,7 +80,7 @@ ABANDON_AFTER = timedelta(minutes=10)
 #: anything on this list and nothing else.
 #: amass is deliberately absent: it is linked into the agent, so there
 #: is nothing to install, and offering it would queue an install task
-#: the Drone now refuses — it is out of that agent's `Known` map too.
+#: the Ghost now refuses — it is out of that agent's `Known` map too.
 INSTALLABLE = ("nmap", "masscan", "gobuster", "gospider", "nuclei",
                "httpx", "subfinder", "ffuf", "whatweb", "nikto", "dnsx",
                "naabu")
@@ -96,7 +96,7 @@ def _project_ceiling(pr) -> int:
     Written out because `or 5` scattered across call sites is how the
     default and the column's default drift apart.
     """
-    return max(1, int(getattr(pr, "drone_max_parallel", 5) or 5))
+    return max(1, int(getattr(pr, "ghost_max_parallel", 5) or 5))
 
 
 def effective_parallel(a, ceiling: int) -> int:
@@ -106,7 +106,7 @@ def effective_parallel(a, ceiling: int) -> int:
     eventually disagree and the symptom is a setting that appears to
     do nothing:
 
-      the operator's per-drone override   what somebody decided about
+      the operator's per-ghost override   what somebody decided about
                                           THIS host
       the agent's own assessment          cores, memory, what masscan
                                           managed to emit
@@ -117,7 +117,7 @@ def effective_parallel(a, ceiling: int) -> int:
     says 8 and gets 2 with no explanation concludes the control is
     broken -- but the project ceiling still applies on top, because it
     is a statement about the client's estate rather than about the
-    box, and no per-drone number should be able to talk its way past
+    box, and no per-ghost number should be able to talk its way past
     it.
     """
     want = a.parallel_override or a.capacity or 1
@@ -183,7 +183,7 @@ class AgentOut(BaseModel):
     #: What this agent decided its host can run at once, and why.
     #: None until it has told us.
     capacity: int | None = None
-    #: Set only once the drone has CONFIRMED it stopped. A killed drone
+    #: Set only once the ghost has CONFIRMED it stopped. A killed ghost
     #: whose host was off never confirms, and the difference between
     #: "killed" and "killed and gone" is the difference between an
     #: engagement that is finished and one with a privileged process
@@ -200,11 +200,11 @@ class AgentOut(BaseModel):
     #: useful form: an operator cares that it cannot do `nuclei`, not
     #: that it lacks a binary of that name.
     cannot_run: list[str] = []
-    #: The effective limit: the operator's per-drone override if there
+    #: The effective limit: the operator's per-ghost override if there
     #: is one, otherwise the agent's own assessment, then the project's
     #: ceiling on top of either. What the dispatcher will honour.
     max_parallel: int = 1
-    #: The operator's number for this one drone, or null when the agent
+    #: The operator's number for this one ghost, or null when the agent
     #: is deciding. Reported separately from `max_parallel` so the UI
     #: can show the control's state rather than the result -- those
     #: differ whenever the project ceiling is the binding one, and a
@@ -234,9 +234,9 @@ class AgentOut(BaseModel):
 class AgentEnrolled(BaseModel):
     """Returned once, at enrollment. None of this is recoverable later."""
     agent: AgentOut
-    callback_key: str = Field(description="Give this to Drone. It authenticates "
+    callback_key: str = Field(description="Give this to Ghost. It authenticates "
                                           "the agent to the server.")
-    call_in_key: str = Field(description="Drone requires this on inbound calls, "
+    call_in_key: str = Field(description="Ghost requires this on inbound calls, "
                                          "so the agent can tell the server from "
                                          "anyone else who finds the port.")
     enroll_token: str = Field(
@@ -264,7 +264,7 @@ class EnrollIn(BaseModel):
 
 
 class RegisterIn(BaseModel):
-    """What Drone reports about itself when it connects."""
+    """What Ghost reports about itself when it connects."""
     platform: str | None = None
     arch: str | None = None
     version: str | None = None
@@ -276,14 +276,14 @@ class RegisterIn(BaseModel):
     missing_tools: dict[str, str] = {}
     outbound_ip: str | None = None
     #: How the agent arrived at `outbound_ip`. Not validated against a
-    #: list here: a newer Drone that learns a seventh way of finding
+    #: list here: a newer Ghost that learns a seventh way of finding
     #: its address should be able to say so, and a label this server
     #: does not recognise is still more use than silence.
     outbound_ip_source: str | None = Field(None, max_length=32)
     outbound_ip_note: str | None = None
     interfaces: list[str] = []
     #: The OS underneath, where it differs from `platform`. Omitted by
-    #: an older Drone and by a newer one that could not tell.
+    #: an older Ghost and by a newer one that could not tell.
     host_platform: str | None = Field(None, max_length=32)
     host_platform_source: str | None = None
     container: str | None = Field(None, max_length=32)
@@ -292,7 +292,7 @@ class RegisterIn(BaseModel):
 
 class AgentPatch(BaseModel):
     name: str | None = None
-    #: What this one drone may run at once, overriding its own
+    #: What this one ghost may run at once, overriding its own
     #: assessment. 0 clears the override and hands the decision back to
     #: the agent -- an explicit value, because `null` in a PATCH body
     #: already means "not supplied" and there would otherwise be no way
@@ -410,7 +410,7 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
     """One agent, as the API reports it.
 
     `ceiling` is the project's limit. It used to default to 5, which is
-    the same number `Project.drone_max_parallel` defaults to and so
+    the same number `Project.ghost_max_parallel` defaults to and so
     looked harmless -- but four callers never passed it, and on a
     project that had changed its ceiling those responses reported an
     effective limit computed against a number the engagement does not
@@ -729,10 +729,10 @@ async def _record_tasking(session: AsyncSession, pr: Project, kind: str,
             detail=(f"Task {task_id} queued by {user.username}. "
                     if task_id else f"Queued by {user.username}. ")
                    + (f"Arguments: {detail}. " if detail else "")
-                   + ("Addressed to this Drone." if agent
+                   + ("Addressed to this Ghost." if agent
                       else "Pooled, so the project's routing decides which "
-                           "Drone takes it."),
-            actor=user, source=f"drone:{kind}")
+                           "Ghost takes it."),
+            actor=user, source=f"ghost:{kind}")
 
 
 async def _candidates(session: AsyncSession, project_id: int) -> list[str]:
@@ -761,7 +761,7 @@ def _looks_like_ip(value: str) -> bool:
 
 
 # ---------------------------------------------------------- dispatching
-DRONE_MODES = ("mesh", "primary", "geo")
+GHOST_MODES = ("mesh", "primary", "geo")
 
 
 def _regions_of(a: Agent) -> set[str]:
@@ -803,7 +803,7 @@ async def _may_claim(session: AsyncSession, project: Project, agent: Agent,
     newly-arrived agent change the answer without anything having to
     re-plan.
     """
-    mode = (project.drone_mode or "mesh").lower()
+    mode = (project.ghost_mode or "mesh").lower()
 
     if mode == "geo":
         want = (task.region or "").strip().lower()
@@ -950,7 +950,7 @@ async def _resolve_agent(request: Request, session: AsyncSession,
     auth = request.headers.get("Authorization", "")
     key = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     if not key:
-        key = request.headers.get("X-Drone-Key", "").strip()
+        key = request.headers.get("X-Ghost-Key", "").strip()
     if not key:
         raise HTTPException(401, "no agent key supplied")
     for a in (await session.execute(select(Agent))).scalars():
@@ -1005,7 +1005,7 @@ async def _project_code(session: AsyncSession, project_id: int) -> str:
 
 # ------------------------------------------------------ operator routes
 #: [a-z0-9]. No uppercase and no punctuation: the name turns up in
-#: container names, log lines and `drone:<name>` audit actors, and a
+#: container names, log lines and `ghost:<name>` audit actors, and a
 #: character that needs quoting in one of those is a character that
 #: eventually gets mangled in another.
 _SUFFIX_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -1034,7 +1034,7 @@ def unique_agent_name(raw: str) -> str:
     see the note there -- so this is about the name nobody chose, not
     about overruling the one somebody did.
     """
-    base = _SUFFIX_RE.sub("", (raw or "").strip())[:120] or "drone"
+    base = _SUFFIX_RE.sub("", (raw or "").strip())[:120] or "ghost"
     return f"{base}-{_new_suffix()}"
 
 
@@ -1066,7 +1066,7 @@ async def enroll(body: EnrollIn, project: str = Query(...),
               connection_mode=body.connection_mode, target_os=body.target_os,
               notes=body.notes, status="offline")
     session.add(a)
-    await audit.record(session, "ui", "drone.create", user=user,
+    await audit.record(session, "ui", "ghost.create", user=user,
                        project_code=pr.code,
                        detail=f"{a.name!r} mode={a.connection_mode} "
                               f"os={a.target_os or 'any'}")
@@ -1113,7 +1113,7 @@ async def list_agents(project: str | None = Query(None),
             .order_by(AgentTask.id))).scalars():
         in_flight.setdefault(t.agent_id, []).append(t)
 
-    ceiling = max(1, int(pr.drone_max_parallel or 5))
+    ceiling = max(1, int(pr.ghost_max_parallel or 5))
     out = []
     for a in rows:
         # Claimed counts as in flight: the agent has taken it and the
@@ -1173,23 +1173,23 @@ async def set_agent(agent_id: int, body: AgentPatch | None = None,
 #: Where the built agent binaries are looked for, in order. The image
 #: builds them into the first; a development checkout has them in the
 #: second after `make release`.
-DRONE_DIRS = (
-    Path("/app/drone-dist"),
-    Path(__file__).resolve().parents[3] / "drone" / "dist",
+GHOST_DIRS = (
+    Path("/app/ghost-dist"),
+    Path(__file__).resolve().parents[3] / "ghost" / "dist",
 )
 
-DRONE_BINARIES = {
-    ("linux", "amd64"): "drone-linux-amd64",
-    ("linux", "arm64"): "drone-linux-arm64",
-    ("darwin", "amd64"): "drone-darwin-amd64",
-    ("darwin", "arm64"): "drone-darwin-arm64",
-    ("windows", "amd64"): "drone-windows-amd64.exe",
-    ("windows", "arm64"): "drone-windows-arm64.exe",
+GHOST_BINARIES = {
+    ("linux", "amd64"): "ghost-linux-amd64",
+    ("linux", "arm64"): "ghost-linux-arm64",
+    ("darwin", "amd64"): "ghost-darwin-amd64",
+    ("darwin", "arm64"): "ghost-darwin-arm64",
+    ("windows", "amd64"): "ghost-windows-amd64.exe",
+    ("windows", "arm64"): "ghost-windows-arm64.exe",
 }
 
 
-def _drone_binary(name: str) -> Path | None:
-    for d in DRONE_DIRS:
+def _ghost_binary(name: str) -> Path | None:
+    for d in GHOST_DIRS:
         p = d / name
         # resolve() then check containment: the name comes from a fixed
         # table rather than the caller, but a path join that can be
@@ -1212,8 +1212,8 @@ async def list_downloads(_: User = Depends(get_current_user)):
     bug rather than a missing build.
     """
     out = []
-    for (goos, arch), name in sorted(DRONE_BINARIES.items()):
-        p = _drone_binary(name)
+    for (goos, arch), name in sorted(GHOST_BINARIES.items()):
+        p = _ghost_binary(name)
         out.append({"os": goos, "arch": arch, "name": name,
                     "available": p is not None,
                     "bytes": p.stat().st_size if p else 0})
@@ -1230,17 +1230,17 @@ async def download_agent(goos: str, arch: str,
     but an unauthenticated endpoint serving an executable from the
     engagement's own server is a thing worth not having.
     """
-    name = DRONE_BINARIES.get((goos.lower(), arch.lower()))
+    name = GHOST_BINARIES.get((goos.lower(), arch.lower()))
     if name is None:
         raise HTTPException(
             404, f"no build for {goos}/{arch}. Available: "
-                 f"{', '.join(f'{o}/{a}' for o, a in sorted(DRONE_BINARIES))}")
-    p = _drone_binary(name)
+                 f"{', '.join(f'{o}/{a}' for o, a in sorted(GHOST_BINARIES))}")
+    p = _ghost_binary(name)
     if p is None:
         raise HTTPException(
             503, f"this Oddjob has no {goos}/{arch} agent binary. They are "
                  f"built into the image; in a development checkout run "
-                 f"`make release` in drone/.")
+                 f"`make release` in ghost/.")
     return FileResponse(p, filename=name,
                         media_type="application/octet-stream")
 
@@ -1284,9 +1284,9 @@ async def reach_agent(agent_id: int,
     ts = str(int(time.time()))
     nonce = secrets.token_urlsafe(12)
     headers = {
-        "X-Drone-Timestamp": ts,
-        "X-Drone-Nonce": nonce,
-        "X-Drone-Signature": agentcrypto.sign(priv, "POST", path, b"", ts, nonce),
+        "X-Ghost-Timestamp": ts,
+        "X-Ghost-Nonce": nonce,
+        "X-Ghost-Signature": agentcrypto.sign(priv, "POST", path, b"", ts, nonce),
         "Content-Type": "application/json",
     }
     try:
@@ -1442,7 +1442,7 @@ async def kill_agent(agent_id: int,
     # agent is not one, so inventing a target_id to get a line would
     # put a false entry on a real host. The audit trail is keyed on
     # time rather than on an asset, which is the right shape for this.
-    await audit.record(session, "ui", "drone.kill", user=user,
+    await audit.record(session, "ui", "ghost.kill", user=user,
                        project_code=pr.code,
                        detail=f"killed {a.name}"
                               + (f", cancelled {cancelled} queued task(s)"
@@ -1543,9 +1543,9 @@ async def read_routing(pr: Project = Depends(require_project("readonly")),
             AgentTask.project_id == pr.id, AgentTask.agent_id.is_(None),
             AgentTask.status == "queued"))).scalar_one()
     first = eligible[0] if eligible else None
-    mode = (pr.drone_mode or "mesh").lower()
+    mode = (pr.ghost_mode or "mesh").lower()
     return RoutingOut(
-        mode=mode, max_parallel=max(1, int(pr.drone_max_parallel or 5)),
+        mode=mode, max_parallel=max(1, int(pr.ghost_max_parallel or 5)),
         current_primary=first.id if (mode == "primary" and first) else None,
         current_primary_name=first.name if (mode == "primary" and first) else None,
         eligible=len(eligible), unassigned_tasks=pending)
@@ -1558,11 +1558,11 @@ async def set_routing(body: RoutingIn,
                       session: AsyncSession = Depends(get_session)):
     if body.mode is not None:
         mode = (body.mode or "").strip().lower()
-        if mode not in DRONE_MODES:
-            raise HTTPException(422, f"mode is one of {', '.join(DRONE_MODES)}")
-        pr.drone_mode = mode
+        if mode not in GHOST_MODES:
+            raise HTTPException(422, f"mode is one of {', '.join(GHOST_MODES)}")
+        pr.ghost_mode = mode
     if body.max_parallel is not None:
-        pr.drone_max_parallel = int(body.max_parallel)
+        pr.ghost_max_parallel = int(body.max_parallel)
     await session.commit()
     await broker.publish("agents", action="routing", project=pr.code)
     return await read_routing(pr=pr, _=_, session=session)
@@ -1689,7 +1689,7 @@ async def create_pooled_task(body: TaskIn,
         raise HTTPException(
             422, "install is addressed to one agent, not to the pool — "
                  "queue it against the agent you mean to change")
-    if (pr.drone_mode or "mesh").lower() == "geo" and not (body.region or "").strip():
+    if (pr.ghost_mode or "mesh").lower() == "geo" and not (body.region or "").strip():
         # Better refused than silently run from wherever answered first,
         # which is the thing geo mode exists to prevent.
         raise HTTPException(
@@ -1750,7 +1750,7 @@ def _subject(kind: str, args: dict) -> str:
 
 @router.get("/tools", response_model=dict)
 async def required_tools(_: User = Depends(get_current_user)):
-    """What a Drone is expected to have, and what each one is for.
+    """What a Ghost is expected to have, and what each one is for.
 
     One list, here. The agent installs exactly these at startup and
     reports what it could not get; the dispatcher reads that to avoid
@@ -1805,7 +1805,7 @@ async def list_queue(limit: int = Query(200, le=1000),
 
 
 class TaskRow(BaseModel):
-    """One task, as the tasks table on the Drone page shows it."""
+    """One task, as the tasks table on the Ghost page shows it."""
     id: int
     kind: str
     subject: str
@@ -1903,7 +1903,7 @@ async def retry_task(task_id: int,
     t.exit_code = None
     t.error = f"restarted by {user.username}; previously: {was or 'failed'}"[:4000]
     await session.commit()
-    await audit.record(session, "ui", "drone.task.retry", user=user,
+    await audit.record(session, "ui", "ghost.task.retry", user=user,
                        project_code=pr.code,
                        detail=f"restarted {t.kind} task {t.id}", commit=True)
     await broker.publish("agents", action="task", project=pr.code)
@@ -1939,7 +1939,7 @@ async def cancel_task(task_id: int,
     subject = _subject(t.kind, json.loads(t.args) if t.args else {})
     await session.delete(t)
     await session.commit()
-    await audit.record(session, "ui", "drone.task.cancel", user=user,
+    await audit.record(session, "ui", "ghost.task.cancel", user=user,
                        project_code=pr.code,
                        detail=f"cancelled queued {t.kind} on {subject}",
                        commit=True)
@@ -2001,7 +2001,7 @@ async def import_task_result(agent_id: int, task_id: int,
     from .scans import _run
     a = await session.get(Agent, agent_id)
     res = await _run(session, pr, t.output, t.import_as,
-                     f"drone:{a.name if a else agent_id}",
+                     f"ghost:{a.name if a else agent_id}",
                      mode=body.mode,
                      decisions=dict(body.decisions))
     t.import_result = res.model_dump_json()
@@ -2089,12 +2089,12 @@ async def claim_identity(body: IdentityIn,
     _, server_kex_pub = await server_kex(session)
     code = await _project_code(session, match.project_id)
     # The moment a scanner gains a credential against this
-    # installation. Source `drone`, not `ui`: no person is on the other
+    # installation. Source `ghost`, not `ui`: no person is on the other
     # end of this request, and attributing it to one would be a lie
     # about who did it. The key itself is never recorded — only that
     # one was accepted, and for which agent.
     await audit.record(
-        session, "drone", "drone.enroll", username=f"drone:{match.name}",
+        session, "ghost", "ghost.enroll", username=f"ghost:{match.name}",
         project_code=code,
         detail=f"{match.name} enrolled an identity"
                + (" with key agreement" if match.kex_public_key else ""))
@@ -2114,7 +2114,7 @@ async def claim_identity(body: IdentityIn,
 async def register(body: RegisterIn, request: Request,
                    a: Agent = Depends(agent_even_if_killed),
                    session: AsyncSession = Depends(get_session)):
-    """Drone announcing itself. Idempotent: it runs on every reconnect."""
+    """Ghost announcing itself. Idempotent: it runs on every reconnect."""
     a.platform, a.arch = body.platform, body.arch
     a.version, a.hostname = body.version, body.hostname
     a.privileged = bool(body.privileged)
@@ -2124,7 +2124,7 @@ async def register(body: RegisterIn, request: Request,
     a.outbound_ip_source = body.outbound_ip_source or None
     a.outbound_ip_note = body.outbound_ip_note or None
     a.interfaces = json.dumps(body.interfaces or [])
-    # Blank is stored as NULL, not "". An older Drone sends nothing and
+    # Blank is stored as NULL, not "". An older Ghost sends nothing and
     # a newer one that could not tell sends nothing, and both mean "no
     # answer" — which is not the same as `linux`, and not the same as
     # "no container". Flattening them here is how a UI ends up
@@ -2186,7 +2186,7 @@ class HeartbeatIn(BaseModel):
 
 
 class RetiredIn(BaseModel):
-    """A drone's last message: it has stopped, and this is what it took."""
+    """A ghost's last message: it has stopped, and this is what it took."""
     reason: str = ""
     removed: list[str] = []
     kept: list[str] = []
@@ -2197,7 +2197,7 @@ class RetiredIn(BaseModel):
 async def retired(body: RetiredIn,
                   a: Agent = Depends(agent_even_if_killed),
                   session: AsyncSession = Depends(get_session)):
-    """A drone confirming it has shut down and cleaned up after itself.
+    """A ghost confirming it has shut down and cleaned up after itself.
 
     `agent_even_if_killed`, necessarily: this arrives from an agent that
     has just been killed, and the whole value of the message is that it
@@ -2205,7 +2205,7 @@ async def retired(body: RetiredIn,
 
     Pressing Kill records an intention. This records what happened,
     which is a different fact and the one that matters at the end of an
-    engagement — a drone killed while its host was powered off never
+    engagement — a ghost killed while its host was powered off never
     sends this, stays unretired, and that is the honest answer, because
     the tools really are still sitting on that machine.
     """
@@ -2217,7 +2217,7 @@ async def retired(body: RetiredIn,
                                     "failed": body.failed[:100]})
     # Killed is how it stays. Retirement is the confirmation of a kill,
     # not a state an agent can put itself into to dodge one — and a
-    # drone that retired on the dead-man switch must not come back as
+    # ghost that retired on the dead-man switch must not come back as
     # enabled the moment somebody restarts its host.
     a.status = "disabled"
     a.last_seen = now
@@ -2227,7 +2227,7 @@ async def retired(body: RetiredIn,
     if body.failed:
         detail += f"; COULD NOT remove {', '.join(body.failed[:8])}"
     pr = await session.get(Project, a.project_id)
-    await audit.record(session, "drone", "drone.retired",
+    await audit.record(session, "ghost", "ghost.retired",
                        project_code=pr.code if pr else None, detail=detail)
     await session.commit()
     await broker.publish("agents", action="retired",
@@ -2319,7 +2319,7 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
     # reports nothing is read as one at a time, which is what every
     # agent did before any of this existed.
     pr_obj = await session.get(Project, a.project_id)
-    ceiling = max(1, int(getattr(pr_obj, "drone_max_parallel", 5) or 5))
+    ceiling = max(1, int(getattr(pr_obj, "ghost_max_parallel", 5) or 5))
     if body is not None and body.capacity is not None:
         a.capacity = max(1, int(body.capacity))
     if body is not None and body.capacity_reason:
@@ -2327,7 +2327,7 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
     # Sent back on every heartbeat as `max_parallel`. It used to be the
     # project ceiling, which the agent ignored and which told it
     # nothing about itself; it is the effective per-agent number now,
-    # and the agent adopts it. That is what makes a per-drone override
+    # and the agent adopts it. That is what makes a per-ghost override
     # take effect at all -- see the note on `slots_free` below.
     allowed = effective_parallel(a, ceiling)
     if body is not None and body.slots_free is not None and not a.parallel_override:
@@ -2530,8 +2530,8 @@ async def submit_result(task_id: int, body: ResultIn,
     # The agent authenticates by key, not as a person, so the actor is
     # the agent's own name -- which is the honest answer to "who sent
     # this" and the one worth having when a result looks wrong.
-    await audit.record(session, "drone", "drone.result",
-                       username=f"drone:{a.name}",
+    await audit.record(session, "ghost", "ghost.result",
+                       username=f"ghost:{a.name}",
                        project_code=(await session.get(Project, t.project_id)).code
                        if t.project_id else None,
                        detail=f"task {t.id} {t.status}"
@@ -2549,7 +2549,7 @@ async def submit_result(task_id: int, body: ResultIn,
     if t.status == "done" and t.kind in NAME_KINDS and (t.output or "").strip():
         pr = await session.get(Project, t.project_id)
         try:
-            imported = await _import_names(session, pr, t, actor=f"drone:{a.name}")
+            imported = await _import_names(session, pr, t, actor=f"ghost:{a.name}")
             t.import_result = json.dumps(imported)
             await session.commit()
         except Exception as e:                   # noqa: BLE001
@@ -2567,7 +2567,7 @@ async def submit_result(task_id: int, body: ResultIn,
     if t.status == "done" and t.kind in LOOKUP_KINDS and (t.output or "").strip():
         pr = await session.get(Project, t.project_id)
         try:
-            rep = await apply_auto(session, pr, actor=f"drone:{a.name}")
+            rep = await apply_auto(session, pr, actor=f"ghost:{a.name}")
             await session.commit()
             resolved = rep.model_dump()
         except Exception:                        # noqa: BLE001
@@ -2577,7 +2577,7 @@ async def submit_result(task_id: int, body: ResultIn,
             # will offer it the next time anybody looks.
             await session.rollback()
             # The detail goes to the log, not down the wire. This
-            # response is read by a Drone sitting inside a client's
+            # response is read by a Ghost sitting inside a client's
             # network, and the exception text here can carry a SQL
             # fragment, a column name or a filesystem path — the shape
             # of this server, handed to the least trusted place it
@@ -2586,7 +2586,7 @@ async def submit_result(task_id: int, body: ResultIn,
             #
             # The agent gets a stable marker instead: enough to know
             # the lookup did not apply and to say so, and useless to
-            # anyone who has got hold of a drone's key.
+            # anyone who has got hold of a ghost's key.
             log.warning("applying lookup results for task %s failed",
                         t.id, exc_info=True)
             resolved = {"error": "could not be applied; see the server log"}
@@ -2597,7 +2597,7 @@ async def submit_result(task_id: int, body: ResultIn,
         from .scans import _run
         try:
             res = await _run(session, pr, t.output, t.import_as,
-                             f"drone:{a.name}", mode="strict", decisions={})
+                             f"ghost:{a.name}", mode="strict", decisions={})
             imported = json.loads(res.model_dump_json())
             t.import_result = json.dumps(imported)
             await session.commit()

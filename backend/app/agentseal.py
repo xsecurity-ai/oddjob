@@ -40,13 +40,13 @@ log = logging.getLogger("oddjob.agentseal")
 
 #: Only the agent-facing routes. Everything else on this server talks
 #: to a browser, which has no key and no way to get one.
-SEALED_PREFIX = "/api/agents/"
+SEALED_PREFIX = "/api/ghosts/"
 
 #: Enrollment is the one agent route that cannot be sealed: it is the
 #: exchange that establishes the key. It carries a one-time token and
 #: a public half, neither of which is a secret worth hiding — the
 #: token authenticates and is burned, and the public key is public.
-NEVER_SEALED = ("/api/agents/enroll", "/api/agents/enrol")
+NEVER_SEALED = ("/api/ghosts/enroll", "/api/ghosts/enrol")
 
 
 async def _agent_key(agent_id: str) -> tuple[Agent, bytes] | None:

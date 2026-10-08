@@ -1,7 +1,7 @@
 """Turning finished lookups into inventory, and spotting unscanned ranges.
 
 `/api/enumerate` derives its state rather than storing it: a pending
-choice is a completed Drone lookup whose answer the target does not yet
+choice is a completed Ghost lookup whose answer the target does not yet
 carry. That is cheap and needs no table, but it means the behaviour is
 entirely emergent — answering a choice has to make it disappear on its
 own, and a stale lookup must not be able to overwrite a newer one.
@@ -40,7 +40,7 @@ def call(p, m="GET", b=None, token=None, key=None):
         r.data = json.dumps(b).encode()
         r.add_header("Content-Type", "application/json")
     if token: r.add_header("Authorization", f"Bearer {token}")
-    if key: r.add_header("X-Drone-Key", key)
+    if key: r.add_header("X-Ghost-Key", key)
     try:
         with urllib.request.urlopen(r, timeout=60) as x:
             raw = x.read(); return x.status, (json.loads(raw) if raw else None)
@@ -55,21 +55,21 @@ admin = call("/api/auth/setup", "POST",
 call("/api/projects", "POST", {"code": "ENUM", "name": "Enumerate"}, token=admin)
 
 # An agent to own the lookups. Results are posted as a real agent would,
-# because the whole point is that `pending` reads what Drone actually
+# because the whole point is that `pending` reads what Ghost actually
 # sends back rather than a shape invented for the test.
-st, en = call("/api/agents?project=ENUM", "POST", {"name": "scanner"}, token=admin)
+st, en = call("/api/ghosts?project=ENUM", "POST", {"name": "scanner"}, token=admin)
 KEY, AID = en["callback_key"], en["agent"]["id"]
-call("/api/agents/register", "POST",
+call("/api/ghosts/register", "POST",
      {"platform": "linux", "arch": "amd64", "privileged": True}, key=KEY)
 
 
 def finish(kind, args, output):
     """Queue a task, let the agent claim it, and report a result."""
-    st, t = call(f"/api/agents/{AID}/tasks?project=ENUM", "POST",
+    st, t = call(f"/api/ghosts/{AID}/tasks?project=ENUM", "POST",
                  {"kind": kind, "args": args}, token=admin)
     tid = t["id"]
-    call("/api/agents/heartbeat", "POST", {}, key=KEY)
-    call(f"/api/agents/tasks/{tid}/result", "POST",
+    call("/api/ghosts/heartbeat", "POST", {}, key=KEY)
+    call(f"/api/ghosts/tasks/{tid}/result", "POST",
          {"status": "done", "output": json.dumps(output), "exit_code": 0},
          key=KEY)
     return tid
@@ -146,7 +146,7 @@ finish("reverse_ip", {"targets": ["198.51.100.20"]},
        [{"ip": "198.51.100.20", "domains": ["three.acme.example"],
          "sources": ["ptr"], "partial": False}])
 # Nothing is called here. One name, and we already hold it: that is not
-# a decision, so it resolves itself the moment the Drone reports back.
+# a decision, so it resolves itself the moment the Ghost reports back.
 # "Automatic" that waits for somebody to open a page is a button with a
 # long name.
 st, tgts = call("/api/targets?project=ENUM&page_size=100", token=admin)
@@ -519,12 +519,12 @@ call("/api/projects/KS/scope", "POST",
                 # is the generated parent the walk must be refused.
                 "deep.nobody.example",
                 "198.51.100.0/24"]}, token=admin)
-st, ksa = call("/api/agents?project=KS", "POST", {"name": "ks-drone"},
+st, ksa = call("/api/ghosts?project=KS", "POST", {"name": "ks-ghost"},
                token=admin)
 KSKEY = ksa["callback_key"]
-call("/api/agents/register", "POST",
+call("/api/ghosts/register", "POST",
      {"platform": "linux", "arch": "amd64", "privileged": True}, key=KSKEY)
-call("/api/agents/heartbeat", "POST", {}, key=KSKEY)
+call("/api/ghosts/heartbeat", "POST", {}, key=KSKEY)
 
 for _h in ("one.svc.acme.example", "two.svc.acme.example",
            "shop.example.co.uk", "198.51.100.5",
@@ -642,9 +642,9 @@ call("/api/projects", "POST", {"code": "KS2", "name": "Addresses only"},
      token=admin)
 call("/api/projects/KS2/scope", "POST", {"lines": ["203.0.113.0/24"]},
      token=admin)
-st, ks2a = call("/api/agents?project=KS2", "POST", {"name": "ks2-drone"},
+st, ks2a = call("/api/ghosts?project=KS2", "POST", {"name": "ks2-ghost"},
                 token=admin)
-call("/api/agents/register", "POST",
+call("/api/ghosts/register", "POST",
      {"platform": "linux", "arch": "amd64", "privileged": True},
      key=ks2a["callback_key"])
 call("/api/targets?project=KS2", "POST", {"host": "203.0.113.7"}, token=admin)
@@ -666,9 +666,9 @@ call("/api/projects", "POST", {"code": "KS3", "name": "Big estate"},
      token=admin)
 call("/api/projects/KS3/scope", "POST",
      {"lines": ["*.cap.example", "cap.example"]}, token=admin)
-st, ks3a = call("/api/agents?project=KS3", "POST", {"name": "ks3-drone"},
+st, ks3a = call("/api/ghosts?project=KS3", "POST", {"name": "ks3-ghost"},
                 token=admin)
-call("/api/agents/register", "POST",
+call("/api/ghosts/register", "POST",
      {"platform": "linux", "arch": "amd64", "privileged": True},
      key=ks3a["callback_key"])
 _many = [f"n{i}.cap.example" for i in range(200)]
@@ -713,17 +713,17 @@ call("/api/projects", "POST",
      {"code": "AUTO", "name": "Auto", "scope": ["*.acme.example",
                                                 "198.51.100.0/24"]},
      token=admin)
-st, ag = call("/api/agents?project=AUTO", "POST", {"name": "scanner"}, token=admin)
+st, ag = call("/api/ghosts?project=AUTO", "POST", {"name": "scanner"}, token=admin)
 AKEY, AAID = ag["callback_key"], ag["agent"]["id"]
-call("/api/agents/register", "POST",
+call("/api/ghosts/register", "POST",
      {"platform": "linux", "arch": "amd64", "privileged": True}, key=AKEY)
 
 
 def afinish(kind, args, output):
-    st, t = call(f"/api/agents/{AAID}/tasks?project=AUTO", "POST",
+    st, t = call(f"/api/ghosts/{AAID}/tasks?project=AUTO", "POST",
                  {"kind": kind, "args": args}, token=admin)
-    call("/api/agents/heartbeat", "POST", {}, key=AKEY)
-    call(f"/api/agents/tasks/{t['id']}/result", "POST",
+    call("/api/ghosts/heartbeat", "POST", {}, key=AKEY)
+    call(f"/api/ghosts/tasks/{t['id']}/result", "POST",
          {"status": "done", "output": json.dumps(output), "exit_code": 0},
          key=AKEY)
 
@@ -742,7 +742,7 @@ print("-- forward lookup, N addresses: no choice at all --")
 # A host with four addresses has four addresses. Adding one creates no
 # asset, points no scanner anywhere new, and asserts nothing except that
 # the name resolved there. Nothing is called below the afinish: the
-# result applies itself the moment the Drone reports it.
+# result applies itself the moment the Ghost reports it.
 call("/api/targets?project=AUTO", "POST", {"host": "many.acme.example"}, token=admin)
 afinish("nslookup", {"targets": ["many.acme.example"]},
         [{"query": "many.acme.example",
@@ -1155,7 +1155,7 @@ check("a plain FQDN is still walked back to its registrable domain",
 # What the gate makes of the roots that are offered.
 #
 # Asked of the scope index directly, not through /enumerate: that
-# endpoint 409s with no drone online, so a loop driving it proves
+# endpoint 409s with no ghost online, so a loop driving it proves
 # nothing on a fleetless runner -- an earlier version of this check
 # probed zero of three and reported success, which is a check that
 # tests nothing while looking like it tests everything.

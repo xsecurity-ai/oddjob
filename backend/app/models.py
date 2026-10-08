@@ -89,7 +89,7 @@ class Project(Base, TimestampMixin):
     #: channels and the operators are all named after.
     codename: Mapped[str | None] = mapped_column(String(64), index=True)
 
-    #: How work is spread when a project has more than one Drone.
+    #: How work is spread when a project has more than one Ghost.
     #:
     #: mesh    — any online agent takes the next task. Whoever asks
     #:           first gets it, which balances by capacity for free:
@@ -105,7 +105,7 @@ class Project(Base, TimestampMixin):
     #:           not looked up: resolving a target address to a country
     #:           would mean sending the client's addresses to a
     #:           third-party geolocation service.
-    drone_mode: Mapped[str] = mapped_column(
+    ghost_mode: Mapped[str] = mapped_column(
         String(16), default="mesh", server_default="mesh")
     #: How many tasks one agent may run at once on this engagement.
     #:
@@ -115,7 +115,7 @@ class Project(Base, TimestampMixin):
     #: operator's half of that: an engagement running against a
     #: fragile estate wants a small number regardless of how much
     #: machine the scanner has under it.
-    drone_max_parallel: Mapped[int] = mapped_column(
+    ghost_max_parallel: Mapped[int] = mapped_column(
         Integer, default=5, server_default="5")
 
     # ------------------------------------------------- standing orders
@@ -896,7 +896,7 @@ class DomainSearch(Base, TimestampMixin):
     """A domain this project has already handed to enumeration.
 
     Written for the offline candidate generator, then orphaned when that
-    went and enumeration became amass on a Drone. It was kept rather than
+    went and enumeration became amass on a Ghost. It was kept rather than
     dropped — a table drop cannot be undone, and the rows were somebody's
     record of what had been run — and it is in use again: every domain
     `/api/domains/enumerate` queues an amass task for gets a row here,
@@ -1305,7 +1305,7 @@ class ImportJob(Base, TimestampMixin):
 
 
 class Agent(Base, TimestampMixin):
-    """A Drone instance: a scanner the server tasks and talks to.
+    """A Ghost instance: a scanner the server tasks and talks to.
 
     Two keys, because the two directions are not the same trust. The
     agent proves itself to the server with `callback_key` on every
@@ -1401,12 +1401,12 @@ class Agent(Base, TimestampMixin):
     #: that task failed three times and told the operator nothing they
     #: could act on.
     missing_tools: Mapped[str | None] = mapped_column(Text)
-    #: When this drone confirmed it had stopped, and what it took with
-    #: it. Set by the drone's own last message, not by the kill: an
+    #: When this ghost confirmed it had stopped, and what it took with
+    #: it. Set by the ghost's own last message, not by the kill: an
     #: operator pressing Kill knows what they asked for, and what they
     #: need to know afterwards is whether it actually happened.
     #:
-    #: A drone killed while its host is off stays unretired here
+    #: A ghost killed while its host is off stays unretired here
     #: forever, which is the honest answer — the tools are still on
     #: that host and somebody has to deal with it.
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -1422,11 +1422,11 @@ class Agent(Base, TimestampMixin):
     capacity: Mapped[int | None] = mapped_column(Integer)
     capacity_reason: Mapped[str | None] = mapped_column(String(300))
 
-    #: What an OPERATOR says this one drone may run at once, overriding
+    #: What an OPERATOR says this one ghost may run at once, overriding
     #: the agent's own assessment. NULL means "let the agent decide",
     #: which is the default and right almost always.
     #:
-    #: Separate from `Project.drone_max_parallel` because they answer
+    #: Separate from `Project.ghost_max_parallel` because they answer
     #: different questions. The project ceiling is about the CLIENT --
     #: a fragile estate wants a small number however much machine is
     #: pointed at it -- so it still applies on top of this. This one is
@@ -1459,7 +1459,7 @@ class Agent(Base, TimestampMixin):
     #: container-internal, interface, unknown.
     #:
     #: Stored because the six are not interchangeable and the address
-    #: alone cannot be told apart. A drone in Docker reported
+    #: alone cannot be told apart. A ghost in Docker reported
     #: 172.17.0.2 here and it rendered exactly like an egress address —
     #: an operator writing an incident notification would have given
     #: the client a number that appears in nobody's logs.
@@ -1568,7 +1568,7 @@ class AgentTask(Base, TimestampMixin):
 AUDIT_SOURCES = (
     "middleware",   # an HTTP request, recorded by the AuditTrail middleware
     "ui",           # a deliberate action a person took in the SPA
-    "drone",         # a scanner enrolling, calling in, or returning results
+    "ghost",         # a scanner enrolling, calling in, or returning results
     "backend",      # the server acting on its own: retention, workers, startup
 )
 
@@ -1609,7 +1609,7 @@ class AuditEvent(Base):
     at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True)
     source: Mapped[str] = mapped_column(String(16), index=True)
-    #: A short stable verb: `request`, `project.create`, `drone.enroll`.
+    #: A short stable verb: `request`, `project.create`, `ghost.enroll`.
     #: Dotted rather than prose so it can be filtered on.
     action: Mapped[str] = mapped_column(String(64), index=True)
     username: Mapped[str | None] = mapped_column(String(128), index=True)
@@ -1751,7 +1751,7 @@ class ServiceHealth(Base):
     """The last thing a subsystem actually did, and whether it worked."""
     __tablename__ = "service_health"
 
-    #: slack | smtp | drone | … — the subsystem's own name.
+    #: slack | smtp | ghost | … — the subsystem's own name.
     service: Mapped[str] = mapped_column(String(32), primary_key=True)
     last_ok_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True))

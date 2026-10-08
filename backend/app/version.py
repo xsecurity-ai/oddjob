@@ -3,7 +3,7 @@
 The number itself is decided in exactly one place — the `VERSION` file
 at the repository root — and this module is how the Python half reads
 it. The Go agent reads the same file through `-ldflags` at build time
-(drone/Makefile), and the images stamp it into an OCI label
+(ghost/Makefile), and the images stamp it into an OCI label
 (.github/workflows/images.yml). Nothing here carries a literal version
 string, because a second literal is a second answer, and the two would
 diverge on the first release nobody remembered to update both for.

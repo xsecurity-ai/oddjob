@@ -171,8 +171,8 @@ st, body = call("/api/definitely-not-a-thing")
 check("404 not HTML", st == 404, f"status={st}")
 
 print("\n== a trailing slash on an api path is SERVED, not redirected ==")
-# `/api/agents/?project=X` read as "no such endpoint" while
-# `/api/agents` worked: the SPA catch-all matched first and swallowed
+# `/api/ghosts/?project=X` read as "no such endpoint" while
+# `/api/ghosts` worked: the SPA catch-all matched first and swallowed
 # the redirect FastAPI would otherwise have issued.
 #
 # Redirecting was the obvious fix and it was wrong. What produced the
