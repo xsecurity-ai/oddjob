@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Email **security@xsecurity.tech** with enough detail to reproduce it.
+Email **security@xsecurity.dev** with enough detail to reproduce it.
 Please do not open a public issue for anything exploitable.
 
 You can expect an acknowledgement within three working days and an
