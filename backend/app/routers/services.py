@@ -154,11 +154,11 @@ async def update_service(service_id: int, body: ServiceUpdate,
     s = await session.get(Service, service_id)
     if not s:
         raise HTTPException(404, f"no service {service_id}")
-    await assert_role_for_target(session, user, s.target_id, "user")
+    code = await assert_role_for_target(session, user, s.target_id, "user")
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(s, k, v)
     await session.commit()
-    await broker.publish("services", action="update")
+    await broker.publish("services", action="update", project=code)
     return _out((await session.execute(_base().where(Service.id == s.id))).first())
 
 
@@ -168,7 +168,7 @@ async def delete_service(service_id: int, user: User = Depends(get_current_user)
     s = await session.get(Service, service_id)
     if not s:
         raise HTTPException(404, f"no service {service_id}")
-    await assert_role_for_target(session, user, s.target_id, "user")
+    code = await assert_role_for_target(session, user, s.target_id, "user")
     await session.delete(s)
     await session.commit()
-    await broker.publish("services", action="delete")
+    await broker.publish("services", action="delete", project=code)

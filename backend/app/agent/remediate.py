@@ -233,7 +233,8 @@ async def _one(min_severity: str) -> str:
         vuln.remediation_source = "agent"
         vuln.remediation_error = None
         await _commit(session, f"vuln {vuln.id}")
-        await broker.publish("vulns", action="remediation", id=vuln.id)
+        await broker.publish("vulns", action="remediation", id=vuln.id,
+                             project=project.code)
         return "done"
 
 

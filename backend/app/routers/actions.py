@@ -37,6 +37,10 @@ async def _run(action_id: int) -> None:
             a.status, a.error = "failed", "service no longer exists"
             a.finished_at = datetime.now(UTC)
             await session.commit()
+            # No service left to reach the project through, so this one
+            # goes out unlabelled and therefore to site admins only. The
+            # row it would refresh describes work against an asset that no
+            # longer exists; nobody else is waiting on it.
             await broker.publish("actions", action=a.kind, status=a.status)
             return
 
@@ -44,7 +48,8 @@ async def _run(action_id: int) -> None:
         proj = await session.get(Project, tgt.project_id)
         a.status = "running"
         await session.commit()
-        await broker.publish("actions", action=a.kind, status="running")
+        await broker.publish("actions", action=a.kind, status="running",
+                             project=proj.code)
 
         try:
             res = await RUNNERS[a.kind](Subject(
@@ -64,7 +69,7 @@ async def _run(action_id: int) -> None:
         a.finished_at = datetime.now(UTC)
         await session.commit()
         await broker.publish("actions", action=a.kind, status=a.status,
-                             service_id=a.service_id)
+                             service_id=a.service_id, project=proj.code)
 
 
 @router.post("/services/{service_id}/actions", response_model=ActionOut, status_code=202)

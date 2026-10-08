@@ -239,6 +239,8 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         raise HTTPException(403, "this account is disabled")
     await session.commit()
     if created:
+        # No project: see events.py -- unlabelled means site admins only,
+        # which is who the user list is for.
         await broker.publish("users", action="register", via="google")
 
     # Checked again on the way out. The state is signed, so this should

@@ -92,12 +92,18 @@ async def events(user: User = Depends(get_current_user)):
     EventSource cannot set an Authorization header, which is exactly why login
     also sets an httpOnly cookie — that is what carries this request.
 
+    Authenticated is not sufficient, though, and for a long time it was all
+    this had. The events name hosts and engagements, so *every* logged-in user
+    receiving *every* event meant any one of them could watch the others' work
+    go by. The stream is filtered per subscriber now — see `events.py` — which
+    is why the user is threaded through rather than merely required.
+
     X-Accel-Buffering:no matters: behind nginx, the default proxy_buffering on
     holds the stream in a buffer and events arrive late and in bursts, which
     looks exactly like the feature being broken.
     """
     return StreamingResponse(
-        event_stream(),
+        event_stream(user.id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

@@ -153,7 +153,7 @@ async def create_report(body: CreateReport, project: str = Query(...),
     session.add(row)
     await session.commit()
     await session.refresh(row)
-    await broker.publish("reports", action="queued", id=row.id)
+    await broker.publish("reports", action="queued", id=row.id, project=pr.code)
     await slack.announce(session, pr, slack.report_requested(KIND_LABEL[kind]))
     # After the commit, so the row is visible to the task's own session.
     schedule(row.id, body.agentic, sev)
@@ -215,6 +215,8 @@ async def delete_report(report_id: int,
         raise HTTPException(404, "no such report")
     if ROLE_ORDER.get(role, -1) < ROLE_ORDER["user"]:
         raise HTTPException(403, "user or admin is required to delete a report")
+    pr = await session.get(Project, row.project_id)
+    code = pr.code if pr else None
     await session.delete(row)
     await session.commit()
-    await broker.publish("reports", action="delete", id=report_id)
+    await broker.publish("reports", action="delete", id=report_id, project=code)

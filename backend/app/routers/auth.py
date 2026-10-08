@@ -241,6 +241,8 @@ async def create_user(body: UserCreate, _: User = Depends(require_site_admin),
     # attribute has never been loaded and touching it emits IO from inside
     # Pydantic, where there is no greenlet to await on.
     u = (await session.execute(select(User).where(User.id == u.id))).scalar_one()
+    # No project: the user list is a site-admin view, and an unlabelled
+    # event is delivered to site admins only. See events.py.
     await broker.publish("users", action="create")
     return UserOut.model_validate(u)
 
@@ -475,6 +477,8 @@ async def invite_user(body: UserInvite, actor: User = Depends(get_current_user),
     # Re-select so `groups` is loaded; see create_user for why touching it
     # from inside Pydantic on a fresh instance blows up.
     u = (await session.execute(select(User).where(User.id == u.id))).scalar_one()
+    # No project: the user list is a site-admin view, and an unlabelled
+    # event is delivered to site admins only. See events.py.
     await broker.publish("users", action="create")
     return UserInvited(
         user=UserOut.model_validate(u), invited=result_ok, detail=detail,

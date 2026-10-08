@@ -395,8 +395,14 @@ async def _project_of(session: AsyncSession, kind: str, row) -> int:
 
 
 async def _authorised(session: AsyncSession, user: User, kind: str, rows: list):
-    """Split rows into (allowed, refused-with-reason)."""
+    """Split rows into (allowed, refused-with-reason, codes-of-the-allowed).
+
+    The codes come back because one bulk call can span engagements, and the
+    change event has to go to each of them separately -- resolved here, while
+    the rows are still loaded and, in the delete case, still exist.
+    """
     ok, bad = [], []
+    codes: set[str] = set()
     cache: dict[int, str | None] = {}
     for r in rows:
         pid = await _project_of(session, kind, r)
@@ -407,7 +413,10 @@ async def _authorised(session: AsyncSession, user: User, kind: str, rows: list):
             bad.append((r.id, role or "no access"))
         else:
             ok.append(r)
-    return ok, bad
+            pr = await session.get(Project, pid)
+            if pr is not None:
+                codes.add(pr.code)
+    return ok, bad, codes
 
 
 @router.post("/delete", response_model=BulkOpResult)
@@ -416,7 +425,7 @@ async def bulk_delete(body: BulkIds, user: User = Depends(get_current_user),
     """Delete many rows by id. Deleting a target cascades to its children."""
     Model = _MODELS[body.kind]
     rows = (await session.execute(select(Model).where(Model.id.in_(body.ids)))).scalars().all()
-    ok, bad = await _authorised(session, user, body.kind, rows)
+    ok, bad, codes = await _authorised(session, user, body.kind, rows)
     for r in ok:
         await session.delete(r)
     await session.commit()
@@ -425,7 +434,9 @@ async def bulk_delete(body: BulkIds, user: User = Depends(get_current_user),
     if missing:
         errors.append(f"{missing} id(s) did not exist")
     if ok:
-        await broker.publish(body.kind, action="bulk_delete", count=len(ok))
+        for code in sorted(codes):
+            await broker.publish(body.kind, action="bulk_delete",
+                                 count=len(ok), project=code)
     return BulkOpResult(kind=body.kind, requested=len(body.ids), changed=len(ok),
                         skipped=len(body.ids) - len(ok), errors=errors)
 
@@ -443,7 +454,7 @@ async def bulk_patch(body: BulkPatch, user: User = Depends(get_current_user),
                  f"allowed: {sorted(allowed)}")
 
     rows = (await session.execute(select(Model).where(Model.id.in_(body.ids)))).scalars().all()
-    ok, bad = await _authorised(session, user, body.kind, rows)
+    ok, bad, codes = await _authorised(session, user, body.kind, rows)
     changed = 0
     for r in ok:
         touched = False
@@ -458,6 +469,8 @@ async def bulk_patch(body: BulkPatch, user: User = Depends(get_current_user),
     if missing:
         errors.append(f"{missing} id(s) did not exist")
     if changed:
-        await broker.publish(body.kind, action="bulk_patch", count=changed)
+        for code in sorted(codes):
+            await broker.publish(body.kind, action="bulk_patch",
+                                 count=changed, project=code)
     return BulkOpResult(kind=body.kind, requested=len(body.ids), changed=changed,
                         skipped=len(body.ids) - changed, errors=errors)

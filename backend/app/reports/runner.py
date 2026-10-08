@@ -35,13 +35,18 @@ async def run(report_id: int, agentic: bool, min_severity: str = "low") -> None:
         row = await session.get(Report, report_id)
         if row is None:
             return
+        # Resolved before the first publish, not inside the try below:
+        # an event with no project reaches site admins only, and the
+        # person waiting on their own report is usually neither.
+        project = await session.get(Project, row.project_id)
+        code = project.code if project else None
+
         row.status = "running"
         row.started_at = datetime.now(UTC)
         await session.commit()
-        await broker.publish("reports", action="running", id=report_id)
+        await broker.publish("reports", action="running", id=report_id, project=code)
 
         try:
-            project = await session.get(Project, row.project_id)
             if project is None:
                 raise RuntimeError("the project was deleted while the report ran")
             who = "someone"
@@ -74,7 +79,7 @@ async def run(report_id: int, agentic: bool, min_severity: str = "low") -> None:
             row.finished_at = datetime.now(UTC)
 
         await session.commit()
-        await broker.publish("reports", action=row.status, id=report_id)
+        await broker.publish("reports", action=row.status, id=report_id, project=code)
 
         if row.status == "ready":
             await _notify(session, row)
