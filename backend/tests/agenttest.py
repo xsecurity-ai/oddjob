@@ -1109,6 +1109,40 @@ check("and says out loud that it does not decide the ambiguous ones",
       "still_needs_a_person" in _rw["apply_lookup_results"].description,
       _rw["apply_lookup_results"].description[-200:])
 
+print("== no read tool reaches past scope_ids ==")
+# `scope_ids` is the bound on what a non-admin may see across all
+# engagements. Two read tools wrote `if project: ... where(project_id ==
+# project.id)` instead of going through `scoped()`, which looks
+# equivalent and is not: with no engagement in view the WHERE was
+# dropped entirely and the tool read every target in the installation.
+# One client's hosts in another client's answer is the one mistake in
+# that file that matters outside it, so this is asserted rather than
+# left to review.
+async def _as_user(name, scope_ids):
+    async with _SL() as s:
+        u = (await s.execute(_sel(_U).limit(1))).scalars().first()
+        tool = {t.name: t for t in _build(s, None, u, False,
+                                          scope_ids=scope_ids)}[name]
+        return await tool.fn()
+
+
+for _tool, _key in (("rank_targets", "targets"), ("find_by_technology", "hosts")):
+    _kw = {"technology": "ssh"} if _tool == "find_by_technology" else {}
+
+    async def _run_it(tool=_tool, kw=_kw, ids=[]):      # noqa: B006
+        async with _SL() as s:
+            u = (await s.execute(_sel(_U).limit(1))).scalars().first()
+            t = {x.name: x for x in _build(s, None, u, False, scope_ids=ids)}[tool]
+            return await t.fn(**kw)
+
+    _nothing = _aio.run(_run_it())
+    check(f"{_tool} with no readable project returns nothing",
+          not _nothing.get(_key), str(_nothing)[:160])
+    _all = _aio.run(_run_it(ids=None))
+    check(f"{_tool} with site-admin scope still works",
+          isinstance(_all.get(_key), list), str(_all)[:160])
+
+
 print("== the assistant can task enumeration, but previews first ==")
 # A sweep is hundreds of tasks against a client's estate. "Have a look
 # at the web hosts" is a sentence, not an authorisation, so the tool

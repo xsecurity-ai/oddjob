@@ -283,10 +283,16 @@ def build(session: AsyncSession, project: Project | None, user: User,
         fifteen unversioned services, and collapsing both into "87"
         hides exactly the thing being decided.
         """
-        tsel = select(Target)
-        if project:
-            tsel = tsel.where(Target.project_id == project.id)
-        rows = (await session.execute(tsel)).scalars().all()
+        # `scoped()`, not `if project:`. The conditional looked
+        # equivalent and was not: with no engagement in view it dropped
+        # the WHERE entirely and ranked every target in the
+        # installation, for any user, ignoring `scope_ids` completely.
+        # That is the one mistake in this file that matters outside it
+        # — one client's hosts in another client's answer — and it was
+        # reachable from the ordinary "which hosts anywhere are worth
+        # attacking" question the all-projects mode exists for.
+        rows = (await session.execute(
+            select(Target).where(scoped(Target.project_id)))).scalars().all()
         if not rows:
             return {"targets": [], "note": "this engagement has no targets yet"}
 
@@ -354,10 +360,12 @@ def build(session: AsyncSession, project: Project | None, user: User,
             return {"error": "give a technology to look for, e.g. 'php'"}
         like = f"%{q}%"
 
-        tsel = select(Target)
-        if project:
-            tsel = tsel.where(Target.project_id == project.id)
-        rows = {t.id: t for t in (await session.execute(tsel)).scalars()}
+        # `scoped()` — see the note in `rank_targets`. The same
+        # `if project:` was here and had the same hole: asked with no
+        # engagement in view it searched every target in the
+        # installation regardless of what the caller may read.
+        rows = {t.id: t for t in (await session.execute(
+            select(Target).where(scoped(Target.project_id)))).scalars()}
         if not rows:
             return {"hosts": [], "technology": q}
 
@@ -378,7 +386,12 @@ def build(session: AsyncSession, project: Project | None, user: User,
                     WebAddress.target_id.in_(list(rows)),
                     or_(func.lower(WebAddress.url).like(like),
                         func.lower(WebAddress.title).like(like),
-                        func.lower(WebAddress.server).like(like))))).scalars():
+                        # `webserver`, not `server`. The attribute does
+                        # not exist, so this tool raised AttributeError
+                        # on every call that got as far as a web row —
+                        # which no test reached, because the ones that
+                        # existed only checked that it was registered.
+                        func.lower(WebAddress.webserver).like(like))))).scalars():
             hits.setdefault(w.target_id, []).append(
                 f"web: {w.url}" + (f" ({w.title})" if w.title else ""))
 
