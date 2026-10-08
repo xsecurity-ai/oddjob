@@ -88,6 +88,8 @@ func cmdRun(argv []string) int {
 	fs.BoolVar(&cfg.AllowPlaintext, "allow-plaintext", false,
 		"permit a non-loopback http:// server")
 	fs.StringVar(&cfg.WorkDir, "workdir", cfg.WorkDir, "where tool output is staged")
+	fs.IntVar(&cfg.Parallel, "parallel", cfg.Parallel,
+		"tasks to run at once (0 sizes from the host, or DRONE_PARALLEL)")
 	fs.StringVar(&cfg.PublicIPURL, "public-ip-url", cfg.PublicIPURL,
 		"service asked for our public address once at registration "+
 			"(empty, or DRONE_PUBLIC_IP_URL=off, to ask nobody)")

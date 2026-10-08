@@ -364,7 +364,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	// because it is the only part that puts packets on the wire and
 	// the answer does not change with load; cores and memory are
 	// re-read on a timer below, which is what makes the tuning live.
-	first := capacity.Measure(ctx, true)
+	first := capacity.Measure(ctx, true, a.cfg.Parallel)
 	a.mu.Lock()
 	a.cap_, a.capWhy = first.Parallel, first.Reason
 	a.mu.Unlock()
@@ -510,7 +510,7 @@ func (a *Agent) beat(ctx context.Context) (*client.HeartbeatResp, error) {
 // doing that every minute to re-learn a number that does not change is
 // not a trade worth making. Cores and memory are free to read.
 func (a *Agent) retune(ctx context.Context) {
-	as := capacity.Measure(ctx, false)
+	as := capacity.Measure(ctx, false, a.cfg.Parallel)
 	a.mu.Lock()
 	changed := as.Parallel != a.cap_
 	a.cap_, a.capWhy = as.Parallel, as.Reason

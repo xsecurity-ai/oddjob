@@ -8,13 +8,18 @@
 //
 // Three inputs, deliberately in this order:
 //
-//	cores   how many tasks can genuinely run at once. Most of what an
-//	        agent runs is a child process that is either waiting on the
-//	        network or burning one core, so cores is the ceiling that
-//	        matters and everything else only lowers it.
+//	cores   how much CPU there is, times how many tasks one core can
+//	        carry. NOT a one-task-per-core ceiling: that was the model
+//	        here and it was wrong. Almost everything an agent runs --
+//	        nmap, amass, httpx, masscan -- spends its life in a syscall
+//	        waiting for a packet, so a core carries several of them
+//	        comfortably and a two-core box ran two tasks while sitting
+//	        near-idle. See tasksPerCore.
 //	memory  what is actually available, not what is installed. A box
 //	        with 32 GB and 500 MB free cannot run eight nmaps, and the
 //	        failure mode is the OOM killer taking the agent with it.
+//	        This is the input that genuinely binds a small host, and it
+//	        still does.
 //	masscan what the host can emit, measured rather than assumed.
 //
 // # What the masscan probe does and does not tell you
@@ -58,10 +63,40 @@ type Assessment struct {
 	MemMB int
 }
 
-// Headroom is how much memory one task is assumed to want. nmap against
-// a large range and amass with a dozen sources both sit around a couple
-// of hundred megabytes; 256 is a round number on the safe side of both.
-const taskMemMB = 256
+// Headroom is how much memory one task is assumed to want.
+//
+// 256 was chosen as "the safe side of amass with a dozen sources", and
+// that was not a guess: an amass measured on one of our own drones was
+// resident at 438 MB. It is the heaviest thing here by a wide margin.
+//
+// The cost of sizing EVERY task for the worst one is that a box with
+// 300 MB free runs a single nmap, which wants a few tens of megabytes
+// — which is how three drones on idle hosts came to report a capacity
+// of one. 128 is still above what the common tools use.
+//
+// What stops that under-estimate hurting is not this constant but the
+// retune: capacity is re-read from MemAvailable every 60 seconds, so a
+// drone that starts an amass watches its own headroom fall and stops
+// taking new work. The loop is the real protection; this number only
+// decides how fast it gets there.
+//
+// A per-tool weight would be better than one figure for all of them,
+// and wants the scheduler to know what a slot is holding. Not done
+// here.
+const taskMemMB = 128
+
+// How much memory to leave for the agent itself and the operating
+// system. Subtracted before dividing, because "available" going to zero
+// is the condition this is avoiding, not a budget to spend to the last
+// megabyte.
+const reserveMemMB = 64
+
+// Tasks one core can carry. The work is network-bound: a scanner is
+// overwhelmingly blocked on a socket, not computing, so a core runs
+// several without any of them slowing down. Four is deliberately modest
+// -- the point is to stop cores being a hard ceiling, not to pretend
+// the CPU is infinite.
+const tasksPerCore = 4
 
 // Floor keeps a constrained host useful rather than idle: one task at a
 // time is what every agent did before any of this existed.
@@ -77,27 +112,68 @@ const ceiling = 32
 // is left out of the reasoning rather than taking the assessment down
 // with it, because an agent that refuses to start because it could not
 // read /proc is worse than one that runs two tasks.
-func Measure(ctx context.Context, probeMasscan bool) Assessment {
+//
+// `override` is the operator's own number and wins outright when it is
+// above zero -- including over the memory estimate. That is the point
+// of it: somebody who knows the box, or who is willing to find out,
+// should not have to argue with a heuristic. It is still held to the
+// ceiling, and the reason says plainly that a person chose it, so a
+// drone running one task on a 64-core machine is traceable to a
+// decision rather than looking like a bug in this file.
+func Measure(ctx context.Context, probeMasscan bool, override int) Assessment {
 	a := Assessment{Cores: runtime.NumCPU()}
 	a.MemMB = availableMemMB()
-
-	byCores := a.Cores
-	limit, why := byCores, fmt.Sprintf("%d cores", a.Cores)
-
-	if a.MemMB > 0 {
-		byMem := a.MemMB / taskMemMB
-		if byMem < limit {
-			limit = byMem
-			why = fmt.Sprintf("%d MB available (%d MB per task)",
-				a.MemMB, taskMemMB)
-		}
-	}
+	a.Parallel, a.Reason = size(a.Cores, a.MemMB, override)
 
 	if probeMasscan {
 		if rate, err := masscanRate(ctx); err == nil && rate > 0 {
 			a.MasscanRate = rate
-			why += fmt.Sprintf("; masscan sustained %s pps locally",
+			a.Reason += fmt.Sprintf("; masscan sustained %s pps locally",
 				thousands(rate))
+		}
+	}
+	return a
+}
+
+// size is the whole decision, with the host's numbers passed in rather
+// than read, so the arithmetic can be tested on a machine that is not
+// the one the case describes. `memMB` of 0 means "could not read it",
+// which is not the same as "no memory" and must not size to zero.
+func size(cores, memMB, override int) (int, string) {
+	if cores < 1 {
+		cores = 1
+	}
+
+	// Cores set the headline because the work is network-bound and a
+	// core carries several blocked processes. Memory then lowers it,
+	// and on a small host it is memory that decides -- which is
+	// correct: the OOM killer does not care how idle the CPU is.
+	limit := cores * tasksPerCore
+	why := fmt.Sprintf("%d cores x %d (tasks wait on the network, "+
+		"not the CPU)", cores, tasksPerCore)
+
+	if memMB > 0 {
+		if byMem := (memMB - reserveMemMB) / taskMemMB; byMem < limit {
+			limit = byMem
+			why = fmt.Sprintf("%d MB available, less %d MB reserved, "+
+				"at %d MB per task", memMB, reserveMemMB, taskMemMB)
+		}
+	}
+
+	if override > 0 {
+		limit = override
+		why = fmt.Sprintf("set to %d by the operator", override)
+		// Said, not enforced. The operator asked for this; the job
+		// here is to make sure the number they see in the fleet table
+		// carries what the host makes of it.
+		if memMB > 0 {
+			if fits := (memMB - reserveMemMB) / taskMemMB; override > fits {
+				if fits < floor {
+					fits = floor
+				}
+				why += fmt.Sprintf(" (the %d MB available suggests %d)",
+					memMB, fits)
+			}
 		}
 	}
 
@@ -109,9 +185,7 @@ func Measure(ctx context.Context, probeMasscan bool) Assessment {
 		why = fmt.Sprintf("capped at %d (beyond this the network is the "+
 			"bottleneck, not the host)", ceiling)
 	}
-	a.Parallel = limit
-	a.Reason = why
-	return a
+	return limit, why
 }
 
 // masscanRate measures the packet rate this host can actually emit.
