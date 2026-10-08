@@ -322,8 +322,16 @@ jobs:
           docker compose exec -T app alembic current | grep -q '(head)'
           docker compose logs app | grep -q 'db: postgresql'
 
+      # Asked of python, not of `id`. The runtime image is distroless:
+      # no shell and no coreutils, so `id -u` is not in it to run.
+      # That is the point of the image rather than a limitation of it,
+      # but it does mean this check has to go through the one
+      # interpreter that is present.
       - name: It does not run as root
-        run: test "$(docker compose exec -T app id -u | tr -d '\r')" != "0"
+        run: |
+          uid=$(docker compose exec -T app /opt/venv/bin/python -c 'import os;print(os.getuid())' | tr -d '\r')
+          echo "running as uid $uid"
+          test "$uid" != "0"
 
       - name: Tear down
         if: always()

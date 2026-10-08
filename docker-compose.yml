@@ -50,6 +50,24 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    # The image is distroless: no shell, no package manager, no
+    # coreutils. Worth knowing before you need to debug it, because
+    # the usual reflexes do not work here —
+    #
+    #   docker compose exec app sh              no shell to exec
+    #   docker compose exec app curl ...        no curl
+    #   docker compose exec app python -c ...   WORKS
+    #
+    # and the one interpreter that is present is the venv's:
+    #
+    #   docker compose exec app /opt/venv/bin/python -c 'import os;print(os.getuid())'
+    #   docker compose exec app alembic current
+    #
+    # To get a shell against the same filesystem, run a debug
+    # container sharing the volume rather than trying to find one in
+    # this image:
+    #
+    #   docker run --rm -it -v oddjob_secret:/data alpine sh
     depends_on:
       db:
         condition: service_healthy
@@ -62,6 +80,15 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       # The session-signing key, so a restart does not log everyone out.
+      #
+      # Written and read as uid 10001, which is why the image keeps
+      # that uid rather than taking the distroless default of 65532 —
+      # the files in this volume on an existing deployment are owned
+      # by 10001, and a container running as anything else cannot
+      # write here. If you ever do change the uid, the volume has to
+      # be chowned to match in the same step:
+      #
+      #   docker run --rm -v oddjob_secret:/d alpine chown -R NEW:NEW /d
       - secret:/app/backend/data
     # Loopback by default. There is no rate limiting, no brute-force
     # lockout and no WAF in front of this; put it behind a VPN or a
