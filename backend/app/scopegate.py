@@ -39,7 +39,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import ProjectScope
+from .models import ProjectScope, Target
 from .scope import BARRED, Ruling, ScopeIndex
 
 #: Status codes for each refusal. Distinct so a caller — and a test —
@@ -59,7 +59,28 @@ async def index_for(session: AsyncSession, project_id: int) -> ScopeIndex:
     rows = (await session.execute(
         select(ProjectScope).where(
             ProjectScope.project_id == project_id))).scalars().all()
-    return ScopeIndex(rows)
+    idx = ScopeIndex(rows)
+
+    # Scope travels between a name and the address it was seen at.
+    #
+    # An operator whose scope says `*.corp.com` and who then scans the
+    # address that `www.corp.com` resolves to is not going outside it;
+    # refusing that made the gate read as broken, because the thing
+    # being refused is the same machine under a different label.
+    #
+    # Only pairs this project has already OBSERVED, from its own
+    # targets. Not a live lookup: resolving here would send traffic
+    # from the gate and make a scope decision depend on what a resolver
+    # happened to say. A name nothing has resolved yet inherits
+    # nothing, which is the honest answer.
+    #
+    # Two columns, loaded once per operation like the rows above.
+    for host, ip in (await session.execute(
+            select(Target.host, Target.ip_address)
+            .where(Target.project_id == project_id,
+                   Target.ip_address.is_not(None)))).all():
+        idx.link(host, ip)
+    return idx
 
 
 def refuse(ruling: Ruling, what: str) -> HTTPException:

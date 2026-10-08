@@ -35,7 +35,7 @@ Keys can come from the environment instead of the command line, which
 is how to keep them out of the process list on a shared host:
 
   DRONE_SERVER  DRONE_KEY  DRONE_CALL_IN_KEY  DRONE_ADVERTISE
-  DRONE_ENROLL_TOKEN  DRONE_WORKDIR
+  DRONE_ENROLL_TOKEN  DRONE_WORKDIR  DRONE_PUBLIC_IP_URL
 `
 
 func main() {
@@ -51,7 +51,7 @@ func main() {
 	case "revive":
 		os.Exit(cmdRevive(os.Args[2:]))
 	case "check":
-		os.Exit(cmdCheck())
+		os.Exit(cmdCheck(os.Args[2:]))
 	case "install":
 		os.Exit(cmdInstall(os.Args[2:]))
 	case "lookup":
@@ -88,6 +88,9 @@ func cmdRun(argv []string) int {
 	fs.BoolVar(&cfg.AllowPlaintext, "allow-plaintext", false,
 		"permit a non-loopback http:// server")
 	fs.StringVar(&cfg.WorkDir, "workdir", cfg.WorkDir, "where tool output is staged")
+	fs.StringVar(&cfg.PublicIPURL, "public-ip-url", cfg.PublicIPURL,
+		"service asked for our public address once at registration "+
+			"(empty, or DRONE_PUBLIC_IP_URL=off, to ask nobody)")
 	_ = fs.Parse(argv)
 
 	cfg.FromEnv()
@@ -198,7 +201,14 @@ func cmdRevive(argv []string) int {
 	return 0
 }
 
-func cmdCheck() int {
+func cmdCheck(argv []string) int {
+	cfg := config.Defaults()
+	fs := flag.NewFlagSet("check", flag.ExitOnError)
+	fs.StringVar(&cfg.PublicIPURL, "public-ip-url", cfg.PublicIPURL,
+		"service asked for our public address (empty to ask nobody)")
+	_ = fs.Parse(argv)
+	cfg.FromEnv()
+
 	ctx := context.Background()
 	priv, advice := tools.RawSocketCapable()
 	mgr, why := tools.DetectManager()
@@ -207,16 +217,33 @@ func cmdCheck() int {
 		mgrName = mgr.Name
 		why = ""
 	}
+	hp := recon.DetectHostPlatform()
+	addr := recon.OutboundAddress(ctx, cfg.PublicIPURL)
 	out := map[string]any{
-		"version":         config.Version,
-		"platform":        runtime.GOOS,
-		"arch":            runtime.GOARCH,
-		"privileged":      priv,
-		"privilege":       advice,
-		"package_manager": mgrName,
-		"outbound_ip":     recon.OutboundIP(),
-		"interfaces":      recon.InterfaceIPs(),
-		"tools":           tools.Installed(ctx),
+		"version":  config.Version,
+		"platform": runtime.GOOS,
+		// What the machine under this process is, as distinct from
+		// what this process is. They differ in a container, and under
+		// WSL2 they differ in the way that matters most: a Linux
+		// binary on a Windows host.
+		"host_platform":        hp.Host,
+		"host_platform_label":  hp.String(),
+		"host_platform_source": hp.HostWhy,
+		"container":            hp.Container,
+		"arch":                 runtime.GOARCH,
+		"privileged":           priv,
+		"privilege":            advice,
+		"package_manager":      mgrName,
+		"outbound_ip":          addr.IP,
+		// Never the address without where it came from: "172.17.0.3"
+		// and "198.51.100.7" are not the same kind of claim and cannot
+		// be told apart by looking at them.
+		"outbound_ip_source": addr.Source,
+		"interfaces":         recon.InterfaceIPs(),
+		"tools":              tools.Installed(ctx),
+	}
+	if addr.Note != "" {
+		out["outbound_ip_note"] = addr.Note
 	}
 	if why != "" {
 		out["package_manager_note"] = why

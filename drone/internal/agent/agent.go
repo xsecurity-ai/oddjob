@@ -116,20 +116,31 @@ func (a *Agent) Wake() {
 
 // Status is what the inbound API reports.
 func (a *Agent) Status() map[string]any {
+	// Outside the lock: these are local file reads, and there is no
+	// reason to hold up a task-completion callback for them. No public
+	// address lookup here — status is polled, and that request belongs
+	// to registration.
+	hp := recon.DetectHostPlatform()
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	priv, advice := tools.RawSocketCapable()
 	return map[string]any{
-		"name":         a.cfg.Name,
-		"version":      config.Version,
-		"platform":     runtime.GOOS,
-		"arch":         runtime.GOARCH,
-		"privileged":   priv,
-		"privilege":    advice,
-		"busy":         a.busy,
-		"current_task": a.current,
-		"owed_results": a.owed(),
-		"server":       a.cfg.Server,
+		"name":    a.cfg.Name,
+		"version": config.Version,
+		// The binary's OS, then the machine's. Both, because the
+		// interesting case is when they disagree.
+		"platform":            runtime.GOOS,
+		"host_platform":       hp.Host,
+		"host_platform_label": hp.String(),
+		"container":           hp.Container,
+		"arch":                runtime.GOARCH,
+		"privileged":          priv,
+		"privilege":           advice,
+		"busy":                a.busy,
+		"current_task":        a.current,
+		"owed_results":        a.owed(),
+		"server":              a.cfg.Server,
 	}
 }
 
@@ -140,6 +151,16 @@ func (a *Agent) Register(ctx context.Context) error {
 	log.Printf("privilege: %s", advice)
 
 	host, _ := hostname()
+
+	// Worked out once, not per announce. announce() runs twice — before
+	// and after tool install — and the address lookup is a request to a
+	// third party: repeating it would double the exposure for an answer
+	// that cannot have changed in the meantime.
+	hp := recon.DetectHostPlatform()
+	log.Printf("host: %s — %s", hp, hp.HostWhy)
+	addr := recon.OutboundAddress(ctx, a.cfg.PublicIPURL)
+	log.Printf("address: %s", addr)
+
 	announce := func(note string) error {
 		a.mu.Lock()
 		missing := make(map[string]string, len(a.missing))
@@ -156,8 +177,18 @@ func (a *Agent) Register(ctx context.Context) error {
 			Tools:        tools.Installed(ctx),
 			MissingTools: missing,
 			CallInURL:    a.cfg.Advertise,
-			OutboundIP:   recon.OutboundIP(),
-			Interfaces:   recon.InterfaceIPs(),
+			// Platform above stays runtime.GOOS — a server picking a
+			// binary or an install snippet needs the binary's OS, not
+			// the machine's. HostPlatform is the field that answers
+			// "which of these is the Windows box", and the two are
+			// sent side by side rather than one overwriting the other.
+			OutboundIP:         addr.IP,
+			OutboundIPSource:   addr.Source,
+			OutboundIPNote:     addr.Note,
+			Interfaces:         recon.InterfaceIPs(),
+			HostPlatform:       hp.Host,
+			HostPlatformSource: hp.HostWhy,
+			Container:          hp.Container,
 		})
 		if err != nil {
 			return err
