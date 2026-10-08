@@ -33,6 +33,21 @@ const OS_LABEL: Record<string, string> = {
   linux: 'Linux', darwin: 'macOS', windows: 'Windows',
 }
 
+/** How the drone found the address it reported. The labels matter
+ *  because the addresses do not distinguish themselves: 10.1.2.3 read
+ *  off a container's own interface and 10.1.2.3 read off the host's
+ *  routing table are the same fourteen characters and mean different
+ *  things to anyone writing an incident notification. */
+const IP_SOURCE: Record<string, string> = {
+  'public-service': 'asked an external service what it sees',
+  'host-route': 'the host routing table',
+  'container-host-netns': "the host's own network namespace",
+  'container-internal': 'the container\'s private address — NOT what the '
+    + 'client will see',
+  interface: 'an interface on the host',
+  unknown: 'could not be determined',
+}
+
 /** "4m ago" — a heartbeat is only useful relative to now. */
 function ago(iso: string | null): string {
   if (!iso) return 'never'
@@ -537,22 +552,49 @@ export function DronesView({ project }: { project: string | null }) {
         // One line: the grid's row height is fixed, and a second line
         // here is in the DOM but clipped — present to a screen reader
         // and invisible to everyone else.
+        //
+        // `platform` is the binary's own OS. On a Linux container
+        // running on Windows it is `linux`, truthfully, and answers a
+        // question nobody asked — "Enrolled for Windows, but it
+        // reports linux" was a correct statement about the binary and
+        // a wrong one about the machine. `host_platform` is the
+        // machine, when the agent could establish it.
+        const host = p.row.host_platform
         const mismatch = p.row.target_os && p.row.platform &&
-                         p.row.target_os !== p.row.platform
+                         p.row.target_os !== (host ?? p.row.platform)
+        // Worth saying even when it matches what was intended: a
+        // container on Windows is a materially different thing to
+        // test from, and the two names are both true.
+        const layered = host && p.row.platform && host !== p.row.platform
         return (
           <Stack direction="row" spacing={0.7} alignItems="center"
             sx={{ minWidth: 0 }}>
-            <Tooltip title={`${p.row.platform ?? '?'}/${p.row.arch ?? '?'}`}>
+            <Tooltip title={
+              `${p.row.platform ?? '?'}/${p.row.arch ?? '?'}` +
+              (host ? `\nHost OS: ${OS_LABEL[host] ?? host}` +
+                      (p.row.host_platform_source
+                        ? ` — ${p.row.host_platform_source}` : '')
+                    : '') +
+              (p.row.container ? `\nInside a ${p.row.container} container` : '')
+            }>
               <Box sx={{ color: neon.cyan, overflow: 'hidden',
                          textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {p.value}
               </Box>
             </Tooltip>
+            {layered ? (
+              <Tooltip title={`A ${p.row.platform} ${p.row.container ?? 'guest'} on ${OS_LABEL[host!] ?? host}. Both are true: ${p.row.platform} is which binary runs, ${OS_LABEL[host!] ?? host} is which machine this is.`}>
+                <Chip size="small"
+                  label={`${p.row.platform} on ${OS_LABEL[host!] ?? host}`}
+                  sx={{ height: 17, fontSize: 9.5, color: neon.cyan,
+                        bgcolor: alpha(neon.cyan, 0.12) }} />
+              </Tooltip>
+            ) : null}
             {mismatch ? (
               // Worth surfacing rather than hiding in a tooltip: it
               // usually means the wrong binary went to the wrong host.
-              <Tooltip title={`Enrolled for ${OS_LABEL[p.row.target_os!] ?? p.row.target_os}, but it reports ${p.row.platform}`}>
-                <Chip size="small" label={p.row.platform ?? '?'} sx={{
+              <Tooltip title={`Enrolled for ${OS_LABEL[p.row.target_os!] ?? p.row.target_os}, but it is on ${OS_LABEL[host ?? p.row.platform!] ?? (host ?? p.row.platform)}`}>
+                <Chip size="small" label={host ?? p.row.platform ?? '?'} sx={{
                   height: 17, fontSize: 9.5, color: neon.yellow,
                   bgcolor: alpha(neon.yellow, 0.14) }} />
               </Tooltip>
@@ -577,9 +619,18 @@ export function DronesView({ project }: { project: string | null }) {
         }
         const others = (p.row.interfaces ?? []).filter((i) => i !== own)
         const differs = own && seen && own !== seen
+        const src = p.row.outbound_ip_source
+        // The one case that must not look like the others. A Docker
+        // bridge address is the same shape as a real egress address,
+        // and an operator writing an incident notification off this
+        // column would hand the client a number from a private
+        // namespace that appears in none of their logs.
+        const inner = src === 'container-internal'
         return (
           <Tooltip title={
-            (own ? `Reported by the agent: ${own}\n` : '') +
+            (own ? `Reported by the agent: ${own}` +
+                   (src ? `  (${IP_SOURCE[src] ?? src})` : '') + '\n' : '') +
+            (p.row.outbound_ip_note ? `${p.row.outbound_ip_note}\n` : '') +
             (seen ? `Connection seen from: ${seen}` +
                     (differs ? '  (NAT, proxy or tunnel in between)' : '') : '') +
             (others.length ? `\nAlso on: ${others.join(', ')}` : '')
@@ -587,10 +638,16 @@ export function DronesView({ project }: { project: string | null }) {
             <Stack direction="row" spacing={0.6} alignItems="center"
               sx={{ minWidth: 0 }}>
               <Box sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12,
-                         color: own ? neon.text : alpha(neon.muted, 0.7),
+                         color: inner ? neon.yellow
+                                      : own ? neon.text : alpha(neon.muted, 0.7),
                          overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {own || seen}
               </Box>
+              {inner && (
+                <Chip size="small" label="container" sx={{
+                  height: 16, fontSize: 9, color: neon.yellow,
+                  bgcolor: alpha(neon.yellow, 0.14) }} />
+              )}
               {others.length > 0 && (
                 <Box sx={{ color: neon.muted, fontSize: 10.5 }}>
                   +{others.length}

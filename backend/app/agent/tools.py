@@ -585,7 +585,19 @@ def build(session: AsyncSession, project: Project | None, user: User,
             out.append({
                 "id": a.id, "name": a.name, "status": a.status,
                 "platform": a.platform, "hostname": a.hostname,
+                # The OS of the machine, where that differs from the
+                # binary's. Omitted when the agent could not tell —
+                # the model must not read a missing key as "linux".
+                **({"host_platform": a.host_platform} if a.host_platform else {}),
+                **({"container": a.container} if a.container else {}),
                 "address": a.outbound_ip or a.last_ip,
+                # Which of the six ways the agent found that address.
+                # Sent because a model asked "what IP will the client
+                # see" has no other way to tell a container's private
+                # address from a real egress one: they are the same
+                # shape and only this says which is which.
+                **({"address_source": a.outbound_ip_source}
+                   if a.outbound_ip_source else {}),
                 # Said plainly: an agent without raw sockets cannot run
                 # masscan and will silently connect-scan with nmap, so
                 # it changes what tasking is worth sending.

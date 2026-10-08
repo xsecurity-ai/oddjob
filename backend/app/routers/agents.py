@@ -112,9 +112,19 @@ class AgentOut(BaseModel):
     hostname: str | None = None
     privileged: bool = False
     tools: dict = {}
-    #: Reported by the agent from its own routing table.
+    #: Reported by the agent about itself, not observed here.
     outbound_ip: str | None = None
+    #: And how it found it, because a container's private address and
+    #: a real egress address are the same shape.
+    outbound_ip_source: str | None = None
+    outbound_ip_note: str | None = None
     interfaces: list[str] = []
+    #: The OS of the machine underneath, where it differs from
+    #: `platform`. Null when undetermined — never defaulted to the
+    #: binary's own platform, which is the bug this answers.
+    host_platform: str | None = None
+    host_platform_source: str | None = None
+    container: str | None = None
     call_in_url: str | None = None
     last_seen: datetime | None = None
     last_ip: str | None = None
@@ -216,7 +226,18 @@ class RegisterIn(BaseModel):
     #: work that needs them.
     missing_tools: dict[str, str] = {}
     outbound_ip: str | None = None
+    #: How the agent arrived at `outbound_ip`. Not validated against a
+    #: list here: a newer Drone that learns a seventh way of finding
+    #: its address should be able to say so, and a label this server
+    #: does not recognise is still more use than silence.
+    outbound_ip_source: str | None = Field(None, max_length=32)
+    outbound_ip_note: str | None = None
     interfaces: list[str] = []
+    #: The OS underneath, where it differs from `platform`. Omitted by
+    #: an older Drone and by a newer one that could not tell.
+    host_platform: str | None = Field(None, max_length=32)
+    host_platform_source: str | None = None
+    container: str | None = Field(None, max_length=32)
     call_in_url: str | None = None
 
 
@@ -339,6 +360,11 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         retired_at=a.retired_at, retired_reason=a.retired_reason,
         retired_cleanup=_json_or_none(a.retired_cleanup),
         outbound_ip=a.outbound_ip, interfaces=_jlist(a.interfaces),
+        outbound_ip_source=a.outbound_ip_source,
+        outbound_ip_note=a.outbound_ip_note,
+        host_platform=a.host_platform,
+        host_platform_source=a.host_platform_source,
+        container=a.container,
         queued_tasks=queued, running_tasks=running,
         completed_tasks=completed, failed_tasks=failed,
         capacity=a.capacity, capacity_reason=a.capacity_reason,
@@ -2021,7 +2047,17 @@ async def register(body: RegisterIn, request: Request,
     a.tools = json.dumps(body.tools or {})
     a.missing_tools = json.dumps(body.missing_tools or {})
     a.outbound_ip = body.outbound_ip
+    a.outbound_ip_source = body.outbound_ip_source or None
+    a.outbound_ip_note = body.outbound_ip_note or None
     a.interfaces = json.dumps(body.interfaces or [])
+    # Blank is stored as NULL, not "". An older Drone sends nothing and
+    # a newer one that could not tell sends nothing, and both mean "no
+    # answer" — which is not the same as `linux`, and not the same as
+    # "no container". Flattening them here is how a UI ends up
+    # asserting something nobody established.
+    a.host_platform = body.host_platform or None
+    a.host_platform_source = body.host_platform_source or None
+    a.container = body.container or None
     a.call_in_url = body.call_in_url
     a.last_seen = datetime.now(timezone.utc)
     a.last_ip = request.client.host if request.client else None
