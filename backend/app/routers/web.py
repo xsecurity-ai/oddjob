@@ -9,6 +9,12 @@ from __future__ import annotations
 
 import re
 
+# At module scope, not inside the handler: the URL below is built from
+# components before the request is made, so the import has to precede
+# it, and a deferred import that is now needed in two places is just a
+# NameError waiting for whichever one runs first.
+import httpx
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select, tuple_
@@ -417,10 +423,6 @@ async def replay(web_id: int, body: ReplayIn,
     port = m.group("port")
     if port is not None and not (0 < int(port) < 65536):
         raise HTTPException(400, f"port {port} is out of range")
-    # Rebuilt from the validated pieces. Nothing the caller sent is
-    # carried through to the URL verbatim.
-    shown = f"[{hostname}]" if v6 else hostname
-    host = shown if port is None else f"{shown}:{port}"
     known = (await session.execute(
         select(Target).where(Target.project_id == target.project_id,
                              Target.host == hostname))).scalar_one_or_none()
@@ -440,7 +442,53 @@ async def replay(web_id: int, body: ReplayIn,
     scheme = orig.scheme or "http"
     if not path.startswith("/"):
         path = "/" + path
-    url = f"{scheme}://{host}{path}"
+    # The destination is the target row's own host, read back out of
+    # the database — not the string the caller sent, even though the
+    # two were just proved equal.
+    #
+    # Two reasons, and the second is the one that made me change it.
+    #
+    # It removes the whole class of bug rather than the instance.
+    # `known.host` matched `hostname` exactly or this code would not be
+    # running, so nothing the caller typed needs to survive as far as
+    # the URL. Any future normalisation difference between what gets
+    # validated and what gets sent — a case fold, a trailing dot, an
+    # IDN form — cannot become a second destination, because there is
+    # only one source for it now.
+    #
+    # And it is a fix a reader can check. The previous version was
+    # correct and CodeQL still flagged py/partial-ssrf on it, because
+    # `validate_host` is not something taint analysis recognises as a
+    # sanitiser. "Correct but unprovable" is a bad place to leave a
+    # critical finding: the next person sees an open alert, cannot
+    # tell it from a real one, and either dismisses it on faith or
+    # re-does this work. A value that comes from a database row needs
+    # no argument.
+    #
+    # The port is the caller's, narrowed to an int by the shape check
+    # above, which is the whole of what a port can be.
+    #
+    # Assembled from components rather than formatted into a string.
+    # That is the part that matters: `path` IS caller-controlled and
+    # is meant to be — editing it is the point of a replay tool — and
+    # an f-string puts it in the same flat piece of text as the
+    # authority, where the only thing keeping `//evil.example.net/x`
+    # from becoming a destination is that it happens to land after
+    # the first slash. Passing host and path as separate arguments
+    # means the path cannot reach the authority at all, by
+    # construction rather than by argument.
+    #
+    # Bracketing an IPv6 literal comes free here; httpx does it, and
+    # the previous version had to remember to.
+    dest = httpx.URL(scheme=scheme, host=known.host,
+                     port=int(port) if port is not None else None,
+                     raw_path=path.encode())
+    # The request is made with the object; `url` is the text form, for
+    # storing on the row and putting on the timeline. Deriving the
+    # string from the object rather than the other way round means
+    # there is no point at which a destination is re-parsed out of
+    # text somebody could have shaped.
+    url = str(dest)
     # httpx sets these from the body it is given; a stale value from the
     # captured request would contradict what is actually sent.
     for drop in [k for k in headers if k.lower() in
@@ -453,11 +501,10 @@ async def replay(web_id: int, body: ReplayIn,
     err = None
     resp_text = ""
     try:
-        import httpx
         async with httpx.AsyncClient(verify=body.verify_tls,
                                      follow_redirects=body.follow_redirects,
                                      timeout=body.timeout) as client:
-            r = await client.request(method, url, headers=headers,
+            r = await client.request(method, dest, headers=headers,
                                      content=payload or None,
                                      extensions={"sni_hostname": hostname})
             status = r.status_code
