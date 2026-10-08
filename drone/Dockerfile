@@ -49,9 +49,22 @@
 FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
 WORKDIR /src
 
-# Supplied by buildx. Defaulted so a plain `docker build` still works.
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+# Supplied by buildx. NO DEFAULTS — a default here does not mean
+# "when buildx does not say", it means "always", and it silently wins
+# over the value buildx provides:
+#
+#   ARG TARGETARCH=amd64   ->  amd64   even on --platform linux/arm64
+#   ARG TARGETARCH         ->  arm64
+#
+# With the defaults this file shipped x86-64 binaries inside the arm64
+# image. The Go-built half came out amd64 while nmap, masscan and
+# gobuster — installed by apk in the arm64 runtime stage — came out
+# aarch64, so the image ran until the moment anybody tasked a scan.
+#
+# Empty is correct for a plain `docker build` without buildx: Go reads
+# an unset GOOS/GOARCH as "this host", which is what that case wants.
+ARG TARGETOS
+ARG TARGETARCH
 ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
 
 # ---- the third-party tools, BEFORE any of our own source -----------
@@ -193,6 +206,31 @@ RUN set -eu; \
     [ "$n" -gt 500 ] || { echo "only $n NSE scripts — nmap -sC would be crippled"; exit 1; }; \
     [ -f /usr/share/nmap/scripts/script.db ] || { echo "no script.db"; exit 1; }; \
     echo "tools present, $n NSE scripts"
+
+# And the right architecture, which the block above only claimed.
+#
+# This is the check that was missing when `ARG TARGETARCH=amd64`
+# shadowed buildx and put x86-64 binaries in the arm64 image. Nothing
+# caught it: every tool was present, the image started, and it would
+# have failed with "exec format error" the first time an operator
+# tasked a scan from an arm64 host.
+#
+# Bytes 18-19 of an ELF header are e_machine. The expected value is
+# read from nmap rather than written down, because nmap comes from
+# apk in this stage and is therefore native to the image by
+# construction — no table of architectures to get wrong, and it keeps
+# working if a third platform is ever added.
+RUN set -eu; \
+    mach() { od -An -tx1 -j18 -N2 "$(command -v "$1")" | tr -d ' \n'; }; \
+    want=$(mach nmap); \
+    for b in drone amass gospider nuclei httpx masscan; do \
+      got=$(mach "$b"); \
+      [ "$got" = "$want" ] || { \
+        echo "$b is ELF e_machine $got but this image is $want —"; \
+        echo "cross-compilation targeted the wrong architecture."; \
+        exit 1; }; \
+    done; \
+    echo "all binaries are e_machine $want"
 
 RUN mkdir -p /var/lib/drone/work
 VOLUME ["/var/lib/drone/work"]
