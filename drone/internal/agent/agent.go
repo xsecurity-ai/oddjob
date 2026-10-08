@@ -23,9 +23,15 @@ import (
 
 type Agent struct {
 	cfg *config.Config
-	cli *client.Client
-	sp  *spool.Spool
-	id  *identity.Identity
+	// capFromServer: cap_ came from Oddjob rather than from measuring
+	// the host, so `retune` leaves it alone. A bool rather than
+	// sniffing capWhy for a phrase -- that string is for an operator
+	// to read, and making control flow depend on its wording means
+	// rewording it silently changes behaviour.
+	capFromServer bool
+	cli           *client.Client
+	sp            *spool.Spool
+	id            *identity.Identity
 	// When this process came up. The dead-man switch falls back to it
 	// when there has never been a successful contact to measure from,
 	// so a Drone that enrolled and immediately lost the server still
@@ -433,6 +439,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.retire(ctx, reason, true)
 			return nil
 		}
+		a.adoptServerParallel(resp.MaxParallel)
 		// `tasks` when the server sends it, falling back to the
 		// single `task` so this still works against one that predates
 		// handing out more than one.
@@ -501,6 +508,42 @@ func (a *Agent) beat(ctx context.Context) (*client.HeartbeatResp, error) {
 	})
 }
 
+// adoptServerParallel takes the number Oddjob sends on each heartbeat.
+//
+// **A local `--parallel` wins.** The precedence is deliberate and is
+// not "most recent" or "most specific": the flag is set by whoever
+// deployed the agent onto that machine, and it is the only way to say
+// "this box must not be pushed harder than this" in a way a remote
+// operator cannot undo. A server-side number is the live control for
+// an engagement; a host-level limit is a property of somebody's
+// hardware. Letting the first override the second would mean a
+// compromised or merely mistaken server could drive a machine into
+// swap, so it does not.
+//
+// Everything else: the server's number replaces what `capacity`
+// measured, for the same reason `--parallel` does -- an operator who
+// sets 8 and sees 2 with no explanation concludes the control does
+// nothing. `retune` will keep measuring the host underneath, and the
+// reason records that this is not the host's own answer.
+//
+// Zero means the server has no opinion, which is also what an older
+// server sends by not sending the field at all. Neither is "run
+// nothing", and reading it that way would idle the fleet against any
+// server that had not been upgraded yet.
+func (a *Agent) adoptServerParallel(n int) {
+	if n <= 0 || a.cfg.Parallel > 0 {
+		return
+	}
+	a.mu.Lock()
+	changed := a.cap_ != n
+	a.cap_, a.capFromServer = n, true
+	a.capWhy = fmt.Sprintf("set to %d from Oddjob", n)
+	a.mu.Unlock()
+	if changed {
+		log.Printf("capacity now %d (set from Oddjob)", n)
+	}
+}
+
 // retune re-measures the host and adopts the new number.
 //
 // Called periodically rather than once at startup: an agent shares its
@@ -510,6 +553,16 @@ func (a *Agent) beat(ctx context.Context) (*client.HeartbeatResp, error) {
 // doing that every minute to re-learn a number that does not change is
 // not a trade worth making. Cores and memory are free to read.
 func (a *Agent) retune(ctx context.Context) {
+	// A number the server set is not the host's to overrule. Without
+	// this the two fight on a sixty-second cycle: Oddjob says 8, the
+	// next retune measures the box and says 2, the heartbeat after
+	// that says 8 again, and the fleet table flickers between them.
+	a.mu.Lock()
+	serverSet := a.capFromServer
+	a.mu.Unlock()
+	if serverSet && a.cfg.Parallel == 0 {
+		return
+	}
 	as := capacity.Measure(ctx, false, a.cfg.Parallel)
 	a.mu.Lock()
 	changed := as.Parallel != a.cap_

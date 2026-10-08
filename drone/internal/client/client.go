@@ -148,6 +148,12 @@ type HeartbeatResp struct {
 	//: against a 403 it cannot interpret.
 	Shutdown bool   `json:"shutdown"`
 	Reason   string `json:"reason"`
+	//: What Oddjob says this agent may run at once: the operator's
+	//: per-drone number if they set one, the agent's own assessment
+	//: otherwise, with the engagement's ceiling applied on top. Zero
+	//: or absent from an older server means "no opinion", which is
+	//: not the same as "run nothing" and must not be read as it.
+	MaxParallel int `json:"max_parallel"`
 }
 
 // EnrollReq trades a one-time token for an identity.

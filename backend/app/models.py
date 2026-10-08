@@ -1422,6 +1422,25 @@ class Agent(Base, TimestampMixin):
     capacity: Mapped[int | None] = mapped_column(Integer)
     capacity_reason: Mapped[str | None] = mapped_column(String(300))
 
+    #: What an OPERATOR says this one drone may run at once, overriding
+    #: the agent's own assessment. NULL means "let the agent decide",
+    #: which is the default and right almost always.
+    #:
+    #: Separate from `Project.drone_max_parallel` because they answer
+    #: different questions. The project ceiling is about the CLIENT --
+    #: a fragile estate wants a small number however much machine is
+    #: pointed at it -- so it still applies on top of this. This one is
+    #: about the HOST: the operator knows something the agent cannot
+    #: see, usually that a container's limit is not what /proc says, or
+    #: that the box is quieter than its core count suggests.
+    #:
+    #: Pushed down to the agent on the next heartbeat rather than only
+    #: applied here. The agent reports `slots_free` computed from its
+    #: own capacity, so a number the agent has not been told about gets
+    #: clamped straight back to what it already believed -- which is
+    #: how a setting ends up looking like it does nothing.
+    parallel_override: Mapped[int | None] = mapped_column(Integer)
+
     #: offline | online | disabled. `disabled` is an operator decision
     #: and survives reconnection; offline is merely an observation.
     status: Mapped[str] = mapped_column(

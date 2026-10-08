@@ -326,9 +326,16 @@ export interface DroneAgent {
    *  until it has reported. */
   capacity: number | null
   capacity_reason: string | null
-  /** The effective limit: the lower of its assessment and the
-   *  project's ceiling. What the dispatcher honours. */
+  /** The effective limit: the operator's per-drone override if set,
+   *  otherwise the agent's own assessment, with the project ceiling
+   *  on top of either. What the dispatcher honours. */
   max_parallel: number
+  /** The operator's number for this one drone, null when the agent is
+   *  deciding. Separate from `max_parallel`, which is the result —
+   *  they differ whenever the project ceiling is the binding one, and
+   *  a box showing 5 when somebody typed 8 is how a control stops
+   *  being trusted. */
+  parallel_override: number | null
   /** What is executing right now — the work, not just a count. */
   running: Array<{
     id: number; kind: string; subject: string; started_at: string | null
@@ -944,6 +951,10 @@ export const api = {
    *  regions only in `geo`. */
   patchAgent: (project: string, id: number, body: {
     name?: string; priority?: number; regions?: string; notes?: string
+    /** Tasks this drone may run at once. `0` clears the override and
+     *  hands the decision back to the agent — `undefined` means "not
+     *  supplied", so there has to be an explicit value for "undo". */
+    parallel_override?: number
   }) =>
     req<DroneAgent>(`/api/agents/${id}` + qs({ project }),
       { method: 'PATCH', body: JSON.stringify(body) }),

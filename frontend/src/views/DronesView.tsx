@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import {
   Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent,
-  DialogTitle, Divider, IconButton, MenuItem, Stack, Step, StepLabel,
+  DialogTitle, Divider, IconButton, MenuItem, Select, Stack, Step, StepLabel,
   Stepper, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
@@ -487,7 +487,7 @@ function EditAgentDialog({ project, agent, mode, onClose }: {
 // ------------------------------------------------------------- the view
 export function DronesView({ project }: { project: string | null }) {
   const qc = useQueryClient()
-  const { canWrite } = useAuth()
+  const { canWrite, roleOn } = useAuth()
   const [wizard, setWizard] = useState(false)
   const [confirmKill, setConfirmKill] = useState<DroneAgent | null>(null)
   const [editing, setEditing] = useState<DroneAgent | null>(null)
@@ -517,6 +517,20 @@ export function DronesView({ project }: { project: string | null }) {
       qc.invalidateQueries({ queryKey: ['drone-agents', project] })
       qc.invalidateQueries({ queryKey: ['drone-routing', project] })
     },
+  })
+  // Per-drone parallelism. Not optimistic: the server applies the
+  // project ceiling on top, so what comes back is frequently not what
+  // was picked, and showing the picked number until a refetch
+  // contradicts it is how somebody walks away believing a drone is
+  // running 16.
+  // The server requires project admin for this PATCH, so the control
+  // is not offered to anyone else — a dropdown that answers 403 teaches
+  // people the app is broken.
+  const admin = roleOn(project ?? null) === 'admin'
+  const setParallel = useMutation({
+    mutationFn: ({ id, n }: { id: number; n: number }) =>
+      api.patchAgent(project as string, id, { parallel_override: n }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['drone-agents', project] }),
   })
 
   const all = data ?? []
@@ -800,29 +814,66 @@ export function DronesView({ project }: { project: string | null }) {
       },
     },
     {
-      // What this agent decided it can run, and why. Shown because the
-      // alternative is an operator raising the project ceiling to 16,
+      // What this agent will run at once, and who decided. Editable,
+      // because the alternative was raising the project ceiling to 16,
       // seeing nothing change, and having no way to find out that the
-      // box had 900 MB free.
-      field: 'max_parallel', headerName: 'Parallel', width: 104,
+      // box had 900 MB free — or to say "this one box can take more".
+      field: 'max_parallel', headerName: 'Parallel', width: 138,
       renderCell: (p) => {
         const eff = (p.value as number) ?? 1
         const own = p.row.capacity
+        const over = p.row.parallel_override
+        const why = own == null
+          ? 'This agent has not reported an assessment of its host yet, so it is held to one task at a time.'
+          : `${own} by its own assessment (${p.row.capacity_reason || 'no reason given'}).`
+        const title = (over
+          ? `Set to ${over} for this drone. ${why} `
+            + `The engagement ceiling still applies on top, so the effective number is ${eff}.`
+          : `${why} The project's ceiling and that are combined, and the lower runs.`)
+          + ' Changing this is pushed to the drone on its next heartbeat.'
+        if (!admin) {
+          return (
+            <Tooltip title={title}>
+              <Box sx={{ color: eff > 1 ? neon.green : neon.muted, fontWeight: 600 }}>
+                {eff}
+              </Box>
+            </Tooltip>
+          )
+        }
         return (
-          <Tooltip title={own == null
-            ? 'This agent has not reported an assessment of its host yet, so it is held to one task at a time.'
-            : `${own} by its own assessment (${p.row.capacity_reason || 'no reason given'}). `
-              + `The project's ceiling and that are combined, and the lower runs.`}>
-            <Box sx={{ color: eff > 1 ? neon.green : neon.muted,
-                       fontWeight: 600 }}>
-              {eff}
-              {own != null && own !== eff && (
-                <Box component="span" sx={{ color: neon.muted,
-                                            fontWeight: 400, fontSize: 11 }}>
-                  {' '}of {own}
-                </Box>
+          <Tooltip title={title}>
+            <Stack direction="row" spacing={0.6} alignItems="center">
+              <Select size="small" variant="standard" disableUnderline
+                value={over ?? 0}
+                disabled={setParallel.isPending}
+                onChange={(e) => setParallel.mutate(
+                  { id: p.row.id, n: Number(e.target.value) })}
+                renderValue={() => (
+                  <Box component="span" sx={{
+                    color: eff > 1 ? neon.green : neon.muted, fontWeight: 600 }}>
+                    {eff}{over ? '' : ' auto'}
+                  </Box>
+                )}
+                sx={{ fontSize: 12, color: neon.text,
+                      '& .MuiSelect-select': { py: 0 } }}>
+                {/* 0 is the way back to automatic. `null` in a PATCH
+                    body means "not supplied", so undo needs a value. */}
+                <MenuItem value={0} sx={{ fontSize: 12 }}>Auto</MenuItem>
+                {[1, 2, 4, 6, 8, 10, 12, 16, 24, 32].map((n) => (
+                  <MenuItem key={n} value={n} sx={{ fontSize: 12 }}>{n}</MenuItem>
+                ))}
+              </Select>
+              {over != null && over !== eff && (
+                // The engagement ceiling is biting. Said here rather
+                // than only in the tooltip: a drone showing 5 when
+                // somebody picked 16 looks broken otherwise.
+                <Tooltip title={`Picked ${over}; the engagement ceiling holds it to ${eff}.`}>
+                  <Chip size="small" label="capped" sx={{
+                    height: 16, fontSize: 9, color: neon.yellow,
+                    bgcolor: alpha(neon.yellow, 0.14) }} />
+                </Tooltip>
               )}
-            </Box>
+            </Stack>
           </Tooltip>
         )
       },
