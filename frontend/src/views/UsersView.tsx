@@ -321,4 +321,3 @@ const chip = (c: string, a = 0.14) => ({
   height: 19, fontSize: 10, bgcolor: alpha(c, a), color: c,
   border: `1px solid ${alpha(c, 0.5)}`,
 })
-

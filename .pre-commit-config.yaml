@@ -1,0 +1,138 @@
+# Pre-commit hooks. `pre-commit install` once; after that they run on
+# every `git commit`.
+#
+# ---------------------------------------------------- the design rule
+#
+# A hook that disagrees with CI is worse than no hook: it either blocks
+# a commit CI would accept, or passes one CI will reject, and both
+# teach people to use --no-verify. So the four linters run **the same
+# command CI runs**, out of the same pinned config, rather than through
+# a pre-commit mirror repo with its own version of the tool.
+#
+# That costs the usual benefit of pinned mirrors — pre-commit cannot
+# install these for you, so you need uv, Go, Node and Docker on hand to
+# commit in those areas. For this repo that is already true of anyone
+# who can run the tests.
+#
+# ------------------------------------------------------------- speed
+#
+# Hooks that take seconds run on every commit. The four linters are
+# scoped with `files:` so they only wake up when something in their
+# language changed, and most of them lint the whole project rather than
+# the staged subset (`pass_filenames: false`) because that is what CI
+# does and what their configs assume.
+#
+# To skip one deliberately: SKIP=go-lint git commit …
+# To run everything over the whole tree: pre-commit run --all-files
+
+# pre-commit only. A pre-push copy would run the same set a second
+# time on work that already passed, and the case it would catch —
+# somebody used --no-verify — is the case where they meant to.
+default_install_hook_types: [pre-commit]
+
+repos:
+  # ------------------------------------------------ cheap, universal
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # Would be a merge conflict committed into a file. Costs nothing.
+      - id: check-merge-conflict
+      # The database is the thing that must never land here. There is
+      # an explicit check for it below too; this catches the general
+      # case of someone committing a 50 MB artefact by accident.
+      - id: check-added-large-files
+        args: [--maxkb=2048]
+      - id: detect-private-key
+      - id: check-case-conflict
+      # Parse checks, not reformatting. A broken ci.yml or
+      # package.json should fail here rather than halfway through a
+      # workflow run.
+      - id: check-yaml
+        # The GitHub Actions `on:` key and multi-document files upset
+        # the strict parser; the workflows are validated by Actions
+        # itself, and by ci.yml's own job.
+        exclude: ^\.github/workflows/
+      - id: check-json
+      - id: check-toml
+      - id: check-executables-have-shebangs
+      # Fixers, deliberately only these two. Whitespace at a line end
+      # and a missing final newline are noise in every diff that
+      # touches the file afterwards, and neither changes meaning.
+      # Nothing here reflows code or reorders anything.
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+
+  # ------------------------------------------------------ secrets
+  # Verified secrets only (`--only-verified`): TruffleHog checks a
+  # candidate against the provider before reporting it. Without that
+  # flag it reports every high-entropy string, which on a repository
+  # full of example tokens and test fixtures is all noise — and a
+  # scanner people learn to ignore is worse than none.
+  #
+  # This is a second line, not the first. The explicit check below
+  # catches the shapes that matter here even when a key is already
+  # revoked and would therefore not verify.
+  - repo: https://github.com/trufflesecurity/trufflehog
+    rev: v3.99.0
+    hooks:
+      - id: trufflehog
+        name: trufflehog (verified secrets)
+        entry: trufflehog git file://. --since-commit HEAD --only-verified --fail
+        language: golang
+        pass_filenames: false
+
+  # ------------------------------- this repository's own disclosure rule
+  - repo: local
+    hooks:
+      # The same test ci.yml's `secrets` job runs. This repository is
+      # public and the application handles client engagement data, so a
+      # credential or a committed database is a disclosure. Catching it
+      # before the commit exists is much better than catching it in CI,
+      # because by then it is in the reflog and usually on a remote.
+      - id: no-secrets-or-client-data
+        name: no secrets or client data
+        language: system
+        pass_filenames: false
+        entry: scripts/check-secrets.sh
+
+      # ------------------------------------------------- the linters
+      - id: python-lint
+        name: ruff
+        language: system
+        pass_filenames: false
+        files: ^backend/.*\.(py|toml)$
+        entry: bash -c 'cd backend && uv run ruff check .'
+
+      - id: go-fmt
+        name: gofmt
+        language: system
+        pass_filenames: false
+        files: ^drone/.*\.go$
+        # CI gates on this separately from the linter, and it is
+        # instant, so it is worth its own hook with its own message.
+        entry: bash -c 'cd drone && out=$(gofmt -l .) && [ -z "$out" ] || { echo "gofmt would change:"; echo "$out"; exit 1; }'
+
+      - id: go-lint
+        name: golangci-lint
+        language: system
+        pass_filenames: false
+        files: ^drone/.*\.(go|mod|sum|yml)$
+        entry: bash -c 'cd drone && golangci-lint run'
+
+      - id: frontend-lint
+        name: eslint
+        language: system
+        pass_filenames: false
+        files: ^frontend/.*\.(ts|tsx|js|mjs|json)$
+        entry: bash -c 'cd frontend && npm run -s lint'
+
+      - id: dockerfile-lint
+        name: hadolint
+        language: system
+        pass_filenames: false
+        files: (^|/)Dockerfile$|^\.hadolint\.yaml$
+        # Through Docker, which is what hadolint-action does in CI, so
+        # the version and the ruleset match rather than depending on
+        # whatever is installed locally.
+        entry: scripts/hadolint.sh

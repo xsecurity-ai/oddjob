@@ -355,24 +355,33 @@ jobs:
       # client engagement data. A credential or a client hostname landing
       # here is a disclosure, so it fails the build rather than waiting
       # to be noticed in review.
+      #
+      # The test itself lives in scripts/check-secrets.sh, because the
+      # pre-commit hook runs the same one. Two copies would eventually
+      # disagree, and the one that matters is whichever is weaker.
       - name: Scan for credentials and committed databases
-        run: |
-          set -euo pipefail
-          fail=0
+        run: scripts/check-secrets.sh
 
-          if git ls-files | grep -nE '\.(db|sqlite3?|pem|key)$|(^|/)\.secret$|(^|/)pg\.env$|(^|/)\.env$'; then
-            echo "::error::a database, key or environment file is committed"
-            fail=1
-          fi
-
-          # Real tokens have a length; the placeholders in the docs and
-          # tests do not reach these thresholds.
-          if git grep -nIE 'xoxb-[A-Za-z0-9-]{20,}|xapp-[A-Za-z0-9-]{20,}|ghp_[A-Za-z0-9]{30,}|sk-ant-[A-Za-z0-9_-]{40,}|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY' -- . ; then
-            echo "::error::what looks like a real credential is committed"
-            fail=1
-          fi
-
-          exit $fail
+      # A different job from the check above, not a replacement for it.
+      # TruffleHog verifies a candidate against the provider, so it
+      # finds live keys in shapes nobody here thought to write down.
+      # The check above finds the shapes that matter to this repository
+      # even when the key is already revoked — which is most of them by
+      # the time anyone looks. Neither subsumes the other.
+      #
+      # `--only-verified`: without it every high-entropy string is a
+      # finding, and on a repository full of example tokens and test
+      # fixtures that is all noise. A scanner people learn to ignore is
+      # worse than no scanner.
+      #
+      # Scans the full history, which is why the checkout above is
+      # fetch-depth: 0 — a key removed in the next commit is still
+      # disclosed, and that is the case worth catching.
+      - name: TruffleHog
+        uses: trufflesecurity/trufflehog@b2b0a92070f206ab7b5a1105d82a7f2f48d92341 # v3.99.0
+        with:
+          path: ./
+          extra_args: --only-verified
 
   # ---------------------------------------------------------------- linters
   # Separate jobs rather than steps bolted onto the suites above, so a

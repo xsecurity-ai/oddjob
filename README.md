@@ -133,10 +133,33 @@ cd frontend && npm install && npm run dev
 SQLite by default. See [Running on PostgreSQL](#running-on-postgresql)
 to point it at a real database.
 
+### Hooks
+
+```bash
+uv tool install pre-commit   # or: pipx install pre-commit
+pre-commit install
+```
+
+Runs the same four linters CI runs — ruff, golangci-lint, ESLint,
+hadolint — out of the same configs, plus TruffleHog and a check that
+no credential or database is being committed. Each linter only wakes
+up when a file in its language changed, so most commits touch two or
+three of them.
+
+A hook that disagrees with CI is worse than no hook, so these call the
+same commands rather than a pre-commit mirror of each tool. That means
+you need `uv`, Go, Node and Docker to commit in those areas — already
+true of anyone who can run the tests.
+
+```bash
+pre-commit run --all-files   # the whole tree, not just what is staged
+SKIP=go-lint git commit …    # skip one deliberately
+```
+
 ### Before you expose it
 
 Both ports bind to loopback. There is no rate limiting and no
-brute-force lockout so put this behind a reverse proxy (e.g., nginx) 
+brute-force lockout so put this behind a reverse proxy (e.g., nginx)
 before changing that. It holds findings, credentials and captured
 traffic including session cookies. Read [SECURITY.md](SECURITY.md).
 
