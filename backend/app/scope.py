@@ -104,6 +104,15 @@ def classify(raw: str, include_subdomains: bool = False) -> Entry:
             net = ipaddress.ip_network(s, strict=False)
         except ValueError as e:
             raise ValueError(f"{raw!r} looks like a range but is not valid: {e}") from e
+        # Same stdlib variance as the bare-address branch below: the
+        # network address of an IPv4-mapped prefix prints as
+        # `::ffff:0.0.0.0` on some CPython patch releases and
+        # `::ffff:0:0` on others. Pinned for the same reason — the
+        # stored value must not depend on the host's interpreter.
+        na = net.network_address
+        if na.version == 6 and na.ipv4_mapped is not None:
+            return Entry("cidr", f"::ffff:{na.ipv4_mapped}/{net.prefixlen}",
+                         included)
         return Entry("cidr", str(net), included)
 
     # Bare address?
