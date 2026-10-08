@@ -91,7 +91,15 @@ def run(suite: str, db: pathlib.Path) -> tuple[int, int, str]:
            "ODDJOB_DB": str(db),
            "ODDJOB_SECRET": "test-secret-not-for-use",
            "ODDJOB_TEST_BASE": f"http://127.0.0.1:{port}",
-           "ODDJOB_TEST_SMTP_PORT": str(free_port())}
+           "ODDJOB_TEST_SMTP_PORT": str(free_port()),
+           # The five-minute target digest, off in the server under test.
+           # slacktest drives `slack.digest.tick()` by hand against the
+           # same database file, and a loop ticking inside the server
+           # would consume the very window the suite just set up — a race
+           # that would fail perhaps one run in five and look like a bug
+           # in the digest rather than in the test. `start()`/`stop()` and
+           # every tick are still exercised; only the timer is silenced.
+           "ODDJOB_SLACK_DIGEST": "0"}
     # A fake Slack, so the suite can prove the events are WIRED rather
     # than just that the strings are formatted correctly.
     slack_port = free_port()

@@ -461,7 +461,10 @@ async def invite_user(body: UserInvite, actor: User = Depends(get_current_user),
         await session.commit()
         for pr, role in grants:
             await broker.publish("acl", action="grant", project=pr.code)
-            await slack.announce(session, pr, slack.user_joined(u.username, role))
+            # `was=None` is a fact here and not an assumption: the account
+            # was created three lines up, so it cannot already hold a grant.
+            await slack.announce_membership(session, pr, u.username,
+                                            was=None, now=role)
 
     if body.password:
         result_ok, detail = False, "account created with a password; no invitation sent"
@@ -619,6 +622,14 @@ async def grant(project: str, body: AclGrant,
         ProjectACL.project_id == pr.id,
         ProjectACL.user_id == (u.id if u else None),
         ProjectACL.group_id == (g.id if g else None)))).scalar_one_or_none()
+    # Read before the write, because afterwards there is nothing left to
+    # compare against and the announce below cannot tell a new member from
+    # a promotion. It used to not try: every grant said "joined the
+    # engagement", including the ones that were actually somebody being
+    # made an admin of a project they had been readonly on for a month.
+    # That is the single access-control event most worth seeing, and it
+    # was indistinguishable in the channel from a routine addition.
+    was = existing.role if existing else None
     if existing:
         existing.role = body.role          # re-granting changes the role
         acl = existing
@@ -631,8 +642,12 @@ async def grant(project: str, body: AclGrant,
         detail=f"{u.username if u else 'group:' + g.name} -> {acl.role}")
     await session.commit()
     await broker.publish("acl", action="grant", project=pr.code)
-    await slack.announce(session, pr, slack.user_joined(
-        u.username if u else f"group:{g.name}", acl.role))
+    # After the commit, so nothing is announced that did not land, and
+    # through the one helper that knows all three transitions. A re-grant
+    # of the role somebody already held posts nothing at all.
+    await slack.announce_membership(
+        session, pr, u.username if u else f"group:{g.name}",
+        was=was, now=acl.role)
     return AclOut(id=acl.id, project_code=pr.code, role=acl.role,
                   username=u.username if u else None, group=g.name if g else None)
 
@@ -647,6 +662,7 @@ async def revoke(project: str, acl_id: int,
     # Read the name before the row goes: afterwards there is nothing to
     # name in the message.
     who = None
+    a_role = a.role
     if a.user_id:
         _u = await session.get(User, a.user_id)
         who = _u.username if _u else None
@@ -657,7 +673,7 @@ async def revoke(project: str, acl_id: int,
     await session.commit()
     await broker.publish("acl", action="revoke", project=pr.code)
     if who:
-        await slack.announce(session, pr, slack.user_removed(who))
+        await slack.announce_membership(session, pr, who, was=a_role, now=None)
 
 
 # -------------------------------------------------------------- api keys

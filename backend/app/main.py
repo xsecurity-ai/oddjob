@@ -79,6 +79,15 @@ async def lifespan(app: FastAPI):
     from .slack_socket import worker as slack_worker
     slack_worker.start()
 
+    # The outbound half that is not event-driven: targets arrive in
+    # hundreds, so they are counted on a timer and summarised rather than
+    # announced one by one. Started HERE, with the other background
+    # loops, so there is one scheduler in the process and not two
+    # competing for sessions. Inert until a project has Slack configured,
+    # and silent on any five minutes in which nothing happened.
+    from .slack import digest as slack_digest
+    slack_digest.start()
+
     # The audit table grows with TRAFFIC, not with the engagement, so it
     # is the one table that needs sweeping rather than keeping. Once at
     # startup, then daily -- a long-lived process would otherwise never
@@ -167,6 +176,7 @@ async def lifespan(app: FastAPI):
     vulnfeed_task.cancel()
     await worker.stop()
     await slack_worker.stop()
+    await slack_digest.stop()
 
 
 app = FastAPI(

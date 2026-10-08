@@ -121,6 +121,11 @@ async def bulk_import(payload: BulkPayload,
         session.add(pr)
         await session.flush()
         # The creator keeps admin on it, or they would immediately lose access.
+        # Not announced, for the reason given at the same line in
+        # `routers/projects.py`: whoever brought the project into existence
+        # being its admin is implied by the project existing, and there is
+        # no channel to post it into yet anyway — a project auto-created by
+        # a bulk upsert has had no Slack configuration applied to it.
         session.add(ProjectACL(project_id=pr.id, user_id=user.id, role="admin"))
         await session.flush()
     else:
