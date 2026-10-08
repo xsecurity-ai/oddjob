@@ -159,8 +159,8 @@ async def roots(project: str = Query(...),
     # likeliest way a whole zone gets put in scope — `*.acme.example` is
     # exactly the entry that means "enumerate this" — so reading only
     # `fqdn` missed the entries that matter most here.
-    for value, included in (await session.execute(
-            select(ProjectScope.value, ProjectScope.included)
+    for value, included, kind in (await session.execute(
+            select(ProjectScope.value, ProjectScope.included, ProjectScope.kind)
             .where(ProjectScope.project_id == pr.id,
                    ProjectScope.kind.in_(("fqdn", "wildcard"))))).all():
         if not included:
@@ -168,7 +168,17 @@ async def roots(project: str = Query(...),
             # offered: generating names under it proposes work that is
             # refused the moment anyone promotes it.
             continue
-        r = gen.registrable((value or "").strip().lstrip("*."))
+        v = (value or "").strip().lstrip("*.")
+        # A wildcard NAMES the zone; a plain hostname does not, and there
+        # is nothing to do with one but infer. `registrable()` guesses,
+        # and a guess has no business overruling the authority that
+        # authorised the work: `*.sub.acme.example` was offered as
+        # `acme.example`, while `sub.acme.example` — the zone actually
+        # written down, and the entry that most means "enumerate this" —
+        # was never offered at all. It went wrong the same way wherever
+        # `_TWO_LEVEL` is short, turning `*.example.com.ve` into the
+        # public suffix `com.ve`.
+        r = v if kind == "wildcard" else gen.registrable(v)
         if r and "." in r and r not in counts:
             counts[r] = 0
             origin[r] = "scope"
