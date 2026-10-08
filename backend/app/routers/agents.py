@@ -90,6 +90,40 @@ INSTALLABLE = ("nmap", "masscan", "gobuster", "gospider", "nuclei",
 #: the engagement, and the operator is normally pasting it immediately.
 ENROLL_TTL = timedelta(hours=2)
 
+def _project_ceiling(pr) -> int:
+    """The engagement's own limit, defaulted in ONE place.
+
+    Written out because `or 5` scattered across call sites is how the
+    default and the column's default drift apart.
+    """
+    return max(1, int(getattr(pr, "drone_max_parallel", 5) or 5))
+
+
+def effective_parallel(a, ceiling: int) -> int:
+    """How many tasks this agent may actually run at once.
+
+    Three numbers, resolved in one place because three places would
+    eventually disagree and the symptom is a setting that appears to
+    do nothing:
+
+      the operator's per-drone override   what somebody decided about
+                                          THIS host
+      the agent's own assessment          cores, memory, what masscan
+                                          managed to emit
+      the project ceiling                 what this ENGAGEMENT should
+                                          do to the client
+
+    The override replaces the agent's assessment -- an operator who
+    says 8 and gets 2 with no explanation concludes the control is
+    broken -- but the project ceiling still applies on top, because it
+    is a statement about the client's estate rather than about the
+    box, and no per-drone number should be able to talk its way past
+    it.
+    """
+    want = a.parallel_override or a.capacity or 1
+    return max(1, min(ceiling, int(want)))
+
+
 #: Task kinds the agent knows how to run, and the importer that reads
 #: each one's output. None means the result is not a scan import.
 TASK_KINDS: dict[str, str | None] = {
@@ -166,9 +200,17 @@ class AgentOut(BaseModel):
     #: useful form: an operator cares that it cannot do `nuclei`, not
     #: that it lacks a binary of that name.
     cannot_run: list[str] = []
-    #: The effective limit: the lower of its own assessment and the
-    #: project's ceiling. What the dispatcher will actually honour.
+    #: The effective limit: the operator's per-drone override if there
+    #: is one, otherwise the agent's own assessment, then the project's
+    #: ceiling on top of either. What the dispatcher will honour.
     max_parallel: int = 1
+    #: The operator's number for this one drone, or null when the agent
+    #: is deciding. Reported separately from `max_parallel` so the UI
+    #: can show the control's state rather than the result -- those
+    #: differ whenever the project ceiling is the binding one, and a
+    #: box showing 5 when somebody typed 8 is how a control stops
+    #: being trusted.
+    parallel_override: int | None = None
     #: What is executing right now, so the fleet table can show the
     #: work rather than only a count of it.
     running: list[dict] = []
@@ -250,6 +292,12 @@ class RegisterIn(BaseModel):
 
 class AgentPatch(BaseModel):
     name: str | None = None
+    #: What this one drone may run at once, overriding its own
+    #: assessment. 0 clears the override and hands the decision back to
+    #: the agent -- an explicit value, because `null` in a PATCH body
+    #: already means "not supplied" and there would otherwise be no way
+    #: to undo this from the UI.
+    parallel_override: int | None = Field(None, ge=0, le=64)
     #: Lower runs first when the project is in primary mode.
     priority: int | None = Field(None, ge=0, le=10000)
     #: Comma-separated region labels, for geo routing.
@@ -357,8 +405,18 @@ def _json_or_none(raw: str | None) -> dict | None:
 
 def _agent_out(a: Agent, code: str, queued: int = 0,
                running: int = 0, completed: int = 0,
-               failed: int = 0, ceiling: int = 5,
+               failed: int = 0, ceiling: int | None = None,
                running_rows: list[AgentTask] | None = None) -> AgentOut:
+    """One agent, as the API reports it.
+
+    `ceiling` is the project's limit. It used to default to 5, which is
+    the same number `Project.drone_max_parallel` defaults to and so
+    looked harmless -- but four callers never passed it, and on a
+    project that had changed its ceiling those responses reported an
+    effective limit computed against a number the engagement does not
+    use. None now means "not supplied", and the callers that have the
+    project to hand pass it.
+    """
     return AgentOut(
         id=a.id, project_code=code, name=a.name, status=a.status,
         platform=a.platform, arch=a.arch, version=a.version,
@@ -381,7 +439,8 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         # The lower of the two, which is what the dispatcher honours.
         # Shown rather than left to be worked out from two numbers in
         # different places.
-        max_parallel=max(1, min(ceiling, a.capacity or 1)),
+        max_parallel=effective_parallel(a, ceiling if ceiling else 5),
+        parallel_override=a.parallel_override,
         running=[{"id": t.id, "kind": t.kind,
                   "subject": _subject(t.kind, json.loads(t.args) if t.args else {}),
                   "started_at": t.started_at.isoformat() if t.started_at else None}
@@ -1014,7 +1073,7 @@ async def enroll(body: EnrollIn, project: str = Query(...),
     await session.commit()
     await session.refresh(a)
     await broker.publish("agents", action="enroll", project=pr.code)
-    return AgentEnrolled(agent=_agent_out(a, pr.code),
+    return AgentEnrolled(agent=_agent_out(a, pr.code, ceiling=_project_ceiling(pr)),
                          callback_key=cb_raw, call_in_key=ci_raw,
                          enroll_token=tok_raw, enroll_expires_at=expires,
                          server_public_key=server_pub)
@@ -1094,6 +1153,10 @@ async def set_agent(agent_id: int, body: AgentPatch | None = None,
             a.name = body.name.strip()[:128] or a.name
         if body.priority is not None:
             a.priority = body.priority
+        if body.parallel_override is not None:
+            # 0 means "back to automatic", stored as NULL so there is
+            # one representation of "no opinion" rather than two.
+            a.parallel_override = body.parallel_override or None
         if body.regions is not None:
             # Normalised on the way in so "JP, eu " and "jp,eu" are the
             # same thing when the dispatcher compares them.
@@ -1104,7 +1167,7 @@ async def set_agent(agent_id: int, body: AgentPatch | None = None,
             a.notes = body.notes
     await session.commit()
     await broker.publish("agents", action="update", project=pr.code)
-    return _agent_out(a, pr.code)
+    return _agent_out(a, pr.code, ceiling=_project_ceiling(pr))
 
 
 #: Where the built agent binaries are looked for, in order. The image
@@ -1314,7 +1377,7 @@ async def reenroll_agent(agent_id: int,
     await broker.publish("agents", action="reenroll", project=pr.code)
 
     return ReEnrolled(
-        agent=_agent_out(a, pr.code),
+        agent=_agent_out(a, pr.code, ceiling=_project_ceiling(pr)),
         enroll_token=tok_raw, enroll_expires_at=expires,
         callback_key=cb_raw, call_in_key=ci_raw,
         server_public_key=server_pub, server_kex_public_key=server_kex_pub,
@@ -1388,7 +1451,7 @@ async def kill_agent(agent_id: int,
                                  if running_closed else ""),
                        commit=True)
     await broker.publish("agents", action="killed", project=pr.code)
-    return _agent_out(a, pr.code)
+    return _agent_out(a, pr.code, ceiling=_project_ceiling(pr))
 
 
 @router.delete("/{agent_id}", status_code=204)
@@ -2261,9 +2324,24 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
         a.capacity = max(1, int(body.capacity))
     if body is not None and body.capacity_reason:
         a.capacity_reason = body.capacity_reason[:300]
-    agent_cap = a.capacity or 1
-    allowed = min(ceiling, agent_cap)
-    if body is not None and body.slots_free is not None:
+    # Sent back on every heartbeat as `max_parallel`. It used to be the
+    # project ceiling, which the agent ignored and which told it
+    # nothing about itself; it is the effective per-agent number now,
+    # and the agent adopts it. That is what makes a per-drone override
+    # take effect at all -- see the note on `slots_free` below.
+    allowed = effective_parallel(a, ceiling)
+    if body is not None and body.slots_free is not None and not a.parallel_override:
+        # The agent's own count of free slots, which it computed from
+        # its own capacity. Honoured when the agent is deciding.
+        #
+        # NOT honoured while an override is set, and that is the whole
+        # reason the override needs saying twice. The agent works out
+        # `slots_free` before it has been told the new number, so
+        # taking the lower of the two clamps the override straight back
+        # to what the agent already believed -- the setting would move
+        # in the database, change nothing, and look broken. It is sent
+        # down in this same response; by the next heartbeat the agent
+        # agrees and this branch stops mattering.
         free = max(0, min(int(body.slots_free), allowed - len(doing)))
     elif said is None:
         free = 0 if doing else 1          # silent agent: one at a time
@@ -2305,13 +2383,13 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
             # means the queue waits here.
             await session.commit()
             return {"ok": True, "task": None, "holding": live,
-                    "slots_free": 0, "max_parallel": ceiling}
+                    "slots_free": 0, "max_parallel": allowed}
         free = max(0, min(free, allowed - len(live)))
 
     if free <= 0:
         await session.commit()
         return {"ok": True, "task": None, "holding": sorted(doing),
-                "slots_free": 0, "max_parallel": ceiling}
+                "slots_free": 0, "max_parallel": allowed}
 
     # Up to `free`, not one. Work addressed to this agent by name
     # comes first: the operator chose it, and a routing policy should
@@ -2385,7 +2463,7 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
     # this reads only the first field and would otherwise be handed
     # nothing at all by a server that had moved on without it.
     return {"ok": True, "task": out[0] if out else None, "tasks": out,
-            "slots_free": free, "max_parallel": ceiling}
+            "slots_free": free, "max_parallel": allowed}
 
 
 @router.post("/tasks/{task_id}/start", response_model=dict)

@@ -231,9 +231,92 @@ check("with the reasoning, so a low number is reviewable",
       me.get("capacity_reason") == "8 cores", str(me.get("capacity_reason")))
 check("and the effective limit is the lower of the two",
       me.get("max_parallel") == 4, str(me.get("max_parallel")))
+
 check("the fleet shows WHAT is running, not just how many",
       len(me.get("running") or []) == 4
       and all(r.get("subject") for r in me["running"]), str(me.get("running"))[:200])
+
+print("\n== an operator can set one drone's parallelism ==")
+# Its own project. Enrolling agents into AGENT perturbs the fleet
+# counts a later section asserts on, and a test that breaks a distant
+# one is worse than a longer setup here.
+call("/api/projects", "POST", {"code": "OVR", "name": "Override"}, token=admin)
+_st, _rt = call("/api/agents/routing?project=OVR", "PUT",
+                {"max_parallel": 4}, token=admin)
+check("the engagement ceiling is set for this section",
+      (_rt or {}).get("max_parallel") == 4, f"{_st} {str(_rt)[:100]}")
+
+
+def _ovr_agent(name):
+    st, en = call("/api/agents?project=OVR", "POST",
+                  {"name": name, "target_os": "linux"}, token=admin)
+    return ((en or {}).get("agent") or {}).get("id"), (en or {}).get("callback_key")
+
+
+OID, OKEY = _ovr_agent("override")
+for _i in range(8):
+    call(f"/api/agents/{OID}/tasks?project=OVR", "POST",
+         {"kind": "nslookup", "args": {"targets": [f"ov{_i}.example"]}},
+         token=admin)
+
+# Three numbers: the agent says 1, the engagement allows 4, and an
+# operator is about to say this particular box should do more.
+st, r = call(f"/api/agents/{OID}?project=OVR", "PATCH",
+             {"parallel_override": 2}, token=admin)
+check("the override is settable per drone", st == 200, f"{st} {str(r)[:120]}")
+check("...and reported as the operator's number, not the result",
+      (r or {}).get("parallel_override") == 2, str(r)[:160])
+check("...and the effective number follows it",
+      (r or {}).get("max_parallel") == 2, str(r)[:160])
+
+# Above what the agent thinks: the operator wins, because one who sets
+# 8 and sees 1 with no explanation concludes the control is broken.
+st, r = call(f"/api/agents/{OID}?project=OVR", "PATCH",
+             {"parallel_override": 8}, token=admin)
+check("an override above the agent's own assessment is honoured",
+      (r or {}).get("parallel_override") == 8, str(r)[:160])
+# ...but the engagement ceiling is about the CLIENT, not the box, and
+# no per-drone number talks its way past it.
+check("the engagement ceiling still applies on top",
+      (r or {}).get("max_parallel") == 4, str(r)[:160])
+
+# The part that makes it take effect at all. The agent computes
+# `slots_free` from its OWN capacity, so honouring that while an
+# override is set clamps the override back to what the agent already
+# believed: the setting moves in the database and nothing happens.
+st, hb = call("/api/agents/heartbeat", "POST",
+              {"ready": True, "running_tasks": [], "slots_free": 1,
+               "capacity": 1, "capacity_reason": "1 core"}, key=OKEY)
+check("a stale slots_free does not clamp the override",
+      len((hb or {}).get("tasks", [])) == 4,
+      f'{len((hb or {}).get("tasks", []))} task(s)')
+check("and the effective number goes down so the agent agrees next time",
+      (hb or {}).get("max_parallel") == 4, str(hb)[:160])
+
+st, r = call(f"/api/agents/{OID}?project=OVR", "PATCH",
+             {"parallel_override": 0}, token=admin)
+check("zero hands the decision back to the agent",
+      (r or {}).get("parallel_override") is None, str(r)[:160])
+check("...and the agent's own assessment governs again",
+      (r or {}).get("max_parallel") == 1, str(r)[:160])
+
+st, _ = call(f"/api/agents/{OID}?project=OVR", "PATCH",
+             {"parallel_override": 999}, token=admin)
+check("an absurd number is refused rather than stored", st == 422, st)
+
+# The behaviour this must not have broken: with no override, the
+# agent's own count is still what the dispatcher honours.
+SID, SKEY = _ovr_agent("selfpaced")
+for _i in range(4):
+    call(f"/api/agents/{SID}/tasks?project=OVR", "POST",
+         {"kind": "nslookup", "args": {"targets": [f"sp{_i}.example"]}},
+         token=admin)
+st, hb = call("/api/agents/heartbeat", "POST",
+              {"ready": True, "running_tasks": [], "slots_free": 1,
+               "capacity": 1, "capacity_reason": "1 core"}, key=SKEY)
+check("with no override the agent's own count still governs",
+      len((hb or {}).get("tasks", [])) == 1,
+      f'{len((hb or {}).get("tasks", []))} task(s)')
 
 # An agent that says nothing is from before any of this and is held to
 # one at a time: a guard the thing it guards can opt out of is no guard.
