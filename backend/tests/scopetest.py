@@ -851,5 +851,91 @@ else:
           and all(c.get("kind") == "fqdn"
                   for c in _cases if c.get("include_subdomains")))
 
+# ============================== INVARIANT: inheritance is not transitive
+print("\n== one step, and the partner must match the list itself ==")
+# This is the invariant the many-to-many address model puts under real
+# pressure, and it was previously true only by construction.
+#
+# `ScopeIndex` links a host to an address so that each can vouch for the
+# other — an operator whose scope says `*.acme.example` and who scans the
+# address `ours.acme.example` resolves to is not going outside it. With
+# one address per target that link was a pair. Now a single CDN address
+# row links to EVERY name the project has recorded at it, so if the walk
+# were recursive — if a partner counted because it was itself ALLOWED
+# rather than because it matches the document DIRECTLY — an in-scope name
+# would vouch for its CDN address, and that address would then vouch for
+# every other tenant renting space behind the same edge. A two-line scope
+# document would quietly cover a hosting provider.
+#
+# The shape, which is the one the operator verified by hand:
+#
+#     ours.acme.example      ALLOWED   on the scope document
+#     203.0.113.9            ALLOWED   via ours.acme.example
+#     theirs.other.example   REFUSED   not in this project's in-scope list
+_cdn = _idx([("wildcard", "*.acme.example", True)],
+            links=[("ours.acme.example", "203.0.113.9")])
+check("the name on the document is in scope",
+      _cdn.check("ours.acme.example").allowed, "")
+_via = _cdn.check("203.0.113.9")
+check("the shared address is in scope, via that name", _via.allowed, _via.reason)
+check("and the ruling says so rather than reading like a document entry",
+      "via ours.acme.example" in _via.reason, _via.reason)
+_theirs = _cdn.check("theirs.other.example")
+check("a co-tenant at that address is REFUSED", not _theirs.allowed, _theirs.reason)
+
+# The strong form. Above, `theirs.other.example` had no link at all, so
+# it could be refused without the walk ever running. Here the project
+# HAS recorded it at the same address — which really happens: a target
+# added while no in-scope list existed, or added at a different address
+# that later turned out to be shared. The walk now runs, finds
+# `203.0.113.9`, and must ask whether that address is ON THE DOCUMENT.
+# It is not. It was only ever allowed because of somebody else.
+_shared = _idx([("wildcard", "*.acme.example", True)],
+               links=[("ours.acme.example", "203.0.113.9"),
+                      ("theirs.other.example", "203.0.113.9")])
+check("ours is still in scope with a neighbour present",
+      _shared.check("ours.acme.example").allowed, "")
+check("the address is still in scope", _shared.check("203.0.113.9").allowed, "")
+_co = _shared.check("theirs.other.example")
+check("but the co-tenant sharing that very address is still REFUSED",
+      not _co.allowed, _co.reason)
+check("and the refusal is about the in-scope list, not about the address",
+      "not in this project's in-scope list" in _co.reason, _co.reason)
+
+# Two hops, spelled out. If scope chained, `far.other.example` would be
+# allowed: it shares 198.51.100.50 with theirs.other.example, which
+# shares 203.0.113.9 with ours.acme.example, which is on the document.
+_chain = _idx([("wildcard", "*.acme.example", True)],
+              links=[("ours.acme.example", "203.0.113.9"),
+                     ("theirs.other.example", "203.0.113.9"),
+                     ("theirs.other.example", "198.51.100.50"),
+                     ("far.other.example", "198.51.100.50")])
+check("scope does not chain across two hops",
+      not _chain.check("far.other.example").allowed,
+      _chain.check("far.other.example").reason)
+check("nor does the second address inherit from the first",
+      not _chain.check("198.51.100.50").allowed,
+      _chain.check("198.51.100.50").reason)
+
+
+# ====================== INVARIANT: every address is checked, separately
+print("\n== a host is not laundered by one of its addresses ==")
+# A target has many addresses now, so `check` takes a list. The two
+# lists read it differently and both readings are the cautious one.
+_multi = _idx([("cidr", "203.0.113.0/24", True), ("ipv4", "198.51.100.7", False)])
+check("a host is admitted by any one of its addresses being in scope",
+      _multi.check("web01.example", ["203.0.113.9", "203.0.113.10"]).allowed, "")
+_barred = _multi.check("web01.example", ["203.0.113.9", "198.51.100.7"])
+check("but ANY address on the out-list bars the host — a machine is "
+      "not partly out of scope", not _barred.allowed, _barred.reason)
+check("and the refusal names the address that caused it",
+      "198.51.100.7" in _barred.reason, _barred.reason)
+# The failure this replaces: `ip_address or ipv6_address` picked one,
+# so a host with a clean v4 and a barred v6 passed on the strength of
+# the first address looked at.
+_v6 = _idx([("cidr", "203.0.113.0/24", True), ("cidr", "2001:db8::/32", False)])
+check("a barred v6 address is not hidden behind a clean v4",
+      not _v6.check("dual.example", ["203.0.113.9", "2001:db8::1"]).allowed, "")
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 raise SystemExit(1 if fail else 0)

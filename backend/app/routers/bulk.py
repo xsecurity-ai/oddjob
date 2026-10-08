@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import addresses
 from ..db import get_session
 from ..events import broker
 from ..hosts import InvalidHost, validate_host
@@ -72,7 +73,10 @@ def _fields(model, *join_keys: str) -> tuple[str, ...]:
     return tuple(k for k in model.model_fields if k not in join_keys)
 
 
-TARGET_FIELDS = _fields(TargetIn, "host")
+#: Addresses are excluded here and written separately below. They are
+#: not a column to copy, and `Target.ip_address` is read-only, so
+#: `_set_if_given` would raise on the first row that carried one.
+TARGET_FIELDS = _fields(TargetIn, "host", "ip_address", "ip_addresses")
 SERVICE_FIELDS = _fields(ServiceIn, "host", "port", "protocol")
 VULN_FIELDS = _fields(VulnIn, "host")
 POC_FIELDS = _fields(PocIn, "host", "title")
@@ -179,8 +183,10 @@ async def bulk_import(payload: BulkPayload,
     idx = await index_for(session, pr.id)
     barred: dict[str, str] = {}
     for h in sorted(want):
-        ip = next((d.get("ip_address") for hh, d in clean_targets if hh == h), None)
-        ruling = idx.check(h, ip)
+        # Every address the payload gives for this host, not one. A row
+        # whose second address is barred is a barred row.
+        ips = next((d.get("ip_addresses") for hh, d in clean_targets if hh == h), None)
+        ruling = idx.check(h, ips)
         # An existing target outside the in-scope list keeps working:
         # the lists govern what is new. One on the out list does not.
         if ruling.verdict == BARRED or (not ruling.allowed and h not in existing):
@@ -210,15 +216,25 @@ async def bulk_import(payload: BulkPayload,
             dupes += 1
         seen.add(host)
         cur = existing.get(host)
+        fresh = {k: v for k, v in data.items() if k in TARGET_FIELDS}
         if cur is None:
-            cur = Target(project_id=pr.id, host=host, **data)
+            cur = Target(project_id=pr.id, host=host, **fresh)
             session.add(cur)
+            await session.flush()
+            await addresses.attach(session, cur, data.get("ip_addresses") or [])
             existing[host] = cur
             created["targets"] += 1
         else:
             # Call once: _set_if_given mutates, so a second call would always
             # report "no change" and the row would count as both.
-            if _set_if_given(cur, data, TARGET_FIELDS):
+            touched = _set_if_given(cur, data, TARGET_FIELDS)
+            # Added, not replaced. A bulk payload is a partial statement
+            # — that is the whole contract of `_set_if_given` — and
+            # "these are the addresses I know about" must not delete the
+            # ones a scan found that the payload's author never saw.
+            gained, _bad = await addresses.attach(
+                session, cur, data.get("ip_addresses") or [])
+            if touched or gained:
                 updated["targets"] += 1
             else:
                 skipped["targets"] += 1
@@ -357,7 +373,11 @@ _MODELS = {"targets": Target, "services": Service, "vulns": Vuln,
 # caller could bulk-write project_id and move rows between engagements, or
 # host and break the join key.
 _PATCHABLE = {
-    "targets": {"alive", "hacked", "os", "notes", "tags", "ip_address"},
+    # `ip_address` is gone from here: it is not a column any more,
+    # and a bulk edit that set one address would have had to mean
+    # "and delete the others", which is not a thing to do to a
+    # multi-selection by accident. Addresses are edited per target.
+    "targets": {"alive", "hacked", "os", "notes", "tags"},
     "services": {"state", "name", "product", "version", "banner"},
     "vulns": {"severity", "status", "description", "remediation"},
     "pocs": {"status", "exit_code", "notes"},

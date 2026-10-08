@@ -1259,21 +1259,29 @@ async def reject_domain_candidates(project: str, ids: list[int]) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# RESERVED, and deliberately not implemented here.
-#
-# Lookup results — GET /api/enumerate/pending and POST /api/enumerate/resolve
-# — are being reworked right now so that most results resolve
-# deterministically, and another agent is adding the in-platform tools for
-# them. Two tools will slot in beside the domain ones above when that lands:
-# roughly `pending_lookups(project)` over the first and
-# `resolve_lookups(project, decisions)` over the second.
-#
-# They are not stubbed, because a stub is a tool the model can call. When
-# the agent's versions land, tests/mcptest.py will FAIL — an agent tool with
-# no MCP equivalent and no AGENT_ONLY entry is exactly what it is built to
-# catch. That failure is the handover, and pre-waiving it here would be
-# switching off the alarm in advance.
-# ---------------------------------------------------------------------------
+# ============================================================ lookup results
+# The handover the RESERVED block here predicted. The agent gained
+# `lookup_results` and `apply_lookup_results`, tests/mcptest.py went red
+# naming both as uncovered, and these close it. The alarm worked.
+@tool(agent_equivalent="lookup_results")
+async def pending_lookups(project: str) -> Any:
+    """Finished DNS lookups and what will happen to each: which resolve
+    themselves and which need a person. Use before adding lookup results,
+    or for "what lookups are waiting", "did the reverse-IP finish"."""
+    return await _req("GET", "/api/enumerate/pending", params={"project": project})
+
+
+@tool(agent_equivalent="apply_lookup_results", writes=True)
+async def apply_lookups(project: str) -> Any:
+    """Add every lookup result whose answer is not in doubt: addresses onto
+    the hosts that resolved to them, a hostname onto a target still named by
+    its address. Use for "add all the lookup results".
+
+    Applies only the deterministic ones. Anything a person has to decide
+    comes back untouched with the reason, and guessing at those is the one
+    thing this must not do.
+    """
+    return await _req("POST", "/api/enumerate/auto", params={"project": project})
 
 
 # ========================================================== counts and health

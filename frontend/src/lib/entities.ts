@@ -41,9 +41,11 @@ export const SPECS: Record<EntityKind, FieldSpec[]> = {
     { name: 'host', label: 'Host (FQDN, IP, bundle id, or cloud resource)', type: 'text',
       required: true, bulk: false,
       help: 'Unique within the project. Not a pattern — no wildcards.' },
-    { name: 'ip_address', label: 'IP address', type: 'text',
-      help: 'Anything that is not an IP literal is stored as empty. '
-            + 'Ignored for a mobile target.' },
+    { name: 'ip_addresses', label: 'IP addresses (comma separated)', type: 'text',
+      help: 'A host legitimately has several — an A record, a AAAA record, '
+            + 'more behind a load balancer. Sending this REPLACES the set. '
+            + 'Anything that is not an IP literal is dropped and named back. '
+            + 'Ignored for a mobile target, which has nothing to resolve.' },
     { name: 'alive', label: 'Alive', type: 'tristate', options: TRISTATE },
     { name: 'hacked', label: 'Hacked', type: 'bool' },
     { name: 'os', label: 'Operating system', type: 'text' },

@@ -239,6 +239,7 @@ project" may mean "not yours".
 | **Drone — fleet** | `list_drones` `enroll_drone` `kill_drone` `drone_routing` `drone_task_kinds` |
 | **Drone — work** | `task_drone` `enumerate_drones` `drone_queue` `list_drone_tasks` `drone_task_status` `retry_drone_task` `cancel_drone_task` `import_drone_task` |
 | **Domains** | `domain_roots` `enumerate_domains` `domain_candidates` `promote_domain_candidates` `reject_domain_candidates` |
+| **Lookups** | `pending_lookups` `apply_lookups` |
 | **Exploits** | `search_exploits` `service_leads` `exploit_leads` `get_cve` `feed_status` |
 | **Deployment** | `site_health` |
 

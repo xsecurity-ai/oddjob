@@ -69,9 +69,10 @@ export function LookupQueueDialog({ project, kind, subjects, onClose,
       const noun = `${reverse ? 'address' : 'name'}${ids.length === 1 ? '' : 'es'}`
       const msg = `Queued ${ids.length} task${ids.length === 1 ? '' : 's'}, one `
               + `per ${reverse ? 'address' : 'name'}, over ${ids.length} ${noun}. `
-              + `Results appear on this page as "choices waiting" as each `
-              + `Drone reports back — nothing is written to the inventory `
-              + `until you pick.`
+              + `Results are applied as each Drone reports back wherever the `
+              + `answer is not in doubt; what is genuinely ambiguous waits `
+              + `for you on this page. Scope decides every name and address `
+              + `on its own either way.`
               + (failed.length
                  ? ` ${failed.length} refused: ${failed[0].subject} — ${failed[0].why}`
                  : '')
@@ -133,9 +134,12 @@ export function LookupQueueDialog({ project, kind, subjects, onClose,
                 region={region} onRegion={setRegion} />
 
               <Caveat>
-                One task, not one per subject. The agent works through them in
-                order and reports the lot, so a slow source delays the answer
-                rather than losing it.
+                One task per subject, so a slow source holds up one answer
+                rather than all of them. Results come back as they finish and
+                most are applied without asking: a host having several
+                addresses is not a decision. What is left for you turns on an
+                address being shared between names, or on a resolver that did
+                not finish.
               </Caveat>
             </>
           )}

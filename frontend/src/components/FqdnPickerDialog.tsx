@@ -1,12 +1,21 @@
 /**
- * Decide what a finished lookup meant.
+ * Decide what a finished lookup meant — and show the ones that need no
+ * deciding separately from the ones that do.
  *
- * A reverse lookup on one address can come back with nothing, with one
- * name, or with forty — shared hosting, a CDN and a reverse proxy all
- * serve many unrelated names from a single address. Exactly one name is
- * the only case where the answer is unambiguous, so that one is applied
- * on sight; more than one is a question only a person can answer, and
- * none is a result worth stating rather than hiding.
+ * Most of this used to be a question because the schema could only hold
+ * one answer: `Target.ip_address` was a single column, so a forward
+ * lookup returning four addresses was four candidates for one slot.
+ * Addresses are many-to-many now, and a host with four addresses simply
+ * has four addresses.
+ *
+ * So the server classifies every result as `auto`, `choice` or
+ * `blocked` (the rule, and the argument for where the line falls, is in
+ * backend/app/lookups.py) and this dialog follows that classification
+ * rather than counting options itself. It had the count rule wired in —
+ * "one answer applies on sight, two or more is a question" — and that
+ * rule is now wrong in both directions: a partial reverse answer with
+ * one name is NOT safe to apply, and several names with one of them
+ * already a target IS.
  *
  * The pending list is derived server-side from completed tasks and the
  * current inventory (see backend/app/routers/enumerate.py). There is no
@@ -35,85 +44,104 @@ function toggle(set: Set<string>, v: string, on: boolean): Set<string> {
 export type PendingLookup =
   Awaited<ReturnType<typeof api.enumeratePending>>[number]
 
-/** Choices a person still has to make — two or more answers for one
- *  subject. A single answer is applied automatically and is deliberately
- *  not counted here, or the badge would advertise a decision nobody has
- *  to take. */
+/** Choices a person still has to make.
+ *
+ *  The server's word, not a count of options. Counting was the old
+ *  rule and it is wrong at both ends now: a partial reverse answer
+ *  naming one host is not safe to apply automatically, and several
+ *  names of which one is already a target is. The badge counts these,
+ *  so it must never advertise a decision nobody has to take. */
 export function openChoices(rows: PendingLookup[] | undefined): PendingLookup[] {
-  return (rows ?? []).filter((r) => r.options.length > 1)
+  return (rows ?? []).filter((r) => r.decision === 'choice')
 }
 
 /**
- * Lookups that ran and produced nothing.
+ * Results there is nothing to pick from: the lookup found nothing, the
+ * scope list refused every name it did find, or somebody already
+ * refused them.
  *
  * Kept visible and kept separate. "We looked and found nothing" is a
- * coverage fact worth seeing, and folding it in with the open choices
- * would make the badge count things nobody can act on.
+ * coverage fact worth seeing, and a scope refusal is the operator's cue
+ * to edit the scope list — but neither is a question, so folding them
+ * in with the open choices would make the badge count things nobody can
+ * answer here.
  */
 export function emptyResults(rows: PendingLookup[] | undefined): PendingLookup[] {
-  return (rows ?? []).filter((r) => r.options.length === 0)
+  return (rows ?? []).filter((r) => r.decision === 'blocked')
+}
+
+/** Results the server will apply by itself. Shown, not asked about. */
+export function autoResults(rows: PendingLookup[] | undefined): PendingLookup[] {
+  return (rows ?? []).filter((r) => r.decision === 'auto')
 }
 
 /**
- * Apply every lookup that came back with exactly one answer.
+ * Ask the server to apply every lookup result whose answer is not in
+ * doubt, and report what it did.
  *
- * One answer is not a choice, so asking would be ceremony. It runs
- * wherever the pending list is already being watched rather than inside
- * the dialog, because the operator who queued the lookup should not
- * have to go and open something for the obvious half of the result to
- * land.
+ * The decision no longer lives here. It used to: this hook picked the
+ * rows with exactly one option and POSTed each one, which was the best
+ * rule available when `ip_address` was a single column. The rule is
+ * wrong now in both directions — a partial reverse answer with one name
+ * must NOT be applied, and several names with one already a target
+ * must — and more to the point it was being made by a browser tab,
+ * which is not where a scope decision belongs. The server classifies,
+ * the server applies, and one call does the lot.
  *
- * Guarded by a ref of what has been attempted, not by the mutation's
- * own state: the list is recomputed on every cache invalidation, and a
- * row whose apply FAILED would otherwise be retried forever at whatever
- * rate the SSE stream fires. A failure is surfaced, not repeated.
+ * The NAME is kept deliberately. `TargetsView` imports it and is being
+ * migrated to TanStack Table by another session; changing the symbol
+ * would collide with that work for no benefit the operator can see.
+ *
+ * Still guarded by a ref. The pending list is recomputed on every cache
+ * invalidation and the call itself invalidates, so an unguarded effect
+ * is a loop. The guard key is the set of auto-able subjects: when a new
+ * lookup finishes the key changes and it runs again.
  */
 export function useAutoApplySingles(project: string | null,
                                     rows: PendingLookup[] | undefined) {
   const qc = useQueryClient()
-  const tried = useRef(new Set<string>())
+  const tried = useRef<string>('')
   const [failed, setFailed] = useState<string | null>(null)
-  //: Set when the single answer could not be applied because another
-  //: target already carries that name. Kept structured rather than as
-  //: a sentence, so the offer to combine them has both ends to work
-  //: with.
+  //: Kept in the returned shape although the server now merges these
+  //: itself. An address-named row taking a name we already hold is no
+  //: longer a collision to offer a dialog about — it is the merge the
+  //: operator ruled automatic. What can still collide is an FQDN
+  //: renaming onto another FQDN, which the server refuses, and this is
+  //: where that offer surfaces.
   const [collision, setCollision] = useState<
     { source: string; into: string } | null>(null)
 
+  const auto = useMemo(
+    () => autoResults(rows).map((r) => `${r.kind}:${r.subject}`).sort().join(','),
+    [rows])
+
   useEffect(() => {
-    if (!project) return
-    const single = (rows ?? []).filter(
-      (r) => r.options.length === 1 && !tried.current.has(`${r.kind}:${r.subject}`))
-    if (!single.length) return
+    if (!project || !auto || tried.current === auto) return
+    tried.current = auto
     let live = true
     void (async () => {
-      let wrote = false
-      for (const r of single) {
-        tried.current.add(`${r.kind}:${r.subject}`)
-        try {
-          await api.enumerateResolve(project, {
-            host: r.target_host, field: r.field, value: r.options[0],
-          })
-          wrote = true
-        } catch (e) {
-          if (!live) continue
-          const msg = e instanceof Error ? e.message : String(e)
-          if (/already has a target/.test(msg)) {
-            // Not a failure to report and move on from. The name
-            // existing is the evidence that this address and that
-            // target are one host, which is exactly when combining
-            // them is right.
-            setCollision({ source: r.target_host, into: r.options[0] })
-          }
-          setFailed(`${r.subject} → ${r.options[0]}: ` + msg)
+      try {
+        const r = await api.enumerateAuto(project)
+        if (!live) return
+        // A refusal is not a failure of the call, and it is the half
+        // most worth reading: a name the scope gate turned down is the
+        // cue to edit the scope list. Named, never counted.
+        const bad = Object.entries(r.refused ?? {})
+        if (bad.length) {
+          setFailed(`${bad.length} not added — ${bad[0][0]}: ${bad[0][1]}`
+                    + (bad.length > 1 ? ` (+${bad.length - 1} more)` : ''))
         }
+        await qc.invalidateQueries()
+      } catch (e) {
+        if (!live) return
+        setFailed(e instanceof Error ? e.message : String(e))
       }
-      if (wrote && live) await qc.invalidateQueries()
     })()
     return () => { live = false }
-  }, [project, rows, qc])
+  }, [project, auto, qc])
 
-  return { failed, collision, clear: () => { setFailed(null); setCollision(null) } }
+  return { failed, collision,
+           clear: () => { setFailed(null); setCollision(null) } }
 }
 
 function Row({ row, project, onBusy }: {
@@ -373,6 +401,99 @@ function MergeConfirm({ project, source, into, onClose }: {
   )
 }
 
+/**
+ * Take every name and address these results offer, in one go.
+ *
+ * At the very top, because it is the answer most of the time: the
+ * operator queued these lookups against their own estate and the
+ * results are their own estate. Making them tick through twelve rows to
+ * say so is how the twelfth gets skipped.
+ *
+ * It is not a bypass. Only `applicable` entries are sent — the ones the
+ * scope gate already allowed, per name, with the refusals listed beside
+ * them — and the server gates again on the way in. What this skips is
+ * the clicking, not the checking.
+ *
+ * The automatic half goes first and separately: it may rename or merge
+ * an address-named row, and the choices below are expressed in terms of
+ * rows that would then no longer exist.
+ */
+function AddAllBar({ project, choices, autos, onBusy }: {
+  project: string
+  choices: PendingLookup[]
+  autos: PendingLookup[]
+  onBusy: (b: boolean) => void
+}) {
+  const qc = useQueryClient()
+  const [err, setErr] = useState<string | null>(null)
+  const [done, setDone] = useState<string | null>(null)
+
+  const names = useMemo(
+    () => choices.reduce((n, r) => n + r.applicable.length, 0), [choices])
+
+  const run = useMutation({
+    mutationFn: async () => {
+      await api.enumerateAuto(project)
+      let taken = 0
+      const refused: string[] = []
+      for (const r of choices) {
+        if (!r.applicable.length) continue
+        // The first applicable entry takes the row and the rest are
+        // added alongside it. Which one takes it is exactly the
+        // question this button is declining to ask — see
+        // backend/app/lookups.py — so it is stated in the result
+        // rather than hidden, and a row where that matters can still
+        // be answered individually below.
+        const res = await api.enumerateResolve(project, {
+          host: r.target_host, field: r.field, value: r.applicable[0],
+          also_resolved: r.options,
+          add: r.applicable.slice(1),
+        })
+        taken += 1 + (res.added?.length ?? 0)
+        for (const [n, why] of Object.entries(res.out_of_scope ?? {})) {
+          refused.push(`${n}: ${why}`)
+        }
+      }
+      return { taken, refused }
+    },
+    onMutate: () => { setErr(null); setDone(null); onBusy(true) },
+    onSuccess: (r) => setDone(
+      `${r.taken} applied`
+      + (r.refused.length ? ` · ${r.refused.length} refused — ${r.refused[0]}` : '')),
+    onError: (e) => setErr(e instanceof Error ? e.message : String(e)),
+    onSettled: async () => { onBusy(false); await qc.invalidateQueries() },
+  })
+
+  return (
+    <Box sx={{ border: `1px solid ${alpha(neon.green, 0.4)}`, borderRadius: 1,
+               p: 1.2 }}>
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}
+             alignItems={{ sm: 'center' }}>
+        <Button variant="outlined" disabled={run.isPending || !choices.length}
+          onClick={() => run.mutate()}
+          sx={{ color: neon.green, borderColor: alpha(neon.green, 0.6),
+                whiteSpace: 'nowrap' }}>
+          {run.isPending ? 'Applying…' : 'Add all'}
+        </Button>
+        <Typography sx={{ fontSize: 11.5, color: neon.muted }}>
+          {names} name{names === 1 ? '' : 's'} across {choices.length}{' '}
+          outstanding result{choices.length === 1 ? '' : 's'}
+          {autos.length > 0 && `, plus ${autos.length} the server applies by itself`}.
+          Scope still decides each one on its own.
+        </Typography>
+      </Stack>
+      {done && (
+        <Alert severity="success" variant="outlined"
+               sx={{ mt: 1, fontSize: 11.5 }}>{done}</Alert>
+      )}
+      {err && (
+        <Alert severity="error" variant="outlined"
+               sx={{ mt: 1, fontSize: 11.5 }}>{err}</Alert>
+      )}
+    </Box>
+  )
+}
+
 export function FqdnPickerDialog({ project, rows, loading, error, auto,
                                    onClose }: {
   project: string
@@ -398,6 +519,7 @@ export function FqdnPickerDialog({ project, rows, loading, error, auto,
     { source: string; into: string } | null>(null)
   const open = useMemo(() => openChoices(rows), [rows])
   const empty = useMemo(() => emptyResults(rows), [rows])
+  const autos = useMemo(() => autoResults(rows), [rows])
 
   return (
     <EnumerateDialog accent={neon.green} onClose={onClose}
@@ -440,11 +562,20 @@ export function FqdnPickerDialog({ project, rows, loading, error, auto,
               }} />
           )}
 
+          {open.length > 0 && (
+            <AddAllBar project={project} choices={open} autos={autos}
+                       onBusy={setBusy} />
+          )}
+
           <Alert severity="info" variant="outlined" sx={{ fontSize: 11.5 }}>
-            Built from the output of finished Drone lookups. A result with
-            exactly one answer is applied straight away; one with several is
-            a question, and one with none is recorded below as a lookup that
-            ran and came back empty — not as an address with no name.
+            Built from the output of finished Drone lookups. A host having
+            several addresses is not a question, so those are recorded
+            without asking. What is left here turns on an address being
+            SHARED — several names answer at it and nothing in the data says
+            which one owns the row — or on an answer the resolver could not
+            finish. Anything with nothing left to pick is listed at the
+            bottom, including a name the scope list refused: that is a cue to
+            edit the scope list, not a decision to take here.
           </Alert>
 
           {open.map((r) => (
@@ -464,7 +595,7 @@ export function FqdnPickerDialog({ project, rows, loading, error, auto,
               <Typography sx={{ fontSize: 10.5, letterSpacing: '0.12em',
                                 textTransform: 'uppercase', color: neon.muted,
                                 fontFamily: `'Orbitron', sans-serif`, mb: 0.6 }}>
-                Looked up, nothing came back
+                Reported, with nothing to pick
               </Typography>
               <Stack spacing={0.6}>
                 {empty.map((r) => (
@@ -482,13 +613,19 @@ export function FqdnPickerDialog({ project, rows, loading, error, auto,
                         {r.note}
                       </Typography>
                     )}
+                    <Box sx={{ flexBasis: '100%' }} />
+                    <Typography sx={{ fontSize: 11, color: neon.muted }}>
+                      {r.plan}
+                    </Typography>
                   </Stack>
                 ))}
               </Stack>
               <Caveat>
                 These stay listed because they stay true. A lookup that found
                 nothing is a fact about what we tried, and clearing it would
-                leave the target looking unexamined.
+                leave the target looking unexamined. A name the scope list
+                refused stays for the same reason: it was found, and the
+                record should say so even though nothing was done with it.
               </Caveat>
             </Box>
           )}

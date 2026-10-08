@@ -162,6 +162,29 @@ class Project(Base, TimestampMixin):
     )
 
 
+#: Which targets answer at which addresses. One row per (host, address)
+#: pair, because the relationship really is many-to-many and nothing
+#: smaller expresses it: a CDN or a shared-hosting address serves dozens
+#: of names, and a single name routinely has an A record, a AAAA record
+#: and several more behind a load balancer.
+#:
+#: The surrogate `id` is not decoration. It is the only thing that makes
+#: "the first address this target was seen at" a stable, answerable
+#: question — `Target.addresses` orders by it, so `Target.ip_address`
+#: (the one-address view the reports and the grid still need) means
+#: "the first one observed" rather than "whichever one the database
+#: handed back this time".
+target_address_links = Table(
+    "target_address_links", Base.metadata,
+    Column("id", Integer, primary_key=True),
+    Column("target_id", ForeignKey("targets.id", ondelete="CASCADE"),
+           nullable=False, index=True),
+    Column("address_id", ForeignKey("target_addresses.id", ondelete="CASCADE"),
+           nullable=False, index=True),
+    UniqueConstraint("target_id", "address_id", name="uq_target_address_link"),
+)
+
+
 class Target(Base, TimestampMixin):
     __tablename__ = "targets"
     __table_args__ = (
@@ -173,6 +196,15 @@ class Target(Base, TimestampMixin):
     project_id: Mapped[int] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True
     )
+    #: The identity of this asset, unique per project and ALWAYS
+    #: lowercase. A single FQDN, or a single IP literal when no name is
+    #: known yet. Never a list and never a pattern — see `app/hosts.py`.
+    #:
+    #: Lowercasing is not cosmetic either. `host` is the join key the
+    #: API speaks, and two rows differing only in case are two buckets
+    #: that findings for one machine get split across. Writers go
+    #: through `normalise_host`; the uniqueness constraint below then
+    #: means something.
     host: Mapped[str] = mapped_column(String(255), index=True)
     #: What kind of asset this is.
     #:
@@ -184,11 +216,11 @@ class Target(Base, TimestampMixin):
     #:           provider
     #:
     #: The distinction is not cosmetic. A mobile app has no address to
-    #: scan, so a blank `ip_address` on one is a fact, not a gap in
+    #: scan, so an empty `ip_addresses` on one is a fact, not a gap in
     #: coverage, and liveness means nothing for it. A cloud resource is
-    #: different again: it often DOES resolve, so its address is kept,
-    #: but "no open ports" on a storage bucket is not the finding that
-    #: the same result on a server would be.
+    #: different again: it often DOES resolve, so its addresses are
+    #: kept, but "no open ports" on a storage bucket is not the finding
+    #: that the same result on a server would be.
     kind: Mapped[str] = mapped_column(
         String(16), default="host", server_default="host", index=True)
     #: Which cloud, for `kind="cloud"`. Free text rather than an enum
@@ -196,7 +228,6 @@ class Target(Base, TimestampMixin):
     #: DigitalOcean, Cloudflare and a dozen others turn up in scope —
     #: and an unrecognised provider must be recordable, not rejected.
     provider: Mapped[str | None] = mapped_column(String(32), index=True)
-    ip_address: Mapped[str | None] = mapped_column(String(45), index=True)
     # Three-state on purpose. NULL means "not probed yet", which is not the
     # same claim as "did not respond" -- collapsing the two would record a gap
     # in our coverage as a fact about the asset.
@@ -219,6 +250,25 @@ class Target(Base, TimestampMixin):
     notes: Mapped[str | None] = mapped_column(Text)
     tags: Mapped[str | None] = mapped_column(Text)
 
+    #: Every address this target answers at, oldest observation first.
+    #:
+    #: `lazy="selectin"`, not the default. A Target is almost never
+    #: rendered without its addresses — the grid, the modal, the report
+    #: and `TargetOut` all want them — and a lazy load inside the async
+    #: session raises MissingGreenlet rather than quietly issuing a
+    #: query, so "load it when touched" is not an option here. One extra
+    #: SELECT per page of targets beats a hundred, and beats a crash.
+    #:
+    #: Writes go through `app/addresses.py`, never by appending a bare
+    #: `TargetAddress`: an address row is unique per project and shared
+    #: between targets, so attaching one is find-or-create, not create.
+    addresses: Mapped[list[TargetAddress]] = relationship(
+        secondary=target_address_links,
+        order_by=target_address_links.c.id,
+        back_populates="targets",
+        lazy="selectin",
+        passive_deletes=True,
+    )
     project: Mapped[Project] = relationship(back_populates="targets")
     events: Mapped[list[Event]] = relationship(
         back_populates="target", cascade="all, delete-orphan", passive_deletes=True,
@@ -238,6 +288,81 @@ class Target(Base, TimestampMixin):
     )
     pocs: Mapped[list[Poc]] = relationship(
         back_populates="target", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+    @property
+    def ip_addresses(self) -> list[str]:
+        """Every address, as plain strings, oldest observation first."""
+        return [a.address for a in self.addresses]
+
+    @property
+    def ip_address(self) -> str | None:
+        """The first address observed, or None.
+
+        **Read-only, and deliberately so.** There used to be a column
+        here and a great deal of code still wants one address to print:
+        a report table cell, the REST summary, the agent's host list.
+        Those are all fine — what is not fine is writing through it,
+        because "set the address" has no meaning once a host may have
+        four. Assigning raises AttributeError, which is the correct and
+        loud failure; `app/addresses.py` is where addresses are written.
+
+        "First observed", not "primary". Nothing here ranks addresses,
+        because nothing in the data does: the A record a scanner happened
+        to hit first is not more real than the other three. Callers that
+        need the whole truth read `ip_addresses`.
+        """
+        a = self.addresses
+        return a[0].address if a else None
+
+
+class TargetAddress(Base, TimestampMixin):
+    """One address, within one project.
+
+    **Scoped per project, never global.** The unique constraint is on
+    (project_id, address) rather than on the address alone, and that is
+    load-bearing twice over. Engagements legitimately recur against the
+    same estate, and a global address row would join two clients' data
+    through a shared CDN edge — the same reason `Target` is keyed per
+    project and not globally.
+
+    Why a row of its own rather than (target_id, address) pairs in one
+    table: "which other names answer here" is the question the shared-
+    hosting and CDN cases turn on, and with an address entity it is a
+    foreign-key join rather than a string scan over every target in the
+    installation. It also means the address is written once and spelled
+    one way, so `203.0.113.9` and ` 203.0.113.9 ` cannot become two
+    different co-tenancy groups.
+
+    Note what this table does NOT do: carrying an address here says
+    nothing about scope. An address is in scope when the scope document
+    says so, or when a host that matches the document directly was
+    observed at it — see `ScopeIndex.check`. Sharing an address with an
+    in-scope name is not inheritance, and must never become it.
+    """
+    __tablename__ = "target_addresses"
+    __table_args__ = (
+        UniqueConstraint("project_id", "address",
+                         name="uq_target_address_project_addr"),
+        Index("ix_target_addresses_project_addr", "project_id", "address"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    #: The compressed, lowercase literal. 45 chars covers the longest
+    #: IPv6 form including an embedded IPv4 and a zone id.
+    address: Mapped[str] = mapped_column(String(45), index=True)
+    #: 4 or 6. Stored rather than re-parsed because the range-coverage
+    #: query filters on it per row, and parsing a few thousand strings
+    #: per request to answer "is this v4" is work the database can do.
+    version: Mapped[int] = mapped_column(Integer, nullable=False,
+                                         server_default="4", default=4)
+
+    targets: Mapped[list[Target]] = relationship(
+        secondary=target_address_links,
+        back_populates="addresses",
+        passive_deletes=True,
     )
 
 

@@ -128,27 +128,80 @@ check("and the choice disappears without being marked done",
       not any(p.get("subject") == "198.51.100.10" for p in (pend or [])),
       str(pend)[:140])
 
-print("== a rename is not a merge ==")
+print("== an address-named row taking a name we already hold is a merge ==")
+# This used to be a 409. The operator ruled it automatic in this one
+# direction: an address-named target is nearly always sparse — it
+# exists because a sweep found an open port before anything knew what
+# the machine was called — and refusing meant the two rows sat side by
+# side for the rest of the engagement. The FQDN survives and keeps its
+# name; nothing it holds is touched.
 call("/api/targets?project=ENUM", "POST", {"host": "198.51.100.20"}, token=admin)
+call("/api/bulk", "POST", {
+    "project": "ENUM", "autocreate_targets": True,
+    "vulns": [{"host": "198.51.100.20", "title": "Open redirect on the sparse row",
+               "severity": "medium"}],
+    "services": [{"host": "198.51.100.20", "port": 8080, "protocol": "tcp"}],
+}, token=admin)
 finish("reverse_ip", {"targets": ["198.51.100.20"]},
        [{"ip": "198.51.100.20", "domains": ["three.acme.example"],
          "sources": ["ptr"], "partial": False}])
+# Nothing is called here. One name, and we already hold it: that is not
+# a decision, so it resolves itself the moment the Drone reports back.
+# "Automatic" that waits for somebody to open a page is a button with a
+# long name.
+st, tgts = call("/api/targets?project=ENUM&page_size=100", token=admin)
+rows = (tgts or {}).get("items", [])
+check("it merged with nobody asked", st == 200, f"status={st}")
+check("the address-named row is gone",
+      not any(t["host"] == "198.51.100.20" for t in rows),
+      str([t["host"] for t in rows]))
+surv = [t for t in rows if t["host"] == "three.acme.example"]
+check("and the survivor answers at both addresses",
+      sorted(surv[0]["ip_addresses"]) == ["198.51.100.10", "198.51.100.20"]
+      if surv else False,
+      str(surv[0].get("ip_addresses") if surv else None))
+
+st, tl = call("/api/targets/ENUM/three.acme.example/timeline", token=admin)
+events = tl if isinstance(tl, list) else (tl or {}).get("items", [])
+blob = json.dumps(events)
+# An address-named row that HAD accumulated findings must be visible in
+# the record, not silently absorbed. The headline says so, not the
+# detail: whoever reads this in three weeks is asking where the finding
+# came from, and the answer has to be the first thing they see.
+check("the merge is on the surviving target's timeline",
+      "merged 198.51.100.20 into three.acme.example" in blob, blob[:200])
+check("and the headline names what it was carrying",
+      "was carrying" in blob and "1 finding" in blob, blob[:300])
+check("the absorbed finding is now on the survivor",
+      any(v["title"] == "Open redirect on the sparse row"
+          for v in (call("/api/vulns?project=ENUM&page_size=100",
+                         token=admin)[1] or {}).get("items", [])),
+      "")
+
+print("-- but two established names still refuse --")
+# The narrow direction is the whole safety argument. Folding one FQDN
+# into another moves findings between two rows that both represent
+# deliberate, named inventory, and that stays a decision somebody makes
+# with a plan in front of them.
+call("/api/targets?project=ENUM", "POST", {"host": "named-a.acme.example"}, token=admin)
+call("/api/targets?project=ENUM", "POST", {"host": "named-b.acme.example"}, token=admin)
 st, err = call("/api/enumerate/resolve?project=ENUM", "POST",
-               {"host": "198.51.100.20", "field": "host",
-                "value": "three.acme.example"}, token=admin)
-# Folding two targets together moves services, findings and PoCs
-# between them. That is a decision, not a side effect of picking a name.
-check("a name already in use is refused", st == 409, f"status={st}")
+               {"host": "named-a.acme.example", "field": "host",
+                "value": "named-b.acme.example"}, token=admin)
+check("an FQDN renaming onto another FQDN is refused", st == 409, f"status={st}")
 check("and the refusal names the target it would have collided with",
-      "three.acme.example" in str(err), str(err)[:140])
+      "named-b.acme.example" in str(err), str(err)[:160])
+check("and says where to do it deliberately",
+      "merge" in str(err).lower(), str(err)[:200])
 
 print("== what cannot be applied ==")
+call("/api/targets?project=ENUM", "POST", {"host": "198.51.100.21"}, token=admin)
 st, _ = call("/api/enumerate/resolve?project=ENUM", "POST",
-             {"host": "198.51.100.20", "field": "host",
+             {"host": "198.51.100.21", "field": "host",
               "value": "203.0.113.9"}, token=admin)
 check("an address is not a hostname", st == 422, f"status={st}")
 st, _ = call("/api/enumerate/resolve?project=ENUM", "POST",
-             {"host": "198.51.100.20", "field": "host", "value": "   "},
+             {"host": "198.51.100.21", "field": "host", "value": "   "},
              token=admin)
 check("an empty answer is refused", st == 422, f"status={st}")
 st, _ = call("/api/enumerate/resolve?project=ENUM", "POST",
@@ -357,10 +410,14 @@ print("-- scope decides, and a refusal is not recorded as a human one --")
 call("/api/projects/ENUM/scope", "POST",
      {"lines": ["*.acme.example", "198.51.100.0/24"]}, token=admin)
 call("/api/targets?project=ENUM", "POST", {"host": "198.51.100.50"}, token=admin)
+# `partial`, so this stays a human's decision and the section can make
+# one. Without it the scope list refuses the neighbour, exactly one name
+# is left, and the result resolves itself on arrival — which is correct
+# and is asserted in the automatic-resolution section at the bottom.
 finish("reverse_ip", {"targets": ["198.51.100.50"]},
        [{"ip": "198.51.100.50",
          "domains": ["tenant.acme.example", "neighbour.someone-else.example"],
-         "sources": ["ptr"], "partial": False}])
+         "sources": ["ptr"], "partial": True}])
 st, res = call("/api/enumerate/resolve?project=ENUM", "POST",
                {"host": "198.51.100.50", "field": "host",
                 "value": "tenant.acme.example",
@@ -622,6 +679,424 @@ check("and skips the 200 already handed over",
       str(len((r9 or {}).get("skipped", []))))
 check("with nothing left deferred", (r9 or {}).get("deferred") == [],
       str((r9 or {}).get("deferred"))[:120])
+
+# ======================================= automatic lookup resolution
+# Under the old model every lookup result was a question, because
+# `Target.ip_address` was one column: four addresses for one slot is
+# four candidates and a human had to pick. Addresses are many-to-many
+# now, so most of those questions stop being questions. The boundary
+# between what is automatic and what is not is the substance of this
+# feature, so it is asserted case by case.
+print("\n== what a lookup result decides for itself ==")
+call("/api/projects", "POST",
+     {"code": "AUTO", "name": "Auto", "scope": ["*.acme.example",
+                                                "198.51.100.0/24"]},
+     token=admin)
+st, ag = call("/api/agents?project=AUTO", "POST", {"name": "scanner"}, token=admin)
+AKEY, AAID = ag["callback_key"], ag["agent"]["id"]
+call("/api/agents/register", "POST",
+     {"platform": "linux", "arch": "amd64", "privileged": True}, key=AKEY)
+
+
+def afinish(kind, args, output):
+    st, t = call(f"/api/agents/{AAID}/tasks?project=AUTO", "POST",
+                 {"kind": kind, "args": args}, token=admin)
+    call("/api/agents/heartbeat", "POST", {}, key=AKEY)
+    call(f"/api/agents/tasks/{t['id']}/result", "POST",
+         {"status": "done", "output": json.dumps(output), "exit_code": 0},
+         key=AKEY)
+
+
+def atargets():
+    st, r = call("/api/targets?project=AUTO&page_size=200", token=admin)
+    return {t["host"]: t for t in (r or {}).get("items", [])}
+
+
+def apending(subject):
+    st, r = call("/api/enumerate/pending?project=AUTO", token=admin)
+    return next((p for p in (r or []) if p["subject"] == subject), None)
+
+
+print("-- forward lookup, N addresses: no choice at all --")
+# A host with four addresses has four addresses. Adding one creates no
+# asset, points no scanner anywhere new, and asserts nothing except that
+# the name resolved there. Nothing is called below the afinish: the
+# result applies itself the moment the Drone reports it.
+call("/api/targets?project=AUTO", "POST", {"host": "many.acme.example"}, token=admin)
+afinish("nslookup", {"targets": ["many.acme.example"]},
+        [{"query": "many.acme.example",
+          "a": ["198.51.100.4", "198.51.100.5"],
+          "aaaa": ["2001:db8::4"]}])
+check("nothing is left waiting on a person",
+      apending("many.acme.example") is None, str(apending("many.acme.example")))
+check("all three addresses land, v4 and v6 together",
+      sorted(atargets()["many.acme.example"]["ip_addresses"])
+      == ["198.51.100.4", "198.51.100.5", "2001:db8::4"],
+      str(atargets()["many.acme.example"]["ip_addresses"]))
+check("ip_address still answers with the first of them",
+      atargets()["many.acme.example"]["ip_address"] == "198.51.100.4",
+      str(atargets()["many.acme.example"]["ip_address"]))
+
+st, rep2 = call("/api/enumerate/auto?project=AUTO", "POST", {}, token=admin)
+check("the endpoint is there for a client that wants to reconcile",
+      st == 200, f"status={st}")
+check("a second run is a no-op — this is safe on every refresh",
+      (rep2 or {}).get("addresses_added") == {}, str(rep2)[:200])
+
+print("-- INVARIANT: every address is gated on its own --")
+# Nothing is approved because a sibling in the same answer was. The
+# name here is in scope and so are two of its addresses; one is on the
+# out-of-scope list, and being handed back in the same breath as two
+# allowed ones does not launder it.
+#
+# Note what DOES vouch, and why that is not the same thing. An address
+# an in-scope NAME resolves to is in scope — that is the link rule the
+# gate has always had, and without it a scope document written as names
+# could never record an address. The vouching comes from the subject of
+# the lookup, which is this very asset. It never comes from a sibling,
+# and the out-of-scope list is consulted before any of it.
+call("/api/projects/AUTO/scope", "POST",
+     {"lines": ["!203.0.113.200"]}, token=admin)
+call("/api/targets?project=AUTO", "POST", {"host": "mixed.acme.example"}, token=admin)
+afinish("nslookup", {"targets": ["mixed.acme.example"]},
+        [{"query": "mixed.acme.example",
+          "a": ["198.51.100.8", "203.0.113.200", "192.0.2.7"]}])
+check("the barred address is not written",
+      sorted(atargets()["mixed.acme.example"]["ip_addresses"])
+      == ["192.0.2.7", "198.51.100.8"],
+      str(atargets()["mixed.acme.example"]["ip_addresses"]))
+# And it stays REPORTED. A refusal is true until the scope list
+# changes, so the row does not quietly disappear once the addresses
+# beside it have been applied — the operator's cue to edit the list
+# would go with it.
+p = apending("mixed.acme.example")
+check("the refusal is still on the queue afterwards, with its reason",
+      list((p or {}).get("refused", {})) == ["203.0.113.200"], str(p)[:280])
+check("classified as blocked — there is nothing to pick",
+      (p or {}).get("decision") == "blocked", str(p)[:280])
+
+print("-- reverse lookup, ONE name: rename, no choice --")
+call("/api/targets?project=AUTO", "POST", {"host": "198.51.100.30"}, token=admin)
+afinish("reverse_ip", {"targets": ["198.51.100.30"]},
+        [{"ip": "198.51.100.30", "domains": ["solo.acme.example"],
+          "sources": ["ptr"], "partial": False}])
+check("the row is renamed, with nobody asked", "solo.acme.example" in atargets(),
+      str(sorted(atargets())))
+check("and the address it was named for moves into ip_addresses",
+      atargets().get("solo.acme.example", {}).get("ip_addresses")
+      == ["198.51.100.30"],
+      str(atargets().get("solo.acme.example", {}).get("ip_addresses")))
+check("and nothing is left waiting", apending("198.51.100.30") is None,
+      str(apending("198.51.100.30")))
+
+print("-- reverse lookup, ONE name we already hold: merge, no choice --")
+call("/api/targets?project=AUTO", "POST", {"host": "198.51.100.31"}, token=admin)
+afinish("reverse_ip", {"targets": ["198.51.100.31"]},
+        [{"ip": "198.51.100.31", "domains": ["solo.acme.example"],
+          "sources": ["ptr"], "partial": False}])
+check("it merges rather than asking", "198.51.100.31" not in atargets(),
+      str(sorted(atargets())))
+check("and the survivor now answers at both addresses",
+      sorted(atargets()["solo.acme.example"]["ip_addresses"])
+      == ["198.51.100.30", "198.51.100.31"],
+      str(atargets()["solo.acme.example"]["ip_addresses"]))
+
+print("-- reverse lookup, SEVERAL names: which one owns the row is a choice --")
+# An address answering to several names is itself the evidence that it
+# is SHARED, so no one of them is "the host at that address". They can
+# all be added; which takes over the address-named row is not something
+# the data decides.
+call("/api/targets?project=AUTO", "POST", {"host": "198.51.100.40"}, token=admin)
+afinish("reverse_ip", {"targets": ["198.51.100.40"]},
+        [{"ip": "198.51.100.40",
+          "domains": ["alpha.acme.example", "bravo.acme.example"],
+          "sources": ["ptr"], "partial": False}])
+p = apending("198.51.100.40")
+check("two names is a genuine choice", (p or {}).get("decision") == "choice",
+      str(p)[:240])
+check("and the question is stated, not implied",
+      "which one takes over" in (p or {}).get("plan", ""),
+      str(p and p.get("plan"))[:200])
+st, rep = call("/api/enumerate/auto?project=AUTO", "POST", {}, token=admin)
+check("auto leaves it alone and reports it as deferred",
+      "reverse_ip:198.51.100.40" in (rep or {}).get("deferred", {}),
+      str(rep)[:240])
+check("the address-named row is still here, unanswered",
+      "198.51.100.40" in atargets(), str(sorted(atargets())))
+check("and creates neither name behind the operator's back",
+      "alpha.acme.example" not in atargets()
+      and "bravo.acme.example" not in atargets(), str(sorted(atargets())))
+
+print("-- unless exactly one of them is a name we already hold --")
+# Then the project has already committed to that name for this host.
+# The address-named row folds into it and the rest become leads.
+call("/api/targets?project=AUTO", "POST", {"host": "bravo.acme.example"}, token=admin)
+st, rep = call("/api/enumerate/auto?project=AUTO", "POST", {}, token=admin)
+check("the established name takes the row",
+      (rep or {}).get("merged") == {"198.51.100.40": "bravo.acme.example"},
+      str(rep)[:240])
+check("and the other name is created as a lead",
+      (rep or {}).get("created") == ["alpha.acme.example"], str(rep)[:240])
+check("the lead carries the address it was seen at",
+      atargets().get("alpha.acme.example", {}).get("ip_addresses")
+      == ["198.51.100.40"],
+      str(atargets().get("alpha.acme.example", {}).get("ip_addresses")))
+check("a lead is NOT marked alive — a reverse lookup is not a probe",
+      atargets().get("alpha.acme.example", {}).get("alive") is None,
+      str(atargets().get("alpha.acme.example", {}).get("alive")))
+
+print("-- INVARIANT: a shared address does not vouch for its tenants --")
+# The CDN case, over HTTP. 198.51.100.0/24 IS on this project's scope
+# document, so if a returned name were gated WITH the address it was
+# seen at, every co-tenant of that range would be auto-created. Names
+# from a multi-answer reverse lookup are gated on the NAME ALONE.
+call("/api/targets?project=AUTO", "POST", {"host": "198.51.100.41"}, token=admin)
+afinish("reverse_ip", {"targets": ["198.51.100.41"]},
+        [{"ip": "198.51.100.41",
+          "domains": ["ours.acme.example", "theirs.other.example"],
+          "sources": ["ptr"], "partial": False}])
+check("the row is named for ours", "ours.acme.example" in atargets(),
+      str(sorted(atargets())))
+check("and the neighbour is not in the inventory",
+      "theirs.other.example" not in atargets(), str(sorted(atargets())))
+# The refusal survives the rename. Once the row has a name it is no
+# longer an outstanding lookup, so the queue cannot report it any more
+# and the timeline is the only place left that can.
+st, tl = call("/api/targets/AUTO/ours.acme.example/timeline", token=admin)
+tlb = json.dumps(tl if isinstance(tl, list) else (tl or {}).get("items", []))
+check("the co-tenant is on the record, with the reason it was not added",
+      "theirs.other.example" in tlb and "Not added, and why" in tlb, tlb[:300])
+check("and the reason is the scope list, named",
+      "in-scope list" in tlb, tlb[:400])
+
+print("-- partial: a floor is acted on forward and never backward --")
+# The asymmetry is the judgement call. A forward decision is not about
+# how many addresses there are — each one that came back is
+# independently true and adding is additive — so a floor is safe. A
+# reverse decision IS about cardinality: one name means "rename it",
+# several mean "the address is shared", and a floor cannot tell them
+# apart. Renaming a row on a partial single answer is exactly the
+# wrong-and-automatic outcome.
+call("/api/targets?project=AUTO", "POST", {"host": "floor.acme.example"}, token=admin)
+afinish("nslookup", {"targets": ["floor.acme.example"]},
+        [{"query": "floor.acme.example", "a": ["198.51.100.60"],
+          "error": "one resolver timed out"}])
+check("a partial forward result is still applied",
+      atargets()["floor.acme.example"]["ip_addresses"] == ["198.51.100.60"],
+      str(atargets()["floor.acme.example"]["ip_addresses"]))
+st, tl = call("/api/targets/AUTO/floor.acme.example/timeline", token=admin)
+tlb = json.dumps(tl if isinstance(tl, list) else (tl or {}).get("items", []))
+check("and the record says the answer was not complete",
+      "floor" in tlb, tlb[:300])
+
+call("/api/targets?project=AUTO", "POST", {"host": "198.51.100.70"}, token=admin)
+afinish("reverse_ip", {"targets": ["198.51.100.70"]},
+        [{"ip": "198.51.100.70", "domains": ["lonely.acme.example"],
+          "sources": ["ptr"], "partial": True}])
+p = apending("198.51.100.70")
+check("a partial reverse result with ONE name is NOT automatic",
+      (p or {}).get("decision") == "choice", str(p)[:260])
+check("and says that the unknown is whether the address is shared",
+      "shared" in (p or {}).get("plan", ""), str(p and p.get("plan"))[:220])
+call("/api/enumerate/auto?project=AUTO", "POST", {}, token=admin)
+check("nothing is renamed on a floor", "198.51.100.70" in atargets(),
+      str(sorted(atargets())))
+
+print("-- a name a human already refused is never auto-added --")
+# A rejected candidate row exists so the same name coming back from a
+# later lookup does not ask for the judgement twice. Auto-adding it
+# would reverse a decision somebody made, silently.
+call("/api/targets?project=AUTO", "POST", {"host": "198.51.100.79"}, token=admin)
+afinish("reverse_ip", {"targets": ["198.51.100.79"]},
+        [{"ip": "198.51.100.79",
+          "domains": ["yes.acme.example", "nope.acme.example"],
+          "sources": ["ptr"], "partial": False}])
+st, _ = call("/api/enumerate/resolve?project=AUTO", "POST",
+             {"host": "198.51.100.79", "field": "host",
+              "value": "yes.acme.example",
+              "also_resolved": ["yes.acme.example", "nope.acme.example"],
+              "deny": ["nope.acme.example"]}, token=admin)
+check("a name can be refused by hand", st == 200, f"status={st}")
+
+call("/api/targets?project=AUTO", "POST", {"host": "198.51.100.80"}, token=admin)
+afinish("reverse_ip", {"targets": ["198.51.100.80"]},
+        [{"ip": "198.51.100.80", "domains": ["nope.acme.example"],
+          "sources": ["ptr"], "partial": False}])
+p = apending("198.51.100.80")
+check("the refused name is blocked, not offered again",
+      (p or {}).get("decision") == "blocked", str(p)[:260])
+check("and the reason says a decision already exists",
+      "already refused" in str((p or {}).get("refused", {})), str(p)[:260])
+call("/api/enumerate/auto?project=AUTO", "POST", {}, token=admin)
+check("the address-named row is untouched", "198.51.100.80" in atargets(),
+      str(sorted(atargets())))
+
+print("-- a lookup that found nothing is reported, not asked about --")
+call("/api/targets?project=AUTO", "POST", {"host": "198.51.100.90"}, token=admin)
+afinish("reverse_ip", {"targets": ["198.51.100.90"]},
+        [{"ip": "198.51.100.90", "domains": [], "sources": ["ptr"],
+          "partial": False}])
+p = apending("198.51.100.90")
+check("an empty answer is blocked, with nothing to pick",
+      (p or {}).get("decision") == "blocked", str(p)[:220])
+check("and says plainly that the lookup returned nothing",
+      "returned no names" in (p or {}).get("plan", ""),
+      str(p and p.get("plan"))[:160])
+
+print("-- a reader may look but not apply --")
+st, _ = call("/api/enumerate/auto?project=AUTO", "POST", {}, token=rtok)
+check("applying automatically still needs write access", st in (403, 404),
+      f"status={st}")
+
+
+# ============================= the same decision, through the agent tools
+# The agent could already QUEUE a reverse-IP or nslookup sweep and then
+# had no way to read what came back, so "add all the lookup results"
+# got "I don\'t have any lookup results to add". Three surfaces now —
+# the dialog, the Add all control and these two tools — and one
+# implementation behind them, because if the agent\'s idea of what scope
+# allows could drift from the API\'s, that difference IS the bug.
+print("\n== the agent can read the queue, and apply the safe half ==")
+import asyncio as _aio  # noqa: E402
+
+from sqlalchemy import select as _sel  # noqa: E402
+
+from app.agent.tools import build as _build  # noqa: E402
+from app.db import SessionLocal as _SL  # noqa: E402
+from app.models import Project as _P  # noqa: E402
+from app.models import User as _U  # noqa: E402
+
+# A genuine choice: two in-scope names, neither of them a target, so
+# nothing decides which one owns the address-named row.
+call("/api/targets?project=AUTO", "POST", {"host": "198.51.100.95"}, token=admin)
+afinish("reverse_ip", {"targets": ["198.51.100.95"]},
+        [{"ip": "198.51.100.95",
+          "domains": ["tool-a.acme.example", "tool-b.acme.example"],
+          "sources": ["ptr"], "partial": False}])
+
+# And something deterministic the automatic pass has not seen: the
+# result lands before the target exists, so there is nothing for it to
+# apply to until the target is created a moment later.
+afinish("reverse_ip", {"targets": ["198.51.100.96"]},
+        [{"ip": "198.51.100.96", "domains": ["tool-c.acme.example"],
+          "sources": ["ptr"], "partial": False}])
+call("/api/targets?project=AUTO", "POST", {"host": "198.51.100.96"}, token=admin)
+
+
+async def _tools(code, writes, scope_ids=None):
+    async with _SL() as sx:
+        pr = (await sx.execute(
+            _sel(_P).where(_P.code == code))).scalars().first() if code else None
+        u = (await sx.execute(_sel(_U).limit(1))).scalars().first()
+        return {t.name: t for t in _build(sx, pr, u, writes,
+                                          scope_ids=scope_ids)}, sx
+
+
+async def _call(code, name, writes=False, scope_ids=None, **kw):
+    async with _SL() as sx:
+        pr = (await sx.execute(
+            _sel(_P).where(_P.code == code))).scalars().first() if code else None
+        u = (await sx.execute(_sel(_U).limit(1))).scalars().first()
+        tool = {t.name: t for t in _build(sx, pr, u, writes,
+                                          scope_ids=scope_ids)}[name]
+        return await tool.fn(**kw)
+
+
+_q = _aio.run(_call("AUTO", "lookup_results"))
+check("the read tool answers with the queue", isinstance(_q, dict), str(_q)[:140])
+_auto_subjects = [r["subject"] for r in _q.get("automatic", [])]
+_need_subjects = [r["subject"] for r in _q.get("needs_you", [])]
+check("it separates what resolves itself from what does not",
+      "198.51.100.96" in _auto_subjects and "198.51.100.95" in _need_subjects,
+      f"automatic={_auto_subjects} needs_you={_need_subjects}")
+check("the ambiguous one comes with the question, not just a flag",
+      "which one takes over" in next(
+          (r["question"] for r in _q["needs_you"]
+           if r["subject"] == "198.51.100.95"), ""),
+      str(_q.get("needs_you"))[:220])
+check("and with the candidates, so they can be offered",
+      sorted(next((r["candidates"] for r in _q["needs_you"]
+                   if r["subject"] == "198.51.100.95"), []))
+      == ["tool-a.acme.example", "tool-b.acme.example"],
+      str(_q.get("needs_you"))[:220])
+check("the distinction is explained rather than left to be inferred",
+      "not a decision" in _q.get("how_to_read_this", ""),
+      str(_q.get("how_to_read_this"))[:160])
+
+print("-- scope_ids bounds it, like every other read --")
+_none = _aio.run(_call(None, "lookup_results", scope_ids=[]))
+check("a user who may read nothing sees nothing",
+      _none.get("total") == 0, str(_none)[:160])
+_wide = _aio.run(_call(None, "lookup_results"))
+check("and a site admin with no project in view sees across them",
+      _wide.get("total", 0) >= _q.get("total", 0), str(_wide.get("total")))
+
+print("-- the write tool applies the safe half and reports the rest --")
+_before = atargets()
+_rep = _aio.run(_call("AUTO", "apply_lookup_results", writes=True))
+_after = atargets()
+check("the deterministic one was applied",
+      "tool-c.acme.example" in _after and "198.51.100.96" not in _after,
+      str(sorted(_after)))
+check("and is named in the report rather than counted",
+      _rep.get("renamed", {}).get("198.51.100.96") == "tool-c.acme.example",
+      str(_rep)[:220])
+# The failure the whole change exists to avoid, and it is worse through
+# a chat window where nobody sees the choice being made.
+check("the ambiguous one was NOT guessed at",
+      "198.51.100.95" in _after
+      and "tool-a.acme.example" not in _after
+      and "tool-b.acme.example" not in _after, str(sorted(_after)))
+_wait = {r["subject"]: r for r in _rep.get("still_needs_a_person", [])}
+check("it comes back as still needing a person, with the candidates",
+      sorted(_wait.get("198.51.100.95", {}).get("candidates", []))
+      == ["tool-a.acme.example", "tool-b.acme.example"], str(_wait)[:260])
+check("and the note says plainly not to guess it",
+      "guessing it" in _rep.get("note", ""), str(_rep.get("note"))[:200])
+
+print("-- the scope gate is not bypassed by going through a tool --")
+# `neighbour.other.example` matches nothing on AUTO\'s in-scope list.
+# The address does — 198.51.100.0/24 is on the document — and that must
+# not carry the name in with it.
+call("/api/targets?project=AUTO", "POST", {"host": "198.51.100.97"}, token=admin)
+afinish("reverse_ip", {"targets": ["198.51.100.97"]},
+        [{"ip": "198.51.100.97",
+          "domains": ["tool-d.acme.example", "neighbour.other.example"],
+          "sources": ["ptr"], "partial": False}])
+_q2 = _aio.run(_call("AUTO", "lookup_results"))
+_blocked = {r["subject"]: r for r in _q2.get("nothing_to_pick", [])}
+_all_rows = (_q2.get("automatic", []) + _q2.get("needs_you", [])
+             + list(_blocked.values()))
+_refused = {k: v for r in _all_rows for k, v in (r.get("not_allowed") or {}).items()}
+check("the tool reports the refused co-tenant rather than hiding it",
+      "neighbour.other.example" in _refused
+      or "neighbour.other.example" not in atargets(), str(_q2)[:260])
+check("and it is not in the inventory",
+      "neighbour.other.example" not in atargets(), str(sorted(atargets())))
+check("while our own name on that address was taken",
+      "tool-d.acme.example" in atargets(), str(sorted(atargets())))
+
+
+# ================================ INVARIANT: host identity and its case
+print("\n== host is unique per project and always lowercase ==")
+call("/api/projects", "POST", {"code": "CASE", "name": "Case"}, token=admin)
+st, _ = call("/api/targets?project=CASE", "POST",
+             {"host": "Web01.ACME.Example."}, token=admin)
+check("a mixed-case host with a trailing dot is accepted", st == 201,
+      f"status={st}")
+st, r = call("/api/targets?project=CASE&page_size=50", token=admin)
+hosts = [t["host"] for t in (r or {}).get("items", [])]
+check("and stored lowercased, with the root dot gone",
+      hosts == ["web01.acme.example"], str(hosts))
+st, r = call("/api/targets?project=CASE", "POST",
+             {"host": "WEB01.acme.example"}, token=admin)
+# Two rows differing only in case are two buckets one machine's findings
+# get split across. `host` is the join key the API speaks.
+check("the same host in another case is a duplicate, not a second row",
+      st == 409, f"status={st} {str(r)[:140]}")
+st, r = call("/api/targets?project=CASE&page_size=50", token=admin)
+check("still one row", len((r or {}).get("items", [])) == 1,
+      str([t["host"] for t in (r or {}).get("items", [])]))
 
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

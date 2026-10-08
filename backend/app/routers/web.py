@@ -432,7 +432,7 @@ async def replay(web_id: int, body: ReplayIn,
     # project acquired before the list said otherwise is still a host
     # nobody may send to.
     await assert_allowed(session, target.project_id, hostname,
-                         "replaying to", ip=known.ip_address)
+                         "replaying to", ip=known.ip_addresses)
 
     scheme = orig.scheme or "http"
     if not path.startswith("/"):

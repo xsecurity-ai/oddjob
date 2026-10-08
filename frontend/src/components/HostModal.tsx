@@ -110,7 +110,18 @@ function Body({ project, host }: { project: string; host: string }) {
             {t.host}
           </Box>
         </Field>
-        <Field label="IP Address">{t.ip_address || dash}</Field>
+        {/* Every one of them, not the first. A host with an A record, a
+            AAAA record and two more behind a load balancer has four
+            addresses, and showing one made the other three invisible to
+            anybody reading the modal — which is where somebody goes to
+            find out what a host actually is. */}
+        <Field label={t.ip_addresses.length > 1 ? 'IP Addresses' : 'IP Address'}>
+          {t.ip_addresses.length
+            ? <Stack spacing={0.2}>
+                {t.ip_addresses.map((a) => <span key={a}>{a}</span>)}
+              </Stack>
+            : dash}
+        </Field>
         <Field label="Operating System">
           {t.os
             ? <Stack direction="row" spacing={0.8} alignItems="baseline" flexWrap="wrap" useFlexGap>

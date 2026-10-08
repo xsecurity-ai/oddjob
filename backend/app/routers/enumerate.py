@@ -21,6 +21,18 @@ on one makes it disappear and there is no second table to keep in
 step. The cost is that a lookup which found nothing keeps being
 reported — correctly, because "we looked and nothing came back" stays
 true until something changes it.
+
+**Most results are no longer a choice at all.** They were, when
+`Target.ip_address` was one column: four addresses for one slot is four
+candidates, and a human had to pick. Addresses are many-to-many now, so
+four addresses is just four addresses. `app/lookups.py` holds the rule
+for which results are deterministic and which are not, and argues the
+boundary at length; this module applies it. `POST /auto` writes every
+deterministic outcome and reports what it did, and `GET /pending`
+labels each row `auto`, `choice` or `blocked` so the queue can show the
+three apart. A `blocked` row is not a question — the scope list refused
+the name, or somebody already did — so it is reported and never
+offered as something to pick.
 """
 from __future__ import annotations
 
@@ -34,13 +46,24 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import audit
+from .. import addresses as addr_mod
+from .. import audit, lookups
 from .. import merge as merge_mod
 from ..db import get_session
 from ..domains import registrable
 from ..events import broker
 from ..hosts import InvalidHost, validate_host
-from ..models import AgentTask, DomainCandidate, Project, ProjectScope, Target, User
+from ..lookups import BLOCKED, CHOICE, LOOKUP_KINDS
+from ..models import (
+    AgentTask,
+    DomainCandidate,
+    Project,
+    ProjectScope,
+    Target,
+    TargetAddress,
+    User,
+)
+from ..scope import ScopeIndex
 from ..scopegate import index_for
 from ..security import get_current_user, require_project
 from ..timeline import record
@@ -53,9 +76,6 @@ router = APIRouter(prefix="/api/enumerate", tags=["enumerate"])
 #: completeness.
 LOOKUP_SCAN_LIMIT = 300
 
-#: Kinds whose output this module knows how to read.
-LOOKUP_KINDS = ("reverse_ip", "nslookup")
-
 
 def _is_ip(value: str) -> bool:
     try:
@@ -66,14 +86,22 @@ def _is_ip(value: str) -> bool:
 
 
 class PendingChoice(BaseModel):
-    """One finished lookup whose answer has not been applied yet."""
+    """One finished lookup whose answer the inventory does not carry yet.
+
+    Not all of these are choices any more, which is why `decision` is
+    here. The name is kept because the route is `/pending` and the UI
+    type is generated from it; what changed is that two thirds of the
+    rows now say `auto`, carry a `plan`, and want a human to read them
+    rather than answer them.
+    """
     task_id: int
     kind: str = Field(description="reverse_ip | nslookup")
     #: What was looked up — an address for reverse_ip, a name for nslookup.
     subject: str
     #: The target this lands on, named as the inventory names it now.
     target_host: str
-    #: Which column applying it would write.
+    #: What applying it would write. `host` renames or merges the
+    #: address-named row; `ip_address` adds addresses to it.
     field: str = Field(description="host | ip_address")
     options: list[str] = []
     #: At least one source did not answer, so `options` is a floor and
@@ -82,6 +110,19 @@ class PendingChoice(BaseModel):
     partial: bool = False
     note: str | None = None
     finished_at: str | None = None
+    #: auto | choice | blocked. See `app/lookups.py` for where the line
+    #: falls and why.
+    decision: str = CHOICE
+    #: One sentence saying what will happen, or why nothing will.
+    plan: str = ""
+    #: The subset of `options` that would actually be written. For a
+    #: reverse result that is the names the scope gate allows, which is
+    #: usually fewer than came back.
+    applicable: list[str] = []
+    #: Each entry that will not be written, and why. Always reported:
+    #: a name the gate refused is the operator's cue to edit the scope
+    #: list, and a count they cannot act on is not a report.
+    refused: dict[str, str] = {}
 
 
 class ResolveIn(BaseModel):
@@ -153,21 +194,24 @@ def _forward_choice(rec: dict) -> tuple[str, list[str], bool, str | None]:
     return name, addrs, bool(err), err
 
 
-@router.get("/pending", response_model=list[PendingChoice])
-async def pending(project: str = Query(...),
-                  pr: Project = Depends(require_project("readonly")),
-                  _: User = Depends(get_current_user),
-                  session: AsyncSession = Depends(get_session)):
-    """Finished lookups whose answer the inventory does not yet carry.
+async def _outstanding(session: AsyncSession, pr: Project
+                       ) -> list[tuple[AgentTask, Target, str, str,
+                                       list[str], bool, str | None]]:
+    """Every finished lookup the inventory has not acted on yet.
+
+    -> (task, target, subject, field, options, partial, note).
+
+    One derivation shared by `/pending` and `/auto`, because the moment
+    they were two the queue showed one thing and the apply did another.
 
     Only the newest task per subject is offered. An address looked up
-    three times produces one choice, not three, and it is the most
-    recent answer — re-running a lookup is how you correct a stale one,
-    so an older result must not be able to win.
+    three times produces one row, not three, and it is the most recent
+    answer — re-running a lookup is how you correct a stale one, so an
+    older result must not be able to win.
 
-    A choice is dropped once the target it would change no longer needs
-    it. That is what makes this safe to derive: answering removes it,
-    and nothing has to be marked done.
+    A row disappears once the target it would change no longer needs
+    it. That is what makes this safe to derive: acting removes it, and
+    nothing has to be marked done.
     """
     rows = (await session.execute(
         select(AgentTask)
@@ -180,15 +224,20 @@ async def pending(project: str = Query(...),
         select(Target).where(Target.project_id == pr.id))).scalars().all()
     # Two indexes because the two lookups are addressed differently: a
     # reverse result names an address, a forward one names a host.
+    #
+    # `by_ip` now indexes EVERY address a target carries, not one
+    # column. That is the many-to-many showing through: a reverse
+    # lookup on the second address of a multi-homed host used to find
+    # nothing and be silently dropped.
     by_ip: dict[str, Target] = {}
     by_host: dict[str, Target] = {}
     for t in targets:
         by_host[t.host.lower()] = t
-        for addr in ((t.ip_address or "").strip(), t.host.strip()):
-            if addr and _is_ip(addr) and addr not in by_ip:
-                by_ip[addr] = t
+        for a in [*t.ip_addresses, t.host.strip()]:
+            if a and _is_ip(a) and a not in by_ip:
+                by_ip[a] = t
 
-    out: list[PendingChoice] = []
+    out = []
     seen_subjects: set[tuple[str, str]] = set()
     for task in rows:
         for rec in _parse(task.output):
@@ -207,7 +256,13 @@ async def pending(project: str = Query(...),
                 subject, options, partial, note = _forward_choice(rec)
                 field = "ip_address"
                 t = by_host.get(subject)
-                if t is None or (t.ip_address or "").strip():
+                if t is None:
+                    continue
+                # Not "has no address" any more — a host may have four,
+                # and a later lookup finding a fifth is still news. The
+                # row drops out when every address it names is already
+                # held, which is checked against the decision below.
+                if not [a for a in options if a not in t.ip_addresses]:
                     continue
                 # A mobile app has no address, so a forward lookup on
                 # one is not a gap to fill.
@@ -220,12 +275,140 @@ async def pending(project: str = Query(...),
             if key in seen_subjects:
                 continue
             seen_subjects.add(key)
-            out.append(PendingChoice(
-                task_id=task.id, kind=task.kind, subject=subject,
-                target_host=t.host, field=field, options=options,
-                partial=partial, note=note,
-                finished_at=task.finished_at.isoformat() if task.finished_at else None))
+            out.append((task, t, subject, field, options, partial, note))
     return out
+
+
+async def _rejected_names(session: AsyncSession, project_id: int) -> set[str]:
+    """Names a human has already refused for this project.
+
+    A rejected `DomainCandidate` row exists precisely so the same name
+    coming back from a later lookup does not ask for the judgement a
+    second time. Auto-adding one would reverse a decision somebody
+    made, silently, which is the one thing automation here must not do.
+    """
+    return {n for (n,) in (await session.execute(
+        select(DomainCandidate.name)
+        .where(DomainCandidate.project_id == project_id,
+               DomainCandidate.state == "rejected"))).all()}
+
+
+def _gate(idx: ScopeIndex, rejected: set[str], known: set[str]):
+    """-> a `allowed(name)` callable for `app/lookups.py`.
+
+    Returns None to permit and a sentence to refuse. Every name is
+    asked about separately and on its own merits: nothing is admitted
+    because a name beside it in the same answer was.
+    """
+    def allowed(name: str, ip=None) -> str | None:
+        n = name.strip().lower().rstrip(".")
+        if n in rejected:
+            return ("already refused for this project; promote the "
+                    "candidate if that has changed")
+        if not _is_ip(n):
+            try:
+                validate_host(n)
+            except InvalidHost as e:
+                return str(e)
+        if n in known:
+            # Already a target. The gate governs what is NEW, and
+            # refusing a host the project already holds would freeze an
+            # engagement the day its scope list was typed in — the same
+            # reasoning as `bulk.py`. A merge into it is still gated by
+            # the merge's own rules.
+            return None
+        ruling = idx.check(n, ip)
+        return None if ruling.allowed else ruling.reason
+    return allowed
+
+
+async def _decisions(session: AsyncSession, pr: Project):
+    """Pair every outstanding lookup with what should be done about it."""
+    rows = await _outstanding(session, pr)
+    if not rows:
+        return []
+    idx = await index_for(session, pr.id)
+    rejected = await _rejected_names(session, pr.id)
+    known = {h for (h,) in (await session.execute(
+        select(Target.host).where(Target.project_id == pr.id))).all()}
+    allowed = _gate(idx, rejected, known)
+
+    out = []
+    for task, t, subject, field, options, partial, note in rows:
+        if field == "ip_address":
+            # The addresses the target does not have yet. One it
+            # already carries is not news and must not be reported as
+            # something that would be added.
+            fresh = [a for a in options if a not in t.ip_addresses]
+
+            def at_name(a, _idx=idx, _n=t.host):
+                # The forward direction is the SAFE half of the pair,
+                # and the only one where the lookup's subject may vouch.
+                # `_n` is a host this project holds and the resolver
+                # says it lives at `a`; a scope document written as
+                # names would otherwise be unable to record any address
+                # at all, which is the failure `ScopeIndex`'s link rule
+                # exists to prevent — "the thing being refused is the
+                # same machine under a different label".
+                #
+                # Recording the pair on the index before asking is not a
+                # shortcut round the gate. `check` walks the link ONE
+                # step and requires the partner to match the document
+                # DIRECTLY, so this only works because `_n` itself is on
+                # the scope list; a third name sharing the address still
+                # has to stand on its own. And the out-of-scope list is
+                # consulted before any of it, so a barred address stays
+                # barred however in-scope the name is.
+                _idx.link(_n, a)
+                return allowed(a)
+
+            # Each address asked about separately. Nothing is admitted
+            # because a sibling in the same answer was.
+            d = lookups.decide_forward(fresh, at_name, partial)
+        else:
+            # NAME ONLY when the address answers to more than one — see
+            # `app/lookups.py`. With a single name the address and the
+            # name are the same asset we already hold, and
+            # `check(name, ip)` is what that parameter is for.
+            names = [n for n in options if n]
+            def one(n, _s=subject, _n=names):
+                return allowed(n, _s if len(_n) == 1 else None)
+            d = lookups.decide_reverse(names, one, partial,
+                                       lambda n: n in known)
+        out.append((task, t, subject, field, options, partial, note, d))
+    return out
+
+
+#: The decisions, for callers outside this module. The agent tools read
+#: it and the auto-apply writes from it, and they share this function
+#: rather than each deriving the rule: if the agent's idea of what scope
+#: allows could drift from the API's, that difference is the bug, and
+#: having one function is the only way to be sure there is none to find.
+lookup_decisions = _decisions
+
+
+@router.get("/pending", response_model=list[PendingChoice])
+async def pending(project: str = Query(...),
+                  pr: Project = Depends(require_project("readonly")),
+                  _: User = Depends(get_current_user),
+                  session: AsyncSession = Depends(get_session)):
+    """Finished lookups, each labelled with what should happen to it.
+
+    Writes nothing, including for the rows marked `auto` — a GET that
+    changed the inventory would make refreshing the page an action.
+    `POST /auto` is what applies them.
+    """
+    return [
+        PendingChoice(
+            task_id=task.id, kind=task.kind, subject=subject,
+            target_host=t.host, field=field, options=options,
+            partial=partial, note=note,
+            finished_at=task.finished_at.isoformat() if task.finished_at else None,
+            decision=d.verdict, plan=d.plan, applicable=d.apply,
+            refused=d.refused)
+        for task, t, subject, field, options, partial, note, d
+        in await _decisions(session, pr)
+    ]
 
 
 async def _decide_others(session: AsyncSession, pr: Project, user: User,
@@ -286,6 +469,12 @@ async def _decide_others(session: AsyncSession, pr: Project, user: User,
         t = Target(project_id=pr.id, host=n, alive=None)
         session.add(t)
         await session.flush()
+        # The address it was seen at goes on it. That is the whole
+        # content of a reverse lookup about this name, and without it
+        # the new target is a bare string with no record of why it is
+        # here — and the scope index has no pair to read back out.
+        if _is_ip(body.host):
+            await addr_mod.attach(session, t, [body.host])
         await record(session, t.id, "discovered",
                      f"added from a reverse lookup on {body.value}",
                      detail=(f"{body.value} answers to this name as well as "
@@ -316,6 +505,106 @@ async def _decide_others(session: AsyncSession, pr: Project, user: User,
     return added, refused, denied
 
 
+async def _take_name(session: AsyncSession, pr: Project, user: User | None,
+                     t: Target, name: str, who: str | None = None) -> str:
+    """Give the address-named target `t` the name `name`. -> what happened.
+
+    Two outcomes, and which one it is depends only on whether the
+    project already holds that name.
+
+    **Rename** when it does not. The address the row was named for moves
+    into `ip_addresses`, where before it had to fit a single column and
+    sometimes could not.
+
+    **Merge** when it does — and this reverses a refusal that stood here
+    deliberately. Folding two targets together moves services, findings,
+    PoCs, web exchanges, implants and a timeline between them, and that
+    was a decision somebody should make rather than a side effect of a
+    name appearing in a dropdown. The operator has ruled it automatic in
+    ONE narrow direction: an address-named row merging into an
+    established FQDN. That direction is low-risk because an address-named
+    target is nearly always sparse — it exists because a sweep found an
+    open port before anything knew what the machine was called — and
+    because the FQDN target survives, keeps its name, and loses nothing.
+    The reverse, and FQDN-to-FQDN, still refuse: see `resolve`.
+
+    Sparse is not the same as empty, so the surviving target gets a
+    timeline entry naming exactly what came across, with findings called
+    out on the first line. An address-named row that HAD accumulated
+    findings must be visible in the record, not silently absorbed.
+    """
+    clash = (await session.execute(
+        select(Target).where(Target.project_id == pr.id,
+                             Target.host == name))).scalar_one_or_none()
+    was = t.host
+    if clash is None:
+        await addr_mod.attach(session, t, [was])
+        t.host = name
+        await record(session, t.id, "change",
+                     f"named {name} from a reverse lookup on {was}",
+                     actor=user or who, source="drone:reverse_ip")
+        return "renamed"
+
+    done = await merge_mod.merge(
+        session, t, clash, actor=who or (user.username if user else "system"))
+    summary = merge_mod.describe(done)
+    await record(
+        session, clash.id, "change", summary.split("\n")[0],
+        detail=(f"A reverse lookup on {was} returned {name}, which this "
+                f"project already held, so the two were one host all "
+                f"along and the address-named row was folded in "
+                f"automatically.\n\n{summary}"),
+        actor=user or who, source="drone:reverse_ip")
+    # Also in the installation audit trail. A merge deletes a row, and
+    # the timeline that would have explained it goes with it; this is
+    # the only place that still names what was absorbed.
+    await audit.record(session, "ui" if user else "drone", "target.merge",
+                       user=user, username=None if user else who,
+                       project_code=pr.code,
+                       detail=summary.replace("\n", "; ")[:4000])
+    return "merged"
+
+
+async def _note_others(session: AsyncSession, target_id: int, subject: str,
+                       chosen: str, others: list[str],
+                       refused: dict[str, str] | None = None) -> None:
+    """The names that were not the one this row took. Timeline only.
+
+    Its own entry rather than folded into the rename line, because this
+    is a finding about the ADDRESS — what else lives there — and not a
+    note about the rename.
+
+    **The refused ones are in here too, and this is the only place they
+    survive.** Once the row has been renamed it stops being an
+    outstanding lookup, so `GET /pending` can no longer report it; a
+    name the scope gate turned down would then exist nowhere at all. It
+    was found, and the record has to say so even though nothing was
+    done with it — that is the difference between "we did not look" and
+    "we looked and were not allowed to follow it up".
+    """
+    refused = refused or {}
+    if not others and not refused:
+        return
+    shown = others[:40]
+    more = f" (+{len(others) - len(shown)} more)" if len(others) > len(shown) else ""
+    body = ""
+    if others:
+        body += "\n".join(shown) + more
+    if refused:
+        body += ("\n\nNot added, and why:\n"
+                 + "\n".join(f"{k} — {v}" for k, v in sorted(refused.items())))
+    await record(
+        session, target_id, "discovered",
+        f"{subject} also resolves to {len(others) + len(refused)} other name(s)",
+        detail=("A reverse lookup on " + subject + " returned these as "
+                "well as " + chosen + ". They are not necessarily the "
+                "same host — an address answering to several names "
+                "is usually shared hosting or a load balancer — but "
+                "each is a lead and none is in scope merely because "
+                "it appeared here:\n\n" + body),
+        source="drone:reverse_ip")
+
+
 @router.post("/resolve")
 async def resolve(body: ResolveIn, project: str = Query(...),
                   pr: Project = Depends(require_project("user")),
@@ -323,11 +612,13 @@ async def resolve(body: ResolveIn, project: str = Query(...),
                   session: AsyncSession = Depends(get_session)):
     """Write a chosen lookup answer onto the target.
 
-    Renaming is a rename, not a merge. If the project already holds a
-    target under the chosen name this refuses and says which one:
-    folding two targets together moves services, findings and PoCs
-    between them, and that is a decision somebody makes deliberately,
-    not a side effect of picking a name off a list.
+    The one case that merges is an ADDRESS-named target taking a name
+    the project already holds — see `_take_name`. Everything else that
+    would fold two targets together still refuses and says which one it
+    would have collided with: moving findings between two established
+    FQDNs is a decision somebody makes at `/api/enumerate/merge`, with a
+    plan in front of them, and not a side effect of picking a name off a
+    list.
     """
     t = (await session.execute(
         select(Target).where(Target.project_id == pr.id,
@@ -344,6 +635,7 @@ async def resolve(body: ResolveIn, project: str = Query(...),
     added: list[str] = []
     refused: dict[str, str] = {}
     denied: list[str] = []
+    surviving = t
 
     if body.field == "host":
         try:
@@ -354,59 +646,59 @@ async def resolve(body: ResolveIn, project: str = Query(...),
             raise HTTPException(
                 422, f"{name} is an address, not a name — a reverse lookup "
                      f"that returns the address back is not a result")
-        clash = (await session.execute(
-            select(Target).where(Target.project_id == pr.id,
-                                 Target.host == name))).scalar_one_or_none()
-        if clash is not None:
-            raise HTTPException(
-                409, f"{pr.code} already has a target named {name}. Renaming "
-                     f"{t.host} to it would merge two targets, which moves "
-                     f"their services and findings — do that deliberately.")
         was = t.host
-        # The old name was the address, and the address is worth keeping.
-        if not (t.ip_address or "").strip() and _is_ip(was):
-            t.ip_address = was
-        t.host = name
-        await record(session, t.id, "change",
-                     f"named {name} from a reverse lookup on {was}",
-                     actor=user, source="drone:reverse_ip")
+        if not _is_ip(was):
+            # The narrow direction, enforced. `_take_name` would merge
+            # happily; what makes the automatic merge acceptable is that
+            # the row being absorbed is an address, and this is where
+            # that is checked rather than assumed.
+            clash = (await session.execute(
+                select(Target).where(Target.project_id == pr.id,
+                                     Target.host == name))).scalar_one_or_none()
+            if clash is not None:
+                raise HTTPException(
+                    409, f"{pr.code} already has a target named {name}. "
+                         f"Renaming {was} to it would merge two named "
+                         f"targets, which moves their services and findings "
+                         f"— do that at /api/enumerate/merge, with the plan "
+                         f"in front of you.")
 
-        # The names not chosen. Recorded as their own entry rather than
-        # folded into the line above, because this is a finding about
-        # the address — what else lives there — and not a note about
-        # the rename.
         others = [n for n in
                   dict.fromkeys(x.strip().lower().rstrip(".")
                                 for x in body.also_resolved)
                   if n and n != name]
-        # Explicit decisions first, so the timeline note below can say
-        # what was done with them rather than only that they existed.
+        # Explicit decisions first, so the timeline note can say what was
+        # done with them rather than only that they existed.
         added, refused, denied = await _decide_others(
             session, pr, user, body, others)
-        if others:
-            shown = others[:40]
-            more = f" (+{len(others) - len(shown)} more)" if len(others) > len(shown) else ""
-            await record(
-                session, t.id, "discovered",
-                f"{was} also resolves to {len(others)} other name(s)",
-                detail=("A reverse lookup on " + was + " returned these as "
-                        "well as " + name + ". They are not necessarily the "
-                        "same host — an address answering to several names "
-                        "is usually shared hosting or a load balancer — but "
-                        "each is a lead and none is in scope merely because "
-                        "it appeared here:\n\n"
-                        + "\n".join(shown) + more),
-                actor=user, source="drone:reverse_ip")
+
+        outcome = await _take_name(session, pr, user, t, name)
+        if outcome == "merged":
+            surviving = (await session.execute(
+                select(Target).where(Target.project_id == pr.id,
+                                     Target.host == name))).scalar_one()
+        await _note_others(session, surviving.id, was, name, others)
     elif body.field == "ip_address":
-        if not _is_ip(value):
-            raise HTTPException(422, f"{value!r} is not an IP address")
-        was = t.ip_address or "none"
-        t.ip_address = value
-        await record(session, t.id, "change",
-                     f"ip_address: {was} → {value} (forward lookup)",
-                     actor=user, source="drone:nslookup")
+        # Plural now. One address was all a column could hold; a host
+        # with an A record, a AAAA record and two more behind a load
+        # balancer has four, and dropping three of them was never a fact
+        # about the host.
+        values = [value, *(x for x in body.also_resolved if x)]
+        got, bad = await addr_mod.attach(session, t, values)
+        if bad and not got:
+            raise HTTPException(422, f"{bad[0]!r} is not an IP address")
+        for b in bad:
+            refused[b] = "not an IP address"
+        if got:
+            added = got
+            await record(session, t.id, "change",
+                         "addresses added: " + ", ".join(got)
+                         + " (forward lookup)",
+                         actor=user, source="drone:nslookup")
     else:
         raise HTTPException(422, "field is host or ip_address")
+
+    t = surviving
 
     await session.commit()
     await broker.publish("targets", action="update", host=t.host, project=pr.code)
@@ -415,6 +707,7 @@ async def resolve(body: ResolveIn, project: str = Query(...),
     # Named, not counted: "3 added" with no list is not something an
     # operator can check, and `refused` is the half they most need.
     return {"host": t.host, "ip_address": t.ip_address,
+            "ip_addresses": t.ip_addresses,
             "added": added, "denied": denied, "out_of_scope": refused}
 
 
@@ -435,9 +728,14 @@ async def ranges(project: str = Query(...),
                                    ProjectScope.included.is_(True),
                                    ProjectScope.kind == "cidr"))).scalars().all()
     addrs: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    # Every address in the project, not one per target. A target counts
+    # in every range it has an address in, because it genuinely is in
+    # every one of them, and a /24 whose only resident is the second
+    # address of a multi-homed host used to report as never looked at.
+    # Distinct rows already, by the unique constraint on the table.
     for (ip,) in (await session.execute(
-            select(Target.ip_address).where(Target.project_id == pr.id,
-                                            Target.ip_address.is_not(None)))).all():
+            select(TargetAddress.address)
+            .where(TargetAddress.project_id == pr.id))).all():
         try:
             addrs.append(ipaddress.ip_address((ip or "").split("%", 1)[0]))
         except ValueError:
@@ -459,6 +757,191 @@ async def ranges(project: str = Query(...),
                                  addresses=net.num_addresses, targets=inside))
     out.sort(key=lambda r: (r.targets, -r.addresses))
     return out
+
+
+# ------------------------------------------------- automatic resolution
+class AutoReport(BaseModel):
+    """What applying the deterministic results did. Named, never counted.
+
+    Every list here holds the things themselves. A reply saying "4
+    applied, 2 refused" is not something an operator can check, and the
+    refusals are the half they most need — a name the scope gate turned
+    down is the cue to edit the scope list, and it is invisible if all
+    they get is a number.
+    """
+    #: "host -> 198.51.100.4, 198.51.100.5" and the like.
+    addresses_added: dict[str, list[str]] = {}
+    #: Address-named rows that learned their name. "198.51.100.10 -> web01…"
+    renamed: dict[str, str] = {}
+    #: Address-named rows folded into a target the project already held.
+    merged: dict[str, str] = {}
+    #: New targets created from the other names on a shared address.
+    created: list[str] = []
+    #: Each thing not written, and why.
+    refused: dict[str, str] = {}
+    #: Results that are still a human's decision, with the question.
+    deferred: dict[str, str] = {}
+
+
+@router.post("/auto", response_model=AutoReport)
+async def auto(project: str = Query(...),
+               pr: Project = Depends(require_project("user")),
+               user: User = Depends(get_current_user),
+               session: AsyncSession = Depends(get_session)):
+    """Apply every lookup result whose answer is not in doubt."""
+    report = await apply_auto(session, pr, user=user)
+    if report.renamed or report.merged or report.created or report.addresses_added:
+        await session.commit()
+        await broker.publish("targets", action="update", project=pr.code)
+        for ch in ("services", "vulns", "web"):
+            await broker.publish(ch, action="merge", project=pr.code)
+    return report
+
+
+async def apply_auto(session: AsyncSession, pr: Project, *,
+                     user: User | None = None,
+                     actor: str | None = None) -> AutoReport:
+    """Apply every lookup result whose answer is not in doubt.
+
+    Called from the route above AND from the agent result handler, so
+    that a lookup finishing resolves itself whether or not anybody has
+    a browser open. "Automatic" that needs somebody to go and look at a
+    page is not automatic; it is a button with a long name.
+
+    The CALLER commits. The agent handler is mid-transaction with its
+    own writes when it gets here and committing underneath it would
+    split one result into two.
+
+    Idempotent and safe to call on every refresh: the work list is
+    derived from what the inventory is still missing, so a second call
+    with nothing new to do writes nothing and reports nothing.
+
+    What counts as "not in doubt" is argued in `app/lookups.py` and is
+    the substance of this change. The short version: adding an address
+    to a host we already hold is never a question, naming an
+    address-named row from a single reverse answer never is either, and
+    everything that turns on an address being SHARED stays with a human.
+
+    One pass, one transaction. A reverse result that renames a target
+    changes what the next result can see — the name it just created is
+    now "already a target", which is what turns the following merge
+    from a guess into a fact — so the decisions are re-derived rather
+    than computed once and replayed.
+    """
+    # The agent path has no person behind it. `actor` is then the
+    # drone's own name, which is the honest answer to "who did this"
+    # and the one worth having when a rename looks wrong.
+    who = actor or (user.username if user else "system")
+    report = AutoReport()
+    # Bounded rather than `while True`. Each pass must make the next one
+    # strictly smaller, and if a bug ever made that untrue this would
+    # spin inside a request holding a transaction open. Five is far more
+    # than any real queue needs: one pass settles the forward results,
+    # and a chain of reverse results long enough to need five is not
+    # something that happens to an engagement.
+    for _ in range(5):
+        progress = False
+        for task, t, subject, field, options, partial, _note, d in \
+                await _decisions(session, pr):
+            key = f"{task.kind}:{subject}"
+            for k, why in d.refused.items():
+                report.refused.setdefault(k, why)
+            if d.verdict == CHOICE:
+                report.deferred.setdefault(key, d.plan)
+                continue
+            if d.verdict == BLOCKED or not d.apply:
+                continue
+
+            if field == "ip_address":
+                got, _bad = await addr_mod.attach(session, t, d.apply)
+                if not got:
+                    continue
+                report.addresses_added.setdefault(t.host, []).extend(got)
+                floor = (" The resolver did not answer in full, so this is "
+                         "a floor and not necessarily every address."
+                         if partial else "")
+                await record(
+                    session, t.id, "change",
+                    "addresses added: " + ", ".join(got),
+                    detail=(f"A forward lookup on {subject} returned "
+                            f"{', '.join(options)}. A host having several "
+                            f"addresses is not a question, so these were "
+                            f"recorded without asking.{floor}"),
+                    actor=user or who, source="drone:nslookup")
+                progress = True
+                continue
+
+            # Reverse. The takeover first: it may delete `t`, and the
+            # leads below have to be created against whatever survives.
+            was = t.host
+            name = d.takeover
+            outcome = await _take_name(session, pr, user, t, name, who)
+            (report.merged if outcome == "merged" else report.renamed)[was] = name
+            surviving = (await session.execute(
+                select(Target).where(Target.project_id == pr.id,
+                                     Target.host == name))).scalar_one()
+            leads = [n for n in d.apply if n != name]
+            report.created.extend(
+                await _add_leads(session, pr, user, leads, was, who))
+            await _note_others(session, surviving.id, was, name, leads,
+                               d.refused)
+            progress = True
+
+        await session.flush()
+        if not progress:
+            break
+    return report
+
+
+async def _add_leads(session: AsyncSession, pr: Project, user: User | None,
+                     names: list[str], subject: str,
+                     who: str | None = None) -> list[str]:
+    """Create targets for names a shared address answers to. -> created.
+
+    Already gated by the caller — these are the names that matched this
+    project's scope document on their own merits, which under the
+    several-names branch of `app/lookups.py` is the only way in. The
+    address they were seen at vouches for none of them.
+
+    `alive` stays None. A reverse lookup is not a probe, and recording
+    "responding" because a resolver answered would be a claim about the
+    host that nothing has tested.
+    """
+    now = datetime.now(UTC)
+    made: list[str] = []
+    for n in names:
+        dup = (await session.execute(
+            select(Target).where(Target.project_id == pr.id,
+                                 Target.host == n))).scalar_one_or_none()
+        if dup is not None:
+            continue
+        t = Target(project_id=pr.id, host=n, alive=None)
+        session.add(t)
+        await session.flush()
+        await addr_mod.attach(session, t, [subject])
+        await record(session, t.id, "discovered",
+                     f"added from a reverse lookup on {subject}",
+                     detail=(f"{subject} answers to this name as well as to "
+                             f"the one that took over the address-named row. "
+                             f"Nothing has been probed at it — it is a lead, "
+                             f"and it is here because it matches this "
+                             f"project's scope list in its own right."),
+                     actor=user or who, source="drone:reverse_ip")
+        row = (await session.execute(
+            select(DomainCandidate)
+            .where(DomainCandidate.project_id == pr.id,
+                   DomainCandidate.name == n))).scalar_one_or_none()
+        if row is None:
+            session.add(DomainCandidate(
+                project_id=pr.id, name=n, root_domain=registrable(n) or n,
+                source="reverse_ip", score=0,
+                reason=f"seen on {subject}", state="accepted",
+                decided_by=user.id if user else None, decided_at=now))
+        else:
+            row.state, row.decided_by, row.decided_at = \
+                "accepted", user.id if user else None, now
+        made.append(n)
+    return made
 
 
 # ------------------------------------------------------------- merging

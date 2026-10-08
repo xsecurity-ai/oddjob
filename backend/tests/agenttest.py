@@ -1063,7 +1063,12 @@ from app.models import Project as _P  # noqa: E402
 from app.models import User as _U
 
 _READ_ONLY = ["rank_targets", "find_by_technology", "exploit_leads",
-              "search_exploits", "get_host", "host_timeline"]
+              "search_exploits", "get_host", "host_timeline",
+              # Reading what a lookup found is the useful half when the
+              # agent is in its default read-only mode: it can already
+              # QUEUE a reverse-IP sweep, and being unable to say what
+              # came back is the gap this closes.
+              "lookup_results"]
 
 
 async def _names(allow_writes):
@@ -1083,8 +1088,60 @@ check("no read-only tool is marked as writing",
 check("and enabling writes only ever adds tools",
       set(_ro).issubset(set(_rw)), str(set(_ro) - set(_rw)))
 check("writes really do add the mutating ones",
-      {"add_note", "add_target", "add_finding"}.issubset(set(_rw)),
+      {"add_note", "add_target", "add_finding",
+       "apply_lookup_results"}.issubset(set(_rw)),
       str(sorted(set(_rw) - set(_ro))))
+check("applying lookup results is a WRITE and is not offered without them",
+      "apply_lookup_results" not in _ro, "")
+# Discoverability is half the bug being fixed. The operator asked the
+# agent to "add all the lookup results" and it said it did not know
+# what was meant — there was no tool, and a tool nobody's phrasing
+# matches would have been nearly as bad.
+check("the read tool's description carries the phrases people use",
+      all(w in _ro["lookup_results"].description.lower()
+          for w in ("lookup", "waiting", "reverse-ip")),
+      _ro["lookup_results"].description[:160])
+check("the write tool's description carries them too",
+      all(w in _rw["apply_lookup_results"].description.lower()
+          for w in ("add all the lookup results", "apply the lookups")),
+      _rw["apply_lookup_results"].description[:160])
+check("and says out loud that it does not decide the ambiguous ones",
+      "still_needs_a_person" in _rw["apply_lookup_results"].description,
+      _rw["apply_lookup_results"].description[-200:])
+
+print("== no read tool reaches past scope_ids ==")
+# `scope_ids` is the bound on what a non-admin may see across all
+# engagements. Two read tools wrote `if project: ... where(project_id ==
+# project.id)` instead of going through `scoped()`, which looks
+# equivalent and is not: with no engagement in view the WHERE was
+# dropped entirely and the tool read every target in the installation.
+# One client's hosts in another client's answer is the one mistake in
+# that file that matters outside it, so this is asserted rather than
+# left to review.
+async def _as_user(name, scope_ids):
+    async with _SL() as s:
+        u = (await s.execute(_sel(_U).limit(1))).scalars().first()
+        tool = {t.name: t for t in _build(s, None, u, False,
+                                          scope_ids=scope_ids)}[name]
+        return await tool.fn()
+
+
+for _tool, _key in (("rank_targets", "targets"), ("find_by_technology", "hosts")):
+    _kw = {"technology": "ssh"} if _tool == "find_by_technology" else {}
+
+    async def _run_it(tool=_tool, kw=_kw, ids=[]):      # noqa: B006
+        async with _SL() as s:
+            u = (await s.execute(_sel(_U).limit(1))).scalars().first()
+            t = {x.name: x for x in _build(s, None, u, False, scope_ids=ids)}[tool]
+            return await t.fn(**kw)
+
+    _nothing = _aio.run(_run_it())
+    check(f"{_tool} with no readable project returns nothing",
+          not _nothing.get(_key), str(_nothing)[:160])
+    _all = _aio.run(_run_it(ids=None))
+    check(f"{_tool} with site-admin scope still works",
+          isinstance(_all.get(_key), list), str(_all)[:160])
+
 
 print("== the assistant can task enumeration, but previews first ==")
 # A sweep is hundreds of tasks against a client's estate. "Have a look

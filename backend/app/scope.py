@@ -495,34 +495,44 @@ class ScopeIndex:
         return best.country if best else None
 
     # ------------------------------------------------------- the decision
-    def check(self, host: str, ip: str | None = None) -> Ruling:
+    def check(self, host: str, ip=None) -> Ruling:
         """May the project do something new with this host?
 
         `ip` is the address already recorded for it, where one is known.
         It is used, and a DNS lookup is not: resolving the name here would
         both send traffic and make the answer depend on what a resolver
         said this second.
+
+        A host may have several addresses, so `ip` takes a string or a
+        list of them. The two lists read the list differently and both
+        readings are the cautious one: ANY address on the out-list bars
+        the host — a machine is not partly out of scope — while ANY
+        address on the in-list admits it, because a multi-homed host
+        that the scope document names at one of its addresses is the
+        same machine at the others.
         """
         h = normalise_host(host)
         if not h:
             return Ruling(BARRED, "an empty host is not a scope decision "
                                   "anyone can make")
         addr = _parse_host(h)
-        other = _parse_host(ip) if ip else None
+        raw_ips = ([ip] if isinstance(ip, str)
+                   else list(ip) if ip is not None else [])
+        others = [(_parse_host(x), x) for x in raw_ips if x]
+        others = [(a, x) for a, x in others if a is not None]
 
         # ---- out first, and out always wins -----------------------------
         hit = self.out.match_name(h) if addr is None else None
         if hit:
             return Ruling(BARRED, f"{h} matches the out-of-scope entry {hit}")
-        for a, why in ((addr, h), (other, f"{h} (recorded as {ip})")):
-            if a is None:
-                continue
+        for a, why in ([(addr, h)] if addr is not None else []) + \
+                      [(a, f"{h} (recorded as {x})") for a, x in others]:
             hit = self.out.match_ip(a)
             if hit:
                 return Ruling(BARRED, f"{why} matches the out-of-scope "
                                       f"entry {hit}")
 
-        country = self.country_of(h, ip)
+        country = self.country_of(h, raw_ips[0] if raw_ips else None)
         if country and country in self.out.countries:
             return Ruling(BARRED, f"{h} is declared to be in {country.upper()}, "
                                   f"which is out of scope")
@@ -536,13 +546,29 @@ class ScopeIndex:
             # living in them to be in scope, and refusing every name
             # because it is not literally written down would make a
             # CIDR-only scope reject the whole engagement.
-            if not ok and other is not None:
-                ok = self.inc.match_ip(other)
+            if not ok:
+                for a, _x in others:
+                    if self.inc.match_ip(a):
+                        ok = True
+                        break
             via = None
             if not ok:
                 # Nothing matched this host directly. Scope travels
                 # along an observed host/address pair, so an address an
                 # in-scope name resolves to is in scope and vice versa.
+                #
+                # **Exactly one step, and the partner must match the
+                # scope document ITSELF.** Not `self.check(partner)`,
+                # which would recurse and make scope transitive: an
+                # in-scope name would vouch for its CDN address, that
+                # address would then vouch for every other tenant
+                # sharing it, and a two-line scope document would
+                # quietly cover a hosting provider. With the
+                # many-to-many address model that is no longer a
+                # hypothetical — one address row really does link to
+                # every name recorded at it — so the direct-match-only
+                # rule is the thing standing between an in-scope name
+                # and its neighbours. `tests/scopetest.py` asserts it.
                 #
                 # The partner is NAMED in the ruling. An address that is
                 # in scope only because something else is should never

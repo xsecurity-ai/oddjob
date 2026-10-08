@@ -194,8 +194,26 @@ class _TargetFields(BaseModel):
         default=None, max_length=32,
         description="Which cloud, for kind=cloud. aws, azure, gcp, oracle, "
                     "cloudflare, … Free text: the list does not end at three.")
+    #: Every address this host answers at, IPv4 and IPv6 together.
+    #:
+    #: On the way IN this is the set: sending it replaces what the
+    #: target has. On the way OUT it is every address on record, oldest
+    #: observation first.
+    ip_addresses: list[str] = Field(
+        default_factory=list,
+        description="IPv4/IPv6 literals. A host legitimately has several — "
+                    "an A record, a AAAA record, and more behind a load "
+                    "balancer. Anything that is not a literal is dropped "
+                    "and named back.")
+    #: The first address, for the places that can only print one: a
+    #: report table cell, the REST summary, the grid column. Writable
+    #: on the way in as a one-address convenience, where it means the
+    #: same as a one-element `ip_addresses`.
     ip_address: str | None = Field(
-        default=None, description="IPv4/IPv6 literal; anything else is coerced to null")
+        default=None, description="IPv4/IPv6 literal; anything else is "
+                                  "coerced to null. The first of "
+                                  "ip_addresses — see that field for the "
+                                  "whole truth.")
     # Tri-state: None = not probed yet, which is a different claim from
     # False = probed and did not respond.
     alive: bool | None = Field(
@@ -210,19 +228,44 @@ class _TargetFields(BaseModel):
     def _ip(cls, v: str | None) -> str | None:
         return clean_ip(v)
 
+    @field_validator("ip_addresses")
+    @classmethod
+    def _ips(cls, v: list[str]) -> list[str]:
+        """Each entry cleaned on its own, duplicates collapsed.
+
+        Deliberately not `[x for x in v if clean_ip(x)]` in one breath:
+        `clean_ip` is what turns `' 203.0.113.9 '` and `'203.0.113.9'`
+        into one value, and without the dedupe AFTER it the same address
+        spelled two ways survives as two entries and then fails the
+        unique constraint at write time instead of here.
+        """
+        out: list[str] = []
+        for x in v or []:
+            c = clean_ip(x if isinstance(x, str) else str(x))
+            if c and c not in out:
+                out.append(c)
+        return out
+
     @model_validator(mode="after")
     def _kind_implies(self):
         """A mobile app has no IP, and saying so is not the same as
         leaving it blank.
 
-        An empty `ip_address` on a host means "not resolved yet" — a gap
-        in coverage. On an application it means there is nothing to
+        An empty `ip_addresses` on a host means "not resolved yet" — a
+        gap in coverage. On an application it means there is nothing to
         resolve. Clearing it here keeps an address someone pasted by
         mistake from turning an app into a scannable host, and keeps
         liveness from ever being inferred for one.
         """
+        # One address written the short way is a one-element set. Folded
+        # together here rather than at four call sites, so a client that
+        # only knows the old field and one that knows the new one cannot
+        # disagree about what the target ends up with.
+        if self.ip_address and self.ip_address not in self.ip_addresses:
+            self.ip_addresses = [self.ip_address, *self.ip_addresses]
         if self.kind == "mobile":
             self.ip_address = None
+            self.ip_addresses = []
             self.alive = None
         if self.kind != "cloud":
             # A provider on a host or an app is meaningless and would
@@ -260,7 +303,14 @@ class TargetIn(_TargetFields):
 
 
 class TargetUpdate(BaseModel):
+    #: Sending either of these REPLACES the target's addresses. A PATCH
+    #: that only wanted to append would have to say which of the four
+    #: it meant to keep, and "set the address" meaning "and delete the
+    #: other three" is at least unambiguous; the importers, which must
+    #: never delete an address a different tool found, add rather than
+    #: replace and do not come through here.
     ip_address: str | None = None
+    ip_addresses: list[str] | None = None
     alive: bool | None = None
     hacked: bool | None = None
     os: str | None = None
