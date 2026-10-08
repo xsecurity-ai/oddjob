@@ -77,6 +77,9 @@ export function ScanRangesDialog({ project, selected = [], onClose,
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
+  /** Ranges the queue refused because the scope does not cover them.
+   *  Held so they can be offered, rather than reported and lost. */
+  const [outOfScope, setOutOfScope] = useState<string[]>([])
 
   const q = useQuery({
     queryKey: ['enumerate-ranges', project],
@@ -169,8 +172,52 @@ export function ScanRangesDialog({ project, selected = [], onClose,
                      ? `. ${failed.length} refused: ${failed[0].subject} — `
                        + `${failed[0].why}`
                      : `. Results import into ${project} as each reports back.`)
-      if (onQueued) onQueued(msg); else setDone(msg)
       await qc.invalidateQueries({ queryKey: ['agents'] })
+
+      // Anything refused for scope is offered rather than just
+      // reported. Typing a range the scope does not cover is the
+      // normal way an engagement grows, and "refused: out of scope"
+      // with no way to act on it sends the operator to another screen
+      // to retype what they just typed here.
+      const oos = failed.filter((f) => /scope/i.test(f.why))
+      if (oos.length) {
+        setOutOfScope(oos.map((f) => f.subject))
+        setDone(msg)
+        return
+      }
+
+      if (onQueued) onQueued(msg); else setDone(msg)
+      // Closed on success, because the answer arrives on the Drones
+      // page and there is nothing further to do here. Left open when
+      // something was refused — that is the case worth reading.
+      onClose()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally { setBusy(false) }
+  }
+
+  /** Add the refused ranges to the scope, then queue them.
+   *
+   *  Deliberately two steps the operator asked for rather than one
+   *  they did not: widening a client's scope is a decision, so it is
+   *  a button and not something the queue does on their behalf. */
+  const addScopeAndQueue = async () => {
+    if (!outOfScope.length) return
+    setBusy(true); setErr(null)
+    try {
+      await api.addProjectScope(project, { lines: outOfScope, included: true })
+      const extra: Record<string, unknown> = {}
+      if (ports.trim()) extra.ports = ports.trim()
+      const { ids, failed } = await queueEach(project, agent, tool, outOfScope,
+                                              extra, region)
+      const msg = `Added ${outOfScope.length} range`
+                + `${outOfScope.length === 1 ? '' : 's'} to scope and queued `
+                + `${ids.length} task${ids.length === 1 ? '' : 's'}`
+                + (failed.length ? `; ${failed.length} still refused` : '')
+      setOutOfScope([])
+      await qc.invalidateQueries()
+      if (onQueued) onQueued(msg); else setDone(msg)
+      onClose()
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally { setBusy(false) }
@@ -337,6 +384,22 @@ export function ScanRangesDialog({ project, selected = [], onClose,
           </Caveat>
         </Stack>
       </DialogContent>
+      {outOfScope.length > 0 && (
+        <Alert severity="warning" variant="outlined"
+               sx={{ mx: 3, mb: 1, fontSize: 12 }}
+               action={
+                 <Button size="small" disabled={busy} onClick={addScopeAndQueue}
+                   sx={{ color: neon.green, whiteSpace: 'nowrap' }}>
+                   Add to scope &amp; queue
+                 </Button>
+               }>
+          {outOfScope.length} range{outOfScope.length === 1 ? ' is' : 's are'} not
+          in {project}&apos;s scope and {outOfScope.length === 1 ? 'was' : 'were'}
+          {' '}refused: {outOfScope.slice(0, 4).join(', ')}
+          {outOfScope.length > 4 ? ` and ${outOfScope.length - 4} more` : ''}.
+        </Alert>
+      )}
+
       <DialogActions sx={{ px: 3, pb: 2 }}>
         <Typography sx={{ fontSize: 11, color: neon.muted, mr: 'auto' }}>
           {chosen.length ? `${chosen.length} range(s), ${addresses.toLocaleString()} addresses` : ''}
