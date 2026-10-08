@@ -68,22 +68,45 @@ func procMemAvailableMB() int {
 // and then be ignored anyway for being larger than MemAvailable.
 func cgroupAvailableMB() int {
 	// v2
-	if lim, ok := readCgroupBytes("/sys/fs/cgroup/memory.max"); ok {
-		used, _ := readCgroupBytes("/sys/fs/cgroup/memory.current")
-		if lim > used {
-			return int((lim - used) / (1 << 20))
-		}
-		return 0
+	if lim, ok := readCgroupBytes(cgroup2Max); ok {
+		used, _ := readCgroupBytes(cgroup2Current)
+		return headroomMB(lim, used)
 	}
 	// v1
-	if lim, ok := readCgroupBytes("/sys/fs/cgroup/memory/memory.limit_in_bytes"); ok {
-		used, _ := readCgroupBytes("/sys/fs/cgroup/memory/memory.usage_in_bytes")
-		if lim > used {
-			return int((lim - used) / (1 << 20))
-		}
-		return 0
+	if lim, ok := readCgroupBytes(cgroup1Limit); ok {
+		used, _ := readCgroupBytes(cgroup1Usage)
+		return headroomMB(lim, used)
 	}
 	return 0
+}
+
+// The files, named once. Passing them as arguments is what lets the
+// test drive `readCgroupBytes` against a temp directory.
+const (
+	cgroup2Max     = "/sys/fs/cgroup/memory.max"
+	cgroup2Current = "/sys/fs/cgroup/memory.current"
+	cgroup1Limit   = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+	cgroup1Usage   = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
+)
+
+// headroomMB is limit-minus-used in megabytes, clamped into an int.
+//
+// The clamp is not decoration. `int` is 32 bits on the 32-bit targets
+// this cross-compiles for, and an unchecked uint64 conversion there
+// wraps — a wrap to a negative or enormous figure would size the whole
+// fleet off one unusual cgroup value. `readCgroupBytes` already refuses
+// anything past a petabyte, so this cannot trigger in practice; it is
+// here so that it cannot trigger in theory either.
+func headroomMB(limit, used uint64) int {
+	if limit <= used {
+		return 0
+	}
+	mb := (limit - used) / (1 << 20)
+	const maxMB = 1 << 30 // an exabyte; far past any real machine
+	if mb > maxMB {
+		mb = maxMB
+	}
+	return int(mb)
 }
 
 // readCgroupBytes reads one cgroup number. The bool is false for an
@@ -91,6 +114,9 @@ func cgroupAvailableMB() int {
 // all three of which have to be distinguishable from a real limit of
 // zero, which is why this does not just return an int.
 func readCgroupBytes(path string) (uint64, bool) {
+	// #nosec G304 -- the callers pass the four cgroup paths named
+	// above as constants. It takes a parameter so the test can point
+	// it at a temp directory; nothing reaches it from a request.
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return 0, false

@@ -50,6 +50,31 @@ func TestReadCgroupBytes(t *testing.T) {
 	}
 }
 
+func TestHeadroomMB(t *testing.T) {
+	cases := []struct {
+		name        string
+		limit, used uint64
+		want        int
+	}{
+		{"half of 512 MB used", 512 << 20, 256 << 20, 256},
+		{"nothing used", 1 << 30, 0, 1024},
+		// Over its limit is not negative headroom, it is none. On a
+		// 32-bit target the unchecked subtraction would wrap to an
+		// enormous positive figure and size the fleet off it.
+		{"over the limit", 256 << 20, 300 << 20, 0},
+		{"exactly at the limit", 256 << 20, 256 << 20, 0},
+		{"a limit of zero", 0, 0, 0},
+		// Past anything real, clamped rather than converted.
+		{"absurd is clamped", 1 << 62, 0, 1 << 30},
+	}
+	for _, c := range cases {
+		if got := headroomMB(c.limit, c.used); got != c.want {
+			t.Errorf("%s: headroomMB(%d, %d) = %d want %d",
+				c.name, c.limit, c.used, got, c.want)
+		}
+	}
+}
+
 func TestAvailableMemIsSane(t *testing.T) {
 	// Whatever this machine is, the answer has to be usable: a
 	// negative or absurd figure would size the whole fleet wrongly,
