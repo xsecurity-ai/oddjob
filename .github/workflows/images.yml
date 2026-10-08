@@ -75,10 +75,19 @@ permissions:
   contents: read
 
 concurrency:
-  # One at a time across every trigger. Two runs pushing the same
-  # `src-<key>` from different commits is a race over which bytes win.
-  group: images
-  cancel-in-progress: false
+  # Grouped by the pointer this run owns, not by the workflow. Two
+  # merges in quick succession should cancel each other — the first
+  # build is already superseded and the arm64 leg has twenty minutes
+  # left to run — but a merge must NOT kill the 03:17 run, or
+  # `:nightly` silently misses a night on a busy day.
+  group: images-${{ (github.event_name == 'workflow_dispatch' && inputs.pointer) || (github.event_name == 'schedule' && 'nightly') || 'develop' }}
+  # Safe to cancel mid-build because of the retag branch below. buildx
+  # pushes blobs before manifests, so a tag that resolves at all is
+  # complete; the worst a cancellation leaves is `src-<key>` published
+  # with its pointer not yet moved, and the next run finds that key,
+  # takes the retag path and moves the pointer onto it. The failure
+  # mode repairs itself on the next run rather than needing a human.
+  cancel-in-progress: true
 
 jobs:
   plan:
