@@ -146,6 +146,13 @@ with tempfile.TemporaryDirectory() as tmp:
     db = Path(tmp) / "withdata.db"
     env = {**os.environ, "ODDJOB_DB": str(db), "ODDJOB_QUIET_ALEMBIC": "1"}
     BEFORE = "a81c5e4f2d60"       # the revision that still has the column
+    # The migration under test, NAMED rather than reached with `head`
+    # and left with `-1`. Those two mean "whatever is newest" and
+    # "whatever that was", so this section quietly became about a
+    # different migration the moment another one landed on top of it --
+    # which is how adding an unrelated column to `projects` made it
+    # fail.
+    UNDER = "c41b7e9a2d08"        # addresses move out to their own table
 
     print("\n== the address migration, over a populated database ==")
     subprocess.run([sys.executable, "-m", "alembic", "upgrade", BEFORE],
@@ -172,7 +179,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "'2026-01-01')", (loser,))
     con.commit(); con.close()
 
-    r = subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"],
+    r = subprocess.run([sys.executable, "-m", "alembic", "upgrade", UNDER],
                        cwd=BACKEND, env=env, capture_output=True, text=True,
                        timeout=300)
     out = (r.stdout or "") + (r.stderr or "")
@@ -224,7 +231,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # And what the downgrade cannot restore, said out loud rather than
     # discovered later. `web01` has two addresses and the column holds
     # one; the other is gone, and the migration says so.
-    r = subprocess.run([sys.executable, "-m", "alembic", "downgrade", "-1"],
+    r = subprocess.run([sys.executable, "-m", "alembic", "downgrade", BEFORE],
                        cwd=BACKEND, env=env, capture_output=True, text=True,
                        timeout=300)
     back = (r.stdout or "") + (r.stderr or "")

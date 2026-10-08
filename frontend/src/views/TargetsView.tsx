@@ -5,6 +5,7 @@ import {
 import ScanIcon from '@mui/icons-material/RadarOutlined'
 import type { ColumnDef } from '../lib/columns'
 import { extraAddresses } from '../lib/cellFacts'
+import { StandingOrders } from '../components/StandingOrders'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Target } from '../lib/api'
 import { useAuth } from '../lib/auth'
@@ -471,6 +472,12 @@ export function TargetsView({ project }: { project: string | null }) {
           loading={pending.isLoading} error={pending.error as Error | null}
           auto={auto} onClose={() => setPicking(false)} />
       )}
+      {/* Only with one engagement in view: these are per-project
+          settings and "all projects" has no sensible meaning for
+          them. Above the table rather than behind a menu, because
+          something that scans a client on its own should be visible
+          from the screen that shows what it scanned. */}
+      {project && <StandingOrders project={project} />}
       <DataTable
         rows={rows}
         columns={columns as ColumnDef[]}

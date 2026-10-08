@@ -18,7 +18,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .hosts import InvalidHost, validate_cloud_id, validate_host
-from .models import PROJECT_STATUSES, SEVERITIES
+from .models import NMAP_CHOICES, PROJECT_STATUSES, SEVERITIES
 
 
 class Page[T](BaseModel):
@@ -131,10 +131,37 @@ class ProjectUpdate(BaseModel):
     slack_delivery: str | None = None
     slack_private: bool | None = None
 
+    # Standing orders. See app/automation.py -- each one queues scans
+    # against the client, so each is explicit and defaults to off.
+    auto_amass: bool | None = None
+    auto_resolve_ips: bool | None = None
+    auto_reverse_dns: bool | None = None
+    auto_nmap: str | None = None
+
+    @field_validator("auto_nmap")
+    @classmethod
+    def _nmap(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = (v or "").strip().lower()
+        # Refused rather than coerced to "off". A typo silently
+        # becoming "do nothing" is the failure where the operator
+        # believes scanning is on and it is not.
+        if v not in NMAP_CHOICES:
+            raise ValueError(
+                f"auto_nmap must be one of {', '.join(NMAP_CHOICES)}")
+        return v
+
 
 class ProjectOut(ProjectBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
+    # What is standing. Reported so the toggles show the state the
+    # server holds rather than whatever the browser last sent.
+    auto_amass: bool = False
+    auto_resolve_ips: bool = False
+    auto_reverse_dns: bool = False
+    auto_nmap: str = "off"
     # The token itself is never returned — only whether an override exists.
     slack_token_set: bool = False
     # Whether a notification posted now would reach a channel: a token

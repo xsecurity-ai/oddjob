@@ -73,6 +73,13 @@ async def lifespan(app: FastAPI):
     from .agent.remediate import worker
     worker.start()
 
+    # Standing orders: amass, DNS and nmap follow-up a project can leave
+    # running. Inert until a project switches one on -- and each one
+    # queues scans against a client, so every candidate is re-gated and
+    # the whole thing is paced. See app/automation.py.
+    from .automation import worker as standing_orders
+    standing_orders.start()
+
     # The inbound half of Slack. Socket Mode, so it needs no public
     # endpoint: inert until an app-level token exists and answering is
     # switched on.

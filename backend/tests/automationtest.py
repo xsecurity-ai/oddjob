@@ -1,0 +1,272 @@
+"""Standing orders: the four policies a project can leave running.
+
+These queue scans against a client's estate with nobody watching, which
+is the whole reason they exist and also the reason this suite is the
+shape it is. Three properties matter more than the feature working:
+
+  * **Nothing runs unless it was switched on.** All four default off,
+    and an upgrade must not inherit one.
+  * **Nothing is queued that the scope gate refuses.** Per candidate,
+    every cycle — not per project and not per batch.
+  * **Nothing is queued twice.** A lookup that comes back empty leaves
+    the host exactly as it was, so a policy phrased as "anything
+    missing X" would re-queue it forever. Having been TRIED is what
+    counts, not having succeeded. This is the one that would only show
+    up in production, a week later, as a client asking why they are
+    being scanned every minute.
+
+`plan` is pure, so most of this describes an estate and asks what would
+happen, rather than driving a server and inferring it.
+"""
+
+# Run from anywhere: the suites import `app`, which lives one level up.
+import pathlib as _pathlib
+import sys as _sys
+
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import json
+import os
+import urllib.error
+import urllib.request
+
+BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8013")
+ok = fail = 0
+
+
+def check(l, c, e=""):
+    global ok, fail
+    if c: ok += 1; print(f"  PASS  {l} {e}")
+    else: fail += 1; print(f"  FAIL  {l} {e}")
+
+
+def call(p, m="GET", b=None, token=None):
+    r = urllib.request.Request(BASE + p, method=m)
+    if b is not None:
+        r.data = json.dumps(b).encode()
+        r.add_header("Content-Type", "application/json")
+    if token: r.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(r, timeout=60) as x:
+            raw = x.read(); return x.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try: return e.code, json.loads(raw)
+        except Exception: return e.code, raw[:300]
+
+
+from app.automation import (  # noqa: E402
+    NMAP_PROFILES,
+    PER_CYCLE,
+    Snapshot,
+    plan,
+)
+from app.models import NMAP_CHOICES  # noqa: E402
+
+# =====================================================================
+# Part 1 — what the policies choose
+# =====================================================================
+print("\n--- nothing happens until something is switched on ---")
+
+ESTATE = [("web.acme.example", True), ("bare.acme.example", False),
+          ("203.0.113.5", True), ("api.acme.example", False)]
+
+check("an untouched project plans nothing",
+      plan(Snapshot(targets=ESTATE)) == [])
+check("...and that is the default a project is created with",
+      Snapshot().auto_nmap == "off" and not Snapshot().auto_amass)
+
+print("\n--- each policy picks what it is for, and nothing else ---")
+
+p = plan(Snapshot(auto_resolve_ips=True, targets=ESTATE))
+check("resolve picks the names with no address",
+      [c.subject for c in p] == ["api.acme.example", "bare.acme.example"],
+      [c.subject for c in p])
+check("...and never an address, which has nothing to resolve",
+      all(not c.subject[0].isdigit() for c in p))
+check("...as nslookup", {c.kind for c in p} == {"nslookup"})
+
+p = plan(Snapshot(auto_reverse_dns=True, targets=ESTATE))
+check("reverse picks only the address-named host",
+      [c.subject for c in p] == ["203.0.113.5"], [c.subject for c in p])
+check("...as reverse_ip", {c.kind for c in p} == {"reverse_ip"})
+
+p = plan(Snapshot(auto_amass=True, targets=ESTATE))
+check("amass picks the zone once, not once per host",
+      [c.subject for c in p] == ["acme.example"], [c.subject for c in p])
+check("...and passes the domain, not a target list",
+      p[0].args.get("domain") == "acme.example", p[0].args)
+
+p = plan(Snapshot(auto_nmap="top100", targets=ESTATE))
+check("nmap picks every host including the address",
+      len(p) == 4, [c.subject for c in p])
+check("...top100 is nmap's own -F, not a port list of ours",
+      p[0].args == {"profile": "quick"}, p[0].args)
+p = plan(Snapshot(auto_nmap="full", targets=ESTATE))
+check("...and full names the range, because -p- and -F are exclusive",
+      p[0].args == {"ports": "1-65535"}, p[0].args)
+check("an unknown nmap setting plans nothing rather than guessing",
+      plan(Snapshot(auto_nmap="medium", targets=ESTATE)) == [])
+check("off plans nothing", plan(Snapshot(auto_nmap="off", targets=ESTATE)) == [])
+
+print("\n--- the vocabulary is not written down twice ---")
+check("models.NMAP_CHOICES and automation's profiles agree",
+      set(NMAP_CHOICES) == {"off", *NMAP_PROFILES},
+      f"{NMAP_CHOICES} vs {sorted(NMAP_PROFILES)}")
+
+# =====================================================================
+# Part 2 — never twice. The one that matters.
+# =====================================================================
+print("\n--- a subject is attempted once, not every cycle ---")
+
+# The failure this prevents: the lookup ran, came back with nothing, and
+# the host still has no address. "Anything missing an address" matches
+# it again next minute, and the minute after that, forever.
+tried = Snapshot(auto_resolve_ips=True, targets=ESTATE,
+                 tasked={("nslookup", "bare.acme.example")})
+check("a name already tried is not tried again",
+      [c.subject for c in plan(tried)] == ["api.acme.example"],
+      [c.subject for c in plan(tried)])
+check("an empty result does not make it eligible again",
+      [c.subject for c in plan(Snapshot(
+          auto_resolve_ips=True, targets=ESTATE,
+          tasked={("nslookup", "bare.acme.example"),
+                  ("nslookup", "api.acme.example")}))] == [])
+
+# Per kind, though: having been nslookup'd says nothing about nmap.
+both = Snapshot(auto_resolve_ips=True, auto_nmap="top100", targets=ESTATE,
+                tasked={("nslookup", "api.acme.example")})
+kinds = {(c.kind, c.subject) for c in plan(both)}
+check("...but only for the kind that was tried",
+      ("nmap", "api.acme.example") in kinds
+      and ("nslookup", "api.acme.example") not in kinds, sorted(kinds))
+
+check("a zone already handed to amass is not handed again",
+      plan(Snapshot(auto_amass=True, targets=ESTATE,
+                    searched={"acme.example"})) == [])
+check("...whether it was recorded as a search or as a task",
+      plan(Snapshot(auto_amass=True, targets=ESTATE,
+                    tasked={("amass", "acme.example")})) == [])
+
+# =====================================================================
+# Part 3 — pacing
+# =====================================================================
+print("\n--- a large backlog drains rather than arriving at once ---")
+
+big = [(f"h{i:04d}.acme.example", False) for i in range(PER_CYCLE * 4)]
+p = plan(Snapshot(auto_resolve_ips=True, targets=big))
+check(f"at most {PER_CYCLE} per policy per cycle", len(p) == PER_CYCLE, len(p))
+check("the order is stable, so an interrupted cycle resumes",
+      [c.subject for c in p] == [c.subject for c in
+                                 plan(Snapshot(auto_resolve_ips=True,
+                                               targets=big))])
+check("...and it is the same first page each time until they are tried",
+      p[0].subject == "h0000.acme.example", p[0].subject)
+# Each policy gets its own allowance rather than sharing one.
+p = plan(Snapshot(auto_resolve_ips=True, auto_nmap="top100", targets=big))
+check("two policies get an allowance each, not half each",
+      len(p) == PER_CYCLE * 2, len(p))
+
+# =====================================================================
+# Part 4 — against a live server: the gate, and the API
+# =====================================================================
+print("\n--- the settings round-trip, and refuse nonsense ---")
+
+admin = call("/api/auth/setup", "POST",
+             {"username": "root", "password": "root-password-1"})[1]["access_token"]
+call("/api/projects", "POST", {"code": "AUTO2", "name": "Standing orders"},
+     token=admin)
+
+st, pr = call("/api/projects/AUTO2", token=admin)
+check("a new project has every standing order off",
+      pr.get("auto_amass") is False and pr.get("auto_resolve_ips") is False
+      and pr.get("auto_reverse_dns") is False and pr.get("auto_nmap") == "off",
+      {k: v for k, v in (pr or {}).items() if k.startswith("auto_")})
+
+st, pr = call("/api/projects/AUTO2", "PATCH",
+              {"auto_amass": True, "auto_nmap": "full"}, token=admin)
+check("they can be switched on", st == 200, st)
+check("...and come back as set",
+      (pr or {}).get("auto_amass") is True and (pr or {}).get("auto_nmap") == "full",
+      {k: v for k, v in (pr or {}).items() if k.startswith("auto_")})
+
+st, body = call("/api/projects/AUTO2", "PATCH", {"auto_nmap": "aggressive"},
+                token=admin)
+check("an unknown nmap setting is refused, not coerced to off", st == 422, st)
+st, pr = call("/api/projects/AUTO2", token=admin)
+check("...and the refusal left the previous value alone",
+      (pr or {}).get("auto_nmap") == "full", (pr or {}).get("auto_nmap"))
+
+# A non-admin must not be able to start scanning a client's estate.
+call("/api/users", "POST",
+     {"username": "hand", "password": "hand-password-1"}, token=admin)
+call("/api/projects/AUTO2/acl", "POST", {"username": "hand", "role": "user"},
+     token=admin)
+hand = call("/api/auth/login", "POST",
+            {"username": "hand", "password": "hand-password-1"}
+            )[1]["access_token"]
+st, _ = call("/api/projects/AUTO2", "PATCH", {"auto_nmap": "top100"}, token=hand)
+check("a plain user cannot switch scanning on", st == 403, st)
+
+print("\n--- the scope gate refuses a candidate the policy wanted ---")
+# Narrow the scope so the estate contains something out of it, then ask
+# `run_once` directly: the worker is what has to consult the gate, and
+# asserting it on `plan` would be asserting the wrong layer.
+import asyncio  # noqa: E402
+
+from sqlalchemy import select  # noqa: E402
+
+from app.automation import run_once  # noqa: E402
+from app.db import SessionLocal  # noqa: E402
+from app.models import Agent, AgentTask, Project  # noqa: E402
+
+call("/api/projects/AUTO2/scope", "POST",
+     {"lines": ["in.acme.example"]}, token=admin)
+for host in ("in.acme.example", "out.somebody-else.example"):
+    call("/api/targets?project=AUTO2", "POST", {"host": host}, token=admin)
+call("/api/projects/AUTO2", "PATCH",
+     {"auto_amass": False, "auto_nmap": "off", "auto_resolve_ips": True},
+     token=admin)
+
+
+async def drive():
+    async with SessionLocal() as s:
+        pr = (await s.execute(
+            select(Project).where(Project.code == "AUTO2"))).scalar_one()
+
+        # No drone: nothing is queued at all, however much is outstanding.
+        n = await run_once(s, pr)
+        check("with no agent online nothing is queued", n == {}, n)
+
+        s.add(Agent(project_id=pr.id, name="auto-test", status="online",
+                    callback_key_hash="x" * 64))
+        await s.commit()
+
+        n = await run_once(s, pr)
+        subs = []
+        for raw in (await s.execute(
+                select(AgentTask.args).where(
+                    AgentTask.project_id == pr.id,
+                    AgentTask.kind == "nslookup"))).scalars():
+            subs += json.loads(raw).get("targets") or []
+        check("the in-scope host is queued", "in.acme.example" in subs, subs)
+        check("the out-of-scope host is NOT, though the policy wanted it",
+              "out.somebody-else.example" not in subs, subs)
+        check("and the count reports only what was queued",
+              n.get("auto_resolve_ips") == 1, n)
+
+        # Second cycle: the same estate, nothing new. This is the
+        # runaway, and it is the reason for the `tasked` set.
+        before = len(subs)
+        await run_once(s, pr)
+        after = len((await s.execute(
+            select(AgentTask.id).where(
+                AgentTask.project_id == pr.id,
+                AgentTask.kind == "nslookup"))).scalars().all())
+        check("a second cycle queues nothing further", after == before,
+              f"{before} then {after}")
+
+
+asyncio.run(drive())
+
+print(f"\n{ok} passed, {fail} failed")
+raise SystemExit(1 if fail else 0)
