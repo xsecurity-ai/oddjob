@@ -451,10 +451,16 @@ else:
 
 
 print("\n== scope travels between a name and the address it was seen at ==")
-# The case that prompted this: a project scoped to *.mufg.jp, a target
-# www.mufg.jp recorded at 23.13.159.70, and a scan of that address
+# The case that prompted this: a project scoped to a zone, a target
+# under it recorded at a CDN address, and a scan of that address
 # refused as "not in this project's in-scope list". It is the same
 # machine under a different label.
+#
+# Written generically on purpose. The original comment here named the
+# client's zone, one of their hostnames and the address it resolved
+# to. This repository is public; an engagement's scope is the client's
+# information and does not stop being so because it is in a comment
+# rather than a fixture.
 from app.scope import ScopeIndex  # noqa: E402
 
 
