@@ -149,6 +149,7 @@ Oddjob says so on its row rather than leaving you to wonder.
 ```bash
 # In Oddjob: Drones → Deploy a Drone. Copy the enrollment token.
 docker run -d --name drone --restart unless-stopped \
+  --network host \
   --cap-drop=ALL --cap-add=NET_RAW --cap-add=NET_ADMIN \
   -e DRONE_SERVER=https://oddjob.internal \
   -e DRONE_ENROLL_TOKEN=drone_... \
@@ -162,11 +163,67 @@ starts and never needs to reach a package mirror from inside someone's
 network.
 
 `--cap-drop=ALL` with `NET_RAW` and `NET_ADMIN` added back: enough for
-SYN scanning and masscan, and nothing else. `network_mode: host` if you
-need the host's own addresses for attribution.
+SYN scanning and masscan, and nothing else.
+
+### `--network host`, and why the example has it
+
+**Leave it off and the Drone cannot catch a callback.** On the default
+bridge the container has a private address on a private network. Nothing
+outside the host can reach it, so a reverse shell, an SSRF callback or a
+DNS exfil listener has nowhere to land — the target connects to the host
+and the host has nothing listening. If you want the Drone to *receive*
+connections, this flag is not optional.
+
+Two other things it fixes, both visible the moment you look at a Drone in
+the fleet table:
+
+```
+            interfaces reported
+bridge      172.17.0.2
+host        203.0.113.9, 10.100.0.2, 10.13.0.5
+```
+
+**Attribution.** On a bridge every packet the client sees comes from the
+host's address after NAT, while the agent believes its address is a
+private bridge IP that appears in nobody's logs. Both ends of the record
+are then wrong, and an incident notification written from that reports an
+address the client cannot find.
+
+**Reach.** The agent can only talk to what its namespace can see. On a
+bridge that is not the private networks the host sits on — which are
+usually the entire reason that host was chosen.
+
+#### What you are giving up
+
+Host networking removes the container's network namespace. Combined with
+`NET_ADMIN`, that capability now applies to **the host's** network stack
+rather than an isolated one: routing and firewall rules included. On a
+dedicated scanning box that is the intent. On a shared machine, decide
+deliberately — and prefer a box you are willing to treat as part of the
+engagement.
+
+Docker Desktop on macOS and Windows does not implement host networking.
+The agent still runs and still reports honestly; it just scans from the
+VM, and it cannot catch callbacks there either. Linux is where an agent
+belongs.
+
+#### Without it
+
+Everything else works — enumeration, scanning, crawling, reporting. You
+lose inbound connections, truthful addresses, and the host's other
+networks:
+
+```bash
+docker run -d --name drone --restart unless-stopped \
+  --cap-drop=ALL --cap-add=NET_RAW --cap-add=NET_ADMIN \
+  -e DRONE_SERVER=https://oddjob.internal \
+  -e DRONE_ENROLL_TOKEN=drone_... \
+  -v drone-state:/var/lib/drone/work \
+  drone-agent run --name edge-01 --workdir /var/lib/drone/work
+```
 
 There is a [`docker-compose.yml`](docker-compose.yml) with every option
-written out.
+written out, `network_mode: host` included.
 
 ### Binary
 
