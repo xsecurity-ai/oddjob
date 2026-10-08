@@ -468,6 +468,25 @@ check("and says why it is unused",
       (h or {}).get("slack", {}).get("note"),
       str((h or {}).get("slack"))[:140])
 
+# The background loops. Both fail silently when they fail: a crashed
+# asyncio task leaves the app healthy, every endpoint answering, and
+# nothing happening. For standing orders that means an operator
+# believing their estate is being enumerated and scanned when it is
+# not — worse than the feature being off, because off is visible on
+# the Targets screen and this is not.
+_w = (h or {}).get("workers", {})
+check("health reports the background loops", set(_w)
+      >= {"standing_orders", "remediation"}, str(list(_w))[:120])
+check("standing orders is running in this process",
+      _w.get("standing_orders", {}).get("running") is True, str(_w)[:200])
+# `last` and not only `running`: a loop can be alive and idle for a
+# reason worth reading, and "running: true" alone does not tell an
+# operator whether anything is actually being queued.
+check("...and says what it last did",
+      _w.get("standing_orders", {}).get("last") is not None, str(_w)[:200])
+check("a loop that is alive is not reported as stopped",
+      "stopped" not in _w.get("standing_orders", {}), str(_w)[:200])
+
 st, _ = call("/api/health/site")
 check("health needs a session", st in (401, 403), f"status={st}")
 

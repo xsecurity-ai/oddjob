@@ -246,6 +246,41 @@ async def site_health(_: User = Depends(require_site_admin),
     except Exception:                            # noqa: BLE001
         socket = {"connected": False, "last": "not running"}
 
+    # The background loops, and what each last did.
+    #
+    # Both of these fail silently when they fail at all: a crashed
+    # asyncio task leaves the app healthy, every endpoint answering,
+    # and nothing happening. For standing orders that means an
+    # operator believing their estate is being enumerated and scanned
+    # when it is not, which is worse than the feature being off,
+    # because "off" is visible on the Targets screen and this is not.
+    #
+    # `last` rather than only `running`: a loop can be alive and doing
+    # nothing for a reason worth reading -- no project has a standing
+    # order, no agent is online -- and "running: true" alone does not
+    # distinguish that from work actually being queued.
+    workers = {}
+    for name, mod, attr in (("standing_orders", "..automation", "worker"),
+                            ("remediation", "..agent.remediate", "worker")):
+        try:
+            import importlib
+            w = getattr(importlib.import_module(mod, __package__), attr)
+            task = getattr(w, "task", None)
+            workers[name] = {
+                "running": bool(getattr(w, "running", False))
+                and task is not None and not task.done(),
+                "last": getattr(w, "last", None),
+            }
+            # A task that finished is a loop that will never run again.
+            # Said plainly rather than left as `running: false`, which
+            # reads the same as "not started yet".
+            if task is not None and task.done():
+                exc = task.exception() if not task.cancelled() else None
+                workers[name]["stopped"] = (
+                    f"{type(exc).__name__}: {exc}" if exc else "exited")
+        except Exception as e:                   # noqa: BLE001
+            workers[name] = {"running": False, "last": f"unavailable: {e}"}
+
     audit_newest = (await session.execute(
         select(func.max(AuditEvent.at)))).scalar_one_or_none()
 
@@ -272,6 +307,7 @@ async def site_health(_: User = Depends(require_site_admin),
         "exploit_feed": await _feed(session, "exploitdb", "Exploit-DB"),
         "slack": slack,
         "slack_socket": socket,
+        "workers": workers,
         "smtp": smtp,
         "drones": await _drones(session),
         "audit": {
