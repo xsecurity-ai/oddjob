@@ -11,10 +11,22 @@ name: oddjob
 
 services:
   db:
-    # The official image, pinned to a major version: Postgres will not
-    # start against a data directory written by a different major, so
-    # an unpinned tag turns a routine `pull` into a stopped database.
-    image: postgres:17
+    # Pinned by digest, and the pin matters more here than anywhere
+    # else in this file. Postgres will not start against a data
+    # directory written by a different major version — it exits with
+    # "database files are incompatible with server" and stays down —
+    # and Chainguard's free tier publishes only the mutable `latest`.
+    # A digest is therefore the only way to know which major you are
+    # about to run.
+    #
+    # THIS IS POSTGRES 18. A deployment whose pgdata was written by 17
+    # must be migrated before it will start: deploy/pg17-to-18.sh.
+    #
+    # When a Dependabot PR moves this digest, check the major before
+    # merging it. Every other digest bump in this repository is safe
+    # to take on faith; this one can stop the database.
+    #   docker run --rm --entrypoint /usr/bin/postgres IMAGE --version
+    image: cgr.dev/chainguard/postgres:latest@sha256:0c4eaf6cb9bd65337d834f5ebfe79add4312ee2125ab584bf1fbc071abc6bb8f
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-oddjob}

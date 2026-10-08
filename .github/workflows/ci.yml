@@ -97,7 +97,12 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:17
+        # The same image and digest the compose file deploys, so this
+        # job tests the major version that actually ships. It was left
+        # on postgres:17 when the db service moved to 18, which made
+        # the one job whose whole purpose is catching Postgres-specific
+        # behaviour the one job testing the wrong Postgres.
+        image: cgr.dev/chainguard/postgres:latest@sha256:0c4eaf6cb9bd65337d834f5ebfe79add4312ee2125ab584bf1fbc071abc6bb8f
         env:
           POSTGRES_USER: oddjob
           POSTGRES_PASSWORD: oddjob

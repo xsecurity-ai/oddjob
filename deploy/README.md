@@ -120,6 +120,49 @@ scan, and throttling that drops findings from work that has already run
 against someone's estate. They authenticate with a signed agent key
 rather than a password, so they are not the brute-force surface.
 
+## Upgrading an existing install to PostgreSQL 18
+
+**Do this before pulling, or the database will not start.** The `db`
+service moved to Chainguard's image, which is PostgreSQL 18. Postgres
+refuses to start against a data directory written by a different major:
+
+```
+FATAL:  database files are incompatible with server
+DETAIL: The data directory was initialized by PostgreSQL version 17,
+        which is not compatible with this version 18.6.
+```
+
+There is no in-place upgrade. The data comes out as SQL, the volume is
+destroyed, and the data goes back in:
+
+```bash
+./deploy/pg17-to-18.sh            # dry run: dump and verify, change nothing
+./deploy/pg17-to-18.sh --commit   # actually do it
+```
+
+The dry run is worth doing first — it dumps, checks the dump is complete,
+and stops. It refuses to go further on a dump that is suspiciously small,
+has too few tables, or lacks the completion marker, because the failure
+that matters is destroying a volume on the strength of a dump that was
+empty because the password was wrong.
+
+The dump is written to `deploy/` and **is not deleted**, whatever happens.
+If the restore goes wrong it is the only copy of the engagement. Delete it
+yourself once the application is confirmed working.
+
+A fresh install needs none of this — there is no volume to migrate.
+
+### When Dependabot bumps the db digest
+
+Check the major version before merging it. Every other digest bump in this
+repository is safe to take on faith; this one can stop the database,
+because Chainguard's free tier publishes only the mutable `latest` and a
+digest is the only thing that says which major you are about to run.
+
+```bash
+docker run --rm --entrypoint /usr/bin/postgres IMAGE@DIGEST --version
+```
+
 ## Which image to run
 
 CI publishes to Docker Hub as `cr0n1c/oddjob` and `cr0n1c/drone`, both
