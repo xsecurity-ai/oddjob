@@ -35,27 +35,11 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { isIpLiteral, validateHost } from '../lib/scopeEntry'
+import { asServerReadsIt, parseDomains } from '../lib/domainInput'
 import { neon, glow } from '../theme'
 import { Caveat, EnumerateDialog, FleetNotice } from './EnumerateBits'
 import { BY_ANY, PillInput, type Analyse } from './PillInput'
 import { useFleet } from './droneTasking'
-
-/** Commas, spaces, newlines. Operators paste from spreadsheets, scope
- *  documents and chat messages, and making them reformat it first is
- *  the kind of friction that gets a tool abandoned for a terminal. */
-export function parseDomains(raw: string): string[] {
-  const out: string[] = []
-  const seen = new Set<string>()
-  for (const piece of (raw || '').split(/[\s,;]+/)) {
-    const v = piece.trim().toLowerCase()
-      .replace(/^https?:\/\//, '').replace(/\/.*$/, '')
-      .replace(/^\*\./, '').replace(/\.$/, '')
-    if (!v || !v.includes('.') || seen.has(v)) continue
-    seen.add(v)
-    out.push(v)
-  }
-  return out
-}
 
 /** `MAX_TASKS` in backend/app/routers/domains.py.
  *
@@ -68,22 +52,6 @@ export function parseDomains(raw: string): string[] {
  *  as `deferred` and the next run drains it. Warning about that would be
  *  telling the operator to split something they did not write. */
 const MAX_PER_SUBMISSION = 200
-
-/** What the SERVER makes of one pasted piece — `EnumerateRequest.wanted`
- *  in backend/app/routers/domains.py, not `parseDomains` above.
- *
- *  The two differ in corners (the server's `lstrip("*.")` eats a run of
- *  leading stars and dots, this box's regex takes one `*.`), and it is
- *  the server's reading that decides what gets queued: what travels is
- *  the raw text, and `parseDomains` only ever counted it for the button.
- *  A pill claiming a line is malformed when the server would enumerate
- *  it happily is the client overruling the authority, so the pill uses
- *  the authority's own normalisation. */
-function asServerReadsIt(raw: string): string {
-  const v = raw.trim().replace(/\.+$/, '').toLowerCase()
-    .replace(/^[*.]+/, '')
-  return v.replace(/^[a-z]+:\/\//, '').split('/')[0].split('?')[0]
-}
 
 /** Only the two refusals `enumerate_domains` actually issues are red.
  *  Everything else it will at least attempt, so the pill says its piece

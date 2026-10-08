@@ -1,0 +1,148 @@
+[
+{
+"raw": "acme.example",
+"wanted": [
+"acme.example"
+]
+},
+{
+"raw": "HTTPS://Acme.Example/path?q=1",
+"wanted": [
+"acme.example"
+]
+},
+{
+"raw": "*.acme.example",
+"wanted": [
+"acme.example"
+]
+},
+{
+"raw": "**..acme.example",
+"wanted": [
+"acme.example"
+]
+},
+{
+"raw": "*.*.acme.example",
+"wanted": [
+"acme.example"
+]
+},
+{
+"raw": "acme.example...",
+"wanted": [
+"acme.example"
+]
+},
+{
+"raw": "localhost",
+"wanted": [
+"localhost"
+]
+},
+{
+"raw": "ftp://files.acme.example",
+"wanted": [
+"files.acme.example"
+]
+},
+{
+"raw": "ssh://jump.acme.example",
+"wanted": [
+"jump.acme.example"
+]
+},
+{
+"raw": "acme.example/a/b?c=d",
+"wanted": [
+"acme.example"
+]
+},
+{
+"raw": "acme.example:8443",
+"wanted": [
+"acme.example:8443"
+]
+},
+{
+"raw": "203.0.113.5",
+"wanted": [
+"203.0.113.5"
+]
+},
+{
+"raw": "[2001:db8::1]",
+"wanted": [
+"[2001:db8::1]"
+]
+},
+{
+"raw": "*.",
+"wanted": []
+},
+{
+"raw": "...",
+"wanted": []
+},
+{
+"raw": "   ",
+"wanted": []
+},
+{
+"raw": "",
+"wanted": []
+},
+{
+"raw": "a.example, b.example;c.example\nd.example\te.example",
+"wanted": [
+"a.example",
+"b.example",
+"c.example",
+"d.example",
+"e.example"
+]
+},
+{
+"raw": "dup.example dup.example DUP.EXAMPLE",
+"wanted": [
+"dup.example"
+]
+},
+{
+"raw": "trailing.example.",
+"wanted": [
+"trailing.example"
+]
+},
+{
+"raw": "http://x.example/",
+"wanted": [
+"x.example"
+]
+},
+{
+"raw": "sub.deep.acme.example",
+"wanted": [
+"sub.deep.acme.example"
+]
+},
+{
+"raw": "xn--bcher-kva.example",
+"wanted": [
+"xn--bcher-kva.example"
+]
+},
+{
+"raw": "UPPER.EXAMPLE",
+"wanted": [
+"upper.example"
+]
+},
+{
+"raw": "mixed.Example/PATH",
+"wanted": [
+"mixed.example"
+]
+}
+]
