@@ -107,20 +107,30 @@ FROM cgr.dev/chainguard/python:latest@sha256:8c6e0d0a587455e8a8d145e20234d5ef5a5
 # bundles it in the wheel, and curl came out because the healthcheck
 # below no longer shells out — see the note there.
 #
-# No useradd either: the image is already nonroot, uid 65532. The old
-# `--chown=oddjob` on every COPY becomes `--chown=65532` for the same
-# reason it existed before — chowning after the fact writes a second
-# copy of the whole virtualenv into a new layer, 228 MB of it.
+# No useradd either — there is no shell to run it with, and the image
+# is already nonroot. The uid stays 10001 rather than taking
+# Chainguard's default of 65532, which is not cosmetic: the `secret`
+# volume holds the session-signing key and its files are owned by
+# 10001 on every deployment that already exists. A container running
+# as 65532 against that volume cannot write to it, so a first boot
+# after upgrading fails to generate a key and an existing one cannot
+# be rotated. Tested, not reasoned about: PermissionError on
+# /app/backend/data. Both uids are equally unprivileged, so there is
+# nothing to trade away by keeping the one already on disk.
+#
+# `--chown` on each COPY rather than a chown afterwards, for the same
+# reason as before — chowning after the fact writes a second copy of
+# the whole virtualenv into a new layer, 228 MB of it.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH"
 
-COPY --from=deps --chown=65532:65532 /opt/venv /opt/venv
-COPY --chown=65532:65532 backend/ /app/backend/
-COPY --from=ui --chown=65532:65532 /build/frontend/dist /app/frontend/dist
-COPY --from=drone --chown=65532:65532 /build/drone/dist /app/drone-dist
-COPY --chown=65532:65532 docker/entrypoint.py /usr/local/bin/entrypoint.py
+COPY --from=deps --chown=10001:10001 /opt/venv /opt/venv
+COPY --chown=10001:10001 backend/ /app/backend/
+COPY --from=ui --chown=10001:10001 /build/frontend/dist /app/frontend/dist
+COPY --from=drone --chown=10001:10001 /build/drone/dist /app/drone-dist
+COPY --chown=10001:10001 docker/entrypoint.py /usr/local/bin/entrypoint.py
 
 # `data` holds the session-signing key, which has to outlive the
 # container or every restart logs everyone out — people respond to
@@ -129,9 +139,9 @@ COPY --chown=65532:65532 docker/entrypoint.py /usr/local/bin/entrypoint.py
 # Created by COPY rather than `RUN mkdir`, because there is no shell
 # here to run mkdir with. An empty directory with the right owner is
 # all it was ever doing.
-COPY --from=deps --chown=65532:65532 /empty /app/backend/data
+COPY --from=deps --chown=10001:10001 /empty /app/backend/data
 
-USER 65532
+USER 10001
 WORKDIR /app/backend
 
 ENV ODDJOB_SECRET_FILE=/app/backend/data/.secret \
