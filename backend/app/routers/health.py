@@ -39,6 +39,7 @@ from ..models import (
     Vuln,
 )
 from ..security import require_site_admin
+from ..version import IS_DEV, VERSION
 
 router = APIRouter(prefix="/api/health", tags=["health"])
 
@@ -161,6 +162,13 @@ async def _drones(session: AsyncSession) -> dict:
         st = _stale(a, busy.get(a.id, 0))
         states[st] = states.get(st, 0) + 1
         rows.append({"id": a.id, "name": a.name, "state": st,
+                     # Null, not a placeholder string. An agent old
+                     # enough to predate version reporting, or one that
+                     # has been created but has never registered, has
+                     # not told us anything — and "unknown" rendered as
+                     # though it were a version is how a fleet summary
+                     # grows a bucket that is not a version.
+                     "version": a.version or None,
                      "last_seen": a.last_seen.isoformat() if a.last_seen else None,
                      "age_seconds": _age(a.last_seen),
                      "missing_tools": (a.missing_tools or "") or None})
@@ -190,6 +198,12 @@ async def _drones(session: AsyncSession) -> dict:
     else:
         state = "ok"
     return {"state": state, "drones": rows, "by_state": states,
+            # The fleet's versions, summarised from the same list of
+            # agents the rows came from rather than from a second
+            # query. One read, so the card and the rows under it
+            # cannot disagree about which drones exist.
+            "versions": servicehealth.fleet_versions(
+                (a.version for a in agents), server_version=VERSION),
             "queue": queue, "queued_over_an_hour": stuck,
             "offline_after_seconds": int(OFFLINE_AFTER.total_seconds()),
             "note": ("no drones are enrolled" if not agents
@@ -239,6 +253,16 @@ async def site_health(_: User = Depends(require_site_admin),
         "generated_at": datetime.now(UTC).isoformat(),
         "server": {
             "state": "ok",
+            # Which Oddjob this is. Read from the VERSION file at
+            # import (see app/version.py), never a literal here — a
+            # second literal is a second answer, and it is always the
+            # stale one.
+            "version": VERSION,
+            # Stated rather than left for the reader to spot the
+            # suffix. "0.0.1-dev-1759900000" in a bug report is only
+            # useful if whoever reads it knows that means an
+            # unreleased build of 0.0.1.
+            "dev": IS_DEV,
             "started_at": STARTED_AT.isoformat(),
             "uptime_seconds": _age(STARTED_AT),
             "sse_subscribers": broker.subscriber_count,

@@ -197,6 +197,13 @@ jobs:
           go-version: '1.26'
           cache-dependency-path: drone/go.sum
 
+      # The release version, from the one file that decides it. Used
+      # both as the agent image's build argument and as the value the
+      # built binaries are checked against.
+      - name: The version
+        id: ver
+        run: echo "version=$(scripts/version.sh --release)" >> "$GITHUB_OUTPUT"
+
       - name: Formatted
         working-directory: drone
         run: |
@@ -219,6 +226,13 @@ jobs:
       # needs a Windows binary.
       - name: Cross-compile every release target
         working-directory: drone
+        # ODDJOB_RELEASE=1 so these are built the way a release is
+        # built — bare version, no `-dev-` suffix. The step below
+        # proves it, and the one after that proves the suffix still
+        # appears when nobody asks for a release, so neither direction
+        # of the mechanism can rot unnoticed.
+        env:
+          ODDJOB_RELEASE: '1'
         run: make release
 
       # Layer cache for the image build below. Without it every PR
@@ -238,6 +252,12 @@ jobs:
           context: ./drone
           load: true
           tags: drone-agent
+          # The same build argument images.yml passes, from the same
+          # script and the same file. The agent image's context is
+          # `drone/`, which has no VERSION in it — see the comment
+          # above the ARG in drone/Dockerfile.
+          build-args: |
+            DRONE_VERSION=${{ steps.ver.outputs.version }}
           cache-from: type=gha,scope=ci-drone
           cache-to: type=gha,scope=ci-drone,mode=max
 
@@ -270,6 +290,67 @@ jobs:
             file dist/drone-linux-amd64; exit 1
           fi
           ./dist/drone-linux-amd64 version
+
+      # The version a drone reports is the one an operator uses to
+      # answer "which agent produced this scan", so it is checked out
+      # of the artefact rather than trusted from the Makefile.
+      #
+      # `drone version` prints "drone <ver> (os/arch, goVER)". The
+      # second field is the version; cut it out rather than regex the
+      # line, so a change to the surrounding text fails loudly here
+      # instead of quietly matching nothing.
+      - name: The release binaries carry a release version
+        working-directory: drone
+        env:
+          WANT: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          got=$(./dist/drone-linux-amd64 version | awk '{print $2}')
+          ../scripts/check-version.sh "$got"
+          if [ "$got" != "$WANT" ]; then
+            echo "::error::the binary says $got and VERSION says $WANT." >&2
+            exit 1
+          fi
+
+      # And the image, which is what most deployments actually run.
+      # Built with the same argument, checked the same way: an image
+      # that reports a dev version must never be publishable, and
+      # images.yml and this job build it identically.
+      - name: The agent image carries a release version
+        env:
+          WANT: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          got=$(docker run --rm --entrypoint /usr/local/bin/drone \
+                  drone-agent version | awk '{print $2}')
+          scripts/check-version.sh "$got"
+          if [ "$got" != "$WANT" ]; then
+            echo "::error::the image says $got and VERSION says $WANT." >&2
+            exit 1
+          fi
+
+      # The other direction, and it is not symmetry for its own sake.
+      # Every check above would still pass if the dev suffix had simply
+      # stopped being produced — and then a developer's build would
+      # wear a release number, which is the failure the whole
+      # arrangement exists to prevent. A guard that cannot fail is not
+      # a guard.
+      - name: A plain build is still marked as a dev build
+        working-directory: drone
+        run: |
+          set -euo pipefail
+          make build
+          got=$(./drone version | awk '{print $2}')
+          echo "unreleased build reports $got"
+          case "$got" in
+            *-dev-*) ;;
+            *) echo "::error::a build with no ODDJOB_RELEASE reported '$got'," >&2
+               echo "::error::which carries no -dev- marker. The suffix has" >&2
+               echo "::error::stopped working and nothing downstream would" >&2
+               echo "::error::notice a dev build wearing a release number." >&2
+               exit 1 ;;
+          esac
+          rm -f drone
 
   docker:
     name: image builds and the stack comes up
@@ -321,6 +402,30 @@ jobs:
           curl -fsS -H 'Accept: text/html' http://127.0.0.1:8000/ | grep -qE 'assets/index-[^"]+\.js'
           curl -fsS -o /dev/null http://127.0.0.1:8000/favicon.ico
 
+      # The one check that actually proves a `-dev-` version cannot
+      # reach main: it asks the built image what version it is, rather
+      # than asking the repository what it ought to be.
+      #
+      # The image gets its answer from app/version.py, which appends
+      # the dev suffix whenever a `.git` directory sits beside VERSION.
+      # `.git` is in .dockerignore, so a correctly built image cannot
+      # report one — and if that ever stops being true, this fails on
+      # the PR that broke it rather than on the first promotion after.
+      #
+      # Asked of python for the same reason as the uid check below:
+      # the runtime image is distroless and there is no shell in it.
+      - name: The image reports a release version
+        run: |
+          set -euo pipefail
+          got=$(docker compose exec -T app /opt/venv/bin/python \
+                  -c 'from app.version import VERSION; print(VERSION)' | tr -d '\r')
+          scripts/check-version.sh "$got"
+          want=$(scripts/version.sh --release)
+          if [ "$got" != "$want" ]; then
+            echo "::error::the image says $got and VERSION says $want." >&2
+            exit 1
+          fi
+
       - name: Migrations ran, and against Postgres
         run: |
           set -euo pipefail
@@ -341,6 +446,34 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down -v
+
+  version:
+    name: the version is a releasable one
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The dev suffix is the commit timestamp, so the check needs
+          # a commit to read. A shallow checkout has one; this is here
+          # to say the dependency is deliberate.
+          fetch-depth: 1
+
+      # `VERSION` is a bare semver triple, the release path produces
+      # no `-dev-` suffix, and the default path still produces one.
+      #
+      # The test lives in scripts/check-version.sh because the
+      # pre-commit hook, bump-version.yml, images.yml and promote.yml
+      # all run the same one. Two copies would eventually disagree,
+      # and the one that matters is whichever is weaker.
+      #
+      # This job checks the FILE and the SCRIPT. The checks that a
+      # built artefact carries a release version live in the `drone`
+      # and `docker` jobs, where the artefacts are — a clean file and
+      # an image built without --release is the interesting failure,
+      # and nothing here could see it.
+      - name: Version
+        run: scripts/check-version.sh
 
   secrets:
     name: no secrets or client data

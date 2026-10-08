@@ -96,6 +96,19 @@ repos:
         pass_filenames: false
         entry: scripts/check-secrets.sh
 
+      # The same test ci.yml's `version` job runs. `VERSION` must be a
+      # bare semver triple: the `-dev-<commit time>` suffix is produced
+      # at build time by scripts/version.sh and must never be committed
+      # to the file, because that string becomes a Docker Hub tag and a
+      # git tag. Scoped to the file, so it costs nothing on the commits
+      # that do not touch it.
+      - id: version
+        name: VERSION is a releasable semver triple
+        language: system
+        pass_filenames: false
+        files: ^(VERSION|scripts/(version|check-version)\.sh)$
+        entry: scripts/check-version.sh
+
       # ------------------------------------------------- the linters
       - id: python-lint
         name: ruff

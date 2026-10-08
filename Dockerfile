@@ -44,15 +44,39 @@ WORKDIR /build/drone
 COPY drone/go.mod drone/go.sum ./
 RUN go mod download
 
+# The repository-root VERSION file, into the Go build directory, so the
+# line below can stamp it. Copied before the source for cache reasons:
+# it changes once per release and the agent changes every day, and the
+# other order would invalidate six cross-compiles on every edit.
+#
+# Note what is NOT here: a build argument. These six binaries are
+# handed out by the Oddjob UI to be run inside a client's network, and
+# the version they report on register is how an operator answers "which
+# agent produced this scan". A build argument is something a caller can
+# forget, get wrong, or quietly default; the file is the one place the
+# version is decided (see scripts/version.sh) and reading it directly
+# is the arrangement with no second answer.
+#
+# No `-dev-` suffix, and that is also deliberate — an image build is a
+# release path. scripts/version.sh only adds the suffix when nobody has
+# said `--release`, and ci.yml reads these binaries' version back and
+# fails if one carries it.
+COPY VERSION ./VERSION
+
 COPY drone/ ./
 RUN set -eu; \
+    ver="$(tr -d '[:space:]' < VERSION)"; \
+    [ -n "$ver" ] || { echo "VERSION is empty"; exit 1; }; \
+    echo "stamping drone binaries as $ver"; \
     for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 \
              windows/amd64 windows/arm64; do \
       os="${t%/*}"; arch="${t#*/}"; \
       out="dist/drone-$os-$arch"; \
       [ "$os" = windows ] && out="$out.exe"; \
       CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-        go build -trimpath -ldflags "-s -w" -o "$out" ./cmd/drone; \
+        go build -trimpath \
+          -ldflags "-s -w -X github.com/xsecurity-ai/oddjob/drone/internal/config.Version=$ver" \
+          -o "$out" ./cmd/drone; \
     done; \
     ls -l dist/
 
@@ -142,6 +166,19 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH"
 
 COPY --from=deps --chown=10001:10001 /opt/venv /opt/venv
+# The version, as a file, one level above the backend — which is where
+# app/version.py walks up to find it. Two properties make this the
+# whole mechanism for the Python half:
+#
+#   * `.git` is in .dockerignore and is therefore not in this image, so
+#     version.py takes the release branch and reports a bare `0.0.1`
+#     rather than appending a `-dev-` suffix. The image cannot
+#     accidentally claim to be a development build, because the thing
+#     that marks one is absent by construction.
+#   * It is the same file the drone stage above stamped into the agent
+#     binaries, from the same build context, so the server and the
+#     agents it hands out cannot disagree.
+COPY --chown=10001:10001 VERSION /app/VERSION
 COPY --chown=10001:10001 backend/ /app/backend/
 COPY --from=ui --chown=10001:10001 /build/frontend/dist /app/frontend/dist
 COPY --from=drone --chown=10001:10001 /build/drone/dist /app/drone-dist

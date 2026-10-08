@@ -99,6 +99,7 @@ jobs:
       oddjob_build: ${{ steps.k.outputs.oddjob_build }}
       pointer: ${{ steps.k.outputs.pointer }}
       dated: ${{ steps.k.outputs.dated }}
+      version: ${{ steps.k.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -110,16 +111,32 @@ jobs:
           WANT: ${{ inputs.pointer }}
         run: |
           set -euo pipefail
+          # The version is an input to both images — it is stamped
+          # into the Go binaries and into the OCI labels — so it has to
+          # be part of both keys. Without it, a release that only bumps
+          # VERSION changes no tree under `drone/`, the key is
+          # unchanged, this job takes the retag path, and `:nightly`
+          # ends up pointing at bytes whose label still says the old
+          # number. promote.yml then reads that label and puts the old
+          # version on the new release. The whole chain is only
+          # coherent if a version bump is a rebuild.
+          version=$(scripts/version.sh --release)
+          scripts/check-version.sh "$version"
+
           # `git rev-parse HEAD:<path>` is the tree hash: it changes
           # when the contents change and not otherwise. Commit SHAs
           # would rebuild on every merge, which is the thing being
           # avoided.
-          drone_tree=$(git rev-parse "HEAD:drone")
+          drone_key=$(
+            { git rev-parse "HEAD:drone"
+              printf 'version=%s\n' "$version"
+            } | sha256sum | cut -c1-16)
           odd_tree=$(
             { git rev-parse "HEAD:backend" "HEAD:frontend" "HEAD:docker" "HEAD:drone"
               git rev-parse "HEAD:Dockerfile"
+              printf 'version=%s\n' "$version"
             } | sha256sum | cut -c1-16)
-          drone_key="${drone_tree:0:16}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
           case "$EVENT" in
             schedule)          pointer=nightly ;;
@@ -156,6 +173,11 @@ jobs:
         run: |
           {
             echo "### Plan — moving \`:${{ steps.k.outputs.pointer }}\`"
+            echo ""
+            echo "Version \`${{ steps.k.outputs.version }}\`, from \`VERSION\`."
+            echo "It is stamped into the binaries and into the"
+            echo "\`org.opencontainers.image.version\` label, and promote.yml"
+            echo "reads it back off the label to decide the release tag."
             echo ""
             echo "| image | source key | action |"
             echo "|---|---|---|"
@@ -197,6 +219,35 @@ jobs:
         with:
           context: ./drone
           platforms: linux/${{ matrix.arch }}
+          # The drone image's build context is `drone/`, which does not
+          # contain the repository-root VERSION file and cannot without
+          # creating a second copy of it. So the version is handed in.
+          # It came from `scripts/version.sh --release` in the plan job
+          # above, which read that one file.
+          build-args: |
+            DRONE_VERSION=${{ needs.plan.outputs.version }}
+          # Labels, not tags. A version TAG means "this was released",
+          # and only promote.yml says that — see its header. A version
+          # LABEL means "these bytes were built from VERSION = X",
+          # which is true of every develop and nightly build and is
+          # exactly what promote.yml needs to read back so it can put
+          # the right number on the digest it is promoting without
+          # recomputing it from anywhere else.
+          #
+          # `revision` is the commit, so promote.yml can put the git
+          # tag on the commit that produced the image rather than on
+          # whatever main happens to be when somebody presses the
+          # button. "Check out the tag to reproduce the release" is
+          # only true if the tag is on that commit.
+          #
+          # `source-key` is this repository's content key, so the
+          # release tag can be checked against the `src-<key>` tag it
+          # came from: the two must resolve to the same digest.
+          labels: |
+            org.opencontainers.image.version=${{ needs.plan.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            ai.xsecurity.source-key=${{ needs.plan.outputs.drone_key }}
           outputs: type=image,name=docker.io/cr0n1c/drone,push-by-digest=true,name-canonical=true,push=true
           # Registry, not type=gha. GitHub's Actions cache is 10 GB for
           # the whole repository with LRU eviction, and `mode=max` on
@@ -215,6 +266,15 @@ jobs:
         with:
           context: .
           platforms: linux/${{ matrix.arch }}
+          # No build-args: this context is the repository root, so the
+          # Dockerfile reads VERSION out of it directly. The labels are
+          # here for the same reason as on the drone image above —
+          # promote.yml reads them rather than recomputing anything.
+          labels: |
+            org.opencontainers.image.version=${{ needs.plan.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            ai.xsecurity.source-key=${{ needs.plan.outputs.oddjob_key }}
           outputs: type=image,name=docker.io/cr0n1c/oddjob,push-by-digest=true,name-canonical=true,push=true
           # Registry for the same reason as drone above. `image-manifest`
           # so Docker Hub accepts it as an ordinary tag rather than

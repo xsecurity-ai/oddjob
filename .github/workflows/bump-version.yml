@@ -1,0 +1,162 @@
+# Bump the version. Manual, like promote.yml, and the only thing in
+# this repository that decides what the next version number is.
+#
+# ------------------------------------------------------ one decider
+#
+# `VERSION` at the repository root holds a bare semver triple. This
+# workflow reads it, increments one component, writes it back and
+# commits to main. That is the whole job: it does not build, it does
+# not publish, and it does not create a release.
+#
+# Everything else READS that file:
+#
+#   backend/app/version.py       the Health view's "Oddjob version"
+#   drone/Makefile, Dockerfiles  stamped into the agent binaries, so
+#                                every drone reports it on register
+#   images.yml                   part of the content key, so a bump is
+#                                a rebuild, and stamped into the
+#                                org.opencontainers.image.version label
+#   promote.yml                  reads that label back and makes it the
+#                                release tag, in Docker Hub and in git
+#
+# promote.yml used to do this arithmetic itself, from the highest
+# existing git tag. It no longer does — see its header. There is one
+# place the number is decided and it is this file; the git tags remain
+# the durable record of what was *released*, which is a different
+# question and is promote.yml's to answer.
+#
+# ------------------------------------------------- what "build" means
+#
+# The three components are `major`, `minor` and `build`. `build` is the
+# patch component — `0.0.1` -> `0.0.2`. Named that way because it is
+# what the request asked for and what people here say; semver calls it
+# patch, and both names are on the input so neither reading is wrong.
+#
+# ------------------------------------------------------- after this
+#
+# Merging the commit this pushes triggers images.yml, which rebuilds
+# both images (VERSION is in the content key) and moves `:develop`.
+# The nightly after that moves `:nightly`. Then promote.yml turns that
+# digest into `v<version>` on Docker Hub and a git tag — by retagging
+# the digest, never by rebuilding.
+name: bump-version
+
+on:
+  workflow_dispatch:
+    inputs:
+      part:
+        description: 'Which component to bump'
+        type: choice
+        options: [build, minor, major]
+        default: build
+      expect_current:
+        # Optional, and the point of it is concurrency. Two people
+        # bumping within a minute of each other both read 0.0.1 and
+        # both write 0.0.2; the second push is rejected by the
+        # fast-forward check below, but stating what you expected turns
+        # that into a clear message rather than a git error.
+        description: 'Optional: the version you expect to be bumping from, e.g. 0.0.1'
+        type: string
+        default: ''
+
+permissions:
+  contents: write        # to push the commit
+
+concurrency:
+  # Shares nothing with promote. Two bumps must not interleave, but a
+  # bump and a promotion are independent — the promotion acts on bytes
+  # that were built from a VERSION already committed.
+  group: bump-version
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # main explicitly, not the ref the dispatch came from. A bump
+          # committed to a side branch would be invisible to every
+          # reader listed in the header and would silently do nothing.
+          ref: main
+          fetch-depth: 0
+
+      - name: Work out the next version
+        id: v
+        env:
+          PART: ${{ inputs.part }}
+          EXPECT: ${{ inputs.expect_current }}
+        run: |
+          set -euo pipefail
+
+          # Validated before it is used as a number. The file is the
+          # input to everything downstream, and "it was already broken"
+          # is a poor reason to write something broken on top of it.
+          scripts/check-version.sh
+
+          cur=$(tr -d '[:space:]' < VERSION)
+          if [ -n "$EXPECT" ] && [ "$EXPECT" != "$cur" ]; then
+            echo "::error::you expected to bump from $EXPECT and VERSION says $cur." >&2
+            echo "::error::Somebody bumped in between. Nothing was changed." >&2
+            exit 1
+          fi
+
+          IFS=. read -r MA MI PA <<< "$cur"
+          case "$PART" in
+            major) MA=$((MA+1)); MI=0; PA=0 ;;
+            minor) MI=$((MI+1)); PA=0 ;;
+            # `build` is this repository's name for semver's patch.
+            build|patch) PA=$((PA+1)) ;;
+            *) echo "::error::unknown part: $PART" >&2; exit 1 ;;
+          esac
+          next="${MA}.${MI}.${PA}"
+
+          # A major or minor bump resets the components below it, which
+          # means the new number can collide with one already released
+          # if somebody bumps backwards by hand. Cheap to check, and
+          # the alternative is promote.yml refusing days later.
+          if git rev-parse "v$next" >/dev/null 2>&1; then
+            echo "::error::v$next has already been released (git tag exists)." >&2
+            exit 1
+          fi
+
+          printf '%s\n' "$next" > VERSION
+          # Proves the file the rest of the repository reads is valid
+          # BEFORE it is committed, using the same script CI and the
+          # pre-commit hook run. A bump that lands a malformed VERSION
+          # on main breaks every build until somebody reverts it.
+          scripts/check-version.sh
+
+          {
+            echo "current=$cur"
+            echo "next=$next"
+          } >> "$GITHUB_OUTPUT"
+          echo "$cur -> $next ($PART)"
+
+      - name: Commit it
+        env:
+          CUR: ${{ steps.v.outputs.current }}
+          NEXT: ${{ steps.v.outputs.next }}
+          PART: ${{ inputs.part }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add VERSION
+          git commit -m "Version $NEXT ($PART from $CUR)" \
+                     -m "Bumped by .github/workflows/bump-version.yml." \
+                     -m "VERSION is the single place the version is decided; see scripts/version.sh."
+          # No force, no lease. If main moved under us the push fails
+          # and nothing is lost — re-running the workflow reads the new
+          # VERSION and bumps from there, which is the correct outcome.
+          git push origin HEAD:main
+          {
+            echo "### VERSION is now \`$NEXT\` (was \`$CUR\`)"
+            echo ""
+            echo "No image carries it yet. \`images.yml\` rebuilds on this commit"
+            echo "— VERSION is part of the content key — and stamps it into the"
+            echo "binaries and the \`org.opencontainers.image.version\` label."
+            echo "Run \`promote\` once \`:develop\` or \`:nightly\` has moved to"
+            echo "publish \`cr0n1c/oddjob:v$NEXT\` and \`cr0n1c/drone:v$NEXT\`"
+            echo "and the matching git tag."
+          } >> "$GITHUB_STEP_SUMMARY"

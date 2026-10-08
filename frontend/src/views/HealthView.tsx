@@ -28,7 +28,9 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import ExpandLessIcon from '@mui/icons-material/ExpandLess'
 import SearchIcon from '@mui/icons-material/Search'
 import { useQuery } from '@tanstack/react-query'
-import { api, type AuditFilter, type HealthBlock, type HealthState } from '../lib/api'
+import {
+  api, type AuditFilter, type DroneFleetVersions, type HealthBlock, type HealthState,
+} from '../lib/api'
 import { neon, glow } from '../theme'
 
 /** Colour carries the state, but never alone — the chip is always
@@ -67,6 +69,29 @@ function StateChip({ state }: { state: HealthState }) {
         color: s.colour, borderColor: alpha(s.colour, 0.5),
         backgroundColor: alpha(s.colour, 0.12),
       }} variant="outlined" />
+  )
+}
+
+/** An unreleased build, said in words.
+ *
+ *  Yellow rather than red: running a dev build is a normal thing to be
+ *  doing on a laptop and an alarming thing to be doing in production,
+ *  and this component cannot tell which it is looking at. Flagging it
+ *  is the job; deciding whether it is a problem is the admin's. */
+function DevChip() {
+  return (
+    // One line, not a wrapped string literal: JSX keeps the newline and
+    // the indentation inside an attribute string, so a tidy-looking
+    // source wrap renders as a tooltip full of gaps.
+    <Tooltip title={'Built from a working tree, not from a release. The number after '
+                    + '-dev- is the Unix time of the commit it was built from.'}>
+      <Chip size="small" label="dev build" sx={{
+        height: 18, fontSize: 9, letterSpacing: '0.08em', textTransform: 'uppercase',
+        fontFamily: `'Orbitron', sans-serif`,
+        color: neon.yellow, borderColor: alpha(neon.yellow, 0.5),
+        backgroundColor: alpha(neon.yellow, 0.12),
+      }} variant="outlined" />
+    </Tooltip>
   )
 }
 
@@ -260,8 +285,25 @@ export function HealthView() {
           ) : null}
         </Card>
 
+        <DroneVersionsCard fleet={dr.versions} />
+
         <Card title="Server" state="ok"
           lines={[
+            // First line on the card, because it is the first thing
+            // asked in every bug report and the hardest thing to get
+            // from anywhere else. The chip beside it is not
+            // decoration: "0.0.1-dev-1759900000" means nothing to
+            // somebody who has not read scripts/version.sh, and
+            // "unreleased build" means the same thing to everybody.
+            ['version', (
+              <Stack direction="row" spacing={0.6} alignItems="center"
+                justifyContent="flex-end" sx={{ flexWrap: 'wrap' }}>
+                <Box component="span" sx={{ fontFamily: 'monospace', fontSize: 12 }}>
+                  {h.server.version || 'unknown'}
+                </Box>
+                {h.server.dev ? <DevChip /> : null}
+              </Stack>
+            )],
             ['started', when(h.server.started_at)],
             ['uptime', ago(h.server.uptime_seconds)],
             ['live subscribers', String(h.server.sse_subscribers)],
@@ -285,6 +327,92 @@ export function HealthView() {
         <AuditTable />
       </Collapse>
     </Box>
+  )
+}
+
+/** Which versions the fleet is actually running, and how many on each.
+ *
+ *  Not "the newest drone is on 0.1.0". A site admin chasing "this task
+ *  behaves differently depending on which drone takes it" needs the
+ *  split — the drone that misbehaved is one of the other two, and a
+ *  single maximum hides it completely. So every version in use gets a
+ *  row with a count, newest first.
+ *
+ *  Drones that have never reported a version are counted on their own
+ *  line and never folded into a bucket. "We do not know what that one
+ *  is running" is a third answer, and a fleet of ten with four silent
+ *  ones must not read as a tidy fleet of six. The agent has sent
+ *  `version` on register for a long time, so in practice this is an
+ *  agent created in the UI that has not yet enrolled, or one built
+ *  before the field existed. Either way it is a gap, not a zero. */
+function DroneVersionsCard({ fleet }: { fleet: DroneFleetVersions }) {
+  const rows = fleet.versions ?? []
+  return (
+    <Card title="Drone versions" state={fleet.state}
+      lines={[
+        ['versions in use', String(fleet.distinct)],
+        ['drones reporting', String(fleet.reported)],
+        // Shown even when it is zero, so the line's absence never has
+        // to be interpreted. A missing row and a row saying 0 read
+        // identically to somebody skimming, and only one of them is
+        // a statement.
+        ['not reporting', String(fleet.unreported)],
+        ['matching this server', fleet.server_version
+          ? `${fleet.matching_server} of ${fleet.reported + fleet.unreported}`
+          : '—'],
+      ]}>
+      <Stack spacing={0.4} sx={{ mt: 1.2 }}>
+        {rows.map((r) => (
+          <Stack key={r.version} direction="row" alignItems="center"
+            justifyContent="space-between" spacing={1}>
+            <Stack direction="row" alignItems="center" spacing={0.6}
+              sx={{ minWidth: 0, flexWrap: 'wrap' }}>
+              <Box component="span" sx={{
+                fontFamily: 'monospace', fontSize: 12,
+                // Greyed, not hidden. A version we cannot order is
+                // still a version somebody is running.
+                opacity: r.parsed ? 1 : 0.6,
+                color: r.matches_server ? neon.green : undefined,
+                wordBreak: 'break-all',
+              }}>{r.version}</Box>
+              {r.dev ? <DevChip /> : null}
+              {!r.parsed ? (
+                <Tooltip title={'Not a semver version, so it cannot be ordered against '
+                                + 'the others. An agent built before the VERSION file '
+                                + 'existed reports one of these.'}>
+                  <Box component="span" sx={{ fontSize: 10, opacity: 0.55 }}>
+                    (unversioned)
+                  </Box>
+                </Tooltip>
+              ) : null}
+            </Stack>
+            <Typography sx={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+              {r.count} {r.count === 1 ? 'drone' : 'drones'}
+            </Typography>
+          </Stack>
+        ))}
+        {fleet.unreported > 0 ? (
+          <Stack direction="row" alignItems="center"
+            justifyContent="space-between" spacing={1}>
+            <Typography sx={{ fontSize: 12, opacity: 0.6, fontStyle: 'italic' }}>
+              no version reported
+            </Typography>
+            <Typography sx={{ fontSize: 12, whiteSpace: 'nowrap', opacity: 0.6 }}>
+              {fleet.unreported} {fleet.unreported === 1 ? 'drone' : 'drones'}
+            </Typography>
+          </Stack>
+        ) : null}
+        {rows.length === 0 && fleet.unreported === 0 ? (
+          <Typography sx={{ fontSize: 11, opacity: 0.6 }}>
+            No drones are enrolled, so there is nothing to compare. That is a
+            statement about this installation, not about the fleet.
+          </Typography>
+        ) : null}
+      </Stack>
+      {fleet.note ? (
+        <Typography sx={{ fontSize: 11, opacity: 0.7, mt: 1 }}>{fleet.note}</Typography>
+      ) : null}
+    </Card>
   )
 }
 
