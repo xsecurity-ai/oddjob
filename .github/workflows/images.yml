@@ -1,0 +1,292 @@
+# Published images for oddjob and drone.
+#
+# Three triggers, three moving pointers, one build:
+#
+#   push to main   -> :develop     every merge, so there is always an
+#                                  image of what main currently is
+#   schedule       -> :nightly     what promote.yml draws from
+#   workflow_dispatch              either, for a rebuild by hand
+#
+# and under all of them `:src-<key>`, which is the durable one. The
+# moving names are conveniences; `src-<key>` is the fact.
+#
+# ---------------------------------------------------------------- keys
+#
+# Each image is keyed on a hash of ITS OWN inputs and the build is
+# skipped when an image already exists for that key. `paths:` cannot do
+# this: path filters are ignored on a `schedule` trigger, so a nightly
+# either rebuilds every night regardless — republishing byte-identical
+# images and making "when did this change?" unanswerable — or it does
+# not run at all. The key is also stricter than "did any commit land":
+# a README change, or a change to the other image's source, correctly
+# rebuilds nothing.
+#
+# The two images are not symmetric, and this is the part worth reading:
+#
+#   drone  <- drone/
+#   oddjob <- backend/ frontend/ docker/ Dockerfile AND drone/
+#
+# because the oddjob image compiles the drone binaries into itself for
+# the download endpoint. A drone-only change therefore rebuilds both,
+# which is exactly what a naive `paths: drone/**` filter on the oddjob
+# job would get wrong.
+#
+# ------------------------------------------------- why a retag branch
+#
+# "Already built" cannot mean "do nothing", now that there is more than
+# one pointer. A merge builds `src-X` and moves `:develop` to it; the
+# 03:17 run that night finds `src-X` already published and, if it
+# simply skipped, would leave `:nightly` on whatever it pointed at
+# before — and promote.yml draws from `:nightly`, so the version number
+# would go on stale bytes.
+#
+# So a skipped build still moves its pointer, with `imagetools create`
+# against the existing digest. Seconds rather than twenty minutes, and
+# `:develop` and `:nightly` are then provably the same bytes whenever
+# the source is the same, rather than two builds that ought to match.
+name: images
+
+on:
+  push:
+    branches: [main]
+    # Deliberately no `paths:` filter. The content key below already
+    # decides, and a second mechanism that can disagree with it is how
+    # you get a push that skips a build the key says is needed — after
+    # a revert, for instance, where the paths changed but the tree went
+    # back to one already built.
+  schedule:
+    # 03:17 UTC. Not on the hour: GitHub queues scheduled runs hard at
+    # :00 and a nightly that waits twenty minutes for a runner is a
+    # nightly that sometimes does not happen.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      pointer:
+        description: 'Which moving tag to move'
+        type: choice
+        options: [develop, nightly]
+        default: develop
+      force:
+        description: 'Rebuild even if an image already exists for this source'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # Grouped by the pointer this run owns, not by the workflow. Two
+  # merges in quick succession should cancel each other — the first
+  # build is already superseded and the arm64 leg has twenty minutes
+  # left to run — but a merge must NOT kill the 03:17 run, or
+  # `:nightly` silently misses a night on a busy day.
+  group: images-${{ (github.event_name == 'workflow_dispatch' && inputs.pointer) || (github.event_name == 'schedule' && 'nightly') || 'develop' }}
+  # Safe to cancel mid-build because of the retag branch below. buildx
+  # pushes blobs before manifests, so a tag that resolves at all is
+  # complete; the worst a cancellation leaves is `src-<key>` published
+  # with its pointer not yet moved, and the next run finds that key,
+  # takes the retag path and moves the pointer onto it. The failure
+  # mode repairs itself on the next run rather than needing a human.
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      drone_key: ${{ steps.k.outputs.drone_key }}
+      oddjob_key: ${{ steps.k.outputs.oddjob_key }}
+      drone_build: ${{ steps.k.outputs.drone_build }}
+      oddjob_build: ${{ steps.k.outputs.oddjob_build }}
+      pointer: ${{ steps.k.outputs.pointer }}
+      dated: ${{ steps.k.outputs.dated }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Work out what changed, and which pointer this run owns
+        id: k
+        env:
+          FORCE: ${{ inputs.force }}
+          EVENT: ${{ github.event_name }}
+          WANT: ${{ inputs.pointer }}
+        run: |
+          set -euo pipefail
+          # `git rev-parse HEAD:<path>` is the tree hash: it changes
+          # when the contents change and not otherwise. Commit SHAs
+          # would rebuild on every merge, which is the thing being
+          # avoided.
+          drone_tree=$(git rev-parse "HEAD:drone")
+          odd_tree=$(
+            { git rev-parse "HEAD:backend" "HEAD:frontend" "HEAD:docker" "HEAD:drone"
+              git rev-parse "HEAD:Dockerfile"
+            } | sha256sum | cut -c1-16)
+          drone_key="${drone_tree:0:16}"
+
+          case "$EVENT" in
+            schedule)          pointer=nightly ;;
+            workflow_dispatch) pointer="${WANT:-develop}" ;;
+            *)                 pointer=develop ;;
+          esac
+          # A second, immutable name alongside the moving one, so a
+          # deployment can pin to the exact thing it was given rather
+          # than to a label that moves under it.
+          if [ "$pointer" = "nightly" ]; then
+            dated="nightly-$(date -u +%Y%m%d)"
+          else
+            dated="develop-$(git rev-parse --short HEAD)"
+          fi
+          {
+            echo "drone_key=$drone_key"
+            echo "oddjob_key=$odd_tree"
+            echo "pointer=$pointer"
+            echo "dated=$dated"
+          } >> "$GITHUB_OUTPUT"
+
+          # Does an image already exist for that exact source? If so
+          # this run retags rather than rebuilds. `docker manifest
+          # inspect` needs no login for a public repo and no pull.
+          need() {
+            if [ "$FORCE" = "true" ]; then echo true; return; fi
+            if docker manifest inspect "docker.io/cr0n1c/$1:src-$2" >/dev/null 2>&1
+            then echo false; else echo true; fi
+          }
+          echo "drone_build=$(need drone "$drone_key")"   >> "$GITHUB_OUTPUT"
+          echo "oddjob_build=$(need oddjob "$odd_tree")"  >> "$GITHUB_OUTPUT"
+
+      - name: Say what will happen
+        run: |
+          {
+            echo "### Plan — moving \`:${{ steps.k.outputs.pointer }}\`"
+            echo ""
+            echo "| image | source key | action |"
+            echo "|---|---|---|"
+            echo "| drone | \`${{ steps.k.outputs.drone_key }}\` | ${{ steps.k.outputs.drone_build == 'true' && 'build' || 'retag existing' }} |"
+            echo "| oddjob | \`${{ steps.k.outputs.oddjob_key }}\` | ${{ steps.k.outputs.oddjob_build == 'true' && 'build' || 'retag existing' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # One job per architecture, each on a runner of that architecture.
+  # Nothing is emulated: `ubuntu-24.04-arm` is real arm64 hardware, and
+  # it is free for public repositories.
+  #
+  # Each leg pushes BY DIGEST — no tag — and hands its digest to the
+  # merge job, which assembles one manifest list and puts the names on
+  # it. Tagging in the legs instead would have the second one overwrite
+  # the first and leave a single-architecture image under a name that
+  # claims to serve both.
+  build:
+    needs: plan
+    if: needs.plan.outputs.drone_build == 'true' || needs.plan.outputs.oddjob_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: drone
+        id: drone
+        if: needs.plan.outputs.drone_build == 'true'
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: ./drone
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=docker.io/cr0n1c/drone,push-by-digest=true,name-canonical=true,push=true
+          # Registry, not type=gha. GitHub's Actions cache is 10 GB for
+          # the whole repository with LRU eviction, and `mode=max` on
+          # four scopes here plus two in CI does not fit — they evict
+          # each other and the cache silently stops working, which
+          # looks exactly like having no cache at all. A cache ref in
+          # the registry has no such cap, and is shared across
+          # branches and runners rather than per-repo-per-key.
+          cache-from: type=registry,ref=docker.io/cr0n1c/drone:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=docker.io/cr0n1c/drone:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
+
+      - name: oddjob
+        id: oddjob
+        if: needs.plan.outputs.oddjob_build == 'true'
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=docker.io/cr0n1c/oddjob,push-by-digest=true,name-canonical=true,push=true
+          # Registry for the same reason as drone above. `image-manifest`
+          # so Docker Hub accepts it as an ordinary tag rather than
+          # rejecting the OCI index form.
+          cache-from: type=registry,ref=docker.io/cr0n1c/oddjob:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=docker.io/cr0n1c/oddjob:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
+
+      # A file per digest rather than one file both legs write: two
+      # runners uploading the same artifact name is a race, and the
+      # loser's architecture silently vanishes from the manifest.
+      - name: Hand the digests to the merge
+        env:
+          DRONE_DIGEST: ${{ steps.drone.outputs.digest }}
+          ODDJOB_DIGEST: ${{ steps.oddjob.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          # Empty when that image did not need building. Written only
+          # when there is something to write, so the merge can tell
+          # "not built this run" from "built and lost".
+          [ -z "$DRONE_DIGEST" ]  || echo "$DRONE_DIGEST"  > "/tmp/digests/drone-$ARCH"
+          [ -z "$ODDJOB_DIGEST" ] || echo "$ODDJOB_DIGEST" > "/tmp/digests/oddjob-$ARCH"
+          ls -l /tmp/digests
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assemble the per-architecture images into one manifest list and put
+  # the names on it. Also the home of the retag path: an image that
+  # already exists for this source is not rebuilt, only pointed at.
+  publish:
+    needs: [plan, build]
+    # `always()` so the retag path still runs when `build` was skipped
+    # for having nothing to build. Without it a run that only needs to
+    # move a pointer would do nothing at all — which is the bug this
+    # whole arrangement exists to avoid.
+    if: always() && needs.plan.result == 'success' && needs.build.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        if: needs.build.result == 'success'
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Name the images
+        env:
+          DRONE_KEY: ${{ needs.plan.outputs.drone_key }}
+          ODDJOB_KEY: ${{ needs.plan.outputs.oddjob_key }}
+          DRONE_BUILD: ${{ needs.plan.outputs.drone_build }}
+          ODDJOB_BUILD: ${{ needs.plan.outputs.oddjob_build }}
+          POINTER: ${{ needs.plan.outputs.pointer }}
+          DATED: ${{ needs.plan.outputs.dated }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published"
+            echo "| image | tags | digest | how |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          .github/scripts/publish.sh drone  "$DRONE_KEY"  "$DRONE_BUILD"
+          .github/scripts/publish.sh oddjob "$ODDJOB_KEY" "$ODDJOB_BUILD"

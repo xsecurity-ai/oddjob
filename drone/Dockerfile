@@ -34,26 +34,88 @@
 # container layer.
 
 # ---------------------------------------------------------------- go
-FROM golang:1.26-bookworm AS build
+#
+# `--platform=$BUILDPLATFORM` pins this stage to the machine doing the
+# building, and GOARCH below says what to emit. Without it, buildx runs
+# the entire Go toolchain under QEMU to produce an arm64 image — and
+# this stage does not just compile the agent, it compiles amass,
+# nuclei, httpx and gospider from source. Four large Go programs under
+# emulation took this image past forty-five minutes while the amd64
+# leg finished in three.
+#
+# Nothing is lost by cross-compiling. Go's cross-compilation is
+# first-class, CGO is off, and the output is decided by GOOS/GOARCH
+# rather than by what the compiler happens to be running on.
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
 WORKDIR /src
 
+# Supplied by buildx. Defaulted so a plain `docker build` still works.
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
+
+# ---- the third-party tools, BEFORE any of our own source -----------
+#
+# Ordering, not neatness. These four were below `COPY . .`, which put
+# them downstream of every file in the repository: changing one line of
+# the agent rebuilt amass, nuclei, httpx and gospider along with it.
+# Measured at 70s for a one-character edit. Up here they depend on this
+# Dockerfile and nothing else, so the ordinary case — someone changed
+# the agent — reuses them.
+#
+# Versions are pinned rather than @latest/@master. Three reasons, in
+# order of how much they matter: an agent that scans a client's estate
+# should be a known build and not whatever upstream published this
+# morning; an unpinned ref can change under us between the amd64 and
+# arm64 legs and ship a manifest whose two halves hold different
+# tools; and a moving ref is a moving cache key.
+#
+# No GOBIN, deliberately: `go install` refuses outright with "cannot
+# install cross-compiled binaries when GOBIN is set". It writes to
+# $GOPATH/bin when building for the host and $GOPATH/bin/$GOOS_$GOARCH
+# when cross-compiling, so the binaries are collected from wherever
+# they landed rather than directed at a fixed path.
+ENV GOFLAGS=-buildvcs=false
+ARG AMASS_VERSION=v4.2.0
+ARG GOSPIDER_VERSION=v1.1.6
+ARG NUCLEI_VERSION=v3.11.1
+ARG HTTPX_VERSION=v1.12.0
+# The module and build caches survive between builds on the same
+# builder, so a version bump to one tool does not recompile the shared
+# dependency graph of the other three.
+#
+# `mkdir -p /out` because this is now the first step that writes there.
+# It used to be created as a side effect of `go build -o /out/drone`,
+# which has moved below.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    mkdir -p /out \
+ && go install "github.com/owasp-amass/amass/v4/cmd/amass@${AMASS_VERSION}" \
+ && go install "github.com/jaeles-project/gospider@${GOSPIDER_VERSION}" \
+ && go install "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@${NUCLEI_VERSION}" \
+ && go install "github.com/projectdiscovery/httpx/cmd/httpx@${HTTPX_VERSION}" \
+ && find "$(go env GOPATH)/bin" -type f -perm -u+x -exec mv -t /out {} +
+
+# ---- then the agent itself ------------------------------------------
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath \
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    go build -trimpath \
       -ldflags "-s -w -X github.com/xsecurity-ai/oddjob/drone/internal/config.Version=$(cat VERSION 2>/dev/null || echo docker)" \
       -o /out/drone ./cmd/drone
 
-# The two tools no distribution packages. Built here rather than
-# `go install`-ed at runtime for the reason in the header: an agent
-# should not need to reach proxy.golang.org from inside a client's
-# network to become useful.
-ENV GOFLAGS=-buildvcs=false
-RUN GOBIN=/out go install github.com/owasp-amass/amass/v4/cmd/amass@master \
- && GOBIN=/out go install github.com/jaeles-project/gospider@latest \
- && GOBIN=/out go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
- && GOBIN=/out go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+# Asserted, not assumed. The failure mode otherwise is an image that
+# builds, pushes and ships with no nuclei in it, discovered the first
+# time somebody tasks a scan against a client's estate.
+RUN set -eu; \
+    for b in drone amass gospider nuclei httpx; do \
+      [ -x "/out/$b" ] || { echo "missing /out/$b"; ls -lR /out "$(go env GOPATH)/bin"; exit 1; }; \
+    done; \
+    ls -l /out
 
 
 # ----------------------------------------------------------- runtime
