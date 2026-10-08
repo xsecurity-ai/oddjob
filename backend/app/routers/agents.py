@@ -450,11 +450,15 @@ SCOPED_KINDS = tuple(k for k in TASK_KINDS if k not in ("install",))
 #: agent that could not get one says so on registration.
 #:
 #: The kinds absent from this map need nothing: nslookup and reverse_ip
-#: use the Go resolver, and install and shell are the agent itself.
+#: use the Go resolver, install and shell are the agent itself, and
+#: amass is now LINKED INTO the agent rather than executed -- so an
+#: agent with no amass binary runs an amass task perfectly well, and
+#: listing it here would have the fleet report a missing tool that
+#: nothing needs. `REQUIRED_TOOLS` is derived from this map, which is
+#: why that follows from the one deletion.
 KIND_TOOL: dict[str, str] = {
     "nmap": "nmap",
     "masscan": "masscan",
-    "amass": "amass",
     "gobuster": "gobuster",
     "gospider": "gospider",
     "nuclei": "nuclei",
