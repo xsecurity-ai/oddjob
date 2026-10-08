@@ -9,6 +9,14 @@ export interface Project {
    *  codename is what the scan directories and Slack channels use. */
   codename: string | null
   description: string | null; status: string
+  /** Standing orders: work the project does on its own as hosts
+   *  arrive. All default off — each one queues scans at a client. */
+  auto_amass: boolean
+  auto_resolve_ips: boolean
+  auto_reverse_dns: boolean
+  /** 'off' | 'top100' | 'full'. Not a boolean: the hundred commonest
+   *  ports and all 65,535 are hours apart in traffic at the far end. */
+  auto_nmap: string
   /** The token itself is never returned — only whether an override exists. */
   slack_token_set: boolean
   /** Whether a notification posted now would reach a channel: a token
@@ -603,6 +611,12 @@ export const api = {
 
   // data — `project` is the code; omitted means every project you can see
   projects: () => req<Page<Project>>('/api/projects' + qs({ limit: 1000 })),
+
+  /** One project, for the views that need its settings rather than the
+   *  whole list — the standing-orders bar reads this so a toggle shows
+   *  what the server holds and not what the browser last sent. */
+  project: (code: string) =>
+    req<Project>(`/api/projects/${encodeURIComponent(code)}`),
   createProject: (b: Record<string, unknown>) =>
     req<ProjectCreated>('/api/projects', { method: 'POST', body: JSON.stringify(b) }),
   projectScope: (project: string) =>
@@ -1301,6 +1315,10 @@ export const api = {
   updateProject: (project: string, body: {
     name?: string; client?: string | null; codename?: string | null
     description?: string | null; status?: string
+    /** Standing orders. Admin only — the server answers 403 to anyone
+     *  else, which is why the UI does not offer them to a plain user. */
+    auto_amass?: boolean; auto_resolve_ips?: boolean
+    auto_reverse_dns?: boolean; auto_nmap?: string
   }) =>
     req<Project>(`/api/projects/${encodeURIComponent(project)}`,
       { method: 'PATCH', body: JSON.stringify(body) }),
