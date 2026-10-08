@@ -726,14 +726,27 @@ CANDIDATE_STATES = ("new", "accepted", "rejected", "exists")
 
 
 class DomainSearch(Base, TimestampMixin):
-    """A root domain that was put through the offline candidate generator.
+    """A domain this project has already handed to enumeration.
 
-    Dead weight, deliberately kept. The generator is gone — enumeration
-    is amass on a Drone now — so nothing writes these rows and nothing
-    reads them. They are left in place rather than dropped in a
-    migration because a table drop cannot be undone and these rows are
-    somebody's record of what was run and when, even if the thing that
-    ran it no longer exists. Drop it in its own change, not as tidying.
+    Written for the offline candidate generator, then orphaned when that
+    went and enumeration became amass on a Drone. It was kept rather than
+    dropped — a table drop cannot be undone, and the rows were somebody's
+    record of what had been run — and it is in use again: every domain
+    `/api/domains/enumerate` queues an amass task for gets a row here,
+    and Kitchen Sink Lookup reads them to avoid re-queueing a zone it has
+    already enumerated.
+
+    **A row means "handed to amass", not "amass finished".** It is
+    written when the task is queued, because the thing being prevented is
+    a duplicate task, and a run that fails is still a run somebody has to
+    decide to repeat. "Rescan already scanned domains" on the request is
+    what repeats it.
+
+    `candidates_found` belongs to the generator and stays 0. Amass files
+    what it finds as targets directly, so there are no candidate rows to
+    count — the column is left rather than repurposed, because a number
+    that silently changed meaning is worse than one that is honestly
+    zero.
     """
     __tablename__ = "domain_searches"
     __table_args__ = (

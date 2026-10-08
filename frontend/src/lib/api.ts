@@ -701,14 +701,34 @@ export const api = {
   domainRoots: (project: string) =>
     req<DomainRoot[]>('/api/domains/roots' + qs({ project })),
   enumerateDomains: (project: string, domains: string,
-                     mode: 'passive' | 'active' = 'passive') =>
+                     mode: 'passive' | 'active' = 'passive',
+                     /** Kitchen Sink Lookup: take every hostname the
+                      *  project knows, drop the addresses, and walk each
+                      *  name back to its registrable domain. `rescan`
+                      *  re-queues domains already handed to amass. */
+                     opts: { kitchenSink?: boolean; rescan?: boolean } = {}) =>
     req<{
       queued: Array<{ domain: string; task_id: number }>
       refused: Record<string, string>
+      /** Already handed to amass for this project, so not sent again.
+       *  Reported rather than dropped — "queued 12, skipped 30" is the
+       *  only way the operator can tell a quiet run from a broken one. */
+      skipped: Array<{ domain: string; runs: number
+                       last_run_at: string | null }>
+      /** Over the per-submission task cap. No search row is written for
+       *  these, so the next Kitchen Sink run picks them up. */
+      deferred: string[]
       agents_online: number
       mode: string
+      kitchen_sink: boolean
+      /** How many distinct domains the request considered, before scope,
+       *  skipping and the cap. */
+      considered: number
     }>('/api/domains/enumerate' + qs({ project }),
-      { method: 'POST', body: JSON.stringify({ domains, mode }) }),
+      { method: 'POST',
+        body: JSON.stringify({ domains, mode,
+                               kitchen_sink: !!opts.kitchenSink,
+                               rescan: !!opts.rescan }) }),
   promoteDomains: (project: string, ids: number[]) =>
     req<{ created: string[]; already_existed: string[] }>(
       '/api/domains/candidates/promote' + qs({ project }),
