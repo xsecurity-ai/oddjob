@@ -111,8 +111,8 @@ def parse(raw: str) -> Dsn:
         raise BadDsn("no host in the connection string")
     try:
         port = parts.port or 5432
-    except ValueError:
-        raise BadDsn("the port is not a number")
+    except ValueError as e:
+        raise BadDsn("the port is not a number") from e
 
     database = unquote((parts.path or "").lstrip("/"))
     if not database:

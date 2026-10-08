@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
+    "lint": "eslint .",
     "test:logic": "node test/hooks.check.mjs && esbuild test/logic.test.ts --bundle --platform=node --format=esm --outfile=/tmp/ms-logic.mjs --log-level=error && node /tmp/ms-logic.mjs"
   },
   "dependencies": {
@@ -23,10 +24,15 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@babel/core": "^8.0.7",
+    "@babel/eslint-parser": "^8.0.7",
+    "@eslint/js": "^10.0.1",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^5.0.0",
     "esbuild": "0.28.2",
+    "eslint": "^10.12.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "typescript": "^7.0.2",
     "vite": "^8.3.1"
   }

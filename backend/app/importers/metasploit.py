@@ -13,14 +13,21 @@ not just what was listening.
 """
 from __future__ import annotations
 
-from xml.etree.ElementTree import Element, ParseError  # nosemgrep: use-defused-xml
+from datetime import UTC, datetime
+from xml.etree.ElementTree import ParseError  # nosemgrep: use-defused-xml
 
+from .model import (
+    UNKNOWN,
+    ImportError_,
+    ParsedCredential,
+    ParsedHost,
+    ParsedNote,
+    ParsedScan,
+    ParsedService,
+    ParsedVuln,
+    norm_severity,
+)
 from .safexml import fromstring
-from datetime import datetime, timezone
-
-from .model import (UNKNOWN, ImportError_, ParsedCredential, ParsedHost,
-                    ParsedNote, ParsedScan, ParsedService, ParsedVuln,
-                    norm_severity)
 
 
 def looks_like(text: str) -> bool:
@@ -52,7 +59,7 @@ def _when(el, tag: str) -> datetime | None:
         return None
     for fmt in ("%Y-%m-%d %H:%M:%S UTC", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
         try:
-            return datetime.strptime(v, fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(v, fmt).replace(tzinfo=UTC)
         except ValueError:
             continue
     return None
@@ -174,14 +181,14 @@ def parse(xml: str | bytes) -> ParsedScan:
             detail=_t(n, "data"),
         ))
 
-    for l in root.findall("loots/loot"):
-        name = host_name(l)
+    for el in root.findall("loots/loot"):
+        name = host_name(el)
         if not name:
             continue
         scan.notes.append(ParsedNote(
             host=name,
-            summary=f"msf loot: {_t(l, 'ltype') or 'loot'} — {_t(l, 'name') or ''}".strip(" —"),
-            detail="\n".join(x for x in [_t(l, "info"), _t(l, "path")] if x) or None,
+            summary=f"msf loot: {_t(el, 'ltype') or 'loot'} — {_t(el, 'name') or ''}".strip(" —"),
+            detail="\n".join(x for x in [_t(el, "info"), _t(el, "path")] if x) or None,
         ))
 
     # A session means the host was compromised, which is exactly what the

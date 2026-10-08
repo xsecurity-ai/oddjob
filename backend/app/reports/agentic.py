@@ -181,9 +181,9 @@ async def revise(session: AsyncSession, project: Project,
                                       [{"role": "user", "content": message}],
                                       [], _no_tools, 0, base_url=base_url)
     except AgentError as e:
-        raise AgentPassError(str(e))
+        raise AgentPassError(str(e)) from e
     except Exception as e:
-        raise AgentPassError(f"{type(e).__name__}: {e}")
+        raise AgentPassError(f"{type(e).__name__}: {e}") from e
 
     edits = _parse(reply.text)
     if not edits:

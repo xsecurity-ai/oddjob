@@ -72,7 +72,7 @@ def classify(raw: str) -> Entry:
         try:
             net = ipaddress.ip_network(s, strict=False)
         except ValueError as e:
-            raise ValueError(f"{raw!r} looks like a range but is not valid: {e}")
+            raise ValueError(f"{raw!r} looks like a range but is not valid: {e}") from e
         return Entry("cidr", str(net), included)
 
     # Bare address?
@@ -93,7 +93,7 @@ def classify(raw: str) -> Entry:
         try:
             base = validate_host(rest)
         except InvalidHost as e:
-            raise ValueError(f"{raw!r} is not a usable wildcard: {e}")
+            raise ValueError(f"{raw!r} is not a usable wildcard: {e}") from e
         if "." not in base:
             raise ValueError(
                 f"{raw!r} wildcards a single label, which would cover an "
@@ -108,7 +108,7 @@ def classify(raw: str) -> Entry:
     try:
         host = validate_host(s)
     except InvalidHost as e:
-        raise ValueError(str(e))
+        raise ValueError(str(e)) from e
     if "." not in host:
         raise ValueError(f"{raw!r} is a single label, not a fully-qualified name")
     return Entry("fqdn", host, included)
@@ -148,18 +148,20 @@ def _looks_like_cidr(s: str) -> bool:
 #: becoming a list entry that silently matches nothing. On an out-of-scope
 #: list that failure is invisible and dangerous: "CN is barred" spelled
 #: `cm` bars Cameroon and tests China.
-ISO_3166_1 = frozenset("""
-ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj
-bl bm bn bo bq br bs bt bv bw by bz ca cc cd cf cg ch ci ck cl cm cn co cr
-cu cv cw cx cy cz de dj dk dm do dz ec ee eg eh er es et fi fj fk fm fo fr
-ga gb gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu
-id ie il im in io iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ky kz
-la lb lc li lk lr ls lt lu lv ly ma mc md me mf mg mh mk ml mm mn mo mp mq
-mr ms mt mu mv mw mx my mz na nc ne nf ng ni nl no np nr nu nz om pa pe pf
-pg ph pk pl pm pn pr ps pt pw py qa re ro rs ru rw sa sb sc sd se sg sh si
-sj sk sl sm sn so sr ss st sv sx sy sz tc td tf tg th tj tk tl tm tn to tr
-tt tv tw tz ua ug um us uy uz va vc ve vg vi vn vu wf ws ye yt za zm zw
-""".split())
+ISO_3166_1 = frozenset(
+    "ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh "
+    "bi bj bl bm bn bo bq br bs bt bv bw by bz ca cc cd cf cg ch ci ck cl "
+    "cm cn co cr cu cv cw cx cy cz de dj dk dm do dz ec ee eg eh er es et "
+    "fi fj fk fm fo fr ga gb gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu "
+    "gw gy hk hm hn hr ht hu id ie il im in io iq ir is it je jm jo jp ke "
+    "kg kh ki km kn kp kr kw ky kz la lb lc li lk lr ls lt lu lv ly ma mc "
+    "md me mf mg mh mk ml mm mn mo mp mq mr ms mt mu mv mw mx my mz na nc "
+    "ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk pl pm pn pr ps pt "
+    "pw py qa re ro rs ru rw sa sb sc sd se sg sh si sj sk sl sm sn so sr "
+    "ss st sv sx sy sz tc td tf tg th tj tk tl tm tn to tr tt tv tw tz ua "
+    "ug um us uy uz va vc ve vg vi vn vu wf ws ye yt za zm zw"
+    .split()
+)
 
 
 def classify_country(raw: str) -> str:

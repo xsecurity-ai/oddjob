@@ -66,8 +66,8 @@ def parse(raw: str, *, base_host: str | None = None,
 
     try:
         port = parts.port or base_port or DEFAULT_PORTS[scheme]
-    except ValueError:
-        raise BadUrl(f"{raw!r} has an invalid port")
+    except ValueError as e:
+        raise BadUrl(f"{raw!r} has an invalid port") from e
 
     path = parts.path or "/"
     if not path.startswith("/"):

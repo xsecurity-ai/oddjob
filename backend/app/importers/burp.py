@@ -12,14 +12,12 @@ stays in the Burp project where it is already stored.
 """
 from __future__ import annotations
 
+from urllib.parse import urlsplit
 from xml.etree.ElementTree import Element, ParseError  # nosemgrep: use-defused-xml
 
+from .model import ImportError_, ParsedScan, ParsedVuln, ParsedWebAddress, norm_severity
 from .safexml import fromstring
 from .safexml import stream as safe_stream
-from urllib.parse import urlsplit
-
-from .model import (ImportError_, ParsedScan, ParsedVuln,
-                    ParsedWebAddress, norm_severity)
 
 
 def looks_like(text: str) -> bool:
@@ -64,7 +62,7 @@ def _html(s: str | None) -> str | None:
     out = re.sub(r"<[^>]+>", "", out)
     from html import unescape
     out = unescape(out)
-    return "\n".join(l.rstrip() for l in out.splitlines() if l.strip()) or None
+    return "\n".join(ln.rstrip() for ln in out.splitlines() if ln.strip()) or None
 
 
 def _slug(s: str) -> str:
@@ -95,14 +93,13 @@ def _one(issue: Element, scan: ParsedScan) -> bool:
     # record of what Burp was talking to.
     port = parts.port or (443 if parts.scheme == "https" else
                           80 if parts.scheme == "http" else None)
-    if port:
-        # Burp only ever talks to things that answered.
-        if not any(s.port == port for s in host.services):
-            from .model import ParsedService
-            host.services.append(ParsedService(
-                port=port, protocol="tcp", state="open",
-                name="https" if parts.scheme == "https" else "http",
-                tunnel="ssl" if parts.scheme == "https" else None))
+    # Burp only ever talks to things that answered.
+    if port and not any(s.port == port for s in host.services):
+        from .model import ParsedService
+        host.services.append(ParsedService(
+            port=port, protocol="tcp", state="open",
+            name="https" if parts.scheme == "https" else "http",
+            tunnel="ssl" if parts.scheme == "https" else None))
 
     path = _t(issue, "path") or "/"
     # Burp only reports an issue for something it requested.

@@ -19,10 +19,13 @@ from ..hosts import normalise_host
 from ..models import Project, Service, Target, User
 from ..query import apply_search, apply_sort, paginate
 from ..schemas import Page, ServiceCreate, ServiceOut, ServiceUpdate
+from ..security import (
+    assert_role_for_target,
+    get_current_user,
+    require_project,
+    visible_project_ids,
+)
 from .projects import resolve_project
-from ..security import (assert_role_for_target, get_current_user,
-                        require_project, visible_project_ids)
-
 
 # Taken from the schema so a new column cannot be forgotten here; `host` and
 # `project_code` come from the joined row rather than the Service itself.
@@ -128,7 +131,8 @@ async def create_service(body: ServiceCreate, project: str = Query(...),
         select(Target).where(Target.project_id == pr.id,
                              Target.host == body.host))).scalar_one_or_none()
     if not t:
-        raise HTTPException(404, f"no target {body.host!r} in {pr.code} — create it, or use /api/bulk")
+        raise HTTPException(
+            404, f"no target {body.host!r} in {pr.code} — create it, or use /api/bulk")
     dup = (await session.execute(
         select(Service).where(Service.target_id == t.id, Service.port == body.port,
                               Service.protocol == body.protocol))).scalar_one_or_none()

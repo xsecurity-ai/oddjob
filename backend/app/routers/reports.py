@@ -2,20 +2,20 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import slack
 from ..db import get_session
 from ..events import broker
-from .. import slack
 from ..models import REPORT_KINDS, Project, Report, User
 from ..reports import ReportDoc, filename, render
 from ..reports.runner import schedule
 from ..security import get_current_user, require_project
-from datetime import datetime
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -156,7 +156,7 @@ async def create_report(body: CreateReport, project: str = Query(...),
     await broker.publish("reports", action="queued", id=row.id)
     await slack.announce(session, pr, slack.report_requested(KIND_LABEL[kind]))
     # After the commit, so the row is visible to the task's own session.
-    schedule(row.id, body.agentic, body.clean_severity())
+    schedule(row.id, body.agentic, sev)
     return _out(row, pr.code, user.username)
 
 

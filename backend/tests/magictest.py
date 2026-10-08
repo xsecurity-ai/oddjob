@@ -5,11 +5,20 @@ there is no point asserting that we *would* have sent an email.
 """
 
 # Run from anywhere: the suites import `app`, which lives one level up.
-import pathlib as _pathlib, sys as _sys
-_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
-import json, re, socket, threading, time, urllib.request, urllib.error, http.cookiejar
+import pathlib as _pathlib
+import sys as _sys
 
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import http.cookiejar
+import json
 import os
+import re
+import socket
+import threading
+import time
+import urllib.error
+import urllib.request
+
 BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8009")
 SMTP_PORT = int(os.environ.get("ODDJOB_TEST_SMTP_PORT", "8025"))
 ok = fail = 0
@@ -187,16 +196,19 @@ print("\n== expiry ==")
 # of the column breaks this loudly at import instead of silently matching
 # zero rows and leaving the test asserting nothing.
 import sys as _sys
+
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from sqlalchemy import create_engine, update
 from sqlalchemy.orm import Session
+
 from app.models import MagicLink
 
 _eng = create_engine("sqlite:///" + os.environ.get("ODDJOB_DB", "/tmp/ms-m.db"))
 with Session(_eng) as _s:
     _s.execute(update(MagicLink).values(
-        used_at=None, expires_at=datetime(2020, 1, 1, tzinfo=timezone.utc)))
+        used_at=None, expires_at=datetime(2020, 1, 1, tzinfo=UTC)))
     _s.commit()
 _eng.dispose()
 st, r = call(f"/api/auth/magic/{tok}", follow=False)

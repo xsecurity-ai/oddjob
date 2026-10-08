@@ -22,3 +22,14 @@ docs/
 .github/
 **/*.md
 !README.md
+
+# Tests do not run in the image and nothing imports them. Not for
+# size — measured, and it is 105.1 MB either way, because they are
+# small text files. The reason is that a deployed image should contain
+# what it runs: 18 files of test fixtures full of credential-shaped
+# strings like "root-password-1" are a thing for an incident responder
+# to rule out at the worst possible moment, and they are not needed
+# here to rule in.
+backend/tests/
+backend/runtests.py
+**/*_test.go

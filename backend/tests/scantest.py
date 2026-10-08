@@ -7,9 +7,14 @@ NSE, MAC, uptime and traceroute.
 """
 
 # Run from anywhere: the suites import `app`, which lives one level up.
-import pathlib as _pathlib, sys as _sys
+import pathlib as _pathlib
+import sys as _sys
+
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
-import json, os, urllib.request, urllib.error
+import json
+import os
+import urllib.error
+import urllib.request
 
 BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8013")
 ok = fail = 0
@@ -184,6 +189,7 @@ check("every service recorded is open",
       str({k: v["state"] for k, v in svc.items() if v["state"] != "open"}))
 
 from app.importers import nmap as _nm
+
 _probe = """<?xml version="1.0"?><nmaprun scanner="nmap" args="x">
 <host><status state="up"/><address addr="10.9.9.9" addrtype="ipv4"/><ports>
 <port protocol="udp" portid="53"><state state="open"/><service name="domain"/></port>
@@ -204,6 +210,7 @@ check("so the host is left with exactly the open ports", _got == {("udp", 53), (
       str(sorted(_got)))
 
 from app.importers import masscan as _ms
+
 _mp = """<?xml version="1.0"?><!-- masscan --><nmaprun scanner="masscan">
 <host><address addr="10.9.9.8" addrtype="ipv4"/><ports>
 <port protocol="tcp" portid="443"><state state="open"/></port>

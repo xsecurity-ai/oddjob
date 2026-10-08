@@ -12,8 +12,14 @@ from __future__ import annotations
 import json
 from urllib.parse import urlsplit
 
-from .model import (ImportError_, ParsedScan, ParsedService, ParsedVuln,
-                    ParsedWebAddress, norm_severity)
+from .model import (
+    ImportError_,
+    ParsedScan,
+    ParsedService,
+    ParsedVuln,
+    ParsedWebAddress,
+    norm_severity,
+)
 
 
 def looks_like(text: str) -> bool:
@@ -41,7 +47,7 @@ def iter_json(text: str):
                 yield x
         return
     ok = False
-    for n, line in enumerate(stripped.splitlines(), 1):
+    for line in stripped.splitlines():
         line = line.strip().rstrip(",")
         if not line or line in ("[", "]"):
             continue

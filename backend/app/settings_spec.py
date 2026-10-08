@@ -86,7 +86,8 @@ SPEC = [
 
     # ---------------------------------------------------------------- smtp
     {"key": "smtp.host", "group": "Email (SMTP)", "label": "Host", "type": "text", "default": ""},
-    {"key": "smtp.port", "group": "Email (SMTP)", "label": "Port", "type": "number", "default": 587},
+    {"key": "smtp.port", "group": "Email (SMTP)", "label": "Port", "type": "number",
+     "default": 587},
     {"key": "smtp.security", "group": "Email (SMTP)", "label": "Security", "type": "select",
      "options": ["starttls", "tls", "none"], "default": "starttls"},
     {"key": "smtp.username", "group": "Email (SMTP)", "label": "Username",

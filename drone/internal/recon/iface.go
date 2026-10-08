@@ -27,7 +27,14 @@ import (
 // even if something did escape, it is addressed nowhere.
 func OutboundIP() string {
 	for _, probe := range []string{"203.0.113.1:80", "[2001:db8::1]:80"} {
-		c, err := net.Dial("udp", probe)
+		// There is nothing here for a context to cancel. A UDP "dial"
+		// to a literal IP sends no packet and resolves no name: the
+		// kernel picks a route and a source address and returns, in
+		// microseconds, with no network operation to block on.
+		// Threading a context through OutboundIP to satisfy the rule
+		// would change the signature of a function called from four
+		// places and buy a cancellation that can never fire.
+		c, err := net.Dial("udp", probe) //nolint:noctx // sends no packet; resolves no name; cannot block — see above
 		if err != nil {
 			continue
 		}

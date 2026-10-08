@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import jwt
@@ -32,9 +32,9 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..headers import cookies_secure
 from ..db import get_session
 from ..events import broker
+from ..headers import cookies_secure
 from ..models import User
 from ..routers.settings import load_all
 from ..schemas import GoogleStatus
@@ -126,7 +126,7 @@ async def start(response: Response, next: str = Query("/", description="path to 
     # the attacker's identity.
     client_id, _secret, redirect_uri = await creds(session)
     nonce = secrets.token_urlsafe(16)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     state = jwt.encode({"n": nonce, "next": safe_next(next),
                         "exp": now + timedelta(seconds=STATE_TTL)},
                        SECRET, algorithm=ALGO)
@@ -135,7 +135,8 @@ async def start(response: Response, next: str = Query("/", description="path to 
         "response_type": "code", "scope": "openid email profile",
         "state": state, "prompt": "select_account",
     }
-    url = AUTH_URL + "?" + "&".join(f"{k}={httpx.QueryParams({k: v})[k]}" for k, v in params.items())
+    url = AUTH_URL + "?" + "&".join(f"{k}={httpx.QueryParams({k: v})[k]}"
+                                    for k, v in params.items())
     r = RedirectResponse(url, status_code=307)
     r.set_cookie(STATE_COOKIE, state, httponly=True, samesite="lax",
                  max_age=STATE_TTL, secure=cookies_secure())
@@ -170,8 +171,8 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         raise HTTPException(400, "state mismatch — start the sign-in again")
     try:
         st = jwt.decode(state, SECRET, algorithms=[ALGO])
-    except jwt.PyJWTError:
-        raise HTTPException(400, "state expired — start the sign-in again")
+    except jwt.PyJWTError as e:
+        raise HTTPException(400, "state expired — start the sign-in again") from e
 
     async with httpx.AsyncClient(timeout=20) as c:
         tok = await c.post(TOKEN_URL, data={

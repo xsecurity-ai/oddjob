@@ -67,6 +67,19 @@ RUN set -eu; \
 # this one has to be the same python or nothing imports. `-dev` is the
 # same image with a shell and apk, which uv needs.
 FROM cgr.dev/chainguard/python:latest-dev@sha256:630df1be3733f7b38d1b535872904248adfe23fbea4befcb08da47cb7436ddb2 AS deps
+# Root because this stage installs: uv puts the virtualenv in /opt/venv and
+# its own binary in /usr/local/bin, neither of which Chainguard's default
+# uid can write to.
+#
+# DL3002 ("last USER should not be root") is a claim about the image that
+# ships. This stage is discarded — nothing here is in the final image but
+# /opt/venv and /empty, both copied with an explicit --chown — and the
+# runtime stage below ends on `USER 10001`.
+#
+# DL3066 wants a numeric id, on the grounds that a name may not resolve on
+# the host. `root` is uid 0 on every system there is, and leaving it
+# spelled out keeps the contrast with the deliberate `USER 10001` legible.
+# hadolint ignore=DL3002,DL3066
 USER root
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
@@ -83,12 +96,14 @@ COPY backend/pyproject.toml backend/uv.lock ./
 # rather than downloading one of its own. The runtime stage copies
 # this venv and has only the one python; a venv pointing at an
 # interpreter that is not there imports nothing.
-RUN uv sync --locked --no-dev --no-install-project --python /usr/bin/python
-
-# An empty directory for the runtime to copy in as `data`. Distroless
-# has no shell, so `RUN mkdir` is not available there and this is the
-# way to get an owned, empty directory into the final image.
-RUN mkdir -p /empty
+#
+# `mkdir /empty` rides along on the same RUN rather than taking a layer of
+# its own (DL3059). It is an empty directory for the runtime to copy in as
+# `data`: distroless has no shell, so `RUN mkdir` is not available down
+# there, and copying this directory is how the final image gets an empty
+# one with the right owner.
+RUN uv sync --locked --no-dev --no-install-project --python /usr/bin/python \
+ && mkdir -p /empty
 
 
 # ------------------------------------------------------------ runtime
@@ -144,6 +159,13 @@ COPY --from=deps --chown=10001:10001 /empty /app/backend/data
 USER 10001
 WORKDIR /app/backend
 
+# The path the session-signing key is read from and written to, not the key
+# itself: `_secret()` in backend/app/security.py generates one with
+# secrets.token_urlsafe on first boot, writes it 0600 to this path, and
+# reads it back on every later start. DL3064 matches on the variable name
+# containing "SECRET"; there is no secret value here, and the name is the
+# one the application looks up.
+# hadolint ignore=DL3064
 ENV ODDJOB_SECRET_FILE=/app/backend/data/.secret \
     PORT=8000
 

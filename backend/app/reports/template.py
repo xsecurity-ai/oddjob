@@ -21,15 +21,13 @@ gaps is worse than one that is honest about them.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import (Implant, Project, ProjectScope, Service, Target, Vuln,
-                      WebAddress)
-from .model import (SEVERITY_ORDER, Block, Finding, ReportDoc, Section,
-                    TargetRow)
+from ..models import Implant, Project, ProjectScope, Service, Target, Vuln, WebAddress
+from .model import SEVERITY_ORDER, Block, Finding, ReportDoc, Section, TargetRow
 
 TOP_N = 10
 
@@ -254,10 +252,10 @@ def _findings_section(findings: list[Finding], *, heading: str,
 def _appendix_targets(targets: list[TargetRow]) -> Section:
     sec = Section("Appendix A: Targets Found", page_break_before=True)
     sec.blocks.append(Block(kind="para", text=(
-        f"Every host recorded during the engagement. "
-        f"“Alive” distinguishes a host that responded from one that was "
-        f"probed and stayed silent; a blank means it was never probed, "
-        f"which is a gap in coverage rather than a finding about the host.")))
+        "Every host recorded during the engagement. "
+        "“Alive” distinguishes a host that responded from one that was "
+        "probed and stayed silent; a blank means it was never probed, "
+        "which is a gap in coverage rather than a finding about the host.")))
     sec.blocks.append(Block(
         kind="table",
         headers=["Host", "IP", "OS", "Alive", "Pwned", "Open", "Findings"],
@@ -272,7 +270,7 @@ def _appendix_targets(targets: list[TargetRow]) -> Section:
 async def build(session: AsyncSession, project: Project, kind: str,
                 requested_by: str, min_severity: str = "low") -> ReportDoc:
     stats = await gather(session, project)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     titles = {"full": "Security Assessment Report",
               "executive": "Executive Summary",

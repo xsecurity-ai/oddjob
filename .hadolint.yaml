@@ -1,0 +1,46 @@
+# hadolint configuration — https://github.com/hadolint/hadolint
+#
+# Scope: `Dockerfile` (the Oddjob app image) and `drone/Dockerfile` (the
+# enumeration agent). Both are linted in CI by the `dockerfile lint` job.
+#
+# The bar here is the same one ci.yml sets for pinned action SHAs: a rule
+# gets turned off only where it is wrong for this repository, with the
+# reason written down. Everything that is merely inconvenient gets fixed in
+# the Dockerfile instead, and the handful of per-line exceptions live as
+# `# hadolint ignore=` pragmas next to the line they excuse rather than
+# here, so they are read by whoever edits that line.
+
+failure-threshold: style
+
+ignored:
+  # DL3018 — "Pin versions in apk add: use `apk add <pkg>=<version>`".
+  #
+  # Both `apk add` calls in drone/Dockerfile run on Chainguard's
+  # wolfi-base, and Wolfi is a rolling repository: its APKINDEX carries
+  # exactly one version of each package and keeps no archive of the
+  # previous ones. A pin is therefore not a pin, it is an expiry date —
+  # the build works until Wolfi rebuilds that package, which for a
+  # distribution whose whole pitch is continuous CVE patching is a matter
+  # of days. Checked rather than assumed, against the pinned base digest:
+  #
+  #     $ apk add --no-cache nmap=7.95-r0
+  #     ERROR: unable to select packages:
+  #       nmap-7.94-r3:
+  #         breaks: world[nmap=7.95-r0]
+  #
+  # So satisfying DL3018 here would mean a Dockerfile that stops building
+  # on a schedule nobody controls, and whose repair is to bump the pin to
+  # whatever Wolfi published — which is what `apk add <pkg>` already does,
+  # with fewer steps and no window where the image cannot be rebuilt.
+  #
+  # Worth being straight about what this costs, because the digest pins on
+  # the FROM lines do not cover it: `apk` fetches the index over the
+  # network at build time, so the base layer is reproducible and the
+  # packages installed on top of it are not. Two builds of the same commit
+  # a month apart can ship different nmap builds. For this image that is
+  # the direction we want — the agent should carry patched scanners — and
+  # the tools it must have are asserted by name in the runtime stage, so a
+  # package that vanishes from Wolfi fails the build rather than shipping.
+  # A genuine fix is a resolved lockfile (apko/melange), not a version
+  # string typed into `apk add`.
+  - DL3018

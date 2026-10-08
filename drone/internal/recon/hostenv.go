@@ -24,7 +24,14 @@ type rootFS interface {
 
 type osFS struct{}
 
-func (osFS) ReadFile(name string) ([]byte, error) { return os.ReadFile(name) }
+// The variable path is the entire purpose of the interface. Every
+// caller in this package passes a string constant — /proc/version,
+// /.dockerenv, /sys/class/net/<iface>/iflink — and the only non-constant
+// element is an interface name this process read back from the kernel.
+// Nothing here is reachable from the server or from task arguments.
+func (osFS) ReadFile(name string) ([]byte, error) {
+	return os.ReadFile(name) //nolint:gosec // G304: callers pass constant /proc and /sys paths; see above
+}
 
 func (osFS) Exists(name string) bool {
 	_, err := os.Stat(name)

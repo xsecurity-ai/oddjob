@@ -30,7 +30,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
 
 import httpx
 
@@ -78,6 +77,7 @@ async def _project_for_channel(session, channel_id: str, channel_name: str | Non
     data from somewhere else.
     """
     from sqlalchemy import select
+
     from .models import Project
     from .slack import normalise_channel
 

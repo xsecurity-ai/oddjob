@@ -14,11 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
 from ..events import broker
-from ..models import Credential, Project, ROLE_ORDER, User
+from ..models import ROLE_ORDER, Credential, Project, User
 from ..query import apply_search, apply_sort, paginate
-from ..schemas import (CredentialCreate, CredentialOut, CredentialUpdate, Page)
-from ..security import (effective_role, get_current_user, require_project,
-                        visible_project_ids)
+from ..schemas import CredentialCreate, CredentialOut, CredentialUpdate, Page
+from ..security import effective_role, get_current_user, require_project, visible_project_ids
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 

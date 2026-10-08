@@ -28,7 +28,6 @@ from __future__ import annotations
 import json
 import logging
 
-from sqlalchemy import select
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response

@@ -10,10 +10,40 @@ gets pointed at the wrong file.
 """
 from __future__ import annotations
 
-from . import (burp, burphistory, c2, httpx_json, masscan, metasploit,
-               nessus, nikto, nmap, nuclei)
-from .model import (ImportError_, ParsedCredential, ParsedHost, ParsedImplant,
-                    ParsedNote, ParsedScan, ParsedService, ParsedVuln)
+from . import burp, burphistory, c2, httpx_json, masscan, metasploit, nessus, nikto, nmap, nuclei
+from .model import (
+    ImportError_,
+    ParsedCredential,
+    ParsedHost,
+    ParsedImplant,
+    ParsedNote,
+    ParsedScan,
+    ParsedService,
+    ParsedVuln,
+)
+
+#: The IR types are re-exported here on purpose: a caller writing against
+#: importers should not have to know the dataclasses live one module down.
+#: Named explicitly so they read as the package's surface rather than as
+#: imports nothing in this file happens to use.
+__all__ = [
+    "ORDER",
+    "REGISTRY",
+    "STREAMABLE",
+    "ImportError_",
+    "ParsedCredential",
+    "ParsedHost",
+    "ParsedImplant",
+    "ParsedNote",
+    "ParsedScan",
+    "ParsedService",
+    "ParsedVuln",
+    "detect",
+    "detect_file",
+    "parse",
+    "streamer",
+    "unknown_format_message",
+]
 
 #: name -> (label, parse(text) -> ParsedScan)
 REGISTRY = {

@@ -17,8 +17,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from sqlalchemy import event
-from sqlalchemy.ext.asyncio import (AsyncSession, async_sessionmaker,
-                                    create_async_engine)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from .models import Base
 

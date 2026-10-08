@@ -17,17 +17,25 @@ from datetime import datetime
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
-from docx.shared import Inches, Pt, RGBColor
+from docx.shared import Pt, RGBColor
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import (BaseDocTemplate, Frame, KeepTogether,
-                                PageBreak, PageTemplate, Paragraph, Spacer,
-                                Table, TableStyle)
+from reportlab.platypus import (
+    BaseDocTemplate,
+    Frame,
+    KeepTogether,
+    PageBreak,
+    PageTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
-from .model import SEVERITY_COLOUR, Block, ReportDoc, Section
+from .model import SEVERITY_COLOUR, Block, ReportDoc
 
 AGENT_NOTICE = (
     "Parts of the narrative in this document were revised by a language "

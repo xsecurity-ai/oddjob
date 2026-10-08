@@ -16,7 +16,7 @@ Secrets are digested, never carried in the token.
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import jwt
@@ -57,7 +57,7 @@ def digest(provider: str, values: dict) -> str:
 
 
 def issue_token(provider: str, values: dict) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return jwt.encode({"p": provider, "d": digest(provider, values),
                        "iat": now, "exp": now + timedelta(minutes=TOKEN_TTL_MINUTES)},
                       SECRET, algorithm=ALGO)
@@ -134,7 +134,7 @@ async def _postgres(cfg: dict) -> tuple[bool, str]:
             "WHERE table_schema = current_schema()")
         can_create = await conn.fetchval(
             "SELECT has_schema_privilege(current_schema(), 'CREATE')")
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return False, f"timed out connecting to {d.summary} after 15s"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"

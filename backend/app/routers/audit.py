@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import csv
 import io
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse, StreamingResponse
@@ -80,7 +80,7 @@ async def _rows(session: AsyncSession, limit: int, source: str | None,
             AuditEvent.ip.ilike(like)))
     if hours:
         stmt = stmt.where(AuditEvent.at
-                    >= datetime.now(timezone.utc) - timedelta(hours=hours))
+                    >= datetime.now(UTC) - timedelta(hours=hours))
     if before:
         stmt = stmt.where(AuditEvent.id < before)
     # Newest first, with id as the tiebreak so entries written in the same
@@ -238,7 +238,7 @@ async def _as_csv(session: AsyncSession, f: dict) -> StreamingResponse:
             "" if r.ms is None else r.ms,
             r.project_code or "", r.detail or "",
         ])
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     who = f"-{f['source']}" if f.get("source") else ""
     name = f"oddjob-audit{who}-{stamp}.csv"
     buf.seek(0)

@@ -98,7 +98,7 @@ class ReportDoc:
         return d
 
     @staticmethod
-    def from_json(d: dict) -> "ReportDoc":
+    def from_json(d: dict) -> ReportDoc:
         secs = [
             Section(
                 heading=s["heading"],

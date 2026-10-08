@@ -355,21 +355,147 @@ jobs:
       # client engagement data. A credential or a client hostname landing
       # here is a disclosure, so it fails the build rather than waiting
       # to be noticed in review.
+      #
+      # The test itself lives in scripts/check-secrets.sh, because the
+      # pre-commit hook runs the same one. Two copies would eventually
+      # disagree, and the one that matters is whichever is weaker.
       - name: Scan for credentials and committed databases
-        run: |
-          set -euo pipefail
-          fail=0
+        run: scripts/check-secrets.sh
 
-          if git ls-files | grep -nE '\.(db|sqlite3?|pem|key)$|(^|/)\.secret$|(^|/)pg\.env$|(^|/)\.env$'; then
-            echo "::error::a database, key or environment file is committed"
-            fail=1
-          fi
+      # A different job from the check above, not a replacement for it.
+      # TruffleHog verifies a candidate against the provider, so it
+      # finds live keys in shapes nobody here thought to write down.
+      # The check above finds the shapes that matter to this repository
+      # even when the key is already revoked — which is most of them by
+      # the time anyone looks. Neither subsumes the other.
+      #
+      # `--only-verified`: without it every high-entropy string is a
+      # finding, and on a repository full of example tokens and test
+      # fixtures that is all noise. A scanner people learn to ignore is
+      # worse than no scanner.
+      #
+      # Scans the full history, which is why the checkout above is
+      # fetch-depth: 0 — a key removed in the next commit is still
+      # disclosed, and that is the case worth catching.
+      - name: TruffleHog
+        uses: trufflesecurity/trufflehog@b2b0a92070f206ab7b5a1105d82a7f2f48d92341 # v3.99.0
+        with:
+          path: ./
+          extra_args: --only-verified
 
-          # Real tokens have a length; the placeholders in the docs and
-          # tests do not reach these thresholds.
-          if git grep -nIE 'xoxb-[A-Za-z0-9-]{20,}|xapp-[A-Za-z0-9-]{20,}|ghp_[A-Za-z0-9]{30,}|sk-ant-[A-Za-z0-9_-]{40,}|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY' -- . ; then
-            echo "::error::what looks like a real credential is committed"
-            fail=1
-          fi
+  # ---------------------------------------------------------------- linters
+  # Separate jobs rather than steps bolted onto the suites above, so a
+  # style finding reads as a style finding and does not sit under a
+  # heading that says "tests". They also run in parallel with them,
+  # which the long ones do not leave room for otherwise.
 
-          exit $fail
+  python-lint:
+    name: python lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install
+        working-directory: backend
+        run: uv sync --locked
+
+      # Out of uv.lock rather than astral-sh/ruff-action: the action
+      # installs its own ruff, so CI and a developer's checkout could
+      # drift to different versions and disagree about a clean tree.
+      # This pins the linter in the same file as everything else and
+      # needs no fourth third-party action to vouch for.
+      #
+      # Lint only. `ruff format` would rewrite 103 of 105 files — see
+      # the comment above [tool.ruff] in backend/pyproject.toml.
+      - name: Ruff
+        working-directory: backend
+        run: uv run ruff check --output-format github .
+
+  go-lint:
+    name: go lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # golangci-lint only analyses the host GOOS, so a linux-only run
+    # never opens mem_darwin.go, priv_windows.go or priv_notlinux.go —
+    # the same blind spot the `drone` job's cross-compile step exists
+    # to close.
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, windows]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+          cache-dependency-path: drone/go.sum
+
+      # The linter version is pinned as well as the action: a new
+      # golangci-lint release adds checks, and an unpinned one turns a
+      # green PR red for a reason nobody in that PR introduced.
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        env:
+          GOOS: ${{ matrix.goos }}
+        with:
+          version: v2.14.0
+          working-directory: drone
+
+  frontend-lint:
+    name: frontend lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+
+      # ESLint parses the TypeScript through Babel, not through the
+      # compiler: typescript-eslint cannot load against TypeScript 7.
+      # See the header of frontend/eslint.config.js.
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+  dockerfile-lint:
+    name: dockerfile lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # One step per file. The action's `recursive` mode globs
+      # **/Dockerfile instead, which would quietly widen to whatever a
+      # future subdirectory drops in. Naming both is the version that
+      # cannot silently start or stop covering something.
+      #
+      # Severity lives in .hadolint.yaml (failure-threshold: style —
+      # every rule fails). The action always exports
+      # HADOLINT_FAILURE_THRESHOLD=info, and the config file beats the
+      # environment, so it is not restated here.
+      - name: Oddjob image
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+
+      # Runs even if the step above failed, so one push reports both
+      # files rather than making you fix one to see the other.
+      - name: Drone agent image
+        if: '!cancelled()'
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: drone/Dockerfile
+          config: .hadolint.yaml

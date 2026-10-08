@@ -123,7 +123,12 @@ func Version(ctx context.Context, name string) string {
 	}
 	var firstLine string
 	for _, probe := range probes {
-		out, _ := exec.CommandContext(ctx, name, probe).CombinedOutput()
+		// `name` has already been checked against `Known` at the top of
+		// this function, and `probe` comes from the literal list above.
+		// Both are compile-time constants by the time they get here,
+		// and argv goes to execve as a slice, so there is no shell to
+		// reinterpret either of them.
+		out, _ := exec.CommandContext(ctx, name, probe).CombinedOutput() //nolint:gosec // G204: name is gated by Known, probe is a literal; no shell — see above
 		if m := versionRe.FindString(string(out)); m != "" {
 			return m
 		}
@@ -178,7 +183,10 @@ func Verify(ctx context.Context, name string) (ok bool, why string) {
 	defer cancel()
 	var seen string
 	for _, probe := range []string{p.version, "--version", "-version", "version"} {
-		out, _ := exec.CommandContext(ctx, name, probe).CombinedOutput()
+		// As in Version() above: `name` was checked against `Known` at
+		// the top of this function and `probe` is from the literal
+		// list on the line above. No shell.
+		out, _ := exec.CommandContext(ctx, name, probe).CombinedOutput() //nolint:gosec // G204: name is gated by Known, probe is a literal; no shell
 		t := strings.TrimSpace(string(out))
 		if t == "" {
 			continue
@@ -436,7 +444,16 @@ func run(ctx context.Context, m *Manager, elevated bool, argv []string,
 		// like a network problem for half an hour.
 		argv = append([]string{"sudo", "-n"}, argv...)
 	}
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	// Running a package manager as root is what this function is for,
+	// so G204 cannot be designed away — but nothing here is tainted.
+	// argv[0] and the flags come from a Manager literal in this file.
+	// The only variable element is a package name, and Ensure refuses
+	// any tool not in `Known` before reaching this point, so a
+	// compromised server picking the argument can still only pick one
+	// of thirteen compile-time constants. There is no shell: argv goes
+	// to execve as a slice, so no element can become a second command
+	// whatever it contains.
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: argv is Manager literals plus a name gated by the Known allowlist; no shell — see above
 	cmd.Env = append(cmd.Environ(), "DEBIAN_FRONTEND=noninteractive")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -509,7 +526,11 @@ func runEnv(ctx context.Context, m *Manager, elevated bool, argv []string,
 		}
 		argv = append([]string{"sudo", "-n"}, argv...)
 	}
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	// As in run() above, and narrower: the only caller is installGo,
+	// whose argv is {"go", "install", p.gomod} with p.gomod read from
+	// the `Known` map. Every element is a compile-time constant, and
+	// there is no shell.
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: argv is entirely compile-time constants from the Known map; no shell — see above
 	cmd.Env = append(cmd.Environ(), env...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

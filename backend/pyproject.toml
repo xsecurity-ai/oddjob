@@ -32,10 +32,81 @@ dev = [
     "httpx>=0.28",
     "pytest>=8.4",
     "pytest-asyncio>=1.2",
+    "ruff>=0.16",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+# Lint only. `ruff format` is deliberately NOT run and NOT wired into CI:
+# this codebase is written to a dense hand-laid style with comment blocks
+# aligned to the code they explain, and the formatter would rewrite every
+# file to say the same thing differently. The linter catches bugs; the
+# formatter would only catch disagreement about taste.
+[tool.ruff]
+# 100, not the 88 default. The code is written to roughly 80 with a
+# deliberate tail — 1337 lines sit between 80 and 88 and only 72 in the
+# whole tree exceed 100. 88 would mean rewrapping a thousand lines that
+# are fine; 120 would catch nothing. 100 is where the distribution ends.
+line-length = 100
+target-version = "py312"
+
+# Written by `alembic revision --autogenerate` from Alembic's own template
+# (Union[str, None], `from typing import Sequence, Union`) and never edited
+# again — a migration that has shipped is a historical record, not source
+# we maintain. env.py and script.py.mako are ours and stay linted.
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes — the real-bug half
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+]
+ignore = [
+    # try/except/pass -> contextlib.suppress. An import and a with-block to
+    # replace two lines that already read as what they do.
+    "SIM105",
+    # `"a b c".split()` -> a list literal. Right for a three-element split and
+    # wrong for a code table: it turns the 249 ISO 3166-1 codes in scope.py
+    # into a 1518-character line nobody can read or diff.
+    "SIM905",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The suites are scripts, not pytest modules: they run top to bottom against
+# a live server, and the style is deliberate.
+"tests/*" = [
+    # Every suite starts by putting the repo root on sys.path so it can
+    # import `app`. The imports that follow cannot precede that line.
+    "E402",
+    # `if c: ok += 1; print(...)` — the assertion helpers are one-liners on
+    # purpose, so a suite reads as a list of claims rather than a program.
+    "E701", "E702",
+    # Fixture payloads and the assertion lines that quote them back.
+    "E501",
+    # `check(l, c, e="")` — l is the label, and it is the single most-called
+    # name in the suites.
+    "E741",
+]
+
+# B008 says "no function call in an argument default", which is exactly how
+# FastAPI declares a dependency: the call in the signature IS the wiring, and
+# FastAPI resolves it per request rather than once at import. Ruff already
+# knows this about Query/Path/Header/Body; these are the ones it does not.
+# `require_project` is our own dependency factory (app/security.py) and
+# returns a Depends, so it is the same construct under a different name.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.File",
+    "app.security.require_project",
+]
 
 [build-system]
 requires = ["hatchling"]

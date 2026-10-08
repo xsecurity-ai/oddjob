@@ -20,13 +20,11 @@ else, known or unknown, is refused.
 from __future__ import annotations
 
 import re
+from urllib.parse import quote
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import (HTMLResponse, JSONResponse, RedirectResponse,
-                                 Response)
-
-from urllib.parse import quote
+from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from .security import API_KEY_PREFIX, COOKIE, decode_token
 

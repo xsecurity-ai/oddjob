@@ -8,20 +8,39 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import (FileResponse, HTMLResponse,
-                               RedirectResponse)
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .db import DB_PATH, init_db
 from .agentseal import AgentSeal
-from .gatekeeper import (FORBIDDEN_HTML, Gatekeeper, NOT_FOUND_HTML,
-                         wants_html)
-from .routers import (agents, actions, agent, audit, auth, bulk, credentials, domains,
-                      vulnfeeds, health,
-                      enumerate as enumerate_routes, explore,
-                      index as api_index, rest,
-                      findings, google, magic, meta, projects, reports, scans,
-                      services, settings, targets, web)
+from .db import init_db
+from .gatekeeper import NOT_FOUND_HTML, Gatekeeper, wants_html
+from .routers import (
+    actions,
+    agent,
+    agents,
+    audit,
+    auth,
+    bulk,
+    credentials,
+    domains,
+    explore,
+    findings,
+    google,
+    health,
+    magic,
+    meta,
+    projects,
+    reports,
+    rest,
+    scans,
+    services,
+    settings,
+    targets,
+    vulnfeeds,
+    web,
+)
+from .routers import enumerate as enumerate_routes
+from .routers import index as api_index
 
 
 @asynccontextmanager
@@ -163,8 +182,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-from . import headers as _headers      # noqa: E402
-from .audit import AuditTrail         # noqa: E402
+from . import headers as _headers  # noqa: E402
+from .audit import AuditTrail  # noqa: E402
 
 # ORDER. `add_middleware` prepends, so the LAST one added is the
 # outermost and therefore the last to touch a response on the way out.

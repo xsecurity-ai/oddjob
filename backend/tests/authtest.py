@@ -1,11 +1,15 @@
 """Auth + ACL verification for Oddjob."""
 
 # Run from anywhere: the suites import `app`, which lives one level up.
-import pathlib as _pathlib, sys as _sys
-_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
-import json, urllib.request, urllib.error
+import pathlib as _pathlib
+import sys as _sys
 
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import json
 import os
+import urllib.error
+import urllib.request
+
 BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8000")
 ok = fail = 0
 
@@ -174,6 +178,7 @@ check("non-admin cannot list users", st == 403, f"status={st}")
 print("\n== the gate ==")
 import urllib.request as _u
 
+
 class _NoRedirect(_u.HTTPRedirectHandler):
     """Follow nothing: the redirect IS the behaviour under test."""
     def redirect_request(self, *a, **k): return None
@@ -272,7 +277,9 @@ check("sniffing is off", h.get("x-content-type-options") == "nosniff")
 check("no HSTS over http", h.get("strict-transport-security") is None,
       str(h.get("strict-transport-security")))
 
-from app.headers import build as _build, origins as _origins
+from app.headers import build as _build
+from app.headers import origins as _origins
+
 s = _build("https://oddjob.corp.example", "", 365, "")
 check("HSTS appears once the base URL is https",
       s["Strict-Transport-Security"] == "max-age=31536000; includeSubDomains",
@@ -296,6 +303,7 @@ check("framing can be permitted explicitly",
       and f["X-Frame-Options"] == "SAMEORIGIN")
 
 from app.headers import cookies_secure
+
 check("cookies are not Secure on an http deployment", cookies_secure() is False)
 
 _st, _b, h = raw("/api/stats", {"Authorization": f"Bearer {admin}"})
@@ -391,6 +399,7 @@ for _p in ("/", "/index.html", "/projects"):
           "no-cache" in _cc or "no-store" in _cc, f"{_st} {_cc!r}")
 
 import re as _re
+
 _st, _body, _ = raw("/index.html", {"Accept": "text/html",
                                     "Authorization": f"Bearer {admin}"})
 _m = _re.search(rb'assets/[A-Za-z0-9_.-]+\.js', _body or b"")
@@ -442,7 +451,10 @@ print("\n== configuring SMTP ==")
 # A throwaway SMTP sink, same shape as magictest's: asserting that we
 # *would* have sent an invitation proves nothing about whether the link
 # survives the trip.
-import re as _re2, socket as _sock2, threading as _thr, time as _time
+import re as _re2
+import socket as _sock2
+import threading as _thr
+import time as _time
 
 SMTP_PORT = int(os.environ.get("ODDJOB_TEST_SMTP_PORT", "8026"))
 INBOX: list[str] = []

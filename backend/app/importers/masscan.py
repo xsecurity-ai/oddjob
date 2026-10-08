@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import json
 
-from .model import (UNKNOWN, ImportError_, ParsedScan, ParsedService)
 from . import nmap as _nmap
+from .model import UNKNOWN, ImportError_, ParsedScan, ParsedService
 
 
 def looks_like(text: str) -> bool:

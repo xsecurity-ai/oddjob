@@ -34,10 +34,9 @@ import binascii
 import re
 from xml.etree.ElementTree import Element, ParseError  # nosemgrep: use-defused-xml
 
+from .model import ImportError_, ParsedScan, ParsedService, ParsedWebAddress
 from .safexml import fromstring
 from .safexml import stream as safe_stream
-
-from .model import (ImportError_, ParsedScan, ParsedService, ParsedWebAddress)
 
 _TITLE = re.compile(rb"<title[^>]*>(.*?)</title>", re.I | re.S)
 _SERVER = re.compile(rb"^server:\s*(.+?)\r?$", re.I | re.M)

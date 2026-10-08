@@ -392,8 +392,8 @@ async def welcome(session, project, token: str) -> str:
     complete is worse than one that is visibly plain.
     """
     from sqlalchemy import func, select
-    from .models import (Agent, ProjectACL, ProjectScope, Target, User,
-                         UserSlackIdentity, Vuln)
+
+    from .models import Agent, ProjectACL, ProjectScope, Target, User, UserSlackIdentity, Vuln
     from .routers.settings import load_all
 
     lines = [f":wave: *{project.codename or project.name}* "
@@ -452,7 +452,7 @@ async def welcome(session, project, token: str) -> str:
         if len(inc) > WELCOME_SCOPE_LIMIT:
             lines.append(f"• …and {len(inc) - WELCOME_SCOPE_LIMIT} more")
         if exc:
-            lines.append(f"• _excluded:_ " + ", ".join(
+            lines.append("• _excluded:_ " + ", ".join(
                 f"`{r.value}`" for r in exc[:3])
                 + (f" and {len(exc) - 3} more" if len(exc) > 3 else ""))
 

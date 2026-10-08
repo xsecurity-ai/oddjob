@@ -9,10 +9,16 @@ every site admin can open".
 """
 
 # Run from anywhere: the suites import `app`, which lives one level up.
-import pathlib as _pathlib, sys as _sys
+import pathlib as _pathlib
+import sys as _sys
+
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
-import json, os, sqlite3, urllib.error, urllib.request
-from datetime import datetime, timedelta, timezone
+import json
+import os
+import sqlite3
+import urllib.error
+import urllib.request
+from datetime import UTC, datetime, timedelta
 
 BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8016")
 DB = os.environ.get("ODDJOB_DB", "")
@@ -210,7 +216,7 @@ if DB and _pathlib.Path(DB).exists():
     # Reach into the suite's own SQLite file to age an entry, which is
     # the only way to test a window measured in days without waiting one.
     con = sqlite3.connect(DB)
-    old = (datetime.now(timezone.utc) - timedelta(days=99)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=99)).isoformat()
     con.execute("INSERT INTO audit_events (at, source, action, detail) "
                 "VALUES (?,?,?,?)", (old, "backend", "test.ancient", "aged"))
     con.commit()
@@ -388,7 +394,7 @@ print("\n== a logged value cannot forge a log line ==")
 # invent an entry nobody wrote, and a forged entry here is not cosmetic
 # -- it is evidence. Sanitised at the logging site, because the callers
 # are the part that keeps changing.
-from app.audit import for_log                                    # noqa: E402
+from app.audit import for_log  # noqa: E402
 
 _forged = "scan\n2026-01-01 12:00:00 INFO  authorised by root"
 check("a newline cannot start a second line",
@@ -469,10 +475,12 @@ print("\n== health is recorded from inside the send, not at its call sites ==")
 # There are ten slack.post call sites and four send_mail ones. Recording
 # at each is how one gets forgotten, and the forgotten one is the path
 # whose silence nobody notices.
-import asyncio as _aio                                              # noqa: E402
-from app import servicehealth as _sh, slack as _slack               # noqa: E402
-from app.db import SessionLocal as _SL                              # noqa: E402
-from app.models import ServiceHealth as _SH                         # noqa: E402
+import asyncio as _aio  # noqa: E402
+
+from app import servicehealth as _sh  # noqa: E402
+from app import slack as _slack
+from app.db import SessionLocal as _SL  # noqa: E402
+from app.models import ServiceHealth as _SH  # noqa: E402
 
 
 async def _post_with(stub):

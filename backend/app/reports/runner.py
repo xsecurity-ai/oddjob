@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 
@@ -36,7 +36,7 @@ async def run(report_id: int, agentic: bool, min_severity: str = "low") -> None:
         if row is None:
             return
         row.status = "running"
-        row.started_at = datetime.now(timezone.utc)
+        row.started_at = datetime.now(UTC)
         await session.commit()
         await broker.publish("reports", action="running", id=report_id)
 
@@ -65,13 +65,13 @@ async def run(report_id: int, agentic: bool, min_severity: str = "low") -> None:
             # Size the reader will actually download, not the JSON's.
             row.size_bytes = len(render(doc, "pdf")[0])
             row.status = "ready"
-            row.finished_at = datetime.now(timezone.utc)
+            row.finished_at = datetime.now(UTC)
             row.error = None
         except Exception as e:
             log.exception("report %s failed", report_id)
             row.status = "failed"
             row.error = f"{type(e).__name__}: {e}"[:2000]
-            row.finished_at = datetime.now(timezone.utc)
+            row.finished_at = datetime.now(UTC)
 
         await session.commit()
         await broker.publish("reports", action=row.status, id=report_id)
@@ -90,7 +90,7 @@ async def _announce(session, row: Report) -> None:
     ready is useful even when we cannot say where from.
     """
     from .. import slack
-    from ..routers.reports import KIND_LABEL   # local: reports.py imports us
+    from ..routers.reports import KIND_LABEL  # local: reports.py imports us
     from ..routers.settings import load_all
     try:
         pr = await session.get(Project, row.project_id)
@@ -181,7 +181,7 @@ async def reap_stale() -> int:
         for r in rows:
             r.status = "failed"
             r.error = "the server restarted while this report was being generated"
-            r.finished_at = datetime.now(timezone.utc)
+            r.finished_at = datetime.now(UTC)
         if rows:
             await session.commit()
         return len(rows)

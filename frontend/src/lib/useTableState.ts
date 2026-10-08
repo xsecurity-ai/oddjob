@@ -157,9 +157,15 @@ export function useTableState(
     () => new Set(columnDefs.map((c) => c.field)), [columnDefs])
 
   // Read once per table id. Re-reading on every column change would stomp
-  // the user's in-session edits the moment a view adds a column.
+  // the user's in-session edits the moment a view adds a column — so
+  // `fields` is read here and deliberately left out of the dependencies.
+  //
+  // The suppression has to be the line immediately above the call. It was
+  // written underneath for a long time, where ESLint applied it to the
+  // blank line after it and it silenced nothing. Nobody noticed because
+  // there was no linter in the repository to notice with.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const initial = useMemo(() => prune(load(id) ?? {}, fields), [id])
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
 
   const [sort, setSortState] = useState<GridSortModel>(
     initial.sort ?? defaults.sort ?? [])

@@ -23,8 +23,7 @@ turn a security fix into a compatibility break.
 """
 from __future__ import annotations
 
-from typing import Iterator
-
+from collections.abc import Iterator
 from xml.etree.ElementTree import Element, ParseError  # nosemgrep: use-defused-xml
 
 from defusedxml.ElementTree import fromstring as _defused
@@ -76,8 +75,8 @@ def stream(path: str, tag: str, root_tag: str | None = None
     it = _defused_iterparse(path, events=("start", "end"))
     try:
         _, root = next(it)
-    except StopIteration:
-        raise ParseError("empty document")
+    except StopIteration as e:
+        raise ParseError("empty document") from e
     except ParseError:
         raise
     except Exception as e:

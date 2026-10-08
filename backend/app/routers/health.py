@@ -17,7 +17,7 @@ enough to be worth withholding.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, select, text
@@ -25,15 +25,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import servicehealth
 from ..db import get_session
-from ..models import (Agent, AgentTask, AuditEvent, CveRecord, Exploit,
-                      FeedState, Project, ServiceHealth, Target, User, Vuln)
+from ..models import (
+    Agent,
+    AgentTask,
+    AuditEvent,
+    CveRecord,
+    Exploit,
+    FeedState,
+    Project,
+    ServiceHealth,
+    Target,
+    User,
+    Vuln,
+)
 from ..security import require_site_admin
 
 router = APIRouter(prefix="/api/health", tags=["health"])
 
 #: When the process came up. A surprising amount of "it started doing
 #: this an hour ago" resolves to "it restarted an hour ago".
-STARTED_AT = datetime.now(timezone.utc)
+STARTED_AT = datetime.now(UTC)
 
 #: Matches OFFLINE_AFTER in routers/agents.py. Imported there rather
 #: than redefined, so the two cannot drift into disagreeing about what
@@ -44,8 +55,8 @@ def _age(dt: datetime | None) -> float | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return round((datetime.now(timezone.utc) - dt).total_seconds(), 1)
+        dt = dt.replace(tzinfo=UTC)
+    return round((datetime.now(UTC) - dt).total_seconds(), 1)
 
 
 async def _database(session: AsyncSession) -> dict:
@@ -167,7 +178,7 @@ async def _drones(session: AsyncSession) -> dict:
         select(func.count()).select_from(AgentTask)
         .where(AgentTask.status == "queued",
                AgentTask.created_at
-               < datetime.now(timezone.utc) - timedelta(hours=1)))).scalar_one())
+               < datetime.now(UTC) - timedelta(hours=1)))).scalar_one())
 
     online = states.get("online", 0) + states.get("busy", 0)
     if not agents:
@@ -225,7 +236,7 @@ async def site_health(_: User = Depends(require_site_admin),
         select(func.max(AuditEvent.at)))).scalar_one_or_none()
 
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "server": {
             "state": "ok",
             "started_at": STARTED_AT.isoformat(),

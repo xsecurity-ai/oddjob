@@ -24,8 +24,8 @@ out here.
 from __future__ import annotations
 
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Awaitable, Callable
 
 
 def _flag(name: str) -> bool:

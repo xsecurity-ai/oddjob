@@ -32,11 +32,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_session
 from ..events import broker
 from ..hosts import InvalidHost, validate_host
-from ..models import (Credential, Poc, Project, ProjectACL, ROLE_ORDER,
-                      implies_alive,
-                      Service, Target, User, Vuln)
-from ..schemas import (BulkIds, BulkOpResult, BulkPatch, BulkPayload,
-                       BulkResult, PocIn, ServiceIn, TargetIn, VulnIn)
+from ..models import (
+    ROLE_ORDER,
+    Credential,
+    Poc,
+    Project,
+    ProjectACL,
+    Service,
+    Target,
+    User,
+    Vuln,
+    implies_alive,
+)
+from ..schemas import (
+    BulkIds,
+    BulkOpResult,
+    BulkPatch,
+    BulkPayload,
+    BulkResult,
+    PocIn,
+    ServiceIn,
+    TargetIn,
+    VulnIn,
+)
 from ..scope import BARRED
 from ..scopegate import index_for
 from ..security import effective_role, get_current_user
@@ -174,7 +192,7 @@ async def bulk_import(payload: BulkPayload,
         # Dropped from `existing` too, so a child row cannot reach a
         # barred target that happens to already be in the project.
         existing = {h: t for h, t in existing.items() if h not in barred}
-        for h, why in sorted(barred.items()):
+        for _host, why in sorted(barred.items()):
             note(f"scope: {why}")
 
     # Iterate the LIST, not a dict keyed by host: collapsing to a dict first

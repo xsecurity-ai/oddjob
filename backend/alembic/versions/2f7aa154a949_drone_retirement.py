@@ -33,4 +33,3 @@ def downgrade() -> None:
         batch_op.drop_column('retired_cleanup')
         batch_op.drop_column('retired_reason')
         batch_op.drop_column('retired_at')
-

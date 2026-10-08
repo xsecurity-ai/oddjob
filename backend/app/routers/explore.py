@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
 from ..models import Project, Service, Target, User, Vuln
-from ..schemas import ExploreOut, NameCount, ExploreHost
+from ..schemas import ExploreHost, ExploreOut, NameCount
 from ..security import get_current_user, visible_project_ids
 from .projects import resolve_project
 
@@ -61,8 +61,8 @@ async def explore(
     if dimension == "port":
         try:
             port = int(value)
-        except ValueError:
-            raise HTTPException(422, f"{value!r} is not a port number")
+        except ValueError as e:
+            raise HTTPException(422, f"{value!r} is not a port number") from e
         base = base.where(Service.port == port)
         if protocol:
             base = base.where(Service.protocol == protocol.lower())
@@ -105,7 +105,7 @@ async def explore(
     vq = (select(Vuln.severity, func.count())
           .join(pairs, (pairs.c.target_id == Vuln.target_id) & (pairs.c.port == Vuln.port))
           .group_by(Vuln.severity))
-    by_sev = {s: 0 for s in SEV_ORDER}
+    by_sev = dict.fromkeys(SEV_ORDER, 0)
     for sev, n in (await session.execute(vq)).all():
         if sev in by_sev:
             by_sev[sev] = int(n)

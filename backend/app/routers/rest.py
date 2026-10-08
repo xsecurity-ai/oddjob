@@ -34,10 +34,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
-from ..models import (Event, Implant, Poc, Project, Service, Target, User,
-                      Vuln, WebAddress)
-from ..security import (effective_role, get_current_user, require_project,
-                        visible_project_ids)
+from ..models import Event, Implant, Poc, Project, Service, Target, Vuln, WebAddress
+from ..security import require_project
 
 router = APIRouter(prefix="/api/projects", tags=["rest"])
 

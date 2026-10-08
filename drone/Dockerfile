@@ -198,11 +198,19 @@ COPY --from=build /out/httpx /usr/local/bin/httpx
 # different package layout — both are the kind of thing that fails
 # silently at the point an operator tasks a scan against a client's
 # estate, which is the worst possible place to discover it.
+#
+# The NSE count comes off a glob rather than `find ... | wc -l`. Same
+# answer — both say 605, the scripts directory is flat — but no pipe, so
+# there is no arrangement where `find` dies and `wc -l` cheerfully
+# reports 0 as the pipeline's success (DL4006). `[ -e "$1" ]` covers the
+# one case a glob gets wrong: no match leaves the pattern itself in $1,
+# which would otherwise count as one file.
 RUN set -eu; \
     for b in drone amass gospider nuclei httpx masscan nmap gobuster dig; do \
       command -v "$b" >/dev/null || { echo "missing: $b"; exit 1; }; \
     done; \
-    n=$(find /usr/share/nmap/scripts -name '*.nse' | wc -l); \
+    set -- /usr/share/nmap/scripts/*.nse; n=$#; \
+    [ -e "$1" ] || n=0; \
     [ "$n" -gt 500 ] || { echo "only $n NSE scripts — nmap -sC would be crippled"; exit 1; }; \
     [ -f /usr/share/nmap/scripts/script.db ] || { echo "no script.db"; exit 1; }; \
     echo "tools present, $n NSE scripts"
@@ -220,8 +228,17 @@ RUN set -eu; \
 # apk in this stage and is therefore native to the image by
 # construction — no table of architectures to get wrong, and it keeps
 # working if a third platform is ever added.
+#
+# `od` output is compared with its spaces left in — "3e 00" against
+# "b7 00" — rather than stripped to "3e00". Nothing here needs them
+# gone, and removing them is what makes this awkward: `od … | tr -d`
+# is a pipe, which wants DL4006's `set -o pipefail`, and there is
+# nowhere on this image to put one (inline it still fires the rule
+# and adds SC3040; SHELL only accepts bash or ash). Word splitting
+# into the positional parameters avoids the pipe and trips SC2046
+# instead. Not comparing the spaces away avoids all of it.
 RUN set -eu; \
-    mach() { od -An -tx1 -j18 -N2 "$(command -v "$1")" | tr -d ' \n'; }; \
+    mach() { od -An -tx1 -j18 -N2 "$(command -v "$1")"; }; \
     want=$(mach nmap); \
     for b in drone amass gospider nuclei httpx masscan; do \
       got=$(mach "$b"); \

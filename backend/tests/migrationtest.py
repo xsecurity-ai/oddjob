@@ -12,9 +12,14 @@ the models. No server, no fixtures, no dev database.
 """
 
 # Run from anywhere: the suites import `app`, which lives one level up.
-import pathlib as _pathlib, sys as _sys
+import pathlib as _pathlib
+import sys as _sys
+
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
-import os, subprocess, sys, tempfile
+import os
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 from sqlalchemy import create_engine, inspect

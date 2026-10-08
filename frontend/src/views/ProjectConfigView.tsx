@@ -88,6 +88,10 @@ export function ProjectConfigView({ project }: { project: string | null }) {
       codename: loaded.codename ?? '', description: loaded.description ?? '',
       status: loaded.status ?? 'active',
     })
+    // Keyed on the id and not on `loaded` itself, which is a fresh object
+    // on every refetch. Depending on the whole thing is what would
+    // overwrite the half-typed sentence described above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded?.id])
 
   if (!project) {

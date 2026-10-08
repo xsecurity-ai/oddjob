@@ -24,35 +24,37 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import re
 import secrets
 import time
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
-from datetime import datetime, timedelta, timezone
-
-from pathlib import Path
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import AliasChoices, BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import audit
+from .. import agentcrypto, audit
 from ..db import get_session
 from ..events import broker
-from ..models import Agent, AgentTask, Project, Setting, Target, User
 from ..hosts import validate_host
+from ..models import Agent, AgentTask, Project, Setting, Target, User
 from ..scopegate import check_task_targets, index_for, refuse
-from ..security import (get_current_user, new_agent_key, require_project,
-                        verify_key)
-from .. import agentcrypto
+from ..security import get_current_user, new_agent_key, require_project, verify_key
 from ..timeline import record
 from .scans import HostDecision
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
+
+# The abandoned-task release below logs what it released, and the name it
+# logged through was never bound in this module -- so the one path that
+# reports a lost task was itself raising NameError.
+log = logging.getLogger("oddjob.agents")
 
 #: An agent that has not checked in for this long is called offline.
 #: Three missed heartbeats rather than one: a single slow network
@@ -422,7 +424,7 @@ def _stale(a: Agent, in_flight: int = 0) -> str:
     if a.status == "disabled":
         return "disabled"
     seen = _aware(a.last_seen)
-    if seen and (datetime.now(timezone.utc) - seen) < OFFLINE_AFTER:
+    if seen and (datetime.now(UTC) - seen) < OFFLINE_AFTER:
         return "online"
     if in_flight > 0:
         return "busy"
@@ -839,8 +841,8 @@ async def _signed_agent(request: Request, session: AsyncSession,
 
     try:
         a = await session.get(Agent, int(claimed))
-    except ValueError:
-        raise HTTPException(401, "malformed agent id")
+    except ValueError as e:
+        raise HTTPException(401, "malformed agent id") from e
     if a is None or not a.public_key:
         raise HTTPException(401, "unknown agent")
 
@@ -924,7 +926,7 @@ def _aware(dt: datetime | None) -> datetime | None:
     which is worse.
     """
     if dt is not None and dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -989,7 +991,7 @@ async def enroll(body: EnrollIn, project: str = Query(...),
     cb_raw, cb_hash = new_agent_key()
     ci_raw, ci_hash = new_agent_key()
     tok_raw, tok_hash = new_agent_key()
-    expires = datetime.now(timezone.utc) + ENROLL_TTL
+    expires = datetime.now(UTC) + ENROLL_TTL
     a = Agent(project_id=pr.id, name=unique_agent_name(body.name),
               callback_key_hash=cb_hash, call_in_key_hash=ci_hash,
               enroll_token_hash=tok_hash, enroll_expires_at=expires,
@@ -1224,7 +1226,7 @@ async def reach_agent(agent_id: int,
         # nobody concludes the host is down when the route is.
         raise HTTPException(
             502, f"could not reach {a.name} at {a.call_in_url}: {e}. That is "
-                 f"this server's view of the path, not proof the agent is down.")
+                 f"this server's view of the path, not proof the agent is down.") from e
     if r.status_code >= 300:
         raise HTTPException(
             502, f"{a.name} refused the call ({r.status_code}): "
@@ -1285,7 +1287,7 @@ async def reenroll_agent(agent_id: int,
     cb_raw, cb_hash = new_agent_key()
     ci_raw, ci_hash = new_agent_key()
     tok_raw, tok_hash = new_agent_key()
-    expires = datetime.now(timezone.utc) + ENROLL_TTL
+    expires = datetime.now(UTC) + ENROLL_TTL
 
     # The old identity goes now, not when the new one is redeemed. An
     # agent whose keys are being rotated because they may be exposed
@@ -1346,7 +1348,7 @@ async def kill_agent(agent_id: int,
     # of the engagement, inflating every count that reads it and
     # looking to an operator like a scan still in progress.
     cancelled = running_closed = 0
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for t in (await session.execute(
             select(AgentTask).where(
                 AgentTask.agent_id == a.id,
@@ -1405,7 +1407,7 @@ async def remove_agent(agent_id: int,
                 AgentTask.status.in_(("queued", "claimed", "running"))))).scalars():
         t.status = "failed"
         t.error = f"the agent {a.name} was deleted while this task was pending"
-        t.finished_at = datetime.now(timezone.utc)
+        t.finished_at = datetime.now(UTC)
     await session.commit()
     await session.delete(a)
     await session.commit()
@@ -1929,7 +1931,7 @@ async def import_task_result(agent_id: int, task_id: int,
     res = await _run(session, pr, t.output, t.import_as,
                      f"drone:{a.name if a else agent_id}",
                      mode=body.mode,
-                     decisions={k: v for k, v in body.decisions.items()})
+                     decisions=dict(body.decisions))
     t.import_result = res.model_dump_json()
     await session.commit()
     await broker.publish("agents", action="result", project=pr.code)
@@ -1980,10 +1982,10 @@ async def claim_identity(body: IdentityIn,
     try:
         if len(agentcrypto.unb64(key)) != 32:
             raise ValueError
-    except Exception:
-        raise HTTPException(422, "public_key must be a base64 Ed25519 key")
+    except Exception as e:
+        raise HTTPException(422, "public_key must be a base64 Ed25519 key") from e
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     match: Agent | None = None
     for a in (await session.execute(
             select(Agent).where(Agent.enroll_token_hash.is_not(None)))).scalars():
@@ -2005,8 +2007,8 @@ async def claim_identity(body: IdentityIn,
         try:
             if len(agentcrypto.unb64(kex)) != 32:
                 raise ValueError
-        except Exception:
-            raise HTTPException(422, "kex_public_key must be a base64 X25519 key")
+        except Exception as e:
+            raise HTTPException(422, "kex_public_key must be a base64 X25519 key") from e
         match.kex_public_key = kex
     match.enroll_used_at = now
     # Burned, so the same token cannot register a second key later.
@@ -2059,7 +2061,7 @@ async def register(body: RegisterIn, request: Request,
     a.host_platform_source = body.host_platform_source or None
     a.container = body.container or None
     a.call_in_url = body.call_in_url
-    a.last_seen = datetime.now(timezone.utc)
+    a.last_seen = datetime.now(UTC)
     a.last_ip = request.client.host if request.client else None
     if a.status == "disabled":
         # A killed agent that comes back -- a restarted service, a
@@ -2135,7 +2137,7 @@ async def retired(body: RetiredIn,
     sends this, stays unretired, and that is the honest answer, because
     the tools really are still sitting on that machine.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     a.retired_at = now
     a.retired_reason = (body.reason or "retired")[:300]
     a.retired_cleanup = json.dumps({"removed": body.removed[:100],
@@ -2185,7 +2187,7 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
     back in the queue rather than sitting in `claimed` for the rest of
     the engagement with nothing left to complete it.
     """
-    a.last_seen = datetime.now(timezone.utc)
+    a.last_seen = datetime.now(UTC)
     a.last_ip = request.client.host if request.client else None
     if a.status == "disabled":
         # Killed. Answer the heartbeat rather than refusing it, so the
@@ -2222,7 +2224,7 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
         with nothing saying why."""
         task.status = "failed"
         task.error = f"refused by the project's scope at dispatch: {why}"
-        task.finished_at = datetime.now(timezone.utc)
+        task.finished_at = datetime.now(UTC)
 
     # What this agent is already holding. Anything here means the last
     # dispatch has not come back.
@@ -2260,7 +2262,7 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
         free = max(0, allowed - len(doing)) if said else 0
 
     if held:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         released = 0
         for h in held:
             if h.id in doing:
@@ -2355,7 +2357,7 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
                 cand.agent_id = a.id
                 chosen.append(cand)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     out = []
     _reverse_candidates: list[str] | None = None
     for t in chosen:
@@ -2384,7 +2386,7 @@ async def start_task(task_id: int, a: Agent = Depends(agent_from_key),
     if t is None or t.agent_id != a.id:
         raise HTTPException(404, "no such task for this agent")
     t.status = "running"
-    t.started_at = datetime.now(timezone.utc)
+    t.started_at = datetime.now(UTC)
     await session.commit()
     return {"ok": True}
 
@@ -2410,7 +2412,7 @@ async def submit_result(task_id: int, body: ResultIn,
 
     t.output, t.stderr = body.output, body.stderr
     t.summary, t.exit_code, t.error = body.summary, body.exit_code, body.error
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     a.last_seen = now
 
     requeued = False

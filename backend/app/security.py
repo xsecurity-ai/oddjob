@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import jwt
@@ -30,8 +30,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_session
-from .models import (ApiKey, Project, ProjectACL, ROLE_ORDER,
-                     SITE_ADMIN_GROUP, User)
+from .models import ROLE_ORDER, SITE_ADMIN_GROUP, ApiKey, Project, ProjectACL, User
 
 ALGO = "HS256"
 TOKEN_TTL_HOURS = int(os.environ.get("ODDJOB_TOKEN_TTL_HOURS", "12"))
@@ -83,7 +82,7 @@ def needs_rehash(hashed: str) -> bool:
 
 # ---------------------------------------------------------------- tokens
 def create_access_token(user: User) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return jwt.encode(
         {"sub": str(user.id), "username": user.username,
          "iat": now, "exp": now + timedelta(hours=TOKEN_TTL_HOURS)},
@@ -127,7 +126,7 @@ async def get_current_user(request: Request,
                 _ph.verify(k.key_hash, token)
             except Exception:
                 continue
-            k.last_used_at = datetime.now(timezone.utc)
+            k.last_used_at = datetime.now(UTC)
             await session.commit()
             u = await session.get(User, k.user_id)
             if u and u.is_active:
@@ -196,7 +195,8 @@ def require_project(minimum: str = "readonly"):
             raise HTTPException(422, "a project is required for this operation")
         ref = str(ref).strip()
         pr = (await session.execute(
-            select(Project).where(Project.code == ref.upper().replace(" ", "-")))).scalar_one_or_none()
+            select(Project).where(
+                Project.code == ref.upper().replace(" ", "-")))).scalar_one_or_none()
         if pr is None and ref.isdigit():
             pr = await session.get(Project, int(ref))
         if pr is None:

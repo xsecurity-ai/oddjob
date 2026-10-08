@@ -118,7 +118,14 @@ func (i *Identity) Save() error {
 	if err := os.MkdirAll(filepath.Dir(i.path), 0o700); err != nil {
 		return err
 	}
-	raw, err := json.MarshalIndent(i.File, "", "  ")
+	// Serialising the private key is the entire job of this function:
+	// it is how the agent survives a restart without re-enrolling, and
+	// the token that would let it re-enroll is one-time and already
+	// spent. The material goes to one place — i.path, written 0600
+	// inside a 0700 directory, both set immediately above and below —
+	// and nothing in this package logs, prints or transmits i.File.
+	// Over the wire the identity is used to sign and seal, never sent.
+	raw, err := json.MarshalIndent(i.File, "", "  ") //nolint:gosec // G117: deliberate — this is the on-disk identity, written 0600; see above
 	if err != nil {
 		return err
 	}

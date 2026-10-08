@@ -32,16 +32,27 @@ drift.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from sqlalchemy import (Boolean, CheckConstraint, Column, DateTime, Float,
-                        ForeignKey,
-                        Index, Integer, String, Table, Text, UniqueConstraint)
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
@@ -137,16 +148,16 @@ class Project(Base, TimestampMixin):
     # changing the site policy moves every project that never chose.
     slack_private: Mapped[bool | None] = mapped_column(Boolean, default=None)
 
-    targets: Mapped[list["Target"]] = relationship(
+    targets: Mapped[list[Target]] = relationship(
         back_populates="project", cascade="all, delete-orphan", passive_deletes=True
     )
-    acls: Mapped[list["ProjectACL"]] = relationship(
+    acls: Mapped[list[ProjectACL]] = relationship(
         back_populates="project", cascade="all, delete-orphan", passive_deletes=True
     )
-    scope: Mapped[list["ProjectScope"]] = relationship(
+    scope: Mapped[list[ProjectScope]] = relationship(
         back_populates="project", cascade="all, delete-orphan", passive_deletes=True
     )
-    contacts: Mapped[list["ProjectContact"]] = relationship(
+    contacts: Mapped[list[ProjectContact]] = relationship(
         back_populates="project", cascade="all, delete-orphan", passive_deletes=True
     )
 
@@ -209,23 +220,23 @@ class Target(Base, TimestampMixin):
     tags: Mapped[str | None] = mapped_column(Text)
 
     project: Mapped[Project] = relationship(back_populates="targets")
-    events: Mapped[list["Event"]] = relationship(
+    events: Mapped[list[Event]] = relationship(
         back_populates="target", cascade="all, delete-orphan", passive_deletes=True,
         order_by="Event.at.desc()",
     )
-    implants: Mapped[list["Implant"]] = relationship(
+    implants: Mapped[list[Implant]] = relationship(
         back_populates="target", cascade="all, delete-orphan", passive_deletes=True,
     )
-    web_addresses: Mapped[list["WebAddress"]] = relationship(
+    web_addresses: Mapped[list[WebAddress]] = relationship(
         back_populates="target", cascade="all, delete-orphan", passive_deletes=True,
     )
-    services: Mapped[list["Service"]] = relationship(
+    services: Mapped[list[Service]] = relationship(
         back_populates="target", cascade="all, delete-orphan", passive_deletes=True
     )
-    vulns: Mapped[list["Vuln"]] = relationship(
+    vulns: Mapped[list[Vuln]] = relationship(
         back_populates="target", cascade="all, delete-orphan", passive_deletes=True
     )
-    pocs: Mapped[list["Poc"]] = relationship(
+    pocs: Mapped[list[Poc]] = relationship(
         back_populates="target", cascade="all, delete-orphan", passive_deletes=True
     )
 
@@ -370,9 +381,9 @@ class User(Base, TimestampMixin):
     slack_handle: Mapped[str | None] = mapped_column(String(128))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
-    groups: Mapped[list["Group"]] = relationship(
+    groups: Mapped[list[Group]] = relationship(
         secondary=user_groups, back_populates="users", lazy="selectin")
-    acls: Mapped[list["ProjectACL"]] = relationship(
+    acls: Mapped[list[ProjectACL]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
 
     @property
@@ -398,7 +409,7 @@ class Group(Base, TimestampMixin):
 
     users: Mapped[list[User]] = relationship(
         secondary=user_groups, back_populates="groups", lazy="selectin")
-    acls: Mapped[list["ProjectACL"]] = relationship(
+    acls: Mapped[list[ProjectACL]] = relationship(
         back_populates="group", cascade="all, delete-orphan", passive_deletes=True)
 
 
@@ -498,7 +509,7 @@ class ProjectACL(Base, TimestampMixin):
         ForeignKey("groups.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String(16), default="readonly")
 
-    project: Mapped["Project"] = relationship(back_populates="acls")
+    project: Mapped[Project] = relationship(back_populates="acls")
     user: Mapped[User | None] = relationship(back_populates="acls")
     group: Mapped[Group | None] = relationship(back_populates="acls")
 
@@ -580,7 +591,7 @@ class Event(Base):
     target_id: Mapped[int] = mapped_column(
         ForeignKey("targets.id", ondelete="CASCADE"), index=True)
     at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
     kind: Mapped[str] = mapped_column(String(16), index=True)
     # One line, written to be read in a list without expanding anything.
     summary: Mapped[str] = mapped_column(Text)
@@ -1020,7 +1031,7 @@ class ProjectScope(Base, TimestampMixin):
     country: Mapped[str | None] = mapped_column(String(2))
     notes: Mapped[str | None] = mapped_column(Text)
 
-    project: Mapped["Project"] = relationship(back_populates="scope")
+    project: Mapped[Project] = relationship(back_populates="scope")
 
 
 class ProjectContact(Base, TimestampMixin):
@@ -1038,7 +1049,7 @@ class ProjectContact(Base, TimestampMixin):
     primary_contact: Mapped[bool] = mapped_column(Boolean, default=False)
     notes: Mapped[str | None] = mapped_column(Text)
 
-    project: Mapped["Project"] = relationship(back_populates="contacts")
+    project: Mapped[Project] = relationship(back_populates="contacts")
 
 
 class ImportJob(Base, TimestampMixin):

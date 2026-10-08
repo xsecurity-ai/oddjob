@@ -11,16 +11,15 @@ already in front of the person who owns it.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..agent import AgentError, build, run, token_kind
 from ..agent.providers import anthropic_chat, openai_chat
 from ..db import get_session
 from ..models import Project, User
-from ..security import (effective_role, get_current_user, require_project,
-                        visible_project_ids)
+from ..security import effective_role, get_current_user, visible_project_ids
 from .settings import load_all
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
@@ -309,9 +308,9 @@ async def chat(body: ChatRequest, project: str = Query(...),
             reply = await openai_chat(token, model, system, messages, tools,
                                       run, max_steps, base_url=base_url)
     except AgentError as e:
-        raise HTTPException(502, str(e))
+        raise HTTPException(502, str(e)) from e
     except Exception as e:
-        raise HTTPException(502, f"{type(e).__name__}: {e}")
+        raise HTTPException(502, f"{type(e).__name__}: {e}") from e
 
     return ChatResponse(
         text=reply.text, provider=provider, model=model,
@@ -398,7 +397,7 @@ async def remediation_status(_: User = Depends(get_current_user),
         .where(or_(Vuln.remediation.is_(None), Vuln.remediation == ""),
                Vuln.severity.in_(keep))
         .group_by(Vuln.severity))).all()
-    by_sev = {s: n for s, n in rows}
+    by_sev = dict(rows)
 
     est = None
     if st["pending"]:
