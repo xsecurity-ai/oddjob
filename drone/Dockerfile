@@ -118,15 +118,50 @@ RUN set -eu; \
     ls -l /out
 
 
+# -------------------------------------------------------- masscan
+# From source because Wolfi has no masscan package — nmap, gobuster
+# and bind-tools are all there, masscan is not. Built in the same
+# distribution it will run in, so it links against that libpcap and
+# not Debian's.
+#
+# Pinned to a tag, like the Go tools above: this binary sends packets
+# at a client's estate at 11,600 pps, and "whatever main was that
+# morning" is not an acceptable answer to which version did that.
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:05d24163df148be377275af8374c16523a1dc7e19bf4f1c689784791553c5e45 AS masscan
+ARG MASSCAN_VERSION=1.3.2
+RUN apk add --no-cache build-base git libpcap-dev linux-headers \
+ && git clone --depth 1 --branch "${MASSCAN_VERSION}" \
+      https://github.com/robertdavidgraham/masscan /src \
+ && make -C /src -j"$(nproc)" \
+ && test -x /src/bin/masscan \
+ && (/src/bin/masscan --version || true)
+# `|| true` on the version print: masscan exits non-zero from
+# --version. The build is proved by `test -x`; the print is for the
+# log, so somebody reading a build can see which version went in.
+
+
 # ----------------------------------------------------------- runtime
-FROM debian:bookworm-slim AS runtime
+# Wolfi rather than Debian. Not distroless — this image cannot be:
+# it is a box of scanners that shells out to nmap and masscan, and it
+# needs root plus CAP_NET_RAW to do its job. What it does get is a
+# 24 MB base that is rebuilt and patched continuously, against a
+# bookworm-slim whose CVE list only grows between stable releases.
+#
+# Pinned by digest for the reason given in the oddjob image: the free
+# tier publishes only mutable `latest`, and this repository's rule is
+# that a mutable reference gets pinned.
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:05d24163df148be377275af8374c16523a1dc7e19bf4f1c689784791553c5e45 AS runtime
 
 # nmap pulls its NSE library with it, which is the only way scripts get
 # here — a Drone cannot fetch individual scripts.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      nmap masscan gobuster \
-      ca-certificates dnsutils \
- && rm -rf /var/lib/apt/lists/*
+#
+# `bind-tools` is Wolfi's name for what Debian calls `dnsutils`: dig,
+# host, nslookup. There is no separate nmap-scripts package — Wolfi's
+# nmap carries all 605 .nse files and script.db in the one package,
+# which is checked below rather than hoped for.
+RUN apk add --no-cache nmap gobuster bind-tools ca-certificates libpcap
+
+COPY --from=masscan /src/bin/masscan /usr/local/bin/masscan
 
 COPY --from=build /out/drone /usr/local/bin/drone
 COPY --from=build /out/amass /usr/local/bin/amass
@@ -144,6 +179,21 @@ COPY --from=build /out/httpx /usr/local/bin/httpx
 # the enrollment token is one-time, so a lost identity means creating
 # the agent again in Oddjob, and a lost spool means losing results for
 # scans that already ran against someone's estate.
+# Every tool the agent shells out to, present and the right
+# architecture. This image changed base from Debian to Wolfi, where
+# masscan is built from source and nmap's scripts come from a
+# different package layout — both are the kind of thing that fails
+# silently at the point an operator tasks a scan against a client's
+# estate, which is the worst possible place to discover it.
+RUN set -eu; \
+    for b in drone amass gospider nuclei httpx masscan nmap gobuster dig; do \
+      command -v "$b" >/dev/null || { echo "missing: $b"; exit 1; }; \
+    done; \
+    n=$(find /usr/share/nmap/scripts -name '*.nse' | wc -l); \
+    [ "$n" -gt 500 ] || { echo "only $n NSE scripts — nmap -sC would be crippled"; exit 1; }; \
+    [ -f /usr/share/nmap/scripts/script.db ] || { echo "no script.db"; exit 1; }; \
+    echo "tools present, $n NSE scripts"
+
 RUN mkdir -p /var/lib/drone/work
 VOLUME ["/var/lib/drone/work"]
 
