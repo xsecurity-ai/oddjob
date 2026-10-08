@@ -715,11 +715,14 @@ CANDIDATE_STATES = ("new", "accepted", "rejected", "exists")
 
 
 class DomainSearch(Base, TimestampMixin):
-    """A root domain that has been put through candidate generation.
+    """A root domain that was put through the offline candidate generator.
 
-    Exists so the same domain is not ground through repeatedly: the record
-    of what was asked, when, and how much it produced is what lets the next
-    run skip it and say why.
+    Dead weight, deliberately kept. The generator is gone — enumeration
+    is amass on a Drone now — so nothing writes these rows and nothing
+    reads them. They are left in place rather than dropped in a
+    migration because a table drop cannot be undone and these rows are
+    somebody's record of what was run and when, even if the thing that
+    ran it no longer exists. Drop it in its own change, not as tidying.
     """
     __tablename__ = "domain_searches"
     __table_args__ = (

@@ -1,4 +1,4 @@
-"""Web addresses, and domain-candidate generation with its memory."""
+"""Web addresses, and the domain roots they group under."""
 
 # Run from anywhere: the suites import `app`, which lives one level up.
 import pathlib as _pathlib, sys as _sys
@@ -132,176 +132,6 @@ st, tl = call("/api/targets/WEB/shop.corp.com/timeline?kind=web", token=admin)
 check("web discoveries land on the timeline", tl["total"] >= 1, str(tl["total"]))
 
 # ======================================================= domain discovery
-print("\n== domain candidate generation ==")
-SEED = "\n".join(json.dumps(x) for x in [
-    {"url": f"https://{h}", "input": h, "host": "10.0.0.9", "port": 443,
-     "scheme": "https", "status_code": 200}
-    for h in ("web01.corp.com", "api-uat.corp.com", "vpn.other.com",
-              "sso.other.com", "vpn.third.com")
-])
-call("/api/projects", "POST", {"code": "DOM", "name": "Domains"}, token=admin)
-imp(SEED, project="DOM")
-
-st, roots = call("/api/domains/roots?project=DOM", token=admin)
-check("roots listed commonest first", roots[0]["domain"] in ("corp.com", "other.com"),
-      str(roots))
-check("none searched yet", all(r["searched"] is False for r in roots))
-
-st, batch = call("/api/domains/detect?project=DOM", "POST",
-                 {"domain": "corp.com"}, token=admin)
-check("detect runs", st == 200, f"status={st} {str(batch)[:90]}")
-r = batch["results"][0]
-names = {c["name"]: c for c in r["candidates"]}
-check("sequence from web01", "web02.corp.com" in names, str(sorted(names)[:6]))
-check("sequences rank highest", names["web02.corp.com"]["score"] >= 80)
-check("environment swap from api-uat",
-      any(n.startswith("api-") and n != "api-uat.corp.com" for n in names),
-      str([n for n in names if n.startswith("api-")]))
-check("vocabulary from other domains is applied",
-      "vpn.corp.com" in names, str(sorted(names)[:8]))
-check("and explains itself", "other domain" in names["vpn.corp.com"]["reason"],
-      names["vpn.corp.com"]["reason"])
-check("a name already in the estate is not suggested",
-      "web01.corp.com" not in names and "api-uat.corp.com" not in names)
-check("the domain itself is not suggested", "corp.com" not in names)
-check("counts reported", r["new_candidates"] > 0 and r["already_known"] == 2,
-      f'{r["new_candidates"]}/{r["already_known"]}')
-
-print("\n== the same domain is not ground through twice ==")
-st, b2 = call("/api/domains/detect?project=DOM", "POST",
-              {"domain": "corp.com"}, token=admin); r2 = b2["results"][0]
-check("second run adds nothing", r2["new_candidates"] == 0, str(r2["new_candidates"]))
-check("and says why", "searched" in (r2["note"] or "").lower(), str(r2["note"])[:90])
-check("but still returns what it found", len(r2["candidates"]) == len(r["candidates"]))
-st, hist = call("/api/domains/searches?project=DOM", token=admin)
-check("the search is remembered", len(hist) == 1 and hist[0]["domain"] == "corp.com",
-      str(hist))
-check("run count did not increase on the skipped run", hist[0]["runs"] == 1,
-      str(hist[0]["runs"]))
-st, roots = call("/api/domains/roots?project=DOM", token=admin)
-check("roots now mark it searched",
-      next(x for x in roots if x["domain"] == "corp.com")["searched"] is True)
-
-st, b3 = call("/api/domains/detect?project=DOM", "POST",
-              {"domain": "corp.com", "force": True}, token=admin); r3 = b3["results"][0]
-check("force re-runs", r3["runs"] == 2, str(r3["runs"]))
-check("but proposes no duplicates", r3["new_candidates"] == 0, str(r3["new_candidates"]))
-
-# A duplicate must be skipped, not fatal. Two ways it arose in
-# production, both ending in a 500 that threw away a run which had
-# already generated a few thousand candidates:
-#
-#   - the generator proposing the same name twice in one batch, which
-#     violates the unique index INSIDE a single INSERT;
-#   - two detect runs overlapping (a double-click will do it), each
-#     reading the existing set before the other commits.
-print("\n== a duplicate candidate is skipped, never a 500 ==")
-import threading as _th                                            # noqa: E402
-
-_codes: list[int] = []
-_lock = _th.Lock()
-
-
-def _detect_once():
-    st, _ = call("/api/domains/detect?project=DOM", "POST",
-                 {"domain": "race.corp.com", "force": True}, token=admin)
-    with _lock:
-        _codes.append(st)
-
-
-_threads = [_th.Thread(target=_detect_once) for _ in range(4)]
-for t in _threads:
-    t.start()
-for t in _threads:
-    t.join()
-check("four concurrent detects on one domain all succeed",
-      _codes and all(c == 200 for c in _codes), f"status codes: {_codes}")
-
-# And the names really are unique afterwards, rather than the conflict
-# having been swallowed into duplicate rows.
-st, after = call("/api/domains/candidates?project=DOM&limit=5000", token=admin)
-_rows = after if isinstance(after, list) else after.get("items", [])
-_names = [c["name"] for c in _rows]
-check("no duplicate candidate rows exist",
-      len(_names) == len(set(_names)),
-      f"{len(_names)} rows, {len(set(_names))} distinct")
-
-print("\n== promoting and rejecting ==")
-web02 = names["web02.corp.com"]["id"]
-vpn = names["vpn.corp.com"]["id"]
-st, p = call("/api/domains/candidates/promote?project=DOM", "POST",
-             {"ids": [web02]}, token=admin)
-check("promoted to a target", p["created"] == ["web02.corp.com"], str(p))
-st, tg = call("/api/targets?project=DOM&q=web02", token=admin)
-check("the target exists", tg["total"] == 1, str(tg["total"]))
-check("and is NOT claimed to be alive — nothing probed it",
-      tg["items"][0]["alive"] is None, str(tg["items"][0]["alive"]))
-st, tl = call("/api/targets/DOM/web02.corp.com/timeline", token=admin)
-check("provenance on the timeline",
-      "domain discovery" in tl["items"][-1]["summary"], str(tl["items"][-1]["summary"]))
-
-st, rj = call("/api/domains/candidates/reject?project=DOM", "POST",
-              {"ids": [vpn]}, token=admin)
-check("rejected", rj["rejected"] == ["vpn.corp.com"], str(rj))
-st, left = call("/api/domains/candidates?project=DOM&state=new", token=admin)
-check("rejected and promoted names drop out of 'new'",
-      not any(c["name"] in ("vpn.corp.com", "web02.corp.com") for c in left),
-      str([c["name"] for c in left][:5]))
-
-st, b4 = call("/api/domains/detect?project=DOM", "POST",
-              {"domain": "corp.com", "force": True}, token=admin); r4 = b4["results"][0]
-check("a rejected name is not offered again",
-      "vpn.corp.com" not in {c["name"] for c in r4["candidates"]})
-
-print("\n== bad input and authorisation ==")
-st, b = call("/api/domains/detect?project=DOM", "POST",
-             {"domain": "localhost"}, token=admin)
-check("a single label is reported against itself, not fatal",
-      st == 200 and b["results"][0]["error"] and b["domains_skipped"] == 1,
-      str(b["results"][0].get("error"))[:70])
-st, b = call("/api/domains/detect?project=DOM", "POST",
-             {"domain": "*.corp.com"}, token=admin)
-check("a wildcard is stripped, not guessed at",
-      b["results"][0]["domain"] == "corp.com")
-
-print("\n== several domains at once ==")
-st, b = call("/api/domains/detect?project=DOM", "POST",
-             {"domains": ["other.com", "third.com", "10.0.0.1", "nope"],
-              "force": True}, token=admin)
-check("batch runs", st == 200, f"status={st}")
-got = {r["domain"]: r for r in b["results"]}
-check("each domain gets its own result", len(got) == 4, str(sorted(got)))
-check("the good ones ran", b["domains_run"] == 2, str(b["domains_run"]))
-check("an IP is refused with a reason, not silently empty",
-      "IP address" in (got["10.0.0.1"]["error"] or ""), str(got["10.0.0.1"]["error"])[:60])
-check("a single label is refused too", got["nope"]["error"] is not None)
-check("one bad entry does not cost the others",
-      got["other.com"]["error"] is None and len(got["other.com"]["candidates"]) > 0)
-
-print("\n== addresses never become candidates ==")
-all_c = call("/api/domains/candidates?project=DOM", token=admin)[1]
-import ipaddress as _ip
-def _isip(x):
-    try: _ip.ip_address(x); return True
-    except ValueError: return False
-check("no candidate is an IP", not any(_isip(c["name"]) for c in all_c))
-check("no candidate has an all-numeric label set",
-      not any(all(p.isdigit() for p in c["name"].split(".")) for c in all_c))
-call("/api/users", "POST", {"username": "ro", "password": "ro-password-1"}, token=admin)
-ro = call("/api/auth/login", "POST",
-          {"username": "ro", "password": "ro-password-1"})[1]["access_token"]
-call("/api/projects/DOM/acl", "POST", {"username": "ro", "role": "readonly"}, token=admin)
-check("a readonly member can read candidates",
-      call("/api/domains/candidates?project=DOM", token=ro)[0] == 200)
-check("but cannot run detection",
-      call("/api/domains/detect?project=DOM", "POST",
-           {"domain": "corp.com"}, token=ro)[0] == 403)
-check("and cannot promote",
-      call("/api/domains/candidates/promote?project=DOM", "POST",
-           {"ids": [1]}, token=ro)[0] == 403)
-check("web addresses of an invisible project are not listed",
-      call("/api/web?project=WEB", token=ro)[1]["total"] == 0)
-
 print("\n== a service that answered means the host is alive ==")
 call("/api/projects", "POST", {"code": "ALIVE", "name": "Alive"}, token=admin)
 st, r = call("/api/bulk", "POST", {"project": "ALIVE", "targets": [
@@ -589,35 +419,6 @@ st, dead = call(f"/api/web/{seed2['id']}/replay", "POST",
 check("a failed connection is recorded rather than raising",
       st == 200 and (dead or {}).get("error"), f"{st} {str(dead)[:120]}")
 
-print("\n== a list, several, or one: detection takes them all at once ==")
-# The batch shape is the contract the UI reads. It returns one entry
-# per domain so a typo in the fourth of eight does not cost the other
-# seven, and a client that reads `.candidates` off the TOP level gets
-# undefined — which is exactly how a run that produced 200 candidates
-# rendered as "No candidates".
-st, b = call("/api/domains/detect?project=DOM", "POST",
-             {"domains": ["corp.com", "other.com"], "force": True},
-             token=admin)
-check("several domains run in one request", st == 200, f"status={st}")
-check("and come back one result per domain",
-      len(b.get("results", [])) == 2, str(list(b))[:120])
-check("the batch has no top-level candidates key to mislead a reader",
-      "candidates" not in b, str(list(b)))
-check("every result carries its own list",
-      all("candidates" in r for r in b["results"]), str(list(b["results"][0])))
-check("and names which domain it is for",
-      {r["domain"] for r in b["results"]} == {"corp.com", "other.com"},
-      str([r["domain"] for r in b["results"]]))
-
-st, b = call("/api/domains/detect?project=DOM", "POST",
-             {"domains": ["corp.com", "not a domain", "nope"]}, token=admin)
-check("one unusable entry does not cost the others",
-      st == 200 and b["domains_run"] >= 1 and b["domains_skipped"] == 2,
-      f'run={b.get("domains_run")} skipped={b.get("domains_skipped")}')
-check("and the bad ones say why, against themselves",
-      all(r["error"] for r in b["results"] if r["domain"] != "corp.com"),
-      str([(r["domain"], r["error"]) for r in b["results"]])[:200])
-
 print("\n== roots do not require targets ==")
 # A fresh engagement has scope and no targets, which is exactly when
 # somebody wants to enumerate. Reporting "no root domains" then is
@@ -643,18 +444,12 @@ st, roots = call("/api/domains/roots?project=FRESH", token=admin)
 check("an excluded domain is never offered",
       "excluded.example" not in {r["domain"] for r in roots}, str(roots)[:200])
 
-print("\n== auto_promote files what it finds, scope permitting ==")
-st, b = call("/api/domains/detect?project=DOM", "POST",
-             {"domains": ["auto.example"], "auto_promote": True,
-              "limit": 20}, token=admin)
-r = b["results"][0]
-check("the run reports what it added, by name not by count",
-      isinstance(r.get("promoted"), list), str(r)[:140])
-if r["candidates"]:
-    check("and every promoted name became a target",
-          all(call(f"/api/targets?project=DOM&q={n}", token=admin)[1]["total"] >= 1
-              for n in r["promoted"][:3]) if r["promoted"] else True,
-          str(r["promoted"])[:120])
+# The project used to be created by the generation section above,
+# which tested a feature that no longer exists. The agent-handoff
+# tests below still need it.
+call("/api/projects", "POST", {"code": "DOM", "name": "Domains"}, token=admin)
+call("/api/projects/DOM/acl", "POST", {"username": "ro", "role": "readonly"},
+     token=admin)
 
 print("\n== handing domains to an agent ==")
 # Refused rather than queued when nothing can run it: work accepted

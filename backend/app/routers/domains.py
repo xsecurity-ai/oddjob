@@ -20,10 +20,9 @@ from .. import domains as gen
 from ..db import get_session
 from ..events import broker
 from ..hosts import InvalidHost, validate_host
-from ..models import (DomainCandidate, DomainSearch, Project, ProjectScope, Target, User,
+from ..models import (DomainCandidate, Project, ProjectScope, Target, User,
                       WebAddress)
-from ..schemas import (DetectBatch, DetectRequest, DetectResult, DomainCandidateOut,
-                       DomainSearchOut, PromoteRequest)
+from ..schemas import DomainCandidateOut, PromoteRequest
 from ..scopegate import index_for
 from ..security import get_current_user, require_project
 from ..timeline import record
@@ -119,8 +118,8 @@ async def roots(project: str = Query(...),
                 session: AsyncSession = Depends(get_session)):
     """Registrable domains this engagement covers, commonest first.
 
-    Three sources, because any one alone leaves a real engagement with
-    an empty list:
+    Two sources, because either alone leaves a real engagement with an
+    empty list:
 
       targets   what the estate already touches, commonest first. The
                 best signal, and the only one that exists mid-engagement.
@@ -128,18 +127,23 @@ async def roots(project: str = Query(...),
                 matter MOST on day one, which is exactly when there are
                 no targets yet — a fresh project used to report "no root
                 domains" while its scope named a dozen.
-      searched  anything run before. A domain someone typed by hand is
-                part of this engagement's working set even if nothing
-                under it has resolved yet.
+
+    There was a third: domains the offline generator had already
+    guessed under. That generator is gone — enumeration is amass on a
+    drone now, and whether it has run is a question about tasks, not
+    about a table here. `searched` stays in the response and is always
+    false, so an older client does not break on its absence.
 
     `known_hosts` is the count from targets only, so a root that is in
     scope and otherwise untouched still reads as 0 and sorts last
     without being hidden.
     """
     hosts = await known_hosts(session, pr.id)
-    searched = {d.lower() for d in (await session.execute(
-        select(DomainSearch.domain)
-        .where(DomainSearch.project_id == pr.id))).scalars().all()}
+    # `searched` used to mean "the offline generator has already
+    # guessed under this". There is no generator now — enumeration is
+    # amass on a drone, and whether that has run is a question about
+    # tasks, not about this table.
+    searched: set[str] = set()
 
     counts = dict(gen.roots_in(hosts))
     origin = {d: "targets" for d in counts}
@@ -170,191 +174,6 @@ async def roots(project: str = Query(...),
     return [{"domain": d, "known_hosts": n, "searched": d in searched,
              "source": origin.get(d, "targets")}
             for d, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
-
-
-@router.post("/detect", response_model=DetectBatch)
-async def detect(body: DetectRequest, project: str = Query(...),
-                 pr: Project = Depends(require_project("user")),
-                 user: User = Depends(get_current_user),
-                 session: AsyncSession = Depends(get_session)):
-    """Run candidate generation across one or more domains.
-
-    Each domain is independent: an unusable one is reported against itself
-    and the rest still run, because a typo in the fourth of eight entries
-    should not cost you the other seven.
-    """
-    wanted = body.wanted()
-    if not wanted:
-        raise HTTPException(422, "give at least one domain")
-
-    results: list[DetectResult] = []
-    for d in wanted:
-        try:
-            results.append(await _detect_one(
-                session, pr, user, d, body.limit, body.force,
-                auto_promote=body.auto_promote, min_score=body.min_score))
-        except HTTPException as e:
-            results.append(DetectResult(domain=d, candidates=[], new_candidates=0,
-                                        runs=0, error=str(e.detail)))
-    await session.commit()
-    await broker.publish("domains", action="detect", project=pr.code)
-    return DetectBatch(
-        results=results,
-        new_candidates=sum(r.new_candidates for r in results),
-        domains_run=sum(1 for r in results if not r.error),
-        domains_skipped=sum(1 for r in results if r.error),
-        promoted=sum(len(r.promoted) for r in results),
-        promoted_refused=sum(len(r.promoted_refused) for r in results))
-
-
-async def _detect_one(session: AsyncSession, pr: Project, user: User,
-                      domain: str, limit: int, force: bool,
-                      *, auto_promote: bool = False,
-                      min_score: int = 0) -> DetectResult:
-    """Generate candidate hostnames under a domain.
-
-    **No lookups and no packets.** Candidates are extrapolated from what the
-    project already holds; each carries the reason it was suggested. They
-    are hypotheses until promoted.
-
-    A domain already searched is not re-run unless `force` is set, and even
-    then names proposed before are not proposed again — the point of the
-    memory is that the second run shows you what changed.
-    """
-    if gen.is_ip(domain):
-        # Subdomains of an address do not exist. Saying so is better than
-        # returning an empty list that looks like "nothing found".
-        raise HTTPException(
-            422, f"{domain} is an IP address — there are no subdomains to "
-                 f"enumerate under one. Give a domain name.")
-    try:
-        validate_host(domain)
-    except InvalidHost as e:
-        raise HTTPException(422, f"{domain!r} is not a usable domain: {e}")
-    if "." not in domain:
-        raise HTTPException(422, f"{domain!r} is a single label, not a domain")
-
-    search = (await session.execute(
-        select(DomainSearch).where(DomainSearch.project_id == pr.id,
-                                   DomainSearch.domain == domain))).scalar_one_or_none()
-    if search is not None and not force:
-        prior = (await session.execute(
-            select(DomainCandidate)
-            .where(DomainCandidate.project_id == pr.id,
-                   DomainCandidate.root_domain == domain)
-            .order_by(DomainCandidate.score.desc(), DomainCandidate.name))).scalars().all()
-        return DetectResult(
-            domain=domain,
-            candidates=[DomainCandidateOut.model_validate(c) for c in prior],
-            new_candidates=0, runs=search.runs,
-            previously_suggested=len(prior),
-            note=(f"{domain} was last searched "
-                  f"{search.last_run_at:%Y-%m-%d %H:%M} UTC and produced "
-                  f"{search.candidates_found} candidate(s); showing those. "
-                  f"Re-run with force to look again."
-                  if search.last_run_at else
-                  f"{domain} has been searched before; showing what it found."))
-
-    hosts = await known_hosts(session, pr.id)
-    existing = {c.name for c in (await session.execute(
-        select(DomainCandidate).where(DomainCandidate.project_id == pr.id))).scalars()}
-
-    produced = gen.generate(domain, hosts, limit=limit, already=existing)
-
-    now = datetime.now(timezone.utc)
-
-    # Deduplicated, and inserted so a collision is skipped rather than
-    # fatal. Two things made this a 500:
-    #
-    #   - the generator can propose the same name twice in one batch
-    #     (two rules arriving at it from different directions), and the
-    #     pair violates the unique index inside a single INSERT;
-    #   - `existing` is read once at the top, so two detect runs
-    #     overlapping — a double-click is enough — both see the name as
-    #     absent and both insert it.
-    #
-    # Either way the whole run died after generating a few thousand
-    # candidates, which is a lot of work to throw away over a name we
-    # already had.
-    seen: set[str] = set()
-    rows: list[dict] = []
-    for c in produced:
-        if c.name in seen:
-            continue
-        seen.add(c.name)
-        rows.append({"project_id": pr.id, "name": c.name,
-                     "root_domain": c.root_domain, "source": c.source,
-                     "score": c.score, "reason": c.reason, "state": "new",
-                     "times_seen": 1, "created_at": now, "updated_at": now})
-
-    created = 0
-    if rows:
-        res = await session.execute(
-            _conflict_insert(session, DomainCandidate).values(rows)
-            .on_conflict_do_nothing(index_elements=["project_id", "name"]))
-        # What was actually written, not what was offered: the caller is
-        # told how many new names there are, and a skipped duplicate is
-        # not a new name.
-        created = res.rowcount if res.rowcount is not None and res.rowcount >= 0 \
-            else len(rows)
-
-    # A name an earlier run already proposed is bumped rather than re-added:
-    # agreement across runs is itself a signal.
-    if existing:
-        again = [c for c in gen.generate(domain, hosts, limit=limit, already=set())
-                 if c.name in existing]
-        for c in again:
-            row = (await session.execute(
-                select(DomainCandidate)
-                .where(DomainCandidate.project_id == pr.id,
-                       DomainCandidate.name == c.name))).scalar_one_or_none()
-            if row is not None and row.state == "new":
-                row.times_seen += 1
-
-    if search is None:
-        # Claimed the same way candidates are, and for the same reason:
-        # two overlapping runs both saw no row above and both tried to
-        # create one, which violates uq_domsearch_project_domain. The
-        # insert is skipped on conflict and the row is then read back,
-        # so whichever request lost the race still ends up with the
-        # real row rather than an exception.
-        await session.execute(
-            _conflict_insert(session, DomainSearch)
-            .values(project_id=pr.id, domain=domain, requested_by=user.id,
-                    created_at=now, updated_at=now)
-            .on_conflict_do_nothing(index_elements=["project_id", "domain"]))
-        search = (await session.execute(
-            select(DomainSearch).where(
-                DomainSearch.project_id == pr.id,
-                DomainSearch.domain == domain))).scalar_one()
-    # Column defaults are applied on INSERT, so a freshly constructed row
-    # still has None here until it is flushed.
-    search.runs = (search.runs or 0) + 1
-    search.last_run_at = now
-    search.candidates_found = (search.candidates_found or 0) + created
-    search.known_at_last_run = len(hosts)
-    await session.flush()
-
-    rows = (await session.execute(
-        select(DomainCandidate)
-        .where(DomainCandidate.project_id == pr.id,
-               DomainCandidate.root_domain == domain,
-               DomainCandidate.state.in_(("new", "accepted")))
-        .order_by(DomainCandidate.score.desc(),
-                  DomainCandidate.name))).scalars().all()
-    known_under = sum(1 for h in hosts
-                      if gen.subdomain_of(h, domain) is not None)
-    return DetectResult(
-        domain=domain,
-        candidates=[DomainCandidateOut.model_validate(c) for c in rows],
-        new_candidates=created,
-        already_known=known_under,
-        previously_suggested=len(rows) - created,
-        runs=search.runs,
-        note=(None if created else
-              f"Nothing new under {domain}. Every name this project's "
-              f"patterns suggest has already been proposed or already exists."),
-    )
 
 
 class EnumerateRequest(BaseModel):
@@ -391,12 +210,12 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
                             session: AsyncSession = Depends(get_session)):
     """Hand a list of domains to Drone, and file what comes back.
 
-    The difference from `/detect` is what produces the names. Detection
-    extrapolates from patterns the estate already shows and produces
-    hypotheses for a person to triage. This asks an agent to actually
-    enumerate the zone, so the names come back resolved — and they are
-    filed as targets automatically when the results arrive, because a
-    name a tool found is a finding and not a suggestion.
+    This replaced an offline generator that extrapolated from patterns
+    the estate already showed and handed back hypotheses for a person
+    to triage. Here an agent enumerates the zone for real, so the names
+    come back resolved — and they are filed as targets automatically
+    when the results arrive, because a name a tool found is a finding
+    and not a suggestion.
 
     One task per domain: amass enumerates a single zone at a time. They
     are queued unassigned so the project's routing policy spreads them,
@@ -472,27 +291,19 @@ async def candidates(project: str = Query(...),
     return [DomainCandidateOut.model_validate(c) for c in rows]
 
 
-@router.get("/searches", response_model=list[DomainSearchOut])
-async def searches(project: str = Query(...),
-                   pr: Project = Depends(require_project("readonly")),
-                   session: AsyncSession = Depends(get_session)):
-    """What has already been searched, so nothing is ground through twice."""
-    rows = (await session.execute(
-        select(DomainSearch).where(DomainSearch.project_id == pr.id)
-        .order_by(DomainSearch.domain))).scalars().all()
-    return [DomainSearchOut.model_validate(r) for r in rows]
-
-
 @router.post("/candidates/promote")
 async def promote(body: PromoteRequest, project: str = Query(...),
                   pr: Project = Depends(require_project("user")),
                   user: User = Depends(get_current_user),
                   session: AsyncSession = Depends(get_session)):
-    """Turn accepted candidates into targets.
+    """Turn candidates into targets.
 
-    Deliberate, and separate from generation: a guessed name is a
-    hypothesis, an inventory row is a claim. The target is created with
-    `alive=None` — not probed — because nothing here has checked.
+    A candidate is a name something saw alongside a target — currently
+    the reverse-IP flow, which records a decision for every name an
+    address answers to. Seeing a name is not the same as claiming it is
+    part of the estate, so promoting it is a separate, deliberate step.
+    The target is created with `alive=None` — not probed — because
+    nothing here has checked.
     """
     rows = (await session.execute(
         select(DomainCandidate).where(DomainCandidate.project_id == pr.id,
@@ -508,19 +319,18 @@ async def _promote_rows(session: AsyncSession, pr: Project, user: User,
                         rows) -> tuple[list[str], list[str], dict[str, str]]:
     """Turn candidate rows into targets. -> (created, already, refused).
 
-    Shared by the explicit promote endpoint and by `auto_promote` on
-    detection, so the automatic path cannot drift from the one a person
-    drives — in particular it cannot quietly stop checking scope.
+    Factored out of the endpoint so a second caller cannot drift from
+    the one a person drives — in particular, cannot quietly stop
+    checking scope.
 
     Does not commit; the caller owns the transaction.
     """
     created, skipped = [], []
     refused: dict[str, str] = {}
-    # A candidate is a guess, so this is the one creation path where the
-    # host was never observed anywhere. All the more reason to check it:
-    # the generator extrapolates from names the estate uses, and the
-    # neighbouring domain it extrapolates onto is frequently somebody
-    # else's.
+    # Nothing has been probed at these names: an address answered to
+    # them, which is all. On shared hosting most of what answers to an
+    # address belongs to somebody else, so the scope check here is the
+    # thing standing between a neighbour's hostname and the inventory.
     idx = await index_for(session, pr.id)
     now = datetime.now(timezone.utc)
     for c in rows:

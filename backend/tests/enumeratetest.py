@@ -276,5 +276,128 @@ st, tgts = call("/api/targets?project=ENUM&page_size=200&q=smuggled", token=admi
 check("and does not appear in the inventory",
       (tgts or {}).get("total") == 0, str(tgts)[:120])
 
+# =========================================== promoting a recorded decision
+# These two endpoints live in the domains router but their only producer
+# is up here: the reverse-IP flow is what writes candidate rows now that
+# the offline name generator is gone. They were briefly uncovered when it
+# went, which is the whole reason for this section.
+print("\n== a name refused earlier can still be promoted later ==")
+
+
+def cand(name):
+    st, rows = call("/api/domains/candidates?project=ENUM", token=admin)
+    return next((c for c in (rows or []) if c["name"] == name), None)
+
+
+# `deny` records the judgement without creating anything, so a rejected
+# candidate is the one case where a row exists and a target does not.
+# That is exactly the state promote has to handle.
+row = cand("deny-me.acme.example")
+check("the refused name has a candidate row to promote", row is not None,
+      str(row)[:120])
+st, res = call("/api/domains/candidates/promote?project=ENUM", "POST",
+               {"ids": [row["id"]]}, token=admin)
+check("promoting it creates the target",
+      (res or {}).get("created") == ["deny-me.acme.example"],
+      f"status={st} {str(res)[:160]}")
+st, tgts = call("/api/targets?project=ENUM&page_size=200&q=deny-me", token=admin)
+items = (tgts or {}).get("items", [])
+check("and it is in the inventory", len(items) == 1, str(tgts)[:140])
+check("unprobed, because promoting is not a probe",
+      items[0]["alive"] is None if items else False,
+      str(items[0]["alive"] if items else None))
+check("the earlier refusal is overwritten, not left contradicting it",
+      (cand("deny-me.acme.example") or {}).get("state") == "accepted",
+      str(cand("deny-me.acme.example"))[:120])
+
+st, tl = call("/api/targets/ENUM/deny-me.acme.example/timeline", token=admin)
+events = tl if isinstance(tl, list) else (tl or {}).get("items", [])
+check("and the timeline says where the name came from",
+      "reverse_ip" in json.dumps(events), json.dumps(events)[:160])
+
+print("-- a name that is already a target is reported, not duplicated --")
+row = cand("add-me.acme.example")        # `add` made this one a target
+st, res = call("/api/domains/candidates/promote?project=ENUM", "POST",
+               {"ids": [row["id"]]}, token=admin)
+check("it comes back as already existing",
+      (res or {}).get("already_existed") == ["add-me.acme.example"],
+      f"status={st} {str(res)[:160]}")
+check("and nothing was created", (res or {}).get("created") == [], str(res)[:120])
+check("the row says so rather than claiming a fresh decision",
+      (cand("add-me.acme.example") or {}).get("state") == "exists",
+      str(cand("add-me.acme.example"))[:120])
+st, tgts = call("/api/targets?project=ENUM&page_size=200&q=add-me", token=admin)
+check("and the target is not forked", (tgts or {}).get("total") == 1, str(tgts)[:120])
+
+print("-- reject marks the row and leaves the inventory alone --")
+st, res = call("/api/domains/candidates/reject?project=ENUM", "POST",
+               {"ids": [row["id"]]}, token=admin)
+check("reject names what it rejected",
+      (res or {}).get("rejected") == ["add-me.acme.example"],
+      f"status={st} {str(res)[:140]}")
+check("and the row carries it",
+      (cand("add-me.acme.example") or {}).get("state") == "rejected",
+      str(cand("add-me.acme.example"))[:120])
+# Rejecting a candidate is a judgement about the name, not an instruction
+# to delete a target somebody is already testing.
+st, tgts = call("/api/targets?project=ENUM&page_size=200&q=add-me", token=admin)
+check("the existing target is untouched", (tgts or {}).get("total") == 1,
+      str(tgts)[:120])
+
+print("-- scope decides, and a refusal is not recorded as a human one --")
+# Up to here ENUM has had no scope list at all, so everything was allowed.
+# Narrowing it means the next promote has something to refuse. The range
+# goes on too, or the address these lookups run against stops being
+# testable and the fixture breaks before it reaches the point.
+call("/api/projects/ENUM/scope", "POST",
+     {"lines": ["*.acme.example", "198.51.100.0/24"]}, token=admin)
+call("/api/targets?project=ENUM", "POST", {"host": "198.51.100.50"}, token=admin)
+finish("reverse_ip", {"targets": ["198.51.100.50"]},
+       [{"ip": "198.51.100.50",
+         "domains": ["tenant.acme.example", "neighbour.someone-else.example"],
+         "sources": ["ptr"], "partial": False}])
+st, res = call("/api/enumerate/resolve?project=ENUM", "POST",
+               {"host": "198.51.100.50", "field": "host",
+                "value": "tenant.acme.example",
+                "also_resolved": ["tenant.acme.example",
+                                  "neighbour.someone-else.example"],
+                "deny": ["neighbour.someone-else.example"]}, token=admin)
+check("a neighbour on the same address can be refused",
+      (res or {}).get("denied") == ["neighbour.someone-else.example"],
+      f"status={st} {str(res)[:160]}")
+
+row = cand("neighbour.someone-else.example")
+st, res = call("/api/domains/candidates/promote?project=ENUM", "POST",
+               {"ids": [row["id"]]}, token=admin)
+check("promoting it is refused on scope",
+      list((res or {}).get("out_of_scope", {})) ==
+      ["neighbour.someone-else.example"], f"status={st} {str(res)[:180]}")
+check("with a reason, not a bare no",
+      "scope" in (res or {}).get("out_of_scope", {})
+      .get("neighbour.someone-else.example", ""),
+      str(res)[:200])
+check("and no target appears", (res or {}).get("created") == [], str(res)[:120])
+st, tgts = call("/api/targets?project=ENUM&page_size=200&q=someone-else", token=admin)
+check("not even a refused one", (tgts or {}).get("total") == 0, str(tgts)[:120])
+# The scope list refused this, not a person. Writing "rejected" on the row
+# would put a judgement nobody made into the audit trail — and would also
+# stop it being offered again once scope changes.
+check("the row keeps the decision a person actually made",
+      (cand("neighbour.someone-else.example") or {}).get("state") == "rejected",
+      str(cand("neighbour.someone-else.example"))[:140])
+
+print("-- candidates are project-scoped --")
+call("/api/projects", "POST", {"code": "ENUM2", "name": "Elsewhere"}, token=admin)
+keep = cand("tenant.acme.example") or cand("deny-me.acme.example")
+st, res = call("/api/domains/candidates/promote?project=ENUM2", "POST",
+               {"ids": [keep["id"]]}, token=admin)
+# Ids are global, so the filter on project_id is the only thing stopping
+# one project promoting another's candidate by guessing a number.
+check("another project's id promotes nothing",
+      (res or {}).get("created") == [] and
+      (res or {}).get("already_existed") == [], f"status={st} {str(res)[:160]}")
+st, tgts = call("/api/targets?project=ENUM2&page_size=200", token=admin)
+check("and creates no target there", (tgts or {}).get("total") == 0, str(tgts)[:120])
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
