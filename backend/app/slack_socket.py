@@ -39,6 +39,10 @@ ACK_DEADLINE = 3.0
 #: closes the socket to say so, which is normal, not an error.
 BACKOFF_START = 2.0
 BACKOFF_MAX = 120.0
+#: Messages answered at once. A model call takes seconds and holds a
+#: database session from the same pool the HTTP API uses, so this is a
+#: ceiling on what a busy channel can take away from everything else.
+MAX_CONCURRENT = 4
 
 
 async def open_url(app_token: str) -> str:
@@ -71,6 +75,11 @@ class Worker:
         #: unresolved identity means answering nothing at all — the
         #: alternative is a bot that replies to itself.
         self.bot_user_id: str | None = None
+        #: Messages being worked on. Held because asyncio keeps only a
+        #: weak reference to a task, and bounded because each one can
+        #: hold a database session for the length of a model call.
+        self._inflight: set[asyncio.Task] = set()
+        self._slots = asyncio.Semaphore(MAX_CONCURRENT)
 
     def start(self) -> None:
         if self.task is None or self.task.done():
@@ -165,30 +174,49 @@ class Worker:
         event = ((msg.get("payload") or {}).get("event")) or {}
         if event.get("type") not in ("app_mention", "message"):
             return
+        # Filtered HERE, before a task exists and before anything opens
+        # a database session. The bot sits in engagement channels where
+        # most traffic is people talking to each other; spending a
+        # connection from the pool the HTTP API shares on every one of
+        # those — to then discover it was not for us — is how a busy
+        # channel becomes an outage somewhere else.
+        from .slackchat import ignore_reason
+        if ignore_reason(event, self.bot_user_id):
+            return
+
         # An @-mention in a channel arrives TWICE, once as app_mention
         # and once as message, with the same ts. `slackchat.budget`
         # de-duplicates on (channel, ts), so both are forwarded and
         # exactly one is answered.
-        asyncio.create_task(self._dispatch(event, bot_token))
+        #
+        # The reference is kept: asyncio holds only a weak one, and a
+        # dispatch collected mid-await is a message that silently
+        # vanishes. Discarded on completion so the set does not grow.
+        task = asyncio.create_task(self._dispatch(event, bot_token))
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
 
     async def _dispatch(self, event: dict, bot_token: str) -> None:
         from .routers.settings import load_all
         from .slackchat import on_event
-        try:
-            # Read per message rather than per connection: a setting
-            # changed in the UI has to take effect without waiting for
-            # Slack to rotate the socket an hour from now, and the
-            # settings that matter here are the ones that say what the
-            # bot may do.
-            async with SessionLocal() as s:
-                cfg = await load_all(s)
-            if not bool(cfg.get("slack.answer_questions", False)):
-                return
-            await on_event(event, bot_token, self.bot_user_id, cfg)
-        except asyncio.CancelledError:
-            raise
-        except Exception:                            # noqa: BLE001
-            log.exception("slack event dispatch failed")
+        # Bounded. Without it a flood in one channel spawns unbounded
+        # concurrent model calls, each holding a database session.
+        async with self._slots:
+            try:
+                # Read per message rather than per connection: a setting
+                # changed in the UI has to take effect without waiting for
+                # Slack to rotate the socket an hour from now, and the
+                # settings that matter here are the ones that say what the
+                # bot may do.
+                async with SessionLocal() as s:
+                    cfg = await load_all(s)
+                if not bool(cfg.get("slack.answer_questions", False)):
+                    return
+                await on_event(event, bot_token, self.bot_user_id, cfg)
+            except asyncio.CancelledError:
+                raise
+            except Exception:                        # noqa: BLE001
+                log.exception("slack event dispatch failed")
 
 
 worker = Worker()

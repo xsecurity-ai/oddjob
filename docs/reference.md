@@ -900,7 +900,7 @@ no form field, no endpoint, no migration.
 | Site | name, base URL (emailed links are unusable if this is wrong) |
 | Identity | Google SSO on/off, **client ID and secret**, redirect URI, allowed email domains, self-registration |
 | Email (SMTP) | host, port, security, credentials, from address |
-| Slack | bot token, channel prefix, **new channels private by default**, create-a-channel-per-project |
+| Slack | bot token, channel prefix, **new channels private by default**, create-a-channel-per-project, and the inbound half: app-level token, answer-when-mentioned, thread follow-ups, **which engagements the bot may change data on** |
 
 ### Test before save
 
@@ -1019,6 +1019,77 @@ Two things that bite:
 
 The timeout is ten minutes for a local server, against two for a hosted
 one: a cold model has to load before it emits a first token.
+
+### Answering in Slack
+
+The agent will answer questions put to it in an engagement's Slack channel.
+It is the only **inbound** path into Oddjob, so the rules are worth reading
+before switching it on (Site Config → Slack → *Answer questions when
+mentioned*).
+
+**Socket Mode, not the Events API.** Oddjob opens a websocket *towards*
+Slack with an app-level token (`xapp-…`, scope `connections:write`). Slack
+opens nothing towards Oddjob, so this works with the app bound to
+`127.0.0.1`: no public hostname, no certificate, no request-signature or
+replay window to get subtly wrong, and no new internet-facing endpoint on a
+host holding client engagement data.
+
+**The channel decides the engagement, and nothing else can.** The project
+is resolved from the channel the message arrived in. No project name, code
+or id in a message can select, add or widen it — a message in one
+engagement's channel asking about another gets told so and sees none of its
+rows, because the tools are built bounded to the one project and none of
+them takes a parameter that names one. A channel linked to no engagement,
+or to two, is answered with a refusal rather than a guess.
+
+**Being in the channel is not authorisation.** The sender's Slack id must
+resolve to an Oddjob user who confirmed that handle for *this workspace*
+(the prompt on a project page, `/slack/me`). Anyone else gets one message
+telling them to link their account and nothing runs on their behalf. A
+linked sender with no role on that engagement is told that, and still sees
+no data. Their role on **that** project decides the rest — being an admin
+on twenty others counts for nothing here.
+
+**It only answers when addressed.** An explicit `@`-mention, always. Inside
+a thread it was mentioned into, a follow-up needs no second mention — but
+not when the reply `@`-mentions somebody else, and not anywhere outside
+such a thread. There is no keyword matching: missing a message costs one
+more mention, answering a conversation it was not part of costs a channel.
+Turn the thread behaviour off with *Follow up in threads it is already in*.
+
+**Always in a thread**, including for a top-level mention, so a channel
+never fills with bot messages. A thread reply is answered from the whole
+thread, fetched and capped at 40 messages. A message containing three
+questions gets three answers: they are enumerated in the prompt, the model
+is asked to label each, and anything unlabelled is asked for again.
+
+**What it may change.** Reading is the default and usually all of it.
+
+| | gated on |
+|---|---|
+| adding a target, filing a finding, adding a note, queueing Drone work | *Let the agent change data* **and** the engagement named in *Engagements the bot may change data on, from Slack* |
+| adding someone to the engagement (at `user`) | *Let the agent change data*, and the sender holding at least `user` there |
+| changing anyone's role | the above **and** the sender holding an **admin grant on that engagement** |
+
+Data writes are per-engagement and empty by default because adding a host
+is a scope decision with packets at the end of it, and a finding is a
+record a client reads. The admin check for a role change is deliberately
+narrower than the rest of the app: a site administrator who was never
+granted admin on that project cannot re-role anyone there from a chat
+message. Every membership change is audited (`project.member.slack`, with
+the channel and the Slack id) and announced in the channel.
+
+**Message text is data, never instructions.** The thread is given to the
+model inside a nonce-delimited block labelled as a transcript — never as
+assistant turns, which a model trusts more — and anything in it imitating
+the delimiter is defanged. Replies are stripped of `@channel`, `@here` and
+user-group forms, so neither an injected instruction nor a scanner banner
+can turn an answer into a workspace-wide ping.
+
+**Loop safety.** It never answers itself, another bot, an app post, a
+message edit or a join notice; each `(channel, timestamp)` is handled once
+however many times Slack redelivers it; each thread has a reply budget and
+each channel a rate limit.
 
 ### Writing remediation automatically
 
@@ -1196,8 +1267,17 @@ uv run python scantest.py      # nmap -sV -O -A ingestion and the timeline
 uv run python importtest.py    # every other importer, incl. the C2 frameworks
 uv run python webtest.py       # web addresses, domain discovery and its memory
 uv run python reporttest.py    # the three report kinds, PDF/DOCX, the agentic guard
+uv run python slacktest.py     # outbound notifications and the inbound socket, against a fake Slack
+uv run python slackchattest.py # who may drive the Slack agent, and what it is confined to
 uv run python migrationtest.py # the migrations build exactly what the models say
 ```
+
+`slackchattest.py` is mostly in-process: `app/slackchat.py` is split so the
+decisions are plain functions and the authorisation chain takes a session,
+so the adversarial cases — a genuine admin on project B asking in project
+A's channel, a non-admin promoting themselves — are asserted on the
+*absence* of the data and the ACL that did not move, rather than on a call
+returning.
 
 Client-side logic — table-state pruning, dropdown ordering, the theme
 definitions — has its own runner, no browser or DOM needed:

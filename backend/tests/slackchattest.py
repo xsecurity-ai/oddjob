@@ -154,6 +154,11 @@ check("thread follow-ups can be switched off entirely",
       not addressed("and the criticals?", in_thread=True, bot_in_thread=True,
                     follow=False).answer)
 
+check("another app posting in a thread does not make it ours",
+      not sc.bot_spoke_in([{"user": "U2", "text": "q"},
+                           {"user": "U9", "bot_id": "B7", "text": "build ok"}],
+                          BOT),
+      "a CI notifier in the channel must not recruit us into the thread")
 check("a thread we posted in counts as ours",
       sc.bot_spoke_in([{"user": "U2", "text": "q"},
                        {"user": BOT, "text": "a"}], BOT))
@@ -230,6 +235,10 @@ check("and the follow-up names only what was missed",
 check("so every question ends up answered",
       sc.unanswered(3, out) == [], out[:200])
 
+check("the follow-up turn frames the quoted text as data too",
+      "UNTRUSTED SLACK TRANSCRIPT" in m.turns[1],
+      "otherwise the retry serves the person's own words as instructions")
+
 m2 = StubModel(answer_first_only=False)
 out2 = run(sc.answer_asks(m2, asks, prompt))
 check("a model that answers everything first time is not asked twice",
@@ -269,11 +278,32 @@ check("an injected marker inside the ASK list is defanged too",
       p2.count(f"--- END UNTRUSTED SLACK TRANSCRIPT {NONCE} ---") == 1,
       f"{p2.count('END UNTRUSTED')} marker(s)")
 
+def pings(text):
+    """Is there a working broadcast form left in what we would post?"""
+    out = sc.sanitise_outgoing(text)
+    return ("<!here>" in out or "<!channel>" in out or "<!everyone>" in out
+            or "<!subteam^" in out)
+
+
 check("the bot cannot be made to ping the whole channel",
-      "<!channel>" not in sc.sanitise_outgoing("see <!channel> now")
-      and "<!here>" not in sc.sanitise_outgoing("see <!here> now"))
-check("nor a user group",
-      "subteam" not in sc.sanitise_outgoing("see <!subteam^S1|@all> now"))
+      not pings("see <!channel> now") and not pings("see <!here> now"))
+check("nor a user group", not pings("see <!subteam^S1|@all> now"))
+# Deleting a match splices what surrounds it into a fresh valid one, so
+# a single deleting pass is bypassable by nesting. These are the exact
+# strings that defeat it.
+check("nesting does not reassemble a broadcast out of the leftovers",
+      not pings("<!<!here>here>"), sc.sanitise_outgoing("<!<!here>here>"))
+check("nor a split one", not pings("<!chan<!here>nel>"),
+      sc.sanitise_outgoing("<!chan<!here>nel>"))
+check("nor a nested user group",
+      not pings("<!<!subteam^S1>subteam^S2|@x>"),
+      sc.sanitise_outgoing("<!<!subteam^S1>subteam^S2|@x>"))
+check("and an unrecognised special form is defanged rather than passed on",
+      "<!" not in sc.sanitise_outgoing("<!date^123^{date}|x>"),
+      sc.sanitise_outgoing("<!date^123^{date}|x>"))
+check("but an ordinary link still works",
+      sc.sanitise_outgoing("see <https://oddjob.acme.example/x|the report>")
+      == "see <https://oddjob.acme.example/x|the report>")
 check("nor notify by raw mention",
       sc.sanitise_outgoing("ask <@U9> about it") == "ask @U9 about it")
 check("plain-text broadcast words are broken too",
@@ -329,6 +359,39 @@ for code, host in (("AAA", "web01.acme.example"), ("BBB", "db01.corp.com")):
     call(f"/api/services?project={code}", "POST",
          {"host": host, "port": 443, "protocol": "tcp", "state": "open",
           "name": "https", "product": "nginx", "version": "1.1"}, token=ADMIN)
+    call(f"/api/credentials?project={code}", "POST",
+         {"host": host, "username": f"{code.lower()}-svc", "kind": "password",
+          "secret": "not-a-real-secret", "service": "https", "port": 443},
+         token=ADMIN)
+
+
+async def _web_rows():
+    """A web address per project, with `webserver` set.
+
+    Written directly: the HTTP create takes a target id and has no
+    `webserver` field, and `webserver` is the column that two of the
+    bugs in `agent/tools.py` turned on. A branch with nothing in the
+    table never runs, which is how they stayed hidden.
+    """
+    from sqlalchemy import select
+
+    from app.models import Target, WebAddress
+    from app.weburl import exchange_key, url_key
+    async with SessionLocal() as s:
+        for code, host in (("AAA", "web01.acme.example"),
+                           ("BBB", "db01.corp.com")):
+            t = (await s.execute(select(Target).where(
+                Target.host == host))).scalar_one()
+            url = f"https://{host}/"
+            s.add(WebAddress(target_id=t.id, url=url, url_hash=url_key(url),
+                             exchange_hash=exchange_key("GET", url, None, None),
+                             scheme="https", port=443, path="/", method="GET",
+                             status_code=200, title=f"{code} portal",
+                             webserver="nginx/1.1", sources="fixture"))
+        await s.commit()
+
+
+run(_web_rows())
 
 for u in ("alice", "mallory", "stranger", "newbie"):
     call("/api/users", "POST",
@@ -414,6 +477,69 @@ check("an unlinked sender gets no project and no tools at all",
 d = run(authz_for("USLACKNEW"))
 check("a slack identity that was declined is not an identity",
       not d.ok and d.refusal == sc.UNLINKED)
+
+
+async def _collide():
+    """Two oddjob accounts claiming one slack id — reachable, because
+    /slack/me resolves the handle a person TYPES and the table is unique
+    on (user_id, workspace_key), not on the slack id."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from app.models import User, UserSlackIdentity
+    async with SessionLocal() as s:
+        uu = (await s.execute(select(User).where(
+            User.username == "stranger"))).scalar_one()
+        row = UserSlackIdentity(user_id=uu.id, workspace_key=WK,
+                                handle="alice", slack_user_id="USLACKALICE",
+                                confirmed_at=datetime.now(UTC))
+        s.add(row)
+        await s.commit()
+        rid = row.id
+    r = await authz_for("USLACKALICE")
+    async with SessionLocal() as s:
+        await s.delete(await s.get(UserSlackIdentity, rid))
+        await s.commit()
+    return r
+
+
+coll = run(_collide())
+async def _member_only():
+    """A ProjectSlackMember row and no workspace identity. It must NOT
+    resolve: that table has no workspace column, and a slack id means
+    one person in one workspace and somebody else in another."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from app.models import Project, ProjectSlackMember, User
+    async with SessionLocal() as s:
+        uu = (await s.execute(select(User).where(
+            User.username == "stranger"))).scalar_one()
+        pp = (await s.execute(select(Project).where(
+            Project.code == "AAA"))).scalar_one()
+        row = ProjectSlackMember(project_id=pp.id, user_id=uu.id,
+                                 handle="stranger",
+                                 slack_user_id="USLACKPROJONLY",
+                                 confirmed_at=datetime.now(UTC))
+        s.add(row)
+        await s.commit()
+    return await authz_for("USLACKPROJONLY")
+
+
+mo = run(_member_only())
+check("a per-project slack record is not an identity on its own",
+      not mo.ok and mo.refusal == sc.UNLINKED,
+      "that table is not keyed by workspace, so an id from another "
+      "workspace would resolve to this person")
+
+check("a slack id claimed by two accounts acts as neither",
+      not coll.ok and coll.refusal == sc.UNLINKED,
+      "picking either would mean acting as somebody on the strength of a "
+      "name they typed")
+check("and alice works again once the impostor record is gone",
+      run(authz_for("USLACKALICE")).ok)
 
 
 async def _disable():
@@ -528,6 +654,31 @@ check("nor project B's code as a reachable project",
 check("project A's own data IS reachable, so the sweep proves something",
       "web01.acme.example" in blob)
 check("and A's own finding is", "AAA only finding" in blob)
+check("and its web row, which is a branch two bugs were hiding in",
+      "AAA portal" in blob, blob[:300])
+
+
+async def one_host():
+    from app.agent.tools import run as run_tool
+    async with SessionLocal() as s:
+        az = await sc.authorise(s, CFG, workspace_key=WK, channel_id="CAAA",
+                                channel_name="eng-aaa",
+                                slack_user_id="USLACKMAL")
+        t = {x.name: x for x in sc.tools_for(s, az)}
+        return (json.loads(await run_tool(t["get_host"],
+                                          {"host": "web01.acme.example"})),
+                json.loads(await run_tool(t["find_by_technology"],
+                                          {"technology": "nginx"})))
+
+
+gh, fbt = run(one_host())
+check("get_host returns the host rather than an error",
+      "error" not in gh and gh.get("host") == "web01.acme.example", str(gh)[:200])
+check("including how many credentials are held for it",
+      gh.get("credentials_held") == 1, str(gh.get("credentials_held")))
+check("find_by_technology matches on the web server column",
+      [h["host"] for h in fbt.get("hosts", [])] == ["web01.acme.example"],
+      str(fbt)[:300])
 
 # Now ask for B by name, which is what the sentence "check FALCON too"
 # turns into. It must come back as an absence, not as data.
@@ -559,6 +710,83 @@ check("and so is exploit matching against it",
 check("list_projects offers this engagement and no other",
       [x["code"] for x in named["projects"]["projects"]] == ["AAA"],
       str(named["projects"]))
+
+
+# `tools_for` passes the bound TWICE — `project=pr` and
+# `scope_ids=[pr.id]` — and the claim in its docstring is that either
+# alone would hold. That claim is worth testing, because the sweep above
+# cannot distinguish them: with `project` set, a tool that ignores
+# `scope_ids` entirely still filters correctly, which is exactly how two
+# unscoped tools sat in this file unnoticed. So the whole sweep is run
+# again with the WEAKER bound only.
+async def sweep_scope_only(probes):
+    from app.agent.tools import build
+    from app.agent.tools import run as run_tool
+    async with SessionLocal() as s:
+        az = await sc.authorise(s, CFG, workspace_key=WK, channel_id="CAAA",
+                                channel_name="eng-aaa",
+                                slack_user_id="USLACKMAL")
+        tools = build(s, None, az.user, False, scope_ids=[az.project.id],
+                      role=az.role)
+        blob = []
+        for t in tools:
+            if t.writes:
+                continue
+            for args in probes:
+                try:
+                    blob.append(await run_tool(t, args))
+                except Exception as e:                   # noqa: BLE001
+                    blob.append(f"{type(e).__name__}: {e}")
+        return "\n".join(blob)
+
+
+weak = run(sweep_scope_only(PROBES))
+check("scope_ids ALONE confines every read tool, with no project passed",
+      "db01.corp.com" not in weak and "BBB only finding" not in weak,
+      weak[max(0, weak.find("db01.corp.com") - 200):][:400])
+check("and that sweep really did reach the data",
+      "web01.acme.example" in weak, weak[:300])
+
+# A tool that throws is not a confined tool, it is an untested one —
+# `find_by_technology` referenced a column that does not exist and
+# every call to it failed, with coverage that only checked it was
+# registered. Nothing exposed over Slack gets to be in that state.
+_ae = [b for b in (blob, weak) if "AttributeError" in b]
+check("no read tool raises on this engagement's real data", not _ae,
+      next((ln for b in _ae for ln in b.splitlines()
+            if "AttributeError" in ln), "")[:400])
+
+
+print("\n== the pattern, not just the two instances ==")
+# The shape that caused it: `tsel = select(Target)` guarded by
+# `if project:`, which silently drops the predicate in the
+# all-engagements mode. A source check, because the next one of these
+# will be written by someone who never read this suite.
+import re as _re
+
+_raw = (_pathlib.Path(__file__).resolve().parents[1]
+        / "app" / "agent" / "tools.py").read_text()
+# Comments stripped first: this file explains the bug it fixed, and a
+# scanner that reads prose finds the thing being warned about.
+TOOLS_SRC = "\n".join(_re.sub(r"\s+#.*$", "", ln)
+                      for ln in _raw.splitlines()
+                      if not ln.lstrip().startswith("#"))
+
+SCOPED_MODELS = ("Target", "Service", "Vuln", "WebAddress", "Credential")
+bare = []
+for mo in _re.finditer(r"select_?\((" + "|".join(SCOPED_MODELS) + r")\)",
+                       TOOLS_SRC):
+    tail = TOOLS_SRC[mo.end():mo.end() + 120]
+    # Either bounded by the helper, or keyed on ids already bounded by
+    # it, or pinned to the single project in view.
+    if not _re.match(r"\s*\.where\(\s*(scoped\(|\w+\.project_id == pid|"
+                     r"\w+\.target_id)", tail):
+        bare.append(TOOLS_SRC[:mo.start()].count("\n") + 1)
+check("no project-scoped table is selected without a project predicate",
+      not bare, f"unbounded select at tools.py line(s) {bare}")
+check("and the `if project:` query guard is gone from tools.py",
+      not _re.search(r"^\s*if project:\s*$", TOOLS_SRC, _re.M),
+      "that idiom drops the WHERE entirely when no single project is in view")
 
 # The same question through the write-shaped path: no project parameter
 # exists anywhere in the toolset, so no sentence can name one.
@@ -630,6 +858,9 @@ r = run(invoke(tools_m, "add_project_member", username="stranger",
                role="admin"))
 check("but cannot add them straight in at admin",
       "error" in r and "admin on AAA" in r["error"], str(r))
+r = run(invoke(tools_m, "add_project_member", username="nosuchperson"))
+check("and cannot tell a missing account from a disabled one",
+      "error" in r and "disabled" not in r["error"], str(r))
 r = run(invoke(tools_m, "set_project_member_role", username="newbie",
                role="admin"))
 check("and cannot change an existing member's role",
@@ -664,6 +895,11 @@ r = run(invoke(tools_a, "set_project_member_role", username="alice",
                role="user"))
 check("but not their own role, even as admin",
       "error" in r and "your own role" in r["error"], str(r))
+r = run(invoke(tools_a, "add_project_member", username="alice",
+               role="readonly"))
+check("and cannot demote themselves through the add tool either",
+      "error" in r and "your own role" in r["error"],
+      "otherwise an engagement's last admin can lock themselves out")
 r = run(invoke(tools_a, "set_project_member_role", username="stranger",
                role="user"))
 check("nor somebody who is not on the engagement yet",
@@ -682,6 +918,34 @@ check("alice, who is admin on AAA only, is absent from BBB's list",
 r = run(invoke(tools_a, "list_project_members"))
 check("and AAA's channel lists AAA", r.get("project") == "AAA", str(r))
 
+
+print("\n== a group grant counts as being on the engagement ==")
+# The case a direct-ACL lookup misses: someone whose only access to AAA
+# is `readonly` through a group reads as "not on the project", and
+# adding them at `user` would be a silent promotion by a non-admin.
+st_, _g = call("/api/groups", "POST", {"name": "readers"}, token=ADMIN)
+_gm, _ = call("/api/groups/readers/members/stranger", "POST", token=ADMIN)
+check("stranger is put in the group", _gm in (200, 201), str(_gm))
+st_, _gr = call("/api/projects/AAA/acl", "POST",
+                {"group": "readers", "role": "readonly"}, token=ADMIN)
+check("the group grant was made", st_ in (200, 201), f"{st_} {_gr}")
+if st_ in (200, 201):
+    # Rebuilt, because each Slack message gets its own session in
+    # production and reusing one from before the group existed would
+    # test a stale identity map rather than the rule.
+    _azm2, tools_m2 = run(schemas("USLACKMAL", "CAAA", "eng-aaa", MEMCFG))
+    _aza2, tools_a2 = run(schemas("USLACKALICE", "CAAA", "eng-aaa", MEMCFG))
+    r = run(invoke(tools_m2, "add_project_member", username="stranger"))
+    check("a non-admin cannot promote a group-granted reader by 'adding' them",
+          "error" in r and "already has access" in r["error"], str(r))
+    st_, acl = call("/api/projects/AAA/acl", token=ADMIN)
+    check("and no direct grant was created for them",
+          not any(x.get("username") == "stranger" for x in (acl or [])),
+          str(acl))
+    r = run(invoke(tools_a2, "set_project_member_role", username="stranger",
+                   role="user"))
+    check("but a project admin can re-role them, group grant and all",
+          r.get("ok") and r.get("role") == "user", str(r))
 
 print("\n== a site admin is not automatically a project admin over slack ==")
 

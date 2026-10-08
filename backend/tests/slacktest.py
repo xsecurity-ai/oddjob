@@ -478,32 +478,58 @@ if _HAVE_WS:
         check("a redelivered envelope is answered once, not twice",
               len(POSTED) == 1, str(len(POSTED)))
 
+        # The same stranger, in the same thread, asking again. They are
+        # told to link their account ONCE: the sentence does not change,
+        # and each repeat costs a thread fetch and a database session.
+        POSTED.clear()
+        deliver("env-6c", type="app_mention", channel="C999",
+                ts="1700000005.0002", user="U42",
+                thread_ts="1700000005.0001", text=f"<@{BOT_ID}> hello again?")
+        check("an unlinked sender is told to link their account once a thread",
+              nothing_arrives(), str(POSTED)[:200])
+
         # A thread reply with no mention, in a thread the bot is in. The
         # thread is fetched whole — the fake serves THREAD — and answered.
+        # A different sender and a different thread, so this measures
+        # the addressing rule and not the refusal already given above.
         POSTED.clear()
-        THREAD[:] = [{"user": "U42", "ts": "1700000000.0001",
+        THREAD[:] = [{"user": "U44", "ts": "1700000010.0001",
                       "text": f"<@{BOT_ID}> how many targets?"},
-                     {"user": BOT_ID, "ts": "1700000000.0002",
+                     {"user": BOT_ID, "ts": "1700000010.0002",
                       "text": "I cannot answer that yet"},
-                     {"user": "U42", "ts": "1700000006.0001",
+                     {"user": "U44", "ts": "1700000011.0001",
                       "text": "and which are alive?"}]
-        deliver("env-7", type="message", channel="C999", ts="1700000006.0001",
-                thread_ts="1700000000.0001", user="U42",
+        deliver("env-7", type="message", channel="C999", ts="1700000011.0001",
+                thread_ts="1700000010.0001", user="U44",
                 text="and which are alive?")
         r7 = arrives()
         check("a follow-up in a thread it is in needs no second mention",
               bool(r7), str(POSTED)[:200])
         if r7:
             check("and the answer still goes in that thread",
-                  r7.get("thread_ts") == "1700000000.0001",
+                  r7.get("thread_ts") == "1700000010.0001",
                   str(r7.get("thread_ts")))
 
         # The same thread, but the reply is aimed at a person.
         POSTED.clear()
-        deliver("env-8", type="message", channel="C999", ts="1700000007.0001",
-                thread_ts="1700000000.0001", user="U42",
+        deliver("env-8", type="message", channel="C999", ts="1700000012.0001",
+                thread_ts="1700000010.0001", user="U45",
                 text="<@U77> can you take a look?")
         check("but a thread reply addressed to someone else is left alone",
+              nothing_arrives(), str(POSTED)[:200])
+
+        # A thread the bot was never in, which merely has another app
+        # posting in it. Treating any bot_id as "us" would recruit the
+        # bot into every thread a CI notifier touches.
+        POSTED.clear()
+        THREAD[:] = [{"user": "U46", "ts": "1700000020.0001",
+                      "text": "deploying the thing"},
+                     {"user": "U99", "bot_id": "B7", "ts": "1700000020.0002",
+                      "text": "build ok"}]
+        deliver("env-9", type="message", channel="C999", ts="1700000021.0001",
+                thread_ts="1700000020.0001", user="U46",
+                text="and how many are alive?")
+        check("another app in a thread does not make it the bot's thread",
               nothing_arrives(), str(POSTED)[:200])
 else:
     check("websockets is installed", False, "cannot exercise socket mode")
