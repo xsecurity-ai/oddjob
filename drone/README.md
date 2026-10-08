@@ -348,8 +348,44 @@ address.
 
 ## What it runs
 
-`nmap`, `masscan`, `amass`, `gobuster`, `gospider`, `nuclei`, `httpx`,
-plus name and address lookups using the Go resolver directly.
+`nmap`, `masscan`, `gobuster`, `gospider`, `nuclei`, `httpx`, plus name
+and address lookups using the Go resolver directly, and **amass linked
+into the agent** rather than executed.
+
+### amass is a library here, not a binary
+
+It used to be whatever `amass` the host had. On one of ours that was
+v3.19.2 from a snap with no configuration, and it did not finish a
+*passive* enumeration of `example.com` in five minutes — two and a half
+of which were system time, so it was not waiting on the network, it was
+thrashing. The same zone through the v4 library finishes in under a
+minute.
+
+None of the settings that matter are reachable from the v3 command
+line. Recursion, how many DNS queries may be in flight, the rate per
+resolver and which resolvers to use are library-level, so the way to
+make it faster was to stop talking to it through argv.
+
+| task argument | default | |
+|---|---|---|
+| `recursive` | `true` | follow what the sources turn up rather than stopping at the first level |
+| `max_dns_queries` | `20000` | in flight at once; the work is almost all waiting on somebody else's resolver |
+| `resolvers_qps` | `100` | per resolver per second |
+| `resolvers` | eight public ones | **stated, not inherited** — see below |
+| `mode` | `passive` | `active` sends traffic to the target's own infrastructure |
+| `timeout_seconds` | `2700` | a cut-off run still reports what it found |
+
+The resolvers are named rather than taken from the host because an
+agent inside a corporate network picks up a resolver that answers for
+the *internal* view of a zone, and an enumeration that quietly returns
+somebody's split-horizon records is a wrong answer that looks like a
+right one.
+
+Two things follow from linking it in. A Drone no longer needs an amass
+binary, so it is not in the image and not in the required-tool list —
+an agent missing it still runs amass tasks. And a run that hits its
+timeout still reports the names it found, where shelling out discarded
+them.
 
 The Drone installs these at startup if they are missing, and tells
 Oddjob what it could not get. Oddjob then stops sending it work that
