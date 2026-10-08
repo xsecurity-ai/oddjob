@@ -1098,6 +1098,84 @@ st, r = call("/api/targets?project=CASE&page_size=50", token=admin)
 check("still one row", len((r or {}).get("items", [])) == 1,
       str([t["host"] for t in (r or {}).get("items", [])]))
 
+print("\n--- a wildcard in scope names its own zone ---")
+# A wildcard entry says which zone the engagement was authorised against.
+# Running it through `registrable()` throws that away and guesses, and the
+# guess is wrong in two ordinary ways:
+#
+#   *.sub.acme.example    offered `acme.example`, which is NOT in scope and
+#                         so is refused the moment it is clicked -- while
+#                         `sub.acme.example`, the zone actually authorised,
+#                         was never offered at all
+#   *.example.com.ve      offered `com.ve`, a public suffix, because that
+#                         two-level suffix is not in `_TWO_LEVEL`
+#
+# A plain FQDN still has to be inferred from, because a single hostname is
+# not a zone -- that half is asserted too, so the fix cannot be "stop
+# calling registrable()".
+call("/api/projects", "POST", {"code": "ROOTS", "name": "Roots"}, token=admin)
+call("/api/projects/ROOTS/scope", "POST",
+     {"lines": ["*.sub.acme.example", "*.example.com.ve", "one.host.acme.example"]},
+     token=admin)
+_st, _r = call("/api/domains/roots?project=ROOTS", token=admin)
+_names = {row["domain"] for row in (_r or [])}
+check("the roots list is returned", _st == 200, f"{_st} {_r}")
+check("a wildcard offers the zone it actually names",
+      "sub.acme.example" in _names, sorted(_names))
+check("...and not the apex above it, which scope would refuse",
+      "acme.example" not in _names or "sub.acme.example" in _names, sorted(_names))
+check("an unlisted two-level suffix does not become a public suffix",
+      "com.ve" not in _names, sorted(_names))
+check("...it offers the client's zone instead",
+      "example.com.ve" in _names, sorted(_names))
+# The other half: a single hostname is not a zone and still gets inferred.
+check("a plain FQDN is still walked back to its registrable domain",
+      "host.acme.example" in _names or "acme.example" in _names, sorted(_names))
+# What the gate makes of the roots that are offered.
+#
+# Asked of the scope index directly, not through /enumerate: that
+# endpoint 409s with no drone online, so a loop driving it proves
+# nothing on a fleetless runner -- an earlier version of this check
+# probed zero of three and reported success, which is a check that
+# tests nothing while looking like it tests everything.
+#
+# Built from the STORED rows exactly as `index_for` builds it, rather
+# than by re-running `classify` over the values. Re-classifying
+# `sub.acme.example` yields an `fqdn` and loses the wildcard the
+# operator entered, which makes the gate look like it refuses something
+# it allows -- a wrong test accusing working code.
+#
+# **This records a gap, it does not bless it.** A wildcard does not put
+# its own apex in scope -- deliberately, because the apex is a different
+# host -- so `*.sub.acme.example` allows `x.sub.acme.example` and
+# refuses `sub.acme.example`. But "enumerate the zone sub.acme.example"
+# is the one operation that wildcard most clearly authorises, and it is
+# refused: Kitchen Sink walking a known host queues amass for the LEAF
+# name and for nothing else. Whether enumerating zone X should be
+# authorised by `*.X` is a question about what the gate permits, so it
+# is not answered here. Until it is, this asserts the behaviour as it
+# stands so a change to it has to be deliberate.
+from types import SimpleNamespace  # noqa: E402
+
+from app.scope import ScopeIndex  # noqa: E402
+
+_st2, _rows = call("/api/projects/ROOTS/scope", token=admin)
+_rows = _rows if isinstance(_rows, list) else (_rows or {}).get("items", [])
+check("the project's scope list came back to check against",
+      len(_rows) >= 3, f"{len(_rows)} rows, status {_st2}")
+_idx = ScopeIndex([SimpleNamespace(**r) for r in _rows])
+check("a name under the wildcard is in scope",
+      _idx.check("x.sub.acme.example").allowed)
+check("the wildcard's own apex is not -- the rule, not a bug",
+      not _idx.check("sub.acme.example").allowed)
+# The part this change is responsible for: whatever the gate then makes
+# of it, the root offered is the zone the operator wrote down, and never
+# a public suffix.
+check("the offered root is the zone the wildcard names",
+      "sub.acme.example" in _names, sorted(_names))
+check("...and never a public suffix", "com.ve" not in _names, sorted(_names))
+
+
 # ---------------------------------------------------------------------
 # The enumerate box and `wanted()` have to read a paste the same way
 # ---------------------------------------------------------------------
