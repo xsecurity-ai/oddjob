@@ -34,26 +34,59 @@
 # container layer.
 
 # ---------------------------------------------------------------- go
-FROM golang:1.26-bookworm AS build
+#
+# `--platform=$BUILDPLATFORM` pins this stage to the machine doing the
+# building, and GOARCH below says what to emit. Without it, buildx runs
+# the entire Go toolchain under QEMU to produce an arm64 image — and
+# this stage does not just compile the agent, it compiles amass,
+# nuclei, httpx and gospider from source. Four large Go programs under
+# emulation took this image past forty-five minutes while the amd64
+# leg finished in three.
+#
+# Nothing is lost by cross-compiling. Go's cross-compilation is
+# first-class, CGO is off, and the output is decided by GOOS/GOARCH
+# rather than by what the compiler happens to be running on.
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
 WORKDIR /src
+
+# Supplied by buildx. Defaulted so a plain `docker build` still works.
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
 
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath \
+RUN go build -trimpath \
       -ldflags "-s -w -X github.com/xsecurity-ai/oddjob/drone/internal/config.Version=$(cat VERSION 2>/dev/null || echo docker)" \
       -o /out/drone ./cmd/drone
 
-# The two tools no distribution packages. Built here rather than
+# The tools no distribution packages. Built here rather than
 # `go install`-ed at runtime for the reason in the header: an agent
 # should not need to reach proxy.golang.org from inside a client's
 # network to become useful.
+# No GOBIN here, deliberately: `go install` refuses outright with
+# "cannot install cross-compiled binaries when GOBIN is set". It writes
+# to $GOPATH/bin when building for the host and to
+# $GOPATH/bin/$GOOS_$GOARCH when cross-compiling, so the binaries are
+# collected afterwards from wherever they landed rather than directed
+# at a fixed path.
 ENV GOFLAGS=-buildvcs=false
-RUN GOBIN=/out go install github.com/owasp-amass/amass/v4/cmd/amass@master \
- && GOBIN=/out go install github.com/jaeles-project/gospider@latest \
- && GOBIN=/out go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
- && GOBIN=/out go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+RUN go install github.com/owasp-amass/amass/v4/cmd/amass@master \
+ && go install github.com/jaeles-project/gospider@latest \
+ && go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
+ && go install github.com/projectdiscovery/httpx/cmd/httpx@latest \
+ && find "$(go env GOPATH)/bin" -type f -perm -u+x -exec mv -t /out {} +
+
+# Asserted, not assumed. The failure mode otherwise is an image that
+# builds, pushes and ships with no nuclei in it, discovered the first
+# time somebody tasks a scan against a client's estate.
+RUN set -eu; \
+    for b in drone amass gospider nuclei httpx; do \
+      [ -x "/out/$b" ] || { echo "missing /out/$b"; ls -lR /out "$(go env GOPATH)/bin"; exit 1; }; \
+    done; \
+    ls -l /out
 
 
 # ----------------------------------------------------------- runtime

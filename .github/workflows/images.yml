@@ -163,73 +163,120 @@ jobs:
             echo "| oddjob | \`${{ steps.k.outputs.oddjob_key }}\` | ${{ steps.k.outputs.oddjob_build == 'true' && 'build' || 'retag existing' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  drone:
+  # One job per architecture, each on a runner of that architecture.
+  # Nothing is emulated: `ubuntu-24.04-arm` is real arm64 hardware, and
+  # it is free for public repositories.
+  #
+  # Each leg pushes BY DIGEST — no tag — and hands its digest to the
+  # merge job, which assembles one manifest list and puts the names on
+  # it. Tagging in the legs instead would have the second one overwrite
+  # the first and leave a single-architecture image under a name that
+  # claims to serve both.
+  build:
     needs: plan
-    runs-on: ubuntu-latest
+    if: needs.plan.outputs.drone_build == 'true' || needs.plan.outputs.oddjob_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # QEMU is only needed to BUILD arm64, not to retag a manifest
-      # that already has it. Skipped on the retag path, which is most
-      # runs.
-      - if: needs.plan.outputs.drone_build == 'true'
-        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - if: needs.plan.outputs.drone_build == 'true'
+      - name: drone
+        id: drone
+        if: needs.plan.outputs.drone_build == 'true'
         uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
         with:
           context: ./drone
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            cr0n1c/drone:src-${{ needs.plan.outputs.drone_key }}
-            cr0n1c/drone:${{ needs.plan.outputs.pointer }}
-            cr0n1c/drone:${{ needs.plan.outputs.dated }}
-          cache-from: type=gha,scope=drone
-          cache-to: type=gha,scope=drone,mode=max
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=docker.io/cr0n1c/drone,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=drone-${{ matrix.arch }}
+          cache-to: type=gha,scope=drone-${{ matrix.arch }},mode=max
 
-      - if: needs.plan.outputs.drone_build != 'true'
-        name: This source is already built — move the pointer to it
+      - name: oddjob
+        id: oddjob
+        if: needs.plan.outputs.oddjob_build == 'true'
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=docker.io/cr0n1c/oddjob,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=oddjob-${{ matrix.arch }}
+          cache-to: type=gha,scope=oddjob-${{ matrix.arch }},mode=max
+
+      # A file per digest rather than one file both legs write: two
+      # runners uploading the same artifact name is a race, and the
+      # loser's architecture silently vanishes from the manifest.
+      - name: Hand the digests to the merge
         env:
-          KEY: ${{ needs.plan.outputs.drone_key }}
-          POINTER: ${{ needs.plan.outputs.pointer }}
-          DATED: ${{ needs.plan.outputs.dated }}
-        run: .github/scripts/retag.sh drone
+          DRONE_DIGEST: ${{ steps.drone.outputs.digest }}
+          ODDJOB_DIGEST: ${{ steps.oddjob.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          # Empty when that image did not need building. Written only
+          # when there is something to write, so the merge can tell
+          # "not built this run" from "built and lost".
+          [ -z "$DRONE_DIGEST" ]  || echo "$DRONE_DIGEST"  > "/tmp/digests/drone-$ARCH"
+          [ -z "$ODDJOB_DIGEST" ] || echo "$ODDJOB_DIGEST" > "/tmp/digests/oddjob-$ARCH"
+          ls -l /tmp/digests
 
-  oddjob:
-    needs: plan
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assemble the per-architecture images into one manifest list and put
+  # the names on it. Also the home of the retag path: an image that
+  # already exists for this source is not rebuilt, only pointed at.
+  publish:
+    needs: [plan, build]
+    # `always()` so the retag path still runs when `build` was skipped
+    # for having nothing to build. Without it a run that only needs to
+    # move a pointer would do nothing at all — which is the bug this
+    # whole arrangement exists to avoid.
+    if: always() && needs.plan.result == 'success' && needs.build.result != 'failure'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - if: needs.plan.outputs.oddjob_build == 'true'
-        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - if: needs.plan.outputs.oddjob_build == 'true'
-        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+      - uses: actions/download-artifact@v4
+        if: needs.build.result == 'success'
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            cr0n1c/oddjob:src-${{ needs.plan.outputs.oddjob_key }}
-            cr0n1c/oddjob:${{ needs.plan.outputs.pointer }}
-            cr0n1c/oddjob:${{ needs.plan.outputs.dated }}
-          cache-from: type=gha,scope=oddjob
-          cache-to: type=gha,scope=oddjob,mode=max
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
 
-      - if: needs.plan.outputs.oddjob_build != 'true'
-        name: This source is already built — move the pointer to it
+      - name: Name the images
         env:
-          KEY: ${{ needs.plan.outputs.oddjob_key }}
+          DRONE_KEY: ${{ needs.plan.outputs.drone_key }}
+          ODDJOB_KEY: ${{ needs.plan.outputs.oddjob_key }}
+          DRONE_BUILD: ${{ needs.plan.outputs.drone_build }}
+          ODDJOB_BUILD: ${{ needs.plan.outputs.oddjob_build }}
           POINTER: ${{ needs.plan.outputs.pointer }}
           DATED: ${{ needs.plan.outputs.dated }}
-        run: .github/scripts/retag.sh oddjob
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published"
+            echo "| image | tags | digest | how |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          .github/scripts/publish.sh drone  "$DRONE_KEY"  "$DRONE_BUILD"
+          .github/scripts/publish.sh oddjob "$ODDJOB_KEY" "$ODDJOB_BUILD"

@@ -6,7 +6,11 @@
 # module, so the layout inside the image mirrors the repository.
 
 # ---------------------------------------------------------------- UI
-FROM node:22-alpine AS ui
+# Built on the build machine, not the target. `npm run build` emits
+# JavaScript, which is the same bytes whatever the architecture — so
+# running node and the whole dependency tree under QEMU to produce an
+# arm64 image buys nothing and costs most of the build.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS ui
 WORKDIR /build/frontend
 
 # Dependencies first: this layer is rebuilt only when the lockfile
@@ -28,7 +32,13 @@ RUN npm run build
 # All six targets, because the host an agent is needed on is whatever
 # the client has. Static (CGO_ENABLED=0) so they run on the older glibc
 # they will meet in the field.
-FROM golang:1.26-alpine AS drone
+#
+# `--platform=$BUILDPLATFORM` for the same reason as the UI stage, and
+# more obviously here: this loop already names its own GOOS and GOARCH
+# for every target, so the six binaries are byte-identical regardless
+# of what the compiler runs on. Emulating the toolchain to produce
+# them was pure cost.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS drone
 WORKDIR /build/drone
 
 COPY drone/go.mod drone/go.sum ./
