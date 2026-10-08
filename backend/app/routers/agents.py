@@ -78,7 +78,10 @@ ABANDON_AFTER = timedelta(minutes=10)
 #: package" instruction from the server is remote code execution with
 #: extra steps, and the agent runs privileged. The server can authorise
 #: anything on this list and nothing else.
-INSTALLABLE = ("amass", "nmap", "masscan", "gobuster", "gospider", "nuclei",
+#: amass is deliberately absent: it is linked into the agent, so there
+#: is nothing to install, and offering it would queue an install task
+#: the Drone now refuses — it is out of that agent's `Known` map too.
+INSTALLABLE = ("nmap", "masscan", "gobuster", "gospider", "nuclei",
                "httpx", "subfinder", "ffuf", "whatweb", "nikto", "dnsx",
                "naabu")
 

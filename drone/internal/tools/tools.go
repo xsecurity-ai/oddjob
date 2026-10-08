@@ -29,8 +29,15 @@ import (
 // one package install on a machine that is about to spend hours
 // scanning, and an agent that cannot get one says so and is simply not
 // given that kind of work.
+//
+// amass is NOT here, and is not in `Known` either. It is linked into
+// the agent (see internal/tasks/amass.go), so an amass task needs no
+// binary and installing one would only produce a second, slower
+// implementation nothing calls. It is also how the snap below came to
+// put v3.19.2 on one of our droplets, where a passive enumeration of
+// example.com did not finish inside five minutes.
 var Baseline = []string{
-	"amass", "nmap", "masscan", "gobuster", "gospider", "nuclei", "httpx",
+	"nmap", "masscan", "gobuster", "gospider", "nuclei", "httpx",
 }
 
 // Known is everything a Drone will install at all. The server has its own
@@ -38,8 +45,6 @@ var Baseline = []string{
 // gate, because the agent runs privileged and should not be one
 // compromised server away from running arbitrary installs.
 var Known = map[string]pkg{
-	"amass": {apt: "", brew: "amass", choco: "amass", version: "-version",
-		snap: "amass", gomod: "github.com/owasp-amass/amass/v4/cmd/amass@master"},
 	"nmap":    {apt: "nmap", brew: "nmap", choco: "nmap", version: "--version"},
 	"masscan": {apt: "masscan", brew: "masscan", choco: "masscan", version: "--version"},
 	"gobuster": {apt: "gobuster", brew: "gobuster", choco: "gobuster", version: "version",
@@ -71,9 +76,15 @@ type pkg struct {
 	version          string
 	// snap and gomod are fallbacks for tools the distribution does not
 	// package. Both are upstream distribution channels, not "download
-	// a binary from somewhere and run it" — amass genuinely is not in
-	// Debian or Ubuntu, and without a fallback the baseline install
-	// simply fails on the most common agent platform there is.
+	// a binary from somewhere and run it": gospider, nuclei and httpx
+	// are not in Debian or Ubuntu, and without a fallback the baseline
+	// install simply fails on the most common agent platform there is.
+	//
+	// No tool uses `snap` any more — amass was the only one, and it is
+	// linked into the agent now. The field stays because it is a
+	// general fallback rather than an amass-specific hack, but note
+	// what it cost when it was used: it is how v3.19.2 arrived on one
+	// of our droplets.
 	snap  string
 	gomod string
 	// mustMention is a string the version output has to contain for
@@ -371,9 +382,9 @@ func Ensure(ctx context.Context, names []string, elevated bool) []InstallReport 
 			}
 		}
 		// Package manager first, then the tool's other upstream
-		// channels. amass is not in Debian or Ubuntu at all, so
-		// without this the baseline install fails on the single most
-		// common agent platform.
+		// channels. The projectdiscovery tools and gospider are not in
+		// Debian or Ubuntu at all, so without this the baseline
+		// install fails on the single most common agent platform.
 		var why []string
 		installed := false
 		via, viaPkg := "", ""
