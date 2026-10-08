@@ -187,6 +187,45 @@ st, b3 = call("/api/domains/detect?project=DOM", "POST",
 check("force re-runs", r3["runs"] == 2, str(r3["runs"]))
 check("but proposes no duplicates", r3["new_candidates"] == 0, str(r3["new_candidates"]))
 
+# A duplicate must be skipped, not fatal. Two ways it arose in
+# production, both ending in a 500 that threw away a run which had
+# already generated a few thousand candidates:
+#
+#   - the generator proposing the same name twice in one batch, which
+#     violates the unique index INSIDE a single INSERT;
+#   - two detect runs overlapping (a double-click will do it), each
+#     reading the existing set before the other commits.
+print("\n== a duplicate candidate is skipped, never a 500 ==")
+import threading as _th                                            # noqa: E402
+
+_codes: list[int] = []
+_lock = _th.Lock()
+
+
+def _detect_once():
+    st, _ = call("/api/domains/detect?project=DOM", "POST",
+                 {"domain": "race.corp.com", "force": True}, token=admin)
+    with _lock:
+        _codes.append(st)
+
+
+_threads = [_th.Thread(target=_detect_once) for _ in range(4)]
+for t in _threads:
+    t.start()
+for t in _threads:
+    t.join()
+check("four concurrent detects on one domain all succeed",
+      _codes and all(c == 200 for c in _codes), f"status codes: {_codes}")
+
+# And the names really are unique afterwards, rather than the conflict
+# having been swallowed into duplicate rows.
+st, after = call("/api/domains/candidates?project=DOM&limit=5000", token=admin)
+_rows = after if isinstance(after, list) else after.get("items", [])
+_names = [c["name"] for c in _rows]
+check("no duplicate candidate rows exist",
+      len(_names) == len(set(_names)),
+      f"{len(_names)} rows, {len(set(_names))} distinct")
+
 print("\n== promoting and rejecting ==")
 web02 = names["web02.corp.com"]["id"]
 vpn = names["vpn.corp.com"]["id"]

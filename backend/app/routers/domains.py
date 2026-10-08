@@ -28,6 +28,22 @@ from ..scopegate import index_for
 from ..security import get_current_user, require_project
 from ..timeline import record
 
+
+def _conflict_insert(session, model):
+    """An INSERT that can carry `on_conflict_do_nothing`.
+
+    Postgres and SQLite both support it, from different modules, and
+    the generic `insert()` supports it from neither. Chosen per
+    session so the same code runs against the deployment database and
+    the test one.
+    """
+    if session.get_bind().dialect.name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as _ins
+    else:
+        from sqlalchemy.dialects.sqlite import insert as _ins
+    return _ins(model)
+
+
 router = APIRouter(prefix="/api/domains", tags=["domains"])
 
 
@@ -246,12 +262,41 @@ async def _detect_one(session: AsyncSession, pr: Project, user: User,
     produced = gen.generate(domain, hosts, limit=limit, already=existing)
 
     now = datetime.now(timezone.utc)
-    created = 0
+
+    # Deduplicated, and inserted so a collision is skipped rather than
+    # fatal. Two things made this a 500:
+    #
+    #   - the generator can propose the same name twice in one batch
+    #     (two rules arriving at it from different directions), and the
+    #     pair violates the unique index inside a single INSERT;
+    #   - `existing` is read once at the top, so two detect runs
+    #     overlapping — a double-click is enough — both see the name as
+    #     absent and both insert it.
+    #
+    # Either way the whole run died after generating a few thousand
+    # candidates, which is a lot of work to throw away over a name we
+    # already had.
+    seen: set[str] = set()
+    rows: list[dict] = []
     for c in produced:
-        session.add(DomainCandidate(
-            project_id=pr.id, name=c.name, root_domain=c.root_domain,
-            source=c.source, score=c.score, reason=c.reason, state="new"))
-        created += 1
+        if c.name in seen:
+            continue
+        seen.add(c.name)
+        rows.append({"project_id": pr.id, "name": c.name,
+                     "root_domain": c.root_domain, "source": c.source,
+                     "score": c.score, "reason": c.reason, "state": "new",
+                     "times_seen": 1, "created_at": now, "updated_at": now})
+
+    created = 0
+    if rows:
+        res = await session.execute(
+            _conflict_insert(session, DomainCandidate).values(rows)
+            .on_conflict_do_nothing(index_elements=["project_id", "name"]))
+        # What was actually written, not what was offered: the caller is
+        # told how many new names there are, and a skipped duplicate is
+        # not a new name.
+        created = res.rowcount if res.rowcount is not None and res.rowcount >= 0 \
+            else len(rows)
 
     # A name an earlier run already proposed is bumped rather than re-added:
     # agreement across runs is itself a signal.
@@ -267,8 +312,21 @@ async def _detect_one(session: AsyncSession, pr: Project, user: User,
                 row.times_seen += 1
 
     if search is None:
-        search = DomainSearch(project_id=pr.id, domain=domain, requested_by=user.id)
-        session.add(search)
+        # Claimed the same way candidates are, and for the same reason:
+        # two overlapping runs both saw no row above and both tried to
+        # create one, which violates uq_domsearch_project_domain. The
+        # insert is skipped on conflict and the row is then read back,
+        # so whichever request lost the race still ends up with the
+        # real row rather than an exception.
+        await session.execute(
+            _conflict_insert(session, DomainSearch)
+            .values(project_id=pr.id, domain=domain, requested_by=user.id,
+                    created_at=now, updated_at=now)
+            .on_conflict_do_nothing(index_elements=["project_id", "domain"]))
+        search = (await session.execute(
+            select(DomainSearch).where(
+                DomainSearch.project_id == pr.id,
+                DomainSearch.domain == domain))).scalar_one()
     # Column defaults are applied on INSERT, so a freshly constructed row
     # still has None here until it is flushed.
     search.runs = (search.runs or 0) + 1
