@@ -78,7 +78,10 @@ ABANDON_AFTER = timedelta(minutes=10)
 #: package" instruction from the server is remote code execution with
 #: extra steps, and the agent runs privileged. The server can authorise
 #: anything on this list and nothing else.
-INSTALLABLE = ("amass", "nmap", "masscan", "gobuster", "gospider", "nuclei",
+#: amass is deliberately absent: it is linked into the agent, so there
+#: is nothing to install, and offering it would queue an install task
+#: the Drone now refuses — it is out of that agent's `Known` map too.
+INSTALLABLE = ("nmap", "masscan", "gobuster", "gospider", "nuclei",
                "httpx", "subfinder", "ffuf", "whatweb", "nikto", "dnsx",
                "naabu")
 
@@ -450,11 +453,15 @@ SCOPED_KINDS = tuple(k for k in TASK_KINDS if k not in ("install",))
 #: agent that could not get one says so on registration.
 #:
 #: The kinds absent from this map need nothing: nslookup and reverse_ip
-#: use the Go resolver, and install and shell are the agent itself.
+#: use the Go resolver, install and shell are the agent itself, and
+#: amass is now LINKED INTO the agent rather than executed -- so an
+#: agent with no amass binary runs an amass task perfectly well, and
+#: listing it here would have the fleet report a missing tool that
+#: nothing needs. `REQUIRED_TOOLS` is derived from this map, which is
+#: why that follows from the one deletion.
 KIND_TOOL: dict[str, str] = {
     "nmap": "nmap",
     "masscan": "masscan",
-    "amass": "amass",
     "gobuster": "gobuster",
     "gospider": "gospider",
     "nuclei": "nuclei",
