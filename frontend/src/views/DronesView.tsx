@@ -9,7 +9,7 @@ import DownloadIcon from '@mui/icons-material/Download'
 import EditIcon from '@mui/icons-material/EditOutlined'
 import ContentCopyIcon from '@mui/icons-material/ContentCopy'
 import PowerSettingsNewIcon from '@mui/icons-material/PowerSettingsNew'
-import type { GridColDef } from '@mui/x-data-grid'
+import type { ColumnDef } from '../lib/columns'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   api, type AgentEnrolled, type DroneAgent, type DroneRouting,
@@ -522,7 +522,7 @@ export function DronesView({ project }: { project: string | null }) {
   const killed = all.filter((a) => a.status === 'disabled')
   const rows = showKilled ? all : all.filter((a) => a.status !== 'disabled')
 
-  const columns: GridColDef<DroneAgent>[] = [
+  const columns: ColumnDef<DroneAgent>[] = [
     {
       field: 'name', headerName: 'Drone', flex: 1.1, minWidth: 150,
       renderCell: (p) => (

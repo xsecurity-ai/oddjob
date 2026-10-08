@@ -3,7 +3,7 @@ import {
   Alert, Badge, Box, Button, Chip, Snackbar, Tooltip, alpha,
 } from '@mui/material'
 import ScanIcon from '@mui/icons-material/RadarOutlined'
-import type { GridColDef } from '@mui/x-data-grid'
+import type { ColumnDef } from '../lib/columns'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Target } from '../lib/api'
 import { useAuth } from '../lib/auth'
@@ -227,7 +227,7 @@ export function TargetsView({ project }: { project: string | null }) {
     }
   }, [rows])
 
-  const columns: GridColDef<Target>[] = [
+  const columns: ColumnDef<Target>[] = [
     {
       field: 'host', headerName: 'Host', flex: 2, minWidth: 230,
       renderCell: (p) => (
@@ -442,7 +442,7 @@ export function TargetsView({ project }: { project: string | null }) {
       )}
       <DataTable
         rows={rows}
-        columns={columns as GridColDef[]}
+        columns={columns as ColumnDef[]}
         loading={isLoading}
         error={error as Error | null}
         initialSort={{ field: 'host', sort: 'asc' }}

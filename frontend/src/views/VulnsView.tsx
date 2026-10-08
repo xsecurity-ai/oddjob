@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Box, Chip, alpha } from '@mui/material'
-import type { GridColDef } from '@mui/x-data-grid'
+import type { ColumnDef } from '../lib/columns'
 import { useQuery } from '@tanstack/react-query'
 import { api, SEVERITY_RANK, type Vuln } from '../lib/api'
 import { DataTable } from '../components/DataTable'
@@ -22,7 +22,7 @@ export function VulnsView({ project }: { project: string | null }) {
     queryFn: () => api.vulns(project ?? undefined),
   })
 
-  const columns: GridColDef<Vuln>[] = [
+  const columns: ColumnDef<Vuln>[] = [
     {
       field: 'severity', headerName: 'Severity', width: 112,
       type: 'singleSelect',
@@ -99,7 +99,7 @@ export function VulnsView({ project }: { project: string | null }) {
     <>
     <DataTable
       rows={data?.items ?? []}
-      columns={columns as GridColDef[]}
+      columns={columns as ColumnDef[]}
       loading={isLoading}
       error={error as Error | null}
       initialSort={{ field: 'severity', sort: 'asc' }}   // asc on rank = worst first

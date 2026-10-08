@@ -1,6 +1,6 @@
 import { Box, Chip, IconButton, Tooltip, alpha } from '@mui/material'
 import ReplayIcon from '@mui/icons-material/ReplayOutlined'
-import type { GridColDef } from '@mui/x-data-grid'
+import type { ColumnDef } from '../lib/columns'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type DroneTaskRow } from '../lib/api'
 import { useAuth } from '../lib/auth'
@@ -73,11 +73,16 @@ export function DroneTasksTable({ project }: { project: string }) {
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: ['drone-tasks', project] })
       await qc.invalidateQueries({ queryKey: ['drone-routing', project] })
+      // Both keys. The fleet table above this one is `drone-agents` and
+      // was missing from here, so the Drone that picked a retry up went
+      // on showing idle; `agents` is Targets' own list of who is live
+      // and still needs the nudge.
+      await qc.invalidateQueries({ queryKey: ['drone-agents', project] })
       await qc.invalidateQueries({ queryKey: ['agents', project] })
     },
   })
 
-  const columns: GridColDef<DroneTaskRow>[] = [
+  const columns: ColumnDef<DroneTaskRow>[] = [
     {
       field: 'id', headerName: 'Task', width: 86, type: 'number',
       renderCell: (p) => (
@@ -181,7 +186,7 @@ export function DroneTasksTable({ project }: { project: string }) {
       // above it.
       tableId="drone-tasks"
       rows={q.data ?? []}
-      columns={columns as GridColDef[]}
+      columns={columns as ColumnDef[]}
       loading={q.isLoading}
       error={q.error as Error | null}
       initialSort={{ field: 'id', sort: 'desc' }}

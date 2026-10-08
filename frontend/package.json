@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
     "lint": "eslint .",
-    "test:logic": "node test/hooks.check.mjs && esbuild test/logic.test.ts --bundle --platform=node --format=esm --outfile=/tmp/ms-logic.mjs --log-level=error && node /tmp/ms-logic.mjs"
+    "test:logic": "node test/hooks.check.mjs && esbuild test/logic.test.ts --bundle --platform=node --format=esm --outfile=/tmp/ms-logic.mjs --log-level=error && node /tmp/ms-logic.mjs && esbuild test/render.test.tsx --bundle --platform=node --format=cjs --jsx=automatic --external:util --external:stream --external:async_hooks --outfile=/tmp/ms-render.cjs --log-level=error && node /tmp/ms-render.cjs"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
@@ -18,8 +18,8 @@
     "@fontsource/share-tech-mono": "^5.2.5",
     "@mui/icons-material": "^7.0.0",
     "@mui/material": "^7.0.0",
-    "@mui/x-data-grid": "^8.0.0",
     "@tanstack/react-query": "^5.90.0",
+    "@tanstack/react-table": "^8.21.3",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

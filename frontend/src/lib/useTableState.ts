@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type {
-  GridColDef, GridDensity, GridFilterModel, GridPaginationModel, GridSortModel,
-} from '@mui/x-data-grid'
+import {
+  EMPTY_FILTER, armedItems, filtersActive, findOperator, quickTerms,
+  type ColumnDef, type Density, type FilterModel, type PaginationModel,
+  type SortModel,
+} from './columns'
 
 /**
  * Remembers how each table was left: sort, filters, the search box, which
@@ -28,17 +30,19 @@ import type {
  */
 
 export interface TableState {
-  sort: GridSortModel
-  filter: GridFilterModel
+  sort: SortModel
+  filter: FilterModel
   columns: Record<string, boolean>
-  pagination: GridPaginationModel
-  density: GridDensity
+  pagination: PaginationModel
+  density: Density
 }
 
+// Still v1 after the move off MUI X. The stored shape is unchanged —
+// `lib/columns.ts` keeps the same field names deliberately — so bumping
+// it would throw away every saved sort and filter in every browser to no
+// purpose, which reads to the user as the tool forgetting.
 const VERSION = 1
 const KEY = (id: string) => `oddjob.table.v${VERSION}.${id}`
-
-const EMPTY_FILTER: GridFilterModel = { items: [] }
 
 export function load(id: string): Partial<TableState> | null {
   try {
@@ -63,18 +67,35 @@ function clear(id: string): void {
   } catch { /* nothing to do */ }
 }
 
-/** Drop anything referring to a column this table no longer has.
+/** Drop anything the table can no longer honour.
  *
- *  Views gain and lose columns between releases, and a filter item whose
- *  `field` is gone matches nothing — which looks exactly like a table with
- *  no data in it. */
-export function prune(state: Partial<TableState>, fields: Set<string>): Partial<TableState> {
+ *  Two kinds of stale. A condition on a column that has since been
+ *  removed matches nothing, which looks exactly like a table with no data
+ *  in it. A condition whose *operator* the column no longer offers — a
+ *  `contains` left over on a field that is now a number — is worse: in
+ *  client mode `matches()` does not recognise it and keeps every row, so
+ *  the chip says filtered and nothing is filtered; in server mode
+ *  `filtering.py` answers 400 and the table looks broken.
+ *
+ *  Pass `columns` to get the second check. Without them only fields are
+ *  pruned, which is what the storage layer could do before it knew what
+ *  operators each column allowed. */
+export function prune(
+  state: Partial<TableState>, fields: Set<string>, columns?: ColumnDef[],
+): Partial<TableState> {
   const out: Partial<TableState> = {}
+  const byField = new Map((columns ?? []).map((c) => [c.field, c]))
+  const keep = (i: { field?: unknown; operator?: unknown }) => {
+    const f = String(i.field)
+    if (!fields.has(f)) return false
+    if (!columns) return true
+    return !!findOperator(byField.get(f), String(i.operator))
+  }
   if (state.sort) out.sort = state.sort.filter((s) => fields.has(s.field))
   if (state.filter) {
     out.filter = {
       ...state.filter,
-      items: (state.filter.items ?? []).filter((i) => fields.has(String(i.field))),
+      items: (state.filter.items ?? []).filter(keep),
     }
   }
   if (state.columns) {
@@ -89,12 +110,15 @@ export function prune(state: Partial<TableState>, fields: Set<string>): Partial<
 /** What the toolbar chip says, and whether to show it at all. Pulled out
  *  of the hook so it can be tested without rendering anything. */
 export function describe(
-  sort: GridSortModel, filter: GridFilterModel,
-  touched: Record<string, boolean>, defaultSort: GridSortModel,
+  sort: SortModel, filter: FilterModel,
+  touched: Record<string, boolean>, defaultSort: SortModel,
 ): { dirty: boolean; summary: string; hiding: boolean } {
-  const activeFilters = (filter.items ?? []).filter(
-    (i) => i.value !== undefined && i.value !== '' && i.value !== null).length
-  const quick = (filter.quickFilterValues ?? []).filter(Boolean)
+  // Shared with the filter itself, so "the chip says filtered" and "rows
+  // are being dropped" cannot come apart. The old count tested the value
+  // directly and so missed `isEmpty` and `isNotEmpty`, which hide rows
+  // while having nothing typed in them — exactly the case the chip is for.
+  const activeFilters = armedItems(filter).length
+  const quick = quickTerms(filter)
   const hidden = Object.values(touched).filter((v) => v === false).length
   const sortChanged = JSON.stringify(sort) !== JSON.stringify(defaultSort ?? [])
 
@@ -108,7 +132,10 @@ export function describe(
   return {
     dirty: activeFilters > 0 || quick.length > 0 || hidden > 0 || sortChanged,
     summary: parts.join(' · '),
-    hiding: activeFilters > 0 || quick.length > 0,
+    // Hiding rows is the only state worth warning about. A remembered
+    // sort or page size is helpful and invisible; a remembered filter is
+    // the one that makes someone think their data is missing.
+    hiding: filtersActive(filter),
   }
 }
 
@@ -126,18 +153,21 @@ export function visibilityDiff(
 }
 
 export interface UseTableState {
-  sort: GridSortModel
-  setSort: (m: GridSortModel) => void
-  filter: GridFilterModel
-  setFilter: (m: GridFilterModel) => void
+  sort: SortModel
+  setSort: (m: SortModel) => void
+  filter: FilterModel
+  setFilter: (m: FilterModel) => void
   columns: Record<string, boolean>
   setColumns: (m: Record<string, boolean>) => void
-  pagination: GridPaginationModel
-  setPagination: (m: GridPaginationModel) => void
-  density: GridDensity
-  setDensity: (d: GridDensity) => void
+  pagination: PaginationModel
+  setPagination: (m: PaginationModel) => void
+  density: Density
+  setDensity: (d: Density) => void
   /** Is anything restored or changed from the default? */
   dirty: boolean
+  /** Is anything actively hiding rows, as opposed to merely reordering
+   *  them? What the toolbar's chip turns yellow for. */
+  hiding: boolean
   /** A short description of what is active, for the toolbar. */
   summary: string
   reset: () => void
@@ -145,9 +175,9 @@ export interface UseTableState {
 
 export function useTableState(
   id: string,
-  columnDefs: GridColDef[],
+  columnDefs: ColumnDef[],
   defaults: {
-    sort?: GridSortModel
+    sort?: SortModel
     /** Visibility the VIEW wants, e.g. hiding Project when one is chosen. */
     columns?: Record<string, boolean>
     pageSize?: number
@@ -165,15 +195,15 @@ export function useTableState(
   // blank line after it and it silenced nothing. Nobody noticed because
   // there was no linter in the repository to notice with.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const initial = useMemo(() => prune(load(id) ?? {}, fields), [id])
+  const initial = useMemo(() => prune(load(id) ?? {}, fields, columnDefs), [id])
 
-  const [sort, setSortState] = useState<GridSortModel>(
+  const [sort, setSortState] = useState<SortModel>(
     initial.sort ?? defaults.sort ?? [])
-  const [filter, setFilterState] = useState<GridFilterModel>(
+  const [filter, setFilterState] = useState<FilterModel>(
     initial.filter ?? EMPTY_FILTER)
-  const [pagination, setPaginationState] = useState<GridPaginationModel>(
+  const [pagination, setPaginationState] = useState<PaginationModel>(
     initial.pagination ?? { page: 0, pageSize: defaults.pageSize ?? 50 })
-  const [density, setDensityState] = useState<GridDensity>(
+  const [density, setDensityState] = useState<Density>(
     initial.density ?? 'compact')
 
   // Column visibility is the one that needs merging rather than replacing.
@@ -216,16 +246,9 @@ export function useTableState(
     columns, setColumns,
     pagination, setPagination: setPaginationState,
     density, setDensity: setDensityState,
-    // Hiding rows is the only state worth warning about. A remembered sort
-    // or page size is helpful and invisible; a remembered filter is the one
-    // that makes someone think their data is missing.
     dirty: described.dirty,
+    hiding: described.hiding,
     summary: described.summary,
     reset,
   }
-}
-
-/** True when state is actively hiding rows, as opposed to merely reordering. */
-export function hidesRows(s: UseTableState): boolean {
-  return describe(s.sort, s.filter, {}, s.sort).hiding
 }
