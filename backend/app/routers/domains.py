@@ -361,7 +361,17 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
         # Independently, for every generated parent as much as for every
         # typed name. This is the check that stops a walk reaching an
         # apex the engagement does not cover.
-        ruling = idx.check(d)
+        #
+        # `check_zone`, not `check`: every name queued here is handed to
+        # amass as a ZONE to enumerate, and that is the one operation a
+        # wildcard authorises on its own apex. `*.acme.example` does not
+        # put `acme.example` in scope to be scanned and still does not —
+        # but it plainly permits asking who exists under it, and
+        # refusing that meant a project scoped the ordinary way could
+        # not enumerate itself. Nothing else is widened: a parent above
+        # the wildcard is still refused and the out-list still wins,
+        # because check_zone defers to check for both.
+        ruling = idx.check_zone(d)
         if not ruling.allowed:
             refused[d] = ruling.reason
             continue

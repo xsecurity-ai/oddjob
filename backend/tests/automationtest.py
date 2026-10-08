@@ -215,9 +215,9 @@ import asyncio  # noqa: E402
 
 from sqlalchemy import select  # noqa: E402
 
-from app.automation import run_once  # noqa: E402
+from app.automation import run_once, snapshot  # noqa: E402
 from app.db import SessionLocal  # noqa: E402
-from app.models import Agent, AgentTask, Project  # noqa: E402
+from app.models import Agent, AgentTask, Project, Target  # noqa: E402
 
 call("/api/projects/AUTO2/scope", "POST",
      {"lines": ["in.acme.example"]}, token=admin)
@@ -267,6 +267,59 @@ async def drive():
 
 
 asyncio.run(drive())
+
+print("\n--- the amass policy asks about a ZONE, the others about a host ---")
+# `*.X` authorises enumerating X and does not authorise touching it.
+# A standing order must honour that difference per candidate, or the
+# automation becomes the way a wildcard quietly turns into a scan.
+call("/api/projects", "POST", {"code": "ZONES", "name": "Zones"}, token=admin)
+call("/api/projects/ZONES/scope", "POST",
+     {"lines": ["*.zone.acme.example"]}, token=admin)
+call("/api/targets?project=ZONES", "POST",
+     {"host": "one.zone.acme.example"}, token=admin)
+
+
+async def zones():
+    async with SessionLocal() as s:
+        pr = (await s.execute(
+            select(Project).where(Project.code == "ZONES"))).scalar_one()
+        s.add(Agent(project_id=pr.id, name="zone-drone", status="online",
+                    callback_key_hash="z" * 64))
+        # The apex AS A TARGET. The API would refuse to create it --
+        # `*.zone.acme.example` does not cover the apex -- so it is
+        # inserted directly, which is the state a project reaches by
+        # narrowing its scope after the host was added. Without it the
+        # apex is never an nmap candidate and the assertion below
+        # passes without testing anything: checked by stubbing the
+        # distinction out and watching this still pass.
+        s.add(Target(project_id=pr.id, host="zone.acme.example", kind="host"))
+        pr.auto_amass = True
+        pr.auto_nmap = "top100"
+        await s.commit()
+
+        await run_once(s, pr)
+        got: dict[str, list[str]] = {}
+        for kind, raw in (await s.execute(
+                select(AgentTask.kind, AgentTask.args).where(
+                    AgentTask.project_id == pr.id))).all():
+            a = json.loads(raw)
+            got.setdefault(kind, []).extend(
+                [a["domain"]] if kind == "amass" else (a.get("targets") or []))
+
+        # The apex is enumerable because the wildcard names it.
+        check("amass is queued for the zone the wildcard names",
+              got.get("amass") == ["zone.acme.example"], got.get("amass"))
+        # ...and is still not a host anything may be done to.
+        check("nmap is NOT queued for that apex",
+              "zone.acme.example" not in got.get("nmap", []), got.get("nmap"))
+        check("nmap is queued for the host that really is in scope",
+              got.get("nmap") == ["one.zone.acme.example"], got.get("nmap"))
+        check("...and the apex was a candidate, so that meant something",
+              "zone.acme.example" in [h for h, _ in
+                                      (await snapshot(s, pr)).targets])
+
+
+asyncio.run(zones())
 
 print(f"\n{ok} passed, {fail} failed")
 raise SystemExit(1 if fail else 0)

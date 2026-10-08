@@ -495,6 +495,47 @@ class ScopeIndex:
         return best.country if best else None
 
     # ------------------------------------------------------- the decision
+    def check_zone(self, zone: str) -> Ruling:
+        """May the project enumerate this ZONE — ask who exists under it?
+
+        A different question from `check`, which asks whether the
+        project may do something to the host of that name, and the two
+        genuinely have different answers for exactly one input.
+
+        `*.acme.example` does not put `acme.example` in scope. That is
+        deliberate and stays: the apex is a different machine from the
+        names under it, and a wildcard is not permission to scan it.
+        But "enumerate the zone acme.example" is the single operation
+        that wildcard most clearly DOES authorise — every name it can
+        return is `*.acme.example`, which is precisely what was
+        written down. Refusing it meant Kitchen Sink walking a known
+        host queued amass for the leaf name and never for the zone,
+        so a project scoped the normal way could not enumerate itself.
+
+        So: allowed if `check` already allows it, or if an included
+        wildcard names this exact zone. Nothing else is widened —
+        a parent of the wildcard is still refused, and the out-list
+        still wins, because this defers to `check` for both.
+
+        This must not be used to decide whether to touch a host. It
+        answers one question, for the enumerate path, and the name
+        says which.
+        """
+        direct = self.check(zone)
+        if direct.allowed:
+            return direct
+        # BARRED is a decision, not an absence: an excluded zone stays
+        # excluded however it was named. Only OUTSIDE -- "nothing in
+        # the allowlist matched" -- can be reconsidered here.
+        if direct.verdict == BARRED:
+            return direct
+        h = normalise_host(zone)
+        if h and _parse_host(h) is None and ("." + h) in self.inc.suffixes:
+            entry = self.inc.suffixes["." + h]
+            return Ruling(ALLOWED,
+                          f"{h} is the zone named by the in-scope entry {entry}")
+        return direct
+
     def check(self, host: str, ip=None) -> Ruling:
         """May the project do something new with this host?
 

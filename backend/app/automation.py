@@ -56,6 +56,7 @@ from .models import (
     AgentTask,
     DomainSearch,
     Project,
+    ProjectScope,
     Target,
 )
 from .scopegate import index_for
@@ -121,6 +122,13 @@ class Snapshot:
     targets: list[tuple[str, bool]] = field(default_factory=list)
     #: Zones already handed to amass (`DomainSearch.domain`).
     searched: set[str] = field(default_factory=set)
+    #: Zones the scope list NAMES with a wildcard. These are candidates
+    #: in their own right, not only the zones derived from hostnames:
+    #: `registrable("one.zone.acme.example")` is `acme.example`, which
+    #: `*.zone.acme.example` does not cover, so deriving from hosts
+    #: alone means the engagement never enumerates the zone it was
+    #: actually authorised against. Same reasoning as `domainRoots`.
+    scope_zones: set[str] = field(default_factory=set)
     #: (kind, subject) this project has ever tasked. See "one attempt
     #: per subject" in the module docstring.
     tasked: set[tuple[str, str]] = field(default_factory=set)
@@ -138,10 +146,8 @@ def plan(s: Snapshot, limit: int = PER_CYCLE) -> list[Candidate]:
     if s.auto_amass:
         zones: list[str] = []
         seen: set[str] = set()
-        for host, _ in s.targets:
-            if is_ip(host):
-                continue            # an address has no zone to enumerate
-            z = gen.registrable(host)
+        derived = [gen.registrable(h) for h, _ in s.targets if not is_ip(h)]
+        for z in list(s.scope_zones) + derived:
             if not z or "." not in z or z in seen:
                 continue
             seen.add(z)
@@ -188,6 +194,17 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
         select(DomainSearch.domain).where(
             DomainSearch.project_id == pr.id))).scalars().all())
 
+    # A wildcard names its zone outright. Excluded entries are left out
+    # here as well as refused by the gate later: offering work that is
+    # certain to be refused is noise in every cycle for ever.
+    scope_zones = {
+        v.strip().lstrip("*.").lower()
+        for v, inc in (await session.execute(
+            select(ProjectScope.value, ProjectScope.included).where(
+                ProjectScope.project_id == pr.id,
+                ProjectScope.kind == "wildcard"))).all()
+        if inc and (v or "").strip()}
+
     # Every subject this project has ever tasked, for the kinds the
     # policies use. `args` is JSON, so it is parsed here rather than
     # matched in SQL -- a LIKE against a serialised blob would match
@@ -214,7 +231,8 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
         auto_resolve_ips=bool(pr.auto_resolve_ips),
         auto_reverse_dns=bool(pr.auto_reverse_dns),
         auto_nmap=str(pr.auto_nmap or "off"),
-        targets=targets, searched=searched, tasked=tasked)
+        targets=targets, searched=searched, tasked=tasked,
+        scope_zones=scope_zones)
 
 
 async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
@@ -242,7 +260,13 @@ async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
     idx = await index_for(session, pr.id)
     queued: dict[str, int] = {}
     for c in want:
-        ruling = idx.check(c.subject)
+        # A zone handed to amass is asked `check_zone`; everything else
+        # is a host something will be done TO, and gets `check`. The two
+        # disagree on exactly one input -- the apex of a wildcard -- and
+        # collapsing them would let a standing order queue a scan at a
+        # host the wildcard never covered, with nobody watching.
+        ruling = (idx.check_zone(c.subject) if c.kind == "amass"
+                  else idx.check(c.subject))
         if not ruling.allowed:
             # Not an error and not logged per candidate: a project whose
             # scope is narrower than its target list refuses the same
