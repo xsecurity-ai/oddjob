@@ -515,25 +515,6 @@ def build(session: AsyncSession, project: Project | None, user: User,
              "summary": e.summary, "actor": e.actor,
              "detail": (e.detail or "")[:800]} for e in rows]}
 
-    async def suggest_domains(domain: str, limit: int = 30) -> dict:
-        from ..routers.domains import known_hosts
-        from ..domains import generate
-        d = (domain or "").strip().lower().lstrip("*.").rstrip(".")
-        if "." not in d:
-            return {"error": f"{d!r} is a single label, not a domain"}
-        if pid is None:
-            return {"error": "suggesting domains needs one engagement in "
-                             "view — the generated names come from that "
-                             "project's known hosts. Pick a project first."}
-        hosts = await known_hosts(session, pid)
-        existing = {c.name for c in (await session.execute(
-            select(DomainCandidate).where(scoped(DomainCandidate.project_id)))).scalars()}
-        out = generate(d, hosts, limit=max(1, min(int(limit), 200)), already=existing)
-        return {"domain": d, "note": "generated offline from known hosts; "
-                                     "no lookups were performed",
-                "candidates": [{"name": c.name, "source": c.source,
-                                "score": c.score, "why": c.reason} for c in out]}
-
     async def port_summary(top: int = 20, protocol: str | None = None) -> dict:
         """Counts per port, computed in SQL over the whole project.
 
@@ -663,11 +644,6 @@ def build(session: AsyncSession, project: Project | None, user: User,
         Tool("host_timeline", "What was found and done to one host, newest first.",
              _obj({"host": {"type": "string"}, "limit": {"type": "integer"}}, ["host"]),
              timeline),
-        Tool("suggest_domains", "Candidate hostnames under a domain, extrapolated "
-             "from names this project already knows. Sends no packets and performs "
-             "no lookups; every result is a hypothesis.",
-             _obj({"domain": {"type": "string"}, "limit": {"type": "integer"}},
-                  ["domain"]), suggest_domains),
         Tool("rank_targets",
              "Which hosts are worth going after first, with the reason for "
              "each. Ranked rather than scored: the reasons come back so the "
