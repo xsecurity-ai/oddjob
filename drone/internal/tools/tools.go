@@ -520,10 +520,10 @@ func runEnv(ctx context.Context, m *Manager, elevated bool, argv []string,
 
 // RemovalReport is the outcome of undoing one install.
 type RemovalReport struct {
-	Tool    string `json:"tool"`
-	Action  string `json:"action"` // removed | kept | failed
-	Detail  string `json:"detail,omitempty"`
-	Via     string `json:"via,omitempty"`
+	Tool   string `json:"tool"`
+	Action string `json:"action"` // removed | kept | failed
+	Detail string `json:"detail,omitempty"`
+	Via    string `json:"via,omitempty"`
 }
 
 // Remove uninstalls tools this Drone installed, and ONLY those.
