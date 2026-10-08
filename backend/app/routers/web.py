@@ -7,6 +7,8 @@ question an operator actually has. A banner cannot answer it.
 """
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select, tuple_
@@ -14,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
 from ..events import broker
+from ..hosts import InvalidHost, validate_host
 from ..models import Project, Service, Target, User, WebAddress
 from ..query import paginate
 from ..schemas import (Page, WebAddressCreate, WebAddressOut,
@@ -32,6 +35,18 @@ from ..weburl import exchange_key, url_key
 from ..importers.burphistory import REQ_CAP, RESP_CAP
 
 router = APIRouter(prefix="/api/web", tags=["web"])
+
+#: A Host header, and nothing that could read as anything else. No
+#: `@` (userinfo, which moves the real destination), no `/` (a path,
+#: which does the same to a careless parser), no whitespace, no
+#: control characters. An IPv6 literal keeps its brackets because that
+#: is how one appears in a Host header.
+#:
+#: Deliberately stricter than "what a browser would accept": this
+#: pattern decides where the server puts a packet on a client's
+#: network, so anything ambiguous is refused rather than interpreted.
+_HOST_PORT = re.compile(
+    r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+)(?::(?P<port>\d{1,5}))?")
 
 SORTABLE = {
     "url": WebAddress.url, "path": WebAddress.path, "port": WebAddress.port,
@@ -354,8 +369,58 @@ async def replay(web_id: int, body: ReplayIn,
     method, path, headers, payload = parse_raw_request(body.raw)
 
     # The Host header decides where it goes, as it does on the wire.
-    host = (headers.get("Host") or headers.get("host") or orig_host).strip()
-    hostname = host.split(":")[0].strip().lower()
+    #
+    # Parsed, not split. `host.split(":")[0]` is what this used to do,
+    # and it is a full bypass of both checks below:
+    #
+    #   Host: known.example.com:80@evil.example.net
+    #     split(":")[0] -> "known.example.com"   passes the target
+    #                                            lookup AND the scope
+    #                                            gate
+    #     the URL built from it resolves to evil.example.net, which is
+    #     where the packet actually goes
+    #
+    # Everything after the colon is userinfo to a URL parser, so the
+    # validated name ends up as a username and the real host is
+    # whatever follows the `@`. For this tool that is worse than the
+    # open proxy the docstring worries about: it sends live traffic to
+    # a host the scope gate just said was allowed, under a client's
+    # engagement, and the audit trail records the wrong name.
+    #
+    # So the header is required to be strictly host[:port], the
+    # hostname goes through the same validator every other host in the
+    # system does, and the URL is rebuilt from the validated parts
+    # rather than from anything the caller typed.
+    raw_host = (headers.get("Host") or headers.get("host") or orig_host).strip()
+    m = _HOST_PORT.fullmatch(raw_host)
+    if m is None:
+        raise HTTPException(
+            400, f"{raw_host!r} is not a bare host or host:port. The Host "
+                 f"header decides where this request is sent, so it is held "
+                 f"to that shape exactly — credentials, paths and anything "
+                 f"else a URL parser would read as a different destination "
+                 f"are refused.")
+    # An IPv6 literal is bracketed in a Host header and bare
+    # everywhere else — in the targets table, in the scope list, and
+    # to validate_host. Brackets come off for all of those and go back
+    # on for the URL. The old `split(":")[0]` made `[::1]:8080` into
+    # `[`, so IPv6 replay never worked; this is the smallest fix that
+    # makes it work rather than merely refusing it more politely.
+    bare = m.group("host")
+    v6 = bare.startswith("[")
+    if v6:
+        bare = bare[1:-1]
+    try:
+        hostname = validate_host(bare)
+    except InvalidHost as e:
+        raise HTTPException(400, str(e))
+    port = m.group("port")
+    if port is not None and not (0 < int(port) < 65536):
+        raise HTTPException(400, f"port {port} is out of range")
+    # Rebuilt from the validated pieces. Nothing the caller sent is
+    # carried through to the URL verbatim.
+    shown = f"[{hostname}]" if v6 else hostname
+    host = shown if port is None else f"{shown}:{port}"
     known = (await session.execute(
         select(Target).where(Target.project_id == target.project_id,
                              Target.host == hostname))).scalar_one_or_none()
