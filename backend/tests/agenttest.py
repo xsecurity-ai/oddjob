@@ -1420,6 +1420,18 @@ check("the agent keeps its name and its record",
 check("and is no longer holding an identity",
       (again or {}).get("agent", {}).get("has_identity") is False,
       str((again or {}).get("agent", {}).get("has_identity")))
+# Both keys rotate on a re-enrol, so both have to come back. Returning
+# only the enrolment token left a CALL-IN agent rotated but unreachable
+# forever: the server had a new call-in key, the operator had no way to
+# learn it, and replacing the agent -- losing its name and everything it
+# had run -- was the only way out.
+check("re-enrolling returns the rotated call-in key",
+      bool((again or {}).get("call_in_key")), str(list((again or {}).keys())))
+check("and the rotated callback key",
+      bool((again or {}).get("callback_key")), str(list((again or {}).keys())))
+check("and they are not the same key",
+      (again or {}).get("call_in_key") != (again or {}).get("callback_key"), "")
+
 check("the response says what to do on the host",
       "identity.json" in str((again or {}).get("instructions")),
       str((again or {}).get("instructions"))[:90])
@@ -1500,6 +1512,60 @@ st, ren5 = call(f"/api/agents/{rid}?project=AGENT", "PATCH",
 check("an overlong name is bounded rather than erroring",
       st == 200 and len((ren5 or {}).get("name", "")) <= 128,
       f"status={st} len={len((ren5 or {}).get('name',''))}")
+
+print("\n== a killed drone confirms it actually went ==")
+# Pressing Kill records an intention. This records what happened, and
+# they are different facts: a drone killed while its host was powered
+# off never confirms, and the tools really are still on that machine.
+st, renr = call("/api/agents?project=AGENT", "POST", {"name": "retire-me"},
+                token=admin)
+RID = renr["agent"]["id"]
+qpriv, qpub = keypair()
+raw("/api/agents/enrol", "POST",
+    {"enroll_token": renr["enroll_token"], "public_key": qpub})
+
+st, before = call(f"/api/agents?project=AGENT", token=admin)
+_row = [a for a in (before or []) if a["id"] == RID]
+check("a live drone has no retirement recorded",
+      _row and _row[0].get("retired_at") is None, str(_row[:1])[:120])
+
+st, _ = call(f"/api/agents/{RID}/kill?project=AGENT", "POST", {}, token=admin)
+check("kill is accepted", st == 200, f"status={st}")
+
+_body = json.dumps({"reason": "killed from Oddjob",
+                    "removed": ["nuclei", "httpx"], "kept": ["nmap"],
+                    "failed": ["gobuster: apt is locked"]}).encode()
+st, _why = raw("/api/agents/retired", "POST",
+               json.loads(_body),
+               headers=signed(qpriv, RID, "POST", "/api/agents/retired", _body))
+# This route has to be on the gatekeeper's allowlist as well as having
+# its own agent-key dependency; without that it answers "not
+# authenticated" before the endpoint is ever reached, and a drone can
+# never report that it shut down.
+check("a KILLED drone can still report that it shut down", st == 200,
+      f"status={st} {str(_why)[:160]}")
+
+st, after = call("/api/agents?project=AGENT", token=admin)
+_r = [a for a in (after or []) if a["id"] == RID]
+check("the confirmation is recorded", _r and _r[0].get("retired_at"),
+      str(_r[:1])[:140])
+check("with the reason", _r and _r[0].get("retired_reason") == "killed from Oddjob",
+      str(_r and _r[0].get("retired_reason")))
+_cl = (_r[0].get("retired_cleanup") or {}) if _r else {}
+check("and what it uninstalled", _cl.get("removed") == ["nuclei", "httpx"],
+      str(_cl))
+# The tool that was already there must be reported kept, not removed:
+# uninstalling someone's own nmap on the way out is a worse trespass
+# than leaving ours behind.
+check("what it deliberately left alone", _cl.get("kept") == ["nmap"], str(_cl))
+# The list that actually matters -- cleanup still owed by hand.
+check("and what it could NOT remove",
+      _cl.get("failed") == ["gobuster: apt is locked"], str(_cl))
+check("the drone stays killed, it cannot un-kill itself by retiring",
+      _r and _r[0].get("status") == "disabled", str(_r and _r[0].get("status")))
+
+st, _ = raw("/api/agents/retired", "POST", {"reason": "nice try"})
+check("an unsigned retirement is refused", st in (401, 403), f"status={st}")
 
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

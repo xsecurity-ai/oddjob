@@ -1173,6 +1173,19 @@ class Agent(Base, TimestampMixin):
     #: that task failed three times and told the operator nothing they
     #: could act on.
     missing_tools: Mapped[str | None] = mapped_column(Text)
+    #: When this drone confirmed it had stopped, and what it took with
+    #: it. Set by the drone's own last message, not by the kill: an
+    #: operator pressing Kill knows what they asked for, and what they
+    #: need to know afterwards is whether it actually happened.
+    #:
+    #: A drone killed while its host is off stays unretired here
+    #: forever, which is the honest answer — the tools are still on
+    #: that host and somebody has to deal with it.
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retired_reason: Mapped[str | None] = mapped_column(String(300))
+    #: JSON {removed: [], kept: [], failed: []}. `failed` is the list
+    #: that matters: it is the cleanup still owed on someone's machine.
+    retired_cleanup: Mapped[str | None] = mapped_column(Text)
 
     #: What this agent decided its host can run at once, and why.
     #: Reported by the agent, not assumed here: it is the only side

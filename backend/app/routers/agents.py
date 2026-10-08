@@ -132,6 +132,15 @@ class AgentOut(BaseModel):
     #: What this agent decided its host can run at once, and why.
     #: None until it has told us.
     capacity: int | None = None
+    #: Set only once the drone has CONFIRMED it stopped. A killed drone
+    #: whose host was off never confirms, and the difference between
+    #: "killed" and "killed and gone" is the difference between an
+    #: engagement that is finished and one with a privileged process
+    #: still sitting on somebody's machine.
+    retired_at: datetime | None = None
+    retired_reason: str | None = None
+    #: {removed, kept, failed}. `failed` is cleanup still owed by hand.
+    retired_cleanup: dict | None = None
     capacity_reason: str | None = None
     #: {tool: why} for everything this agent tried to install and could
     #: not. Work needing one of these is not sent here.
@@ -305,6 +314,19 @@ def _jlist(raw: str | None) -> list[str]:
     return [str(x) for x in v] if isinstance(v, list) else []
 
 
+def _json_or_none(raw: str | None) -> dict | None:
+    """Stored JSON, or None. A malformed blob reads as absent rather
+    than failing the whole agent list — one bad row must not take out
+    the page an operator is using to find it."""
+    if not raw:
+        return None
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else None
+    except ValueError:
+        return None
+
+
 def _agent_out(a: Agent, code: str, queued: int = 0,
                running: int = 0, completed: int = 0,
                failed: int = 0, ceiling: int = 5,
@@ -314,6 +336,8 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         platform=a.platform, arch=a.arch, version=a.version,
         hostname=a.hostname, privileged=a.privileged, tools=_tools(a.tools),
         call_in_url=a.call_in_url, last_seen=a.last_seen, last_ip=a.last_ip,
+        retired_at=a.retired_at, retired_reason=a.retired_reason,
+        retired_cleanup=_json_or_none(a.retired_cleanup),
         outbound_ip=a.outbound_ip, interfaces=_jlist(a.interfaces),
         queued_tasks=queued, running_tasks=running,
         completed_tasks=completed, failed_tasks=failed,
@@ -1193,6 +1217,14 @@ class ReEnrolled(BaseModel):
     enroll_expires_at: datetime
     server_public_key: str
     server_kex_public_key: str
+    #: Both rotate on a re-enrol, so both have to come back. Returning
+    #: only the enrolment token meant a CALL-IN agent could be rotated
+    #: but never restarted: the server had a new call-in key, the
+    #: operator had no way to learn it, and the agent could not be
+    #: reached again. Replacing the agent was the only way out, which
+    #: threw away its name and everything it had ever run.
+    callback_key: str
+    call_in_key: str
     #: What the operator has to do on the host, because the agent will
     #: not recover on its own.
     instructions: str
@@ -1247,6 +1279,7 @@ async def reenroll_agent(agent_id: int,
     return ReEnrolled(
         agent=_agent_out(a, pr.code),
         enroll_token=tok_raw, enroll_expires_at=expires,
+        callback_key=cb_raw, call_in_key=ci_raw,
         server_public_key=server_pub, server_kex_public_key=server_kex_pub,
         instructions=(
             f"{a.name} will fail to authenticate from now until it redeems "
@@ -2040,6 +2073,56 @@ class HeartbeatIn(BaseModel):
     #: than wondering why a 32-core box is running two things.
     capacity: int | None = None
     capacity_reason: str | None = None
+
+
+class RetiredIn(BaseModel):
+    """A drone's last message: it has stopped, and this is what it took."""
+    reason: str = ""
+    removed: list[str] = []
+    kept: list[str] = []
+    failed: list[str] = []
+
+
+@router.post("/retired", response_model=dict)
+async def retired(body: RetiredIn,
+                  a: Agent = Depends(agent_even_if_killed),
+                  session: AsyncSession = Depends(get_session)):
+    """A drone confirming it has shut down and cleaned up after itself.
+
+    `agent_even_if_killed`, necessarily: this arrives from an agent that
+    has just been killed, and the whole value of the message is that it
+    comes after the kill.
+
+    Pressing Kill records an intention. This records what happened,
+    which is a different fact and the one that matters at the end of an
+    engagement — a drone killed while its host was powered off never
+    sends this, stays unretired, and that is the honest answer, because
+    the tools really are still sitting on that machine.
+    """
+    now = datetime.now(timezone.utc)
+    a.retired_at = now
+    a.retired_reason = (body.reason or "retired")[:300]
+    a.retired_cleanup = json.dumps({"removed": body.removed[:100],
+                                    "kept": body.kept[:100],
+                                    "failed": body.failed[:100]})
+    # Killed is how it stays. Retirement is the confirmation of a kill,
+    # not a state an agent can put itself into to dodge one — and a
+    # drone that retired on the dead-man switch must not come back as
+    # enabled the moment somebody restarts its host.
+    a.status = "disabled"
+    a.last_seen = now
+    detail = f"{a.name} confirmed shutdown: {a.retired_reason}"
+    if body.removed:
+        detail += f"; uninstalled {', '.join(body.removed[:8])}"
+    if body.failed:
+        detail += f"; COULD NOT remove {', '.join(body.failed[:8])}"
+    pr = await session.get(Project, a.project_id)
+    await audit.record(session, "drone", "drone.retired",
+                       project_code=pr.code if pr else None, detail=detail)
+    await session.commit()
+    await broker.publish("agents", action="retired",
+                         project=pr.code if pr else None)
+    return {"ok": True, "recorded": True}
 
 
 @router.post("/heartbeat", response_model=dict)
