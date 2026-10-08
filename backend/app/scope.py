@@ -109,6 +109,27 @@ def classify(raw: str, include_subdomains: bool = False) -> Entry:
     # Bare address?
     try:
         ip = ipaddress.ip_address(s)
+        # An IPv4-mapped IPv6 address is spelled explicitly rather than
+        # left to `str()`. CPython renders `::ffff:cb00:7101` as the hex
+        # form on some patch releases and the dotted `::ffff:203.0.113.1`
+        # on others, so `str()` makes the stored value depend on which
+        # Python the host happens to run. Two installs would then
+        # normalise the same scope line differently, and a value written
+        # by one would not match a lookup from the other.
+        #
+        # Caught by a differential fixture that pins this function's
+        # answers for the browser: CI is on Ubuntu's 3.12.3 and recorded
+        # the other form. The fixture found a real portability bug rather
+        # than a disagreement between client and server.
+        # The zone id is carried through rather than dropped: it is part
+        # of which interface the address is on, and `ipv4_mapped` does not
+        # keep it. Losing it here would silently rewrite a scoped address
+        # into a different one — which is how the first version of this
+        # fix turned `::ffff:203.0.113.1%eth0` into `::ffff:203.0.113.1`,
+        # caught by the fixture rather than by reading.
+        if ip.version == 6 and ip.ipv4_mapped is not None:
+            zone = f"%{ip.scope_id}" if ip.scope_id else ""
+            return Entry("ipv6", f"::ffff:{ip.ipv4_mapped}{zone}", included)
         return Entry("ipv4" if ip.version == 4 else "ipv6", str(ip), included)
     except ValueError:
         pass
