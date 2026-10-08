@@ -376,6 +376,89 @@ function Routing({ project, routing }:
  *  dialog says which — a priority field on a project running mesh is
  *  a control that does nothing, and leaving the operator to discover
  *  that is how a setting gets blamed for not working. */
+/** The Parallel cell: what this ghost runs at once, and who decided.
+ *
+ *  A component rather than a closure inside `renderCell` because it
+ *  needs state, and the state is there to fix a specific bug: the
+ *  tooltip used to wrap the whole control, so opening the menu left
+ *  the balloon showing on top of the options. The explanation covered
+ *  the thing it was explaining.
+ *
+ *  Nothing to attach the tooltip to instead — here the cell IS the
+ *  control — so it is closed explicitly while the menu is open.
+ */
+function ParallelCell({ eff, own, reason, over, admin, busy, onPick }: {
+  eff: number
+  own: number | null
+  reason: string | null
+  over: number | null
+  admin: boolean
+  busy: boolean
+  onPick: (n: number) => void
+}) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [hover, setHover] = useState(false)
+
+  const why = own == null
+    ? 'This ghost has not reported an assessment of its host yet, so it is held to one task at a time.'
+    : `${own} by its own assessment (${reason || 'no reason given'}).`
+  const title = (over
+    ? `Set to ${over} for this ghost. ${why} `
+      + `The engagement ceiling still applies on top, so the effective number is ${eff}.`
+    : `${why} The project's ceiling and that are combined, and the lower runs.`)
+    + ' Changing this is pushed to the ghost on its next heartbeat.'
+
+  if (!admin) {
+    return (
+      <Tooltip title={title}>
+        <Box sx={{ color: eff > 1 ? neon.green : neon.muted, fontWeight: 600 }}>
+          {eff}
+        </Box>
+      </Tooltip>
+    )
+  }
+  return (
+    <Tooltip title={title} open={hover && !menuOpen}
+      onOpen={() => setHover(true)} onClose={() => setHover(false)}>
+      <Stack direction="row" spacing={0.6} alignItems="center">
+        <Select size="small" variant="standard" disableUnderline
+          value={over ?? 0}
+          disabled={busy}
+          open={menuOpen}
+          onOpen={() => setMenuOpen(true)}
+          onClose={() => setMenuOpen(false)}
+          onChange={(e) => onPick(Number(e.target.value))}
+          renderValue={() => (
+            <Box component="span" sx={{
+              color: eff > 1 ? neon.green : neon.muted, fontWeight: 600 }}>
+              {eff}{over ? '' : ' auto'}
+            </Box>
+          )}
+          sx={{ fontSize: 12, color: neon.text,
+                '& .MuiSelect-select': { py: 0 } }}>
+          {/* 0 is the way back to automatic. `null` in a PATCH body
+              means "not supplied", so undo needs a value. */}
+          <MenuItem value={0} sx={{ fontSize: 12 }}>Auto</MenuItem>
+          {[1, 2, 4, 6, 8, 10, 12, 16, 24, 32].map((n) => (
+            <MenuItem key={n} value={n} sx={{ fontSize: 12 }}>{n}</MenuItem>
+          ))}
+        </Select>
+        {over != null && over !== eff && (
+          // The engagement ceiling is biting. Said here rather than
+          // only in the tooltip: a ghost showing 5 when somebody
+          // picked 16 looks broken otherwise.
+          <Tooltip title={`Picked ${over}; the engagement ceiling holds it to ${eff}.`}>
+            <Chip size="small" label="capped" sx={{
+              height: 16, fontSize: 9, color: neon.yellow,
+              bgcolor: alpha(neon.yellow, 0.14) }} />
+          </Tooltip>
+        )}
+      </Stack>
+    </Tooltip>
+  )
+}
+
+
 function EditAgentDialog({ project, agent, mode, onClose }: {
   project: string; agent: GhostAgent; mode?: string; onClose: () => void
 }) {
@@ -819,64 +902,17 @@ export function GhostsView({ project }: { project: string | null }) {
       // seeing nothing change, and having no way to find out that the
       // box had 900 MB free — or to say "this one box can take more".
       field: 'max_parallel', headerName: 'Parallel', width: 138,
-      renderCell: (p) => {
-        const eff = (p.value as number) ?? 1
-        const own = p.row.capacity
-        const over = p.row.parallel_override
-        const why = own == null
-          ? 'This agent has not reported an assessment of its host yet, so it is held to one task at a time.'
-          : `${own} by its own assessment (${p.row.capacity_reason || 'no reason given'}).`
-        const title = (over
-          ? `Set to ${over} for this ghost. ${why} `
-            + `The engagement ceiling still applies on top, so the effective number is ${eff}.`
-          : `${why} The project's ceiling and that are combined, and the lower runs.`)
-          + ' Changing this is pushed to the ghost on its next heartbeat.'
-        if (!admin) {
-          return (
-            <Tooltip title={title}>
-              <Box sx={{ color: eff > 1 ? neon.green : neon.muted, fontWeight: 600 }}>
-                {eff}
-              </Box>
-            </Tooltip>
-          )
-        }
-        return (
-          <Tooltip title={title}>
-            <Stack direction="row" spacing={0.6} alignItems="center">
-              <Select size="small" variant="standard" disableUnderline
-                value={over ?? 0}
-                disabled={setParallel.isPending}
-                onChange={(e) => setParallel.mutate(
-                  { id: p.row.id, n: Number(e.target.value) })}
-                renderValue={() => (
-                  <Box component="span" sx={{
-                    color: eff > 1 ? neon.green : neon.muted, fontWeight: 600 }}>
-                    {eff}{over ? '' : ' auto'}
-                  </Box>
-                )}
-                sx={{ fontSize: 12, color: neon.text,
-                      '& .MuiSelect-select': { py: 0 } }}>
-                {/* 0 is the way back to automatic. `null` in a PATCH
-                    body means "not supplied", so undo needs a value. */}
-                <MenuItem value={0} sx={{ fontSize: 12 }}>Auto</MenuItem>
-                {[1, 2, 4, 6, 8, 10, 12, 16, 24, 32].map((n) => (
-                  <MenuItem key={n} value={n} sx={{ fontSize: 12 }}>{n}</MenuItem>
-                ))}
-              </Select>
-              {over != null && over !== eff && (
-                // The engagement ceiling is biting. Said here rather
-                // than only in the tooltip: a ghost showing 5 when
-                // somebody picked 16 looks broken otherwise.
-                <Tooltip title={`Picked ${over}; the engagement ceiling holds it to ${eff}.`}>
-                  <Chip size="small" label="capped" sx={{
-                    height: 16, fontSize: 9, color: neon.yellow,
-                    bgcolor: alpha(neon.yellow, 0.14) }} />
-                </Tooltip>
-              )}
-            </Stack>
-          </Tooltip>
-        )
-      },
+      renderCell: (p) => (
+        <ParallelCell
+          eff={(p.value as number) ?? 1}
+          own={p.row.capacity}
+          reason={p.row.capacity_reason}
+          over={p.row.parallel_override}
+          admin={admin}
+          busy={setParallel.isPending}
+          onPick={(n) => setParallel.mutate({ id: p.row.id, n })}
+        />
+      ),
     },
     {
       field: 'completed_tasks', headerName: 'Completed', width: 116,
