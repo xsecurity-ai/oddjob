@@ -204,32 +204,9 @@ export interface DomainCandidate {
   source: string; score: number; reason: string | null
   state: string; times_seen: number; created_at: string
 }
-export interface DomainSearch {
-  id: number; domain: string; runs: number; last_run_at: string | null
-  candidates_found: number; known_at_last_run: number; note: string | null
-}
+/** `searched` is always false now that nothing generates names to search
+ *  for. Kept so an older client does not break on a missing field. */
 export interface DomainRoot { domain: string; known_hosts: number; searched: boolean }
-export interface DetectResult {
-  domain: string; candidates: DomainCandidate[]
-  new_candidates: number; already_known: number; previously_suggested: number
-  runs: number; note: string | null
-  error?: string | null
-  /** Present when auto_promote ran. Named, not counted. */
-  promoted?: string[]
-  promoted_skipped?: string[]
-  promoted_refused?: Record<string, string>
-}
-/** What /api/domains/detect actually returns: one entry per domain, so
- *  a typo in the fourth of eight never costs you the other seven.
- *
- *  This shape was the bug. The client declared DetectResult and read
- *  `.candidates` off the batch, which has no such key — so a run that
- *  produced 200 candidates rendered as "No candidates". */
-export interface DetectBatch {
-  results: DetectResult[]
-  new_candidates: number; domains_run: number; domains_skipped: number
-  promoted: number; promoted_refused: number
-}
 export interface AgentStep {
   kind: string; text: string; tool: string | null
   args: Record<string, unknown>; result: string | null

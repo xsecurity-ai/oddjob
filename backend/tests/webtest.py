@@ -1,4 +1,4 @@
-"""Web addresses, and domain-candidate generation with its memory."""
+"""Web addresses, and the domain roots they group under."""
 
 # Run from anywhere: the suites import `app`, which lives one level up.
 import pathlib as _pathlib, sys as _sys

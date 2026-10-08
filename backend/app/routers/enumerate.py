@@ -107,8 +107,8 @@ class ResolveIn(BaseModel):
     #: Scope decides, exactly as it does everywhere else.
     add: list[str] = []
     #: And the ones to refuse. Remembered rather than merely skipped,
-    #: so domain detection does not propose them again next week and
-    #: the judgement has to be made twice.
+    #: so a later lookup on the same shared address does not ask for
+    #: the same judgement a second time.
     deny: list[str] = []
 
 
@@ -237,7 +237,7 @@ async def _decide_others(session: AsyncSession, pr: Project, user: User,
 
     Picking one name does not make the others untrue, and until now
     they went on the timeline and nowhere else — findable, but not
-    testable, and offered again by domain detection a week later.
+    testable, and offered again by the next lookup on that address.
 
     Two explicit decisions, both remembered:
 
@@ -246,9 +246,9 @@ async def _decide_others(session: AsyncSession, pr: Project, user: User,
             at the name itself, only that an address answers to it, so
             `alive` stays None — a reverse lookup is not a probe.
       deny  is written as a rejected candidate. Not merely skipped:
-            the generator will not re-propose a name it already has a
-            row for, so recording the refusal is what stops the same
-            judgement being asked for twice.
+            the row is what carries the decision forward, so the same
+            name coming back from a later lookup on the same shared
+            address does not ask for the judgement twice.
 
     Anything in neither list is left exactly as before, on the
     timeline. Silence is not a decision.
@@ -297,8 +297,9 @@ async def _decide_others(session: AsyncSession, pr: Project, user: User,
         added.append(n)
 
     for n in sorted(want_add | want_deny):
-        # A row either way, because the generator skips any name it
-        # already has one for: that is what keeps a decision made.
+        # A row either way. The row is the decision: without one for
+        # an accepted name, nothing distinguishes "chosen" from "never
+        # looked at" once the target exists.
         row = (await session.execute(
             select(DomainCandidate)
             .where(DomainCandidate.project_id == pr.id,

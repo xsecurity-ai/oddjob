@@ -210,12 +210,12 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
                             session: AsyncSession = Depends(get_session)):
     """Hand a list of domains to Drone, and file what comes back.
 
-    The difference from `/detect` is what produces the names. Detection
-    extrapolates from patterns the estate already shows and produces
-    hypotheses for a person to triage. This asks an agent to actually
-    enumerate the zone, so the names come back resolved — and they are
-    filed as targets automatically when the results arrive, because a
-    name a tool found is a finding and not a suggestion.
+    This replaced an offline generator that extrapolated from patterns
+    the estate already showed and handed back hypotheses for a person
+    to triage. Here an agent enumerates the zone for real, so the names
+    come back resolved — and they are filed as targets automatically
+    when the results arrive, because a name a tool found is a finding
+    and not a suggestion.
 
     One task per domain: amass enumerates a single zone at a time. They
     are queued unassigned so the project's routing policy spreads them,
@@ -296,11 +296,14 @@ async def promote(body: PromoteRequest, project: str = Query(...),
                   pr: Project = Depends(require_project("user")),
                   user: User = Depends(get_current_user),
                   session: AsyncSession = Depends(get_session)):
-    """Turn accepted candidates into targets.
+    """Turn candidates into targets.
 
-    Deliberate, and separate from generation: a guessed name is a
-    hypothesis, an inventory row is a claim. The target is created with
-    `alive=None` — not probed — because nothing here has checked.
+    A candidate is a name something saw alongside a target — currently
+    the reverse-IP flow, which records a decision for every name an
+    address answers to. Seeing a name is not the same as claiming it is
+    part of the estate, so promoting it is a separate, deliberate step.
+    The target is created with `alive=None` — not probed — because
+    nothing here has checked.
     """
     rows = (await session.execute(
         select(DomainCandidate).where(DomainCandidate.project_id == pr.id,
@@ -316,19 +319,18 @@ async def _promote_rows(session: AsyncSession, pr: Project, user: User,
                         rows) -> tuple[list[str], list[str], dict[str, str]]:
     """Turn candidate rows into targets. -> (created, already, refused).
 
-    Shared by the explicit promote endpoint and by `auto_promote` on
-    detection, so the automatic path cannot drift from the one a person
-    drives — in particular it cannot quietly stop checking scope.
+    Factored out of the endpoint so a second caller cannot drift from
+    the one a person drives — in particular, cannot quietly stop
+    checking scope.
 
     Does not commit; the caller owns the transaction.
     """
     created, skipped = [], []
     refused: dict[str, str] = {}
-    # A candidate is a guess, so this is the one creation path where the
-    # host was never observed anywhere. All the more reason to check it:
-    # the generator extrapolates from names the estate uses, and the
-    # neighbouring domain it extrapolates onto is frequently somebody
-    # else's.
+    # Nothing has been probed at these names: an address answered to
+    # them, which is all. On shared hosting most of what answers to an
+    # address belongs to somebody else, so the scope check here is the
+    # thing standing between a neighbour's hostname and the inventory.
     idx = await index_for(session, pr.id)
     now = datetime.now(timezone.utc)
     for c in rows:
