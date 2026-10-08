@@ -200,10 +200,10 @@ async def delete_vuln(vuln_id: int, user: User = Depends(get_current_user),
     v = await session.get(Vuln, vuln_id)
     if not v:
         raise HTTPException(404, f"no vuln {vuln_id}")
-    await assert_role_for_target(session, user, v.target_id, "user")
+    code = await assert_role_for_target(session, user, v.target_id, "user")
     await session.delete(v)
     await session.commit()
-    await broker.publish("vulns", action="delete")
+    await broker.publish("vulns", action="delete", project=code)
 
 
 @router.get("/pocs", response_model=Page[PocOut])
@@ -261,7 +261,7 @@ async def delete_poc(poc_id: int, user: User = Depends(get_current_user),
     p = await session.get(Poc, poc_id)
     if not p:
         raise HTTPException(404, f"no poc {poc_id}")
-    await assert_role_for_target(session, user, p.target_id, "user")
+    code = await assert_role_for_target(session, user, p.target_id, "user")
     await session.delete(p)
     await session.commit()
-    await broker.publish("pocs", action="delete")
+    await broker.publish("pocs", action="delete", project=code)

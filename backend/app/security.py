@@ -215,12 +215,18 @@ def require_project(minimum: str = "readonly"):
 
 
 async def assert_role_for_target(session: AsyncSession, user: User,
-                                 target_id: int, minimum: str = "user") -> None:
+                                 target_id: int, minimum: str = "user") -> str:
     """Role check for routes addressed by child-object id rather than project.
 
     Without this a caller with readonly on a project could still DELETE a
     service by guessing its integer id -- the ACL would never be consulted
     because no project appears in the path.
+
+    Returns the project's code. These routes are reached by child id and so
+    never had the engagement to hand, which is exactly why their change
+    events used to go out unlabelled and therefore to everybody; it is
+    already loaded here to do the ACL check, so handing it back costs
+    nothing and gives the call site no excuse.
     """
     from .models import Target
     t = await session.get(Target, target_id)
@@ -231,6 +237,8 @@ async def assert_role_for_target(session: AsyncSession, user: User,
         raise HTTPException(404, "not found")
     if ROLE_ORDER[role] < ROLE_ORDER[minimum]:
         raise HTTPException(403, f"{minimum} required; you have {role}")
+    pr = await session.get(Project, t.project_id)
+    return pr.code if pr else ""
 
 
 # ------------------------------------------------------------ agent keys

@@ -227,6 +227,8 @@ async def deliver_invite(session: AsyncSession, user: User, cfg: dict) -> Invite
         await send_mail(cfg, user.email, subject, text)
     except Exception as e:
         return InviteResult(ok=False, detail=f"{type(e).__name__}: {e}")
+    # No project: the user list is a site-admin view, and an unlabelled
+    # event is delivered to site admins only. See events.py.
     await broker.publish("users", action="invited")
     return InviteResult(ok=True, detail=f"invitation sent to {user.email}")
 

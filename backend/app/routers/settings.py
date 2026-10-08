@@ -245,6 +245,8 @@ async def write_settings(body: SettingsPatch, user: User = Depends(require_site_
     # security headers; recompute rather than making them need a restart.
     from ..headers import refresh as refresh_headers
     await refresh_headers(session)
+    # No project: settings are installation-wide and the view is
+    # site-admin only, so unlabelled delivery is the right audience.
     await broker.publish("settings", action="update")
     return await read_settings(user, session)
 
@@ -268,6 +270,8 @@ async def clear_setting(key: str, user: User = Depends(require_site_admin),
             if flag is not None:
                 flag.value, flag.updated_by = "0", user.id
     await session.commit()
+    # No project: settings are installation-wide and the view is
+    # site-admin only, so unlabelled delivery is the right audience.
     await broker.publish("settings", action="clear")
 
 

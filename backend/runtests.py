@@ -50,6 +50,7 @@ SUITES = [
     ("tests/audittest.py",     TMP / "ms-audit.db"),
     ("tests/vulnfeedtest.py",  TMP / "ms-vuln.db"),
     ("tests/mcptest.py",       TMP / "ms-mcp.db"),
+    ("tests/eventstest.py",    TMP / "ms-events.db"),
 ]
 
 

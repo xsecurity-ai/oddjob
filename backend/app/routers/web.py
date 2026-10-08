@@ -365,7 +365,7 @@ async def replay(web_id: int, body: ReplayIn,
         raise HTTPException(404, "no such web address")
     orig, orig_host, _code = row[0], row[1], row[2]
     target = await session.get(Target, orig.target_id)
-    await assert_role_for_target(session, user, orig.target_id, "user")
+    code = await assert_role_for_target(session, user, orig.target_id, "user")
 
     method, path, headers, payload = parse_raw_request(body.raw)
 
@@ -552,7 +552,7 @@ async def replay(web_id: int, body: ReplayIn,
                  f"request replayed: {method} {url} -> "
                  f"{status if status is not None else err}", actor=user)
     await session.commit()
-    await broker.publish("web", action="create", host=known.host)
+    await broker.publish("web", action="create", host=known.host, project=code)
     return ReplayOut(web=await _one(session, new.id), status_code=status,
                      elapsed_ms=elapsed, error=err)
 
@@ -651,7 +651,7 @@ async def add_web(body: WebAddressCreate,
     t = await session.get(Target, body.target_id)
     if t is None:
         raise HTTPException(404, "target not found")
-    await assert_role_for_target(session, user, body.target_id, "user")
+    code = await assert_role_for_target(session, user, body.target_id, "user")
     try:
         u = parse_url(body.url, base_host=t.host)
     except BadUrl as e:
@@ -675,7 +675,7 @@ async def add_web(body: WebAddressCreate,
     await session.flush()
     await record(session, t.id, "web", f"web address added: {u.url}", actor=user)
     await session.commit()
-    await broker.publish("web", action="create", host=t.host)
+    await broker.publish("web", action="create", host=t.host, project=code)
     return await _one(session, row.id)
 
 
@@ -686,11 +686,11 @@ async def update_web(wid: int, body: WebAddressUpdate,
     row = await session.get(WebAddress, wid)
     if row is None:
         raise HTTPException(404, "not found")
-    await assert_role_for_target(session, user, row.target_id, "user")
+    code = await assert_role_for_target(session, user, row.target_id, "user")
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(row, k, v)
     await session.commit()
-    await broker.publish("web", action="update")
+    await broker.publish("web", action="update", project=code)
     return await _one(session, wid)
 
 
@@ -700,10 +700,10 @@ async def delete_web(wid: int, user: User = Depends(get_current_user),
     row = await session.get(WebAddress, wid)
     if row is None:
         raise HTTPException(404, "not found")
-    await assert_role_for_target(session, user, row.target_id, "user")
+    code = await assert_role_for_target(session, user, row.target_id, "user")
     await session.delete(row)
     await session.commit()
-    await broker.publish("web", action="delete")
+    await broker.publish("web", action="delete", project=code)
 
 
 async def _one(session: AsyncSession, wid: int) -> WebAddressOut:
