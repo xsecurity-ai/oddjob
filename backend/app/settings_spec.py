@@ -200,8 +200,30 @@ SPEC = [
      "help": "The bot replies in-thread when someone @-mentions it, using the "
              "agent and only the data of the engagement that channel belongs "
              "to. Mentions only — reading every message would send the "
-             "channel's whole conversation to a model. Read-only: a question "
-             "is not an instruction to change anything."},
+             "channel's whole conversation to a model. The sender must be a "
+             "Slack account linked to an Oddjob user with access to that "
+             "engagement; anyone else is told to link their account and "
+             "nothing runs for them."},
+    {"key": "slack.chat_follow_threads", "group": "Slack",
+     "label": "Follow up in threads it is already in", "type": "bool",
+     "default": True,
+     "help": "In a thread the bot was @-mentioned into, a reply needs no "
+             "second mention — which is how a conversation reads. Still "
+             "mentions only everywhere else, and still silent when the reply "
+             "@-mentions somebody other than the bot. Off makes every single "
+             "message require a mention."},
+    {"key": "slack.chat_write_projects", "group": "Slack",
+     "label": "Engagements the bot may change data on, from Slack",
+     "type": "text", "default": "",
+     "help": "Project codes, comma separated. EMPTY MEANS NONE, which is the "
+             "intended state. Adding a target from a chat message is a scope "
+             "decision with packets at the end of it, and filing a finding "
+             "writes the record a client reads — so those stay off per "
+             "engagement until somebody names it here, even with "
+             "“Let the agent change data” on. Managing who is ON an "
+             "engagement is governed separately: it follows that switch, and "
+             "changing anyone's role additionally requires the person who "
+             "sent the message to hold admin on that engagement."},
 ]
 
 for _s in SPEC:

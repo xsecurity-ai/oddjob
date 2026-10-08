@@ -220,9 +220,16 @@ def build(session: AsyncSession, project: Project | None, user: User,
         events = (await session.execute(
             select(Event).where(Event.target_id == t.id)
             .order_by(Event.at.desc()).limit(15))).scalars().all()
+        # Credentials hang off the PROJECT and name their host as a
+        # string; they have no `target_id`. Asking for one raised
+        # AttributeError before the query was built, so `get_host` —
+        # the tool the agent reaches for first about any host — failed
+        # outright on every call. Matched on project and host instead,
+        # which is the relationship the table actually has.
         creds = int((await session.execute(
             select(func.count()).select_from(Credential)
-            .where(Credential.target_id == t.id))).scalar_one())
+            .where(Credential.project_id == t.project_id,
+                   func.lower(Credential.host) == t.host))).scalar_one())
 
         # Is it even allowed to be touched? Asked here rather than
         # discovered when a task is refused: an agent deciding what to
@@ -384,13 +391,15 @@ def build(session: AsyncSession, project: Project | None, user: User,
         for w in (await session.execute(
                 select(WebAddress).where(
                     WebAddress.target_id.in_(list(rows)),
+                    # `webserver`, not `server`. There is no `server`
+                    # column, so this raised AttributeError before the
+                    # query was even built — every call to this tool
+                    # that got past the empty-project check failed, and
+                    # the only coverage it had asserted that the tool
+                    # was REGISTERED. A tool reachable from a Slack
+                    # channel wants better than that.
                     or_(func.lower(WebAddress.url).like(like),
                         func.lower(WebAddress.title).like(like),
-                        # `webserver`, not `server`. The attribute does
-                        # not exist, so this tool raised AttributeError
-                        # on every call that got as far as a web row —
-                        # which no test reached, because the ones that
-                        # existed only checked that it was registered.
                         func.lower(WebAddress.webserver).like(like))))).scalars():
             hits.setdefault(w.target_id, []).append(
                 f"web: {w.url}" + (f" ({w.title})" if w.title else ""))

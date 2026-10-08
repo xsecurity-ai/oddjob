@@ -1,10 +1,16 @@
-"""Answering questions in Slack, over Socket Mode.
+"""The websocket Slack delivers inbound events over, and nothing else.
 
-Everything else in `app/slack.py` is outbound. This is the inbound
-half: Slack opens nothing towards us, we open a websocket towards
-Slack, which is why it works with the app bound to 127.0.0.1 and no
-public endpoint, no TLS certificate and no request-signature
-verification to get wrong.
+Everything in `app/slack.py` is outbound. This is the transport for the
+inbound half; every *decision* about an inbound message lives in
+`app/slackchat.py`, which is why that module can be tested without a
+socket and this one is deliberately almost empty.
+
+Socket Mode, not the Events API. Slack opens nothing towards us: we open
+a websocket towards Slack, so this works with the app bound to 127.0.0.1
+behind no public hostname, with no TLS certificate to obtain and no
+request-signature or replay-window check to get subtly wrong. On a host
+holding client engagement data, not adding an internet-facing endpoint
+is worth more than the convenience of an HTTP handler.
 
 The shape:
 
@@ -12,18 +18,7 @@ The shape:
       -> a one-shot wss:// URL
     connect, then for each envelope
       -> ack it by envelope_id within 3 seconds, or Slack retries
-      -> handle it
-
-**Only mentions are answered.** Reading every message in the channel
-would mean an engagement channel's whole conversation going to a model,
-including whatever someone pasted from a client system. Being addressed
-is the consent signal, and it is the user's own deliberate act.
-
-**The answer is scoped to one engagement.** The channel decides which:
-the agent gets exactly the tools that channel's project would give it,
-so a question asked in one engagement's channel cannot be answered with
-another's data. A channel that belongs to no project gets told so rather
-than being answered from everything.
+      -> hand it to slackchat.on_event
 """
 from __future__ import annotations
 
@@ -44,6 +39,10 @@ ACK_DEADLINE = 3.0
 #: closes the socket to say so, which is normal, not an error.
 BACKOFF_START = 2.0
 BACKOFF_MAX = 120.0
+#: Messages answered at once. A model call takes seconds and holds a
+#: database session from the same pool the HTTP API uses, so this is a
+#: ceiling on what a busy channel can take away from everything else.
+MAX_CONCURRENT = 4
 
 
 async def open_url(app_token: str) -> str:
@@ -58,85 +57,29 @@ async def open_url(app_token: str) -> str:
     return d["url"]
 
 
-def _question(event: dict) -> str:
-    """The text with the bot mention stripped.
-
-    Leaving `<@U123>` in makes the model answer the mention rather than
-    the question surprisingly often.
-    """
-    import re
-    return re.sub(r"<@[A-Z0-9]+>", "", event.get("text") or "").strip()
-
-
-async def _project_for_channel(session, channel_id: str, channel_name: str | None):
-    """Which engagement this channel belongs to, or None.
-
-    Matched on the stored channel name. The id is not stored anywhere —
-    projects record the human name — so the name is what we have, and a
-    channel we cannot place is answered with a refusal rather than with
-    data from somewhere else.
-    """
-    from sqlalchemy import select
-
-    from .models import Project
-    from .slack import normalise_channel
-
-    want = normalise_channel(channel_name or "") or channel_id
-    rows = (await session.execute(select(Project))).scalars().all()
-    for p in rows:
-        if (p.slack_channel or "").lower() == want:
-            return p
-    return None
-
-
-async def answer(session, project, question: str) -> str:
-    """Ask the engagement's agent, with that engagement's tools."""
-    from .agent.providers import anthropic_chat, openai_chat
-    from .agent.tools import build, run
-    from .routers.agent import SYSTEM, WRITES_OFF, _resolve
-
-    provider, token, model, _src, base_url, cfg = await _resolve(session, project)
-    if provider != "local" and not token:
-        return ("No model is configured for this engagement, so I cannot "
-                "answer. Set one in Site Config → Agent.")
-    if provider == "local" and not base_url:
-        return "No local model server is configured, so I cannot answer."
-
-    # Read-only, always. A question asked in a chat channel is not an
-    # instruction to change the engagement's data, and the person
-    # asking may not even be the one who typed it.
-    #
-    # `build` only constructs the write tools when the third argument
-    # is true, so the stand-in is never dereferenced today. It exists
-    # so that if that ever changes the attribution reads "agent(slack)"
-    # instead of raising AttributeError on None.
-    tools = build(session, project, _SlackActor(), False)
-    system = SYSTEM.format(
-        code=project.code, client=f" for {project.client}" if project.client else "",
-        writes=WRITES_OFF)
-    steps = max(1, min(int(cfg.get("agent.max_steps") or 12), 50))
-    msgs = [{"role": "user", "content": question}]
-    if provider == "anthropic":
-        reply = await anthropic_chat(token, model, system, msgs, tools, run, steps)
-    else:
-        reply = await openai_chat(token, model, system, msgs, tools, run, steps,
-                                  base_url=base_url)
-    return (reply.text or "").strip() or "I had nothing to add."
-
-
-class _SlackActor:
-    """Stands in for the User the HTTP chat path has. See `answer`."""
-    username = "slack"
-    id = None
-
-
 class Worker:
-    """One websocket, restarted for as long as the app runs."""
+    """One websocket, restarted for as long as the app runs.
+
+    The single long-lived connection for the process, started from the
+    lifespan in `main.py` beside the remediation worker. Deliberately
+    not a second scheduler: it holds no session of its own between
+    events, and each event opens and closes one.
+    """
 
     def __init__(self) -> None:
         self.task: asyncio.Task | None = None
         self.last: str | None = None
         self.connected = False
+        #: Our own Slack user id, resolved once per connection. Without
+        #: it we cannot tell our own voice from anyone else's, so an
+        #: unresolved identity means answering nothing at all — the
+        #: alternative is a bot that replies to itself.
+        self.bot_user_id: str | None = None
+        #: Messages being worked on. Held because asyncio keeps only a
+        #: weak reference to a task, and bounded because each one can
+        #: hold a database session for the length of a model call.
+        self._inflight: set[asyncio.Task] = set()
+        self._slots = asyncio.Semaphore(MAX_CONCURRENT)
 
     def start(self) -> None:
         if self.task is None or self.task.done():
@@ -150,21 +93,24 @@ class Worker:
             except asyncio.CancelledError:
                 pass
 
-    async def _config(self) -> tuple[str, str, bool]:
+    async def _config(self) -> tuple[str, str, bool, dict]:
         from .routers.settings import load_all
         async with SessionLocal() as s:
             cfg = await load_all(s)
         return (str(cfg.get("slack.app_token") or "").strip(),
                 str(cfg.get("slack.bot_token") or "").strip(),
-                bool(cfg.get("slack.answer_questions", False)))
+                bool(cfg.get("slack.answer_questions", False)),
+                cfg)
 
     async def _loop(self) -> None:
         import websockets
 
+        from .slackchat import bot_identity
+
         delay = BACKOFF_START
         while True:
             try:
-                app_token, bot_token, on = await self._config()
+                app_token, bot_token, on, cfg = await self._config()
                 if not (on and app_token and bot_token):
                     self.connected = False
                     self.last = ("answering is off" if not on
@@ -173,12 +119,24 @@ class Worker:
                     await asyncio.sleep(30)
                     continue
 
+                self.bot_user_id = await bot_identity(bot_token)
+                if not self.bot_user_id:
+                    # Said plainly and retried, rather than connecting
+                    # and answering blind: every loop-safety rule in
+                    # slackchat is anchored on knowing which user we are.
+                    self.connected = False
+                    self.last = ("auth.test did not return a user id — the "
+                                 "bot token may be wrong; not answering "
+                                 "until it does")
+                    await asyncio.sleep(30)
+                    continue
+
                 url = await open_url(app_token)
                 async with websockets.connect(url, open_timeout=20) as ws:
                     self.connected = True
-                    self.last = "connected"
+                    self.last = f"connected as {self.bot_user_id}"
                     delay = BACKOFF_START
-                    log.info("slack socket connected")
+                    log.info("slack socket connected as %s", self.bot_user_id)
                     async for raw in ws:
                         await self._envelope(ws, raw, bot_token)
             except asyncio.CancelledError:
@@ -214,60 +172,51 @@ class Worker:
         if kind != "events_api":
             return
         event = ((msg.get("payload") or {}).get("event")) or {}
-        if event.get("type") != "app_mention":
+        if event.get("type") not in ("app_mention", "message"):
             return
-        if event.get("bot_id") or event.get("subtype"):
-            return               # never answer ourselves or a system message
-
-        asyncio.create_task(self._answer(event, bot_token))
-
-    async def _answer(self, event: dict, bot_token: str) -> None:
-        from .slack import post
-
-        channel = event.get("channel") or ""
-        # Reply in the thread it was asked in, starting one if needed:
-        # an answer that lands loose in the channel loses its question.
-        thread = event.get("thread_ts") or event.get("ts")
-        question = _question(event)
-        if not question:
-            await post(bot_token, channel,
-                       "Ask me something about this engagement.", thread_ts=thread)
+        # Filtered HERE, before a task exists and before anything opens
+        # a database session. The bot sits in engagement channels where
+        # most traffic is people talking to each other; spending a
+        # connection from the pool the HTTP API shares on every one of
+        # those — to then discover it was not for us — is how a busy
+        # channel becomes an outage somewhere else.
+        from .slackchat import ignore_reason
+        if ignore_reason(event, self.bot_user_id):
             return
 
-        try:
-            async with SessionLocal() as session:
-                name = await self._channel_name(bot_token, channel)
-                project = await _project_for_channel(session, channel, name)
-                if project is None:
-                    await post(
-                        bot_token, channel,
-                        f"This channel is not linked to an engagement, so I "
-                        f"will not guess which data to answer from. Set a "
-                        f"project's Slack channel to `{name or channel}`.",
-                        thread_ts=thread)
+        # An @-mention in a channel arrives TWICE, once as app_mention
+        # and once as message, with the same ts. `slackchat.budget`
+        # de-duplicates on (channel, ts), so both are forwarded and
+        # exactly one is answered.
+        #
+        # The reference is kept: asyncio holds only a weak one, and a
+        # dispatch collected mid-await is a message that silently
+        # vanishes. Discarded on completion so the set does not grow.
+        task = asyncio.create_task(self._dispatch(event, bot_token))
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+
+    async def _dispatch(self, event: dict, bot_token: str) -> None:
+        from .routers.settings import load_all
+        from .slackchat import on_event
+        # Bounded. Without it a flood in one channel spawns unbounded
+        # concurrent model calls, each holding a database session.
+        async with self._slots:
+            try:
+                # Read per message rather than per connection: a setting
+                # changed in the UI has to take effect without waiting for
+                # Slack to rotate the socket an hour from now, and the
+                # settings that matter here are the ones that say what the
+                # bot may do.
+                async with SessionLocal() as s:
+                    cfg = await load_all(s)
+                if not bool(cfg.get("slack.answer_questions", False)):
                     return
-                text = await answer(session, project, question)
-            await post(bot_token, channel, text, thread_ts=thread)
-        except Exception as e:                       # noqa: BLE001
-            log.exception("answering slack question failed")
-            # Say so in the thread. Silence looks identical to the bot
-            # being offline, and the person waits.
-            await post(bot_token, channel,
-                       f":warning: I could not answer that: "
-                       f"`{type(e).__name__}: {e}`"[:600], thread_ts=thread)
-
-    async def _channel_name(self, bot_token: str, channel_id: str) -> str | None:
-        try:
-            async with httpx.AsyncClient(timeout=15) as c:
-                from .slack import API
-                r = await c.post(
-                    f"{API}/conversations.info",
-                    headers={"Authorization": f"Bearer {bot_token}"},
-                    json={"channel": channel_id})
-                d = r.json()
-            return ((d.get("channel") or {}).get("name")) if d.get("ok") else None
-        except Exception:                            # noqa: BLE001
-            return None
+                await on_event(event, bot_token, self.bot_user_id, cfg)
+            except asyncio.CancelledError:
+                raise
+            except Exception:                        # noqa: BLE001
+                log.exception("slack event dispatch failed")
 
 
 worker = Worker()
