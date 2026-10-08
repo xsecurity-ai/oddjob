@@ -38,10 +38,11 @@
 # `--platform=$BUILDPLATFORM` pins this stage to the machine doing the
 # building, and GOARCH below says what to emit. Without it, buildx runs
 # the entire Go toolchain under QEMU to produce an arm64 image — and
-# this stage does not just compile the agent, it compiles amass,
-# nuclei, httpx and gospider from source. Four large Go programs under
-# emulation took this image past forty-five minutes while the amd64
-# leg finished in three.
+# this stage does not just compile the agent, it compiles nuclei,
+# httpx and gospider from source. Large Go programs under emulation
+# took this image past forty-five minutes while the amd64 leg finished
+# in three. (It was four of them until amass became a library the
+# agent links rather than a binary it shells out to.)
 #
 # Nothing is lost by cross-compiling. Go's cross-compilation is
 # first-class, CGO is off, and the output is decided by GOOS/GOARCH
@@ -69,9 +70,9 @@ ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
 
 # ---- the third-party tools, BEFORE any of our own source -----------
 #
-# Ordering, not neatness. These four were below `COPY . .`, which put
+# Ordering, not neatness. These were below `COPY . .`, which put
 # them downstream of every file in the repository: changing one line of
-# the agent rebuilt amass, nuclei, httpx and gospider along with it.
+# the agent rebuilt nuclei, httpx and gospider along with it.
 # Measured at 70s for a one-character edit. Up here they depend on this
 # Dockerfile and nothing else, so the ordinary case — someone changed
 # the agent — reuses them.
@@ -89,7 +90,6 @@ ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
 # when cross-compiling, so the binaries are collected from wherever
 # they landed rather than directed at a fixed path.
 ENV GOFLAGS=-buildvcs=false
-ARG AMASS_VERSION=v4.2.0
 ARG GOSPIDER_VERSION=v1.1.6
 ARG NUCLEI_VERSION=v3.11.1
 ARG HTTPX_VERSION=v1.12.0
@@ -103,7 +103,6 @@ ARG HTTPX_VERSION=v1.12.0
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
     mkdir -p /out \
- && go install "github.com/owasp-amass/amass/v4/cmd/amass@${AMASS_VERSION}" \
  && go install "github.com/jaeles-project/gospider@${GOSPIDER_VERSION}" \
  && go install "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@${NUCLEI_VERSION}" \
  && go install "github.com/projectdiscovery/httpx/cmd/httpx@${HTTPX_VERSION}" \
@@ -153,7 +152,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
 # builds, pushes and ships with no nuclei in it, discovered the first
 # time somebody tasks a scan against a client's estate.
 RUN set -eu; \
-    for b in drone amass gospider nuclei httpx; do \
+    for b in drone gospider nuclei httpx; do \
       [ -x "/out/$b" ] || { echo "missing /out/$b"; ls -lR /out "$(go env GOPATH)/bin"; exit 1; }; \
     done; \
     ls -l /out
@@ -205,7 +204,6 @@ RUN apk add --no-cache nmap gobuster bind-tools ca-certificates libpcap
 COPY --from=masscan /src/bin/masscan /usr/local/bin/masscan
 
 COPY --from=build /out/drone /usr/local/bin/drone
-COPY --from=build /out/amass /usr/local/bin/amass
 COPY --from=build /out/gospider /usr/local/bin/gospider
 # In the image rather than installed on first use: an agent should not
 # need to reach proxy.golang.org from inside a client's network to run
@@ -234,7 +232,7 @@ COPY --from=build /out/httpx /usr/local/bin/httpx
 # one case a glob gets wrong: no match leaves the pattern itself in $1,
 # which would otherwise count as one file.
 RUN set -eu; \
-    for b in drone amass gospider nuclei httpx masscan nmap gobuster dig; do \
+    for b in drone gospider nuclei httpx masscan nmap gobuster dig; do \
       command -v "$b" >/dev/null || { echo "missing: $b"; exit 1; }; \
     done; \
     set -- /usr/share/nmap/scripts/*.nse; n=$#; \
@@ -268,7 +266,7 @@ RUN set -eu; \
 RUN set -eu; \
     mach() { od -An -tx1 -j18 -N2 "$(command -v "$1")"; }; \
     want=$(mach nmap); \
-    for b in drone amass gospider nuclei httpx masscan; do \
+    for b in drone gospider nuclei httpx masscan; do \
       got=$(mach "$b"); \
       [ "$got" = "$want" ] || { \
         echo "$b is ELF e_machine $got but this image is $want —"; \

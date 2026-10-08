@@ -363,46 +363,12 @@ func runMasscan(ctx context.Context, args map[string]any, workDir string) Result
 }
 
 // -------------------------------------------------------------- amass
+// The implementation moved to amass.go, which drives the v4 library in
+// process instead of shelling out to whatever binary the host had. The
+// task contract is unchanged: one domain, `mode`, and a JSON result of
+// names under that zone.
 func runAmass(ctx context.Context, args map[string]any, workDir string) Result {
-	// amass enumerates one zone at a time, so only the first is used --
-	// said plainly rather than silently dropping the rest.
-	ds := subjects(args, "domain", "domains")
-	if len(ds) == 0 {
-		return failed("amass needs `targets` (or `domain`)")
-	}
-	if len(ds) > 1 {
-		return failed(
-			"amass takes one domain per task; got %d (%s) — queue one task each",
-			len(ds), strings.Join(ds, ", "))
-	}
-	domain := ds[0]
-	if tools.Path("amass") == "" {
-		return failed("amass is not installed on this agent")
-	}
-	// Passive by default. Active enumeration sends traffic to the
-	// target's infrastructure, which is a scope decision, so it has to
-	// be asked for rather than assumed.
-	argv := []string{"enum", "-d", domain, "-nocolor"}
-	if str(args, "mode") != "active" {
-		argv = append(argv, "-passive")
-	}
-	argv = append(argv, extraArgs(args)...)
-
-	r := runCmd(ctx, timeout(args, 45*time.Minute), "amass", argv...)
-	// amass writes prose to stdout alongside the names -- "No assets
-	// were discovered" is a sentence, not a hostname, and counting it
-	// as one reported "found 1 name(s)" for a run that found nothing.
-	// The server then has to refuse it as unparseable, which is the
-	// right outcome reached by the wrong route: the agent should not
-	// have called it a name.
-	names := hostnamesUnder(uniqueLines(r.stdout), domain)
-	return Result{
-		Status:   "done",
-		Output:   recon.JSON(map[string]any{"domain": domain, "names": names}),
-		Stderr:   tail(r.stderr, 4000),
-		Summary:  fmt.Sprintf("amass found %d name(s) under %s", len(names), domain),
-		ExitCode: r.code,
-	}
+	return runAmassLib(ctx, args, workDir)
 }
 
 // ----------------------------------------------------------- gobuster

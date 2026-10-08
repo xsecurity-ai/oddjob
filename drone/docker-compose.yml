@@ -53,6 +53,15 @@ services:
       # One-time, from the deploy wizard. Unset after first run.
       DRONE_ENROLL_TOKEN: ${DRONE_ENROLL_TOKEN:-}
       DRONE_WORKDIR: /var/lib/drone/work
+      # How many tasks at once. Unset (or 0) sizes from the host, which
+      # is right almost always -- see "How many tasks at once" in the
+      # README before raising it.
+      #
+      # In a container the sizing reads this container's cgroup limit
+      # as well as /proc/meminfo (which is the HOST's) and takes the
+      # smaller, so `mem_limit` is respected without being repeated
+      # here. Set this only to override both.
+      DRONE_PARALLEL: ${DRONE_PARALLEL:-0}
 
     command:
       - run

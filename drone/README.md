@@ -243,10 +243,51 @@ drone run --server https://oddjob.internal --enroll-token drone_...
 | `--name` | | what it is called in the UI |
 | `--regions` | | comma-separated, for `geo` routing |
 | `--heartbeat` | | default 15s |
+| `--parallel` | `DRONE_PARALLEL` | tasks at once; `0` (the default) sizes from the host |
 
 Prefer the environment over flags for anything secret: process lists are
 readable by every user on the box, which on an engagement host is
 precisely the point.
+
+### How many tasks at once
+
+By default the Drone decides, and re-decides every 60 seconds. Two
+inputs: cores times four — the work is network-bound, so a core carries
+several processes that are all sitting in a socket read — lowered by
+available memory at 128 MB a task with 64 MB held back for the system.
+Whichever is smaller wins, floored at 1 and capped at 32.
+
+In a container, "available memory" is the smaller of `/proc/meminfo`
+and this container's own cgroup limit. That file belongs to the host: a
+Drone under `--memory=512m` on a 16 GB machine reads 6 GB from it and
+368 MB from the cgroup, and the cgroup is the one that will kill it.
+
+The fleet table shows the number and the reason it landed there, which
+is worth reading before changing anything: `4 cores x 4 (tasks wait on
+the network, not the CPU)` and `300 MB available, less 64 MB reserved,
+at 128 MB per task` call for different fixes, and only one of them is
+this setting.
+
+```bash
+drone run --parallel 8          # or DRONE_PARALLEL=8
+drone run --parallel 0          # the default: work it out from the host
+```
+
+An explicit number **wins over the memory estimate** rather than being
+clamped by it. Asking for 8 and getting 2 with no explanation is how
+people conclude a setting does nothing. Where the host disagrees it
+says so instead: `set to 8 by the operator (the 136 MB available
+suggests 1)`.
+
+That wording is a real warning and not decoration. Memory is what
+actually binds a small host, and the one thing here that eats it is
+amass — measured resident at 438 MB on one of our own drones, against a
+few tens for nmap. Several amass tasks on a 1 GB box will reach the OOM
+killer, and it takes the Drone with it. The retune is what normally
+saves you: capacity is re-read from `MemAvailable` every minute, so a
+Drone that starts something heavy watches its own headroom fall and
+stops accepting work. Overriding upward on a host with little free
+memory opts out of the margin, not the mechanism.
 
 ### Enrollment, and what it establishes
 
@@ -307,8 +348,44 @@ address.
 
 ## What it runs
 
-`nmap`, `masscan`, `amass`, `gobuster`, `gospider`, `nuclei`, `httpx`,
-plus name and address lookups using the Go resolver directly.
+`nmap`, `masscan`, `gobuster`, `gospider`, `nuclei`, `httpx`, plus name
+and address lookups using the Go resolver directly, and **amass linked
+into the agent** rather than executed.
+
+### amass is a library here, not a binary
+
+It used to be whatever `amass` the host had. On one of ours that was
+v3.19.2 from a snap with no configuration, and it did not finish a
+*passive* enumeration of `example.com` in five minutes — two and a half
+of which were system time, so it was not waiting on the network, it was
+thrashing. The same zone through the v4 library finishes in under a
+minute.
+
+None of the settings that matter are reachable from the v3 command
+line. Recursion, how many DNS queries may be in flight, the rate per
+resolver and which resolvers to use are library-level, so the way to
+make it faster was to stop talking to it through argv.
+
+| task argument | default | |
+|---|---|---|
+| `recursive` | `true` | follow what the sources turn up rather than stopping at the first level |
+| `max_dns_queries` | `20000` | in flight at once; the work is almost all waiting on somebody else's resolver |
+| `resolvers_qps` | `100` | per resolver per second |
+| `resolvers` | eight public ones | **stated, not inherited** — see below |
+| `mode` | `passive` | `active` sends traffic to the target's own infrastructure |
+| `timeout_seconds` | `2700` | a cut-off run still reports what it found |
+
+The resolvers are named rather than taken from the host because an
+agent inside a corporate network picks up a resolver that answers for
+the *internal* view of a zone, and an enumeration that quietly returns
+somebody's split-horizon records is a wrong answer that looks like a
+right one.
+
+Two things follow from linking it in. A Drone no longer needs an amass
+binary, so it is not in the image and not in the required-tool list —
+an agent missing it still runs amass tasks. And a run that hits its
+timeout still reports the names it found, where shelling out discarded
+them.
 
 The Drone installs these at startup if they are missing, and tells
 Oddjob what it could not get. Oddjob then stops sending it work that
