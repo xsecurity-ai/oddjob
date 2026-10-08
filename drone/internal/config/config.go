@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,6 +97,19 @@ type Config struct {
 	// exposure than the address is worth. Empty falls straight to the
 	// local answer, labelled as local.
 	PublicIPURL string
+
+	// Parallel is how many tasks this Drone runs at once. Zero means
+	// work it out from the host -- see internal/capacity, which is the
+	// default and the right answer almost always.
+	//
+	// Set it when you know something the host does not advertise: a
+	// container whose memory limit /proc/meminfo does not reflect, a
+	// box you are deliberately keeping quiet, or an engagement where
+	// the uplink rather than the scanner is the constraint. It wins
+	// over the memory estimate rather than being clamped by it,
+	// because the operator saying 8 and getting 2 with no explanation
+	// is how people conclude the setting does nothing.
+	Parallel int
 }
 
 // hasSavedIdentity reports whether a previous run already enrolled.
@@ -258,6 +272,18 @@ func (c *Config) FromEnv() {
 		} else {
 			log.Printf("WARNING: DRONE_MAX_SILENCE=%q is not a duration "+
 				"(try 12h) — keeping %s", v, c.MaxSilence)
+		}
+	}
+	// Same rule: only when the flag was left alone. A bad value is
+	// reported and ignored rather than silently becoming zero, which
+	// reads as "autosize" and would look like the setting was never
+	// applied at all.
+	if v := env("PARALLEL"); v != "" && c.Parallel == 0 {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
+			c.Parallel = n
+		} else {
+			log.Printf("WARNING: DRONE_PARALLEL=%q is not a count — "+
+				"sizing from the host instead", v)
 		}
 	}
 }

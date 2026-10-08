@@ -243,10 +243,51 @@ drone run --server https://oddjob.internal --enroll-token drone_...
 | `--name` | | what it is called in the UI |
 | `--regions` | | comma-separated, for `geo` routing |
 | `--heartbeat` | | default 15s |
+| `--parallel` | `DRONE_PARALLEL` | tasks at once; `0` (the default) sizes from the host |
 
 Prefer the environment over flags for anything secret: process lists are
 readable by every user on the box, which on an engagement host is
 precisely the point.
+
+### How many tasks at once
+
+By default the Drone decides, and re-decides every 60 seconds. Two
+inputs: cores times four — the work is network-bound, so a core carries
+several processes that are all sitting in a socket read — lowered by
+available memory at 128 MB a task with 64 MB held back for the system.
+Whichever is smaller wins, floored at 1 and capped at 32.
+
+In a container, "available memory" is the smaller of `/proc/meminfo`
+and this container's own cgroup limit. That file belongs to the host: a
+Drone under `--memory=512m` on a 16 GB machine reads 6 GB from it and
+368 MB from the cgroup, and the cgroup is the one that will kill it.
+
+The fleet table shows the number and the reason it landed there, which
+is worth reading before changing anything: `4 cores x 4 (tasks wait on
+the network, not the CPU)` and `300 MB available, less 64 MB reserved,
+at 128 MB per task` call for different fixes, and only one of them is
+this setting.
+
+```bash
+drone run --parallel 8          # or DRONE_PARALLEL=8
+drone run --parallel 0          # the default: work it out from the host
+```
+
+An explicit number **wins over the memory estimate** rather than being
+clamped by it. Asking for 8 and getting 2 with no explanation is how
+people conclude a setting does nothing. Where the host disagrees it
+says so instead: `set to 8 by the operator (the 136 MB available
+suggests 1)`.
+
+That wording is a real warning and not decoration. Memory is what
+actually binds a small host, and the one thing here that eats it is
+amass — measured resident at 438 MB on one of our own drones, against a
+few tens for nmap. Several amass tasks on a 1 GB box will reach the OOM
+killer, and it takes the Drone with it. The retune is what normally
+saves you: capacity is re-read from `MemAvailable` every minute, so a
+Drone that starts something heavy watches its own headroom fall and
+stops accepting work. Overriding upward on a host with little free
+memory opts out of the margin, not the mechanism.
 
 ### Enrollment, and what it establishes
 
