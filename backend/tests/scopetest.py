@@ -937,5 +937,67 @@ _v6 = _idx([("cidr", "203.0.113.0/24", True), ("cidr", "2001:db8::/32", False)])
 check("a barred v6 address is not hidden behind a clean v4",
       not _v6.check("dual.example", ["203.0.113.9", "2001:db8::1"]).allowed, "")
 
+print("\n== enumerating a zone is not the same question as touching a host ==")
+# `*.acme.example` does not put `acme.example` in scope, deliberately:
+# the apex is a different machine from the names under it. But
+# "enumerate the zone acme.example" is the one operation that wildcard
+# plainly DOES authorise -- every name it can return is `*.acme.example`
+# -- and refusing it meant Kitchen Sink walking a known host queued
+# amass for the LEAF name and never for the zone. A project scoped the
+# ordinary way could not enumerate itself.
+_z = ScopeIndex([classify("*.sub.acme.example", False)])
+check("a name under the wildcard is in scope",
+      _z.check("x.sub.acme.example").allowed)
+check("the apex is still NOT a host the project may touch",
+      not _z.check("sub.acme.example").allowed)
+check("...but it IS a zone the project may enumerate",
+      _z.check_zone("sub.acme.example").allowed,
+      _z.check_zone("sub.acme.example").reason)
+check("...and the ruling names the entry that authorised it",
+      "*.sub.acme.example" in _z.check_zone("sub.acme.example").reason,
+      _z.check_zone("sub.acme.example").reason)
+
+# Everything the widening must NOT reach. One input changed answer and
+# these say which ones did not.
+check("a parent ABOVE the wildcard is not a zone either",
+      not _z.check_zone("acme.example").allowed)
+check("nor the grandparent", not _z.check_zone("example").allowed)
+check("nor a sibling zone", not _z.check_zone("other.acme.example").allowed)
+check("an unrelated zone is still refused",
+      not _z.check_zone("somebody-else.example").allowed)
+check("nor a name under a zone that is only enumerable",
+      not _z.check("sub.acme.example").allowed)
+
+# The out-list still wins. BARRED is a decision, not an absence, and
+# only OUTSIDE may be reconsidered.
+_x = ScopeIndex([classify("*.sub.acme.example", False),
+                 classify("!sub.acme.example", False)])
+check("an explicitly excluded apex stays excluded",
+      not _x.check_zone("sub.acme.example").allowed,
+      _x.check_zone("sub.acme.example").reason)
+check("...and says it was the out-list that did it",
+      "out-of-scope" in _x.check_zone("sub.acme.example").reason,
+      _x.check_zone("sub.acme.example").reason)
+
+# An fqdn entry is not a wildcard: what must not happen is its parent
+# becoming enumerable.
+_f = ScopeIndex([classify("one.host.acme.example", False)])
+check("a plain fqdn does not make its parent a zone",
+      not _f.check_zone("host.acme.example").allowed)
+check("...and the fqdn itself is allowed, as it already was",
+      _f.check_zone("one.host.acme.example").allowed)
+
+check("a bare address never matches the wildcard-apex branch",
+      not ScopeIndex([classify("*.acme.example", False)])
+      .check_zone("203.0.113.5").allowed)
+check("an empty zone is refused", not _z.check_zone("").allowed)
+
+# With no allowlist the project is unrestricted; check_zone must not
+# become stricter than check.
+_open = ScopeIndex([])
+check("no allowlist: check_zone agrees with check",
+      _open.check_zone("anything.example").allowed
+      == _open.check("anything.example").allowed)
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 raise SystemExit(1 if fail else 0)

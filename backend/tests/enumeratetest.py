@@ -504,13 +504,20 @@ check("and so is nothing at all", _walk("") == [] and _walk("   ") == [],
 print("\n== Kitchen Sink Lookup over a project's hosts ==")
 call("/api/projects", "POST", {"code": "KS", "name": "Kitchen Sink"},
      token=admin)
-# `*.acme.example` covers names under it and deliberately NOT the apex,
-# which is how a generated parent ends up refused — the case the walk
-# must not be allowed to talk its way past. `example.co.uk` is written
-# out in full so the two-level-suffix host has somewhere legitimate to
-# stop; both are placeholders, and nothing here resolves anything.
+# `*.acme.example` covers names under it, and does NOT put the apex in
+# scope as a host — but it does authorise enumerating the zone, which
+# is the one operation a wildcard plainly permits on its own apex (see
+# `check_zone`). The case the walk must still not talk its way past is
+# a zone under no wildcard at all, which `deep.nobody.example` below
+# supplies. `example.co.uk` is written out in full so the
+# two-level-suffix host has somewhere legitimate to stop; all are
+# placeholders, and nothing here resolves anything.
 call("/api/projects/KS/scope", "POST",
      {"lines": ["*.acme.example", "*.example.co.uk", "example.co.uk",
+                # In scope as ONE NAME, with no wildcard: the host is
+                # approved and `nobody.example` above it is not, which
+                # is the generated parent the walk must be refused.
+                "deep.nobody.example",
                 "198.51.100.0/24"]}, token=admin)
 st, ksa = call("/api/agents?project=KS", "POST", {"name": "ks-drone"},
                token=admin)
@@ -520,7 +527,12 @@ call("/api/agents/register", "POST",
 call("/api/agents/heartbeat", "POST", {}, key=KSKEY)
 
 for _h in ("one.svc.acme.example", "two.svc.acme.example",
-           "shop.example.co.uk", "198.51.100.5"):
+           "shop.example.co.uk", "198.51.100.5",
+           # In scope by name only. Its walk produces `nobody.example`,
+           # which no entry covers — the apex of `*.acme.example` IS
+           # enumerable now, so without this there would be nothing
+           # left here that the walk must be refused.
+           "deep.nobody.example"):
     call("/api/targets?project=KS", "POST", {"host": _h}, token=admin)
 
 
@@ -534,8 +546,15 @@ check("a kitchen sink run with an empty box is accepted", st == 200,
       f"status={st} {str(r1)[:160]}")
 q1 = sorted(x["domain"] for x in (r1 or {}).get("queued", []))
 check("every host walks back to its domain and all of it is queued",
-      q1 == ["example.co.uk", "one.svc.acme.example", "shop.example.co.uk",
+      q1 == ["acme.example", "deep.nobody.example", "example.co.uk",
+             "one.svc.acme.example", "shop.example.co.uk",
              "svc.acme.example", "two.svc.acme.example"], str(q1))
+# `acme.example` is in that list because `*.acme.example` is in scope.
+# The wildcard does not make the apex a host anything may be done to;
+# it makes it a zone that may be ASKED about, which is the difference
+# `check_zone` draws and the only input on which the two disagree.
+check("the apex of a wildcard is enumerable, because the wildcard says so",
+      "acme.example" in q1, str(q1))
 
 # Two hosts share `svc.acme.example`. Ten would share it ten times, and
 # ten amass tasks for one zone is ten times the traffic for one zone's
@@ -543,16 +562,16 @@ check("every host walks back to its domain and all of it is queued",
 check("a parent shared by two hosts is queued once, not twice",
       q1.count("svc.acme.example") == 1, str(q1))
 check("and the count of distinct domains considered is reported",
-      (r1 or {}).get("considered") == 6, str(r1)[:200])
+      (r1 or {}).get("considered") == 8, str(r1)[:200])
 
-# The apex. `one.svc.acme.example` being approved says nothing about
-# `acme.example`, and queueing amass at a zone nobody signed off is
-# traffic at an unapproved asset.
+# A zone under no wildcard. `one.svc.acme.example` being approved says
+# nothing about `nobody.example`, and queueing amass at a zone nobody
+# signed off is traffic at an unapproved asset.
 ref1 = (r1 or {}).get("refused", {})
-check("the apex parent of approved children is refused on its own merits",
-      list(ref1) == ["acme.example"], str(ref1)[:200])
+check("a generated parent the scope list does not cover is refused",
+      sorted(ref1) == ["nobody.example"], str(ref1)[:200])
 check("with the scope list's reason, not a bare no",
-      "in-scope list" in ref1.get("acme.example", ""), str(ref1)[:200])
+      "in-scope list" in ref1.get("nobody.example", ""), str(ref1)[:200])
 
 _blob = json.dumps(r1)
 check("the public suffix under the co.uk host is never reached",
@@ -579,11 +598,13 @@ check("each carrying how many times it has run",
 check("and when",
       all(x.get("last_run_at") for x in (r2 or {}).get("skipped", [])),
       str((r2 or {}).get("skipped"))[:200])
-# A skip is not a refusal: the apex is still out of scope and still
-# said so, and the two reasons must not be collapsed into one list.
+# A skip is not a refusal: the uncovered zone is still out of scope and
+# still says so, and the two reasons must not be collapsed into one list.
 check("a domain refused on scope is still refused, not reported as skipped",
-      list((r2 or {}).get("refused", {})) == ["acme.example"], str(r2)[:200])
-check("and is not in the skipped list", "acme.example" not in sk2, str(sk2))
+      sorted((r2 or {}).get("refused", {})) == ["nobody.example"],
+      str(r2)[:200])
+check("and is not in the skipped list",
+      "nobody.example" not in sk2, str(sk2))
 
 print("-- the rescan flag is what runs them again --")
 st, r3 = ks({"domains": "", "kitchen_sink": True, "rescan": True})
