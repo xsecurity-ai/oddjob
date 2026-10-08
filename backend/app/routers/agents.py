@@ -2485,13 +2485,26 @@ async def submit_result(task_id: int, body: ResultIn,
             rep = await apply_auto(session, pr, actor=f"drone:{a.name}")
             await session.commit()
             resolved = rep.model_dump()
-        except Exception as e:                   # noqa: BLE001
+        except Exception:                        # noqa: BLE001
             # Never fail the result submission over this. The agent has
             # delivered its work and that must land; a lookup that could
             # not be applied is still on the task, and the Targets page
             # will offer it the next time anybody looks.
             await session.rollback()
-            resolved = {"error": f"{type(e).__name__}: {e}"[:500]}
+            # The detail goes to the log, not down the wire. This
+            # response is read by a Drone sitting inside a client's
+            # network, and the exception text here can carry a SQL
+            # fragment, a column name or a filesystem path — the shape
+            # of this server, handed to the least trusted place it
+            # talks to. CodeQL called it py/stack-trace-exposure and
+            # was right.
+            #
+            # The agent gets a stable marker instead: enough to know
+            # the lookup did not apply and to say so, and useless to
+            # anyone who has got hold of a drone's key.
+            log.warning("applying lookup results for task %s failed",
+                        t.id, exc_info=True)
+            resolved = {"error": "could not be applied; see the server log"}
         imported = {**(imported or {}), "lookup": resolved}
 
     if t.status == "done" and t.import_as and (t.output or "").strip():
