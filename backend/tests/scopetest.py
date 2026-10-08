@@ -445,5 +445,57 @@ else:
           str(bob)[:160])
 
 
+print("\n== scope travels between a name and the address it was seen at ==")
+# The case that prompted this: a project scoped to *.mufg.jp, a target
+# www.mufg.jp recorded at 23.13.159.70, and a scan of that address
+# refused as "not in this project's in-scope list". It is the same
+# machine under a different label.
+from app.scope import ScopeIndex                                    # noqa: E402
+
+
+def _idx(entries, links=()):
+    class E:
+        def __init__(s_, k, v, i): s_.kind, s_.value, s_.included, s_.country = k, v, i, None
+    ix = ScopeIndex([E(k, v, i) for k, v, i in entries])
+    for h, a in links:
+        ix.link(h, a)
+    return ix
+
+
+_i = _idx([("wildcard", "*.corp.com", True)],
+          links=[("www.corp.com", "198.51.100.7")])
+check("the name itself is in scope", _i.check("www.corp.com").allowed, "")
+_r = _i.check("198.51.100.7")
+check("and so is the address it was recorded at", _r.allowed, _r.reason)
+# Provenance is the whole point of doing it this way: an address in
+# scope only because something else is must never read the same as one
+# written on the scope document.
+check("the ruling names what it came in on",
+      "via www.corp.com" in _r.reason, _r.reason)
+
+check("an unrelated address is still refused",
+      not _i.check("203.0.113.9").allowed, _i.check("203.0.113.9").reason)
+
+# And the other direction: a CIDR scope, a name observed inside it.
+_j = _idx([("cidr", "198.51.100.0/24", True)],
+          links=[("host.elsewhere.test", "198.51.100.7")])
+_r2 = _j.check("host.elsewhere.test")
+check("a name inherits from an in-scope address too", _r2.allowed, _r2.reason)
+
+# Out-of-scope still wins over anything inherited. A barred address
+# that an in-scope name happens to resolve to is still barred —
+# otherwise the deny list could be walked around by adding a CNAME.
+_k = _idx([("wildcard", "*.corp.com", True), ("ipv4", "198.51.100.7", False)],
+          links=[("www.corp.com", "198.51.100.7")])
+check("an out-of-scope address is not rescued by an in-scope name",
+      not _k.check("198.51.100.7").allowed, _k.check("198.51.100.7").reason)
+
+# Nothing is resolved here. A name the project has never observed at
+# an address inherits nothing, which is the honest answer rather than
+# a guess made by a resolver at gate time.
+_l = _idx([("wildcard", "*.corp.com", True)])
+check("an address nothing has been observed at inherits nothing",
+      not _l.check("198.51.100.7").allowed, _l.check("198.51.100.7").reason)
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 raise SystemExit(1 if fail else 0)

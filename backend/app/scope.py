@@ -322,6 +322,16 @@ class ScopeIndex:
         self.inc = _Side()
         self.out = _Side()
         self.attributions: list[_Attribution] = []
+        # host <-> address pairs this project has already recorded, both
+        # directions. Scope travels along them: an address an in-scope
+        # name resolves to is in scope, and a name recorded at an
+        # in-scope address is too.
+        #
+        # Populated from the TARGET table by `index_for`, never from a
+        # live lookup — resolving here would send traffic and make the
+        # answer depend on what a resolver said this second. So the link
+        # exists only once something has actually observed it.
+        self.links: dict[str, set[str]] = {}
         for e in entries:
             self.add(e.kind, e.value, e.included,
                      getattr(e, "country", None))
@@ -333,6 +343,15 @@ class ScopeIndex:
             self.attributions.append(
                 _Attribution(kind, value, country.lower(),
                              _rank(kind, value)))
+
+    def link(self, host: str, ip: str | None) -> None:
+        """Record that `host` was observed at `ip`."""
+        h = normalise_host(host)
+        a = normalise_host(ip or "")
+        if not h or not a or h == a:
+            return
+        self.links.setdefault(h, set()).add(a)
+        self.links.setdefault(a, set()).add(h)
 
     @property
     def defined(self) -> bool:
@@ -415,9 +434,32 @@ class ScopeIndex:
             # CIDR-only scope reject the whole engagement.
             if not ok and other is not None:
                 ok = self.inc.match_ip(other)
+            via = None
+            if not ok:
+                # Nothing matched this host directly. Scope travels
+                # along an observed host/address pair, so an address an
+                # in-scope name resolves to is in scope and vice versa.
+                #
+                # The partner is NAMED in the ruling. An address that is
+                # in scope only because something else is should never
+                # read the same as one somebody wrote on the scope
+                # document — that difference is the whole audit trail
+                # when a CDN address turns out to be shared with another
+                # tenant.
+                for partner in sorted(self.links.get(h, ())):
+                    pa = _parse_host(partner)
+                    hit = (self.inc.match_ip(pa) if pa is not None
+                           else self.inc.match_name(partner))
+                    if hit:
+                        ok, via = True, partner
+                        break
             if not ok:
                 return Ruling(OUTSIDE,
                               f"{h} is not in this project's in-scope list")
+            if via:
+                return Ruling(ALLOWED,
+                              f"{h} is in scope via {via}, which this "
+                              f"project has recorded it alongside")
 
         if self.inc.countries:
             # Undetermined is refused here, and only here. An in-scope
