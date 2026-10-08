@@ -163,6 +163,33 @@ digest is the only thing that says which major you are about to run.
 docker run --rm --entrypoint /usr/bin/postgres IMAGE@DIGEST --version
 ```
 
+## Updating itself
+
+`deploy/docker-compose.autoupdate.yaml` pulls and restarts Oddjob when the tag
+it runs moves:
+
+```bash
+docker compose -f docker-compose.yml -f deploy/docker-compose.autoupdate.yaml up -d
+```
+
+It needs `ODDJOB_IMAGE` to name a **published** tag. A locally built
+`oddjob:local` has no upstream digest to compare against, so auto-update
+silently does nothing — which is the state a host is in by default, without any
+sign that it is.
+
+**The entrypoint runs `alembic upgrade head` before serving, so this means
+migrations apply unattended**, on whatever schedule the tag moves. On
+`:develop` that is every merge to main, against a database holding findings,
+captured traffic and credentials. `:nightly` gives the same automation with a
+night of soak; a semver tag gives it only when somebody decides. Choose by how
+much you would mind a bad migration at 3am.
+
+The watchtower it adds is **scoped** (`WATCHTOWER_SCOPE=oddjob`), so it only
+touches Oddjob and any unscoped watchtower already on the host leaves Oddjob
+alone. Tightening an existing host-wide watchtower instead would speed up
+updates for every other container too — a media server restarting mid-stream
+because an unrelated `:latest` moved.
+
 ## Which image to run
 
 CI publishes to Docker Hub as `cr0n1c/oddjob` and `cr0n1c/drone`, both

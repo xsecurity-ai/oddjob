@@ -1,0 +1,67 @@
+# Optional: pull and restart Oddjob when a new image is published.
+#
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.autoupdate.yaml up -d
+#
+# Requires ODDJOB_IMAGE to name a published tag. A locally built image
+# has no upstream digest to compare against, so with the default
+# `oddjob:local` this does nothing at all — which is the state most
+# hosts are in without realising it.
+#
+#   ODDJOB_IMAGE=cr0n1c/oddjob:develop    every merge to main
+#   ODDJOB_IMAGE=cr0n1c/oddjob:nightly    one build, soaked overnight
+#   ODDJOB_IMAGE=cr0n1c/oddjob:v1.4.0     deliberate releases only
+#
+# ----------------------------------------------------------- read this
+#
+# The entrypoint runs `alembic upgrade head` before serving. So turning
+# this on means **migrations apply unattended**, on whatever schedule
+# the tag moves. On `:develop` that is every merge to main, against a
+# database holding findings, captured traffic and credentials.
+#
+# That is a real trade and it is yours to make. `:nightly` gives the
+# same automation with a night of soak in between; a semver tag gives
+# it only when somebody decides. Pick the one that matches how much
+# you would mind a bad migration at 3am.
+#
+# ------------------------------------------------- why a second one
+#
+# Scoped, rather than reusing whatever watchtower the host already
+# runs. An unscoped watchtower updates everything it can see, so
+# tightening its interval to catch Oddjob quickly also tightens it for
+# every other container on the box — a media server restarting
+# mid-stream because an unrelated `:latest` moved.
+#
+# `WATCHTOWER_SCOPE` is built for this: an instance with a scope only
+# touches containers carrying the matching label, and an instance
+# without one ignores every container that has a scope. So the two do
+# not fight over Oddjob, and nothing else changes behaviour.
+
+services:
+  app:
+    labels:
+      # Claims this container for the scoped instance below, and tells
+      # any unscoped watchtower on the host to leave it alone.
+      com.centurylinklabs.watchtower.scope: oddjob
+
+  watchtower-oddjob:
+    image: ghcr.io/nicholas-fedor/watchtower:latest
+    restart: unless-stopped
+    volumes:
+      # Read-write because updating a container means recreating it.
+      # This is root on the host for practical purposes — the same
+      # grant the host's existing watchtower already holds, which is
+      # the only reason it is acceptable here.
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_SCOPE: oddjob
+      # Five minutes. "On push" without an inbound hook: the
+      # alternative is exposing watchtower's HTTP API so CI can call
+      # it, which means a new internet-facing endpoint with an update
+      # token, on a host holding engagement data. Polling costs a
+      # handful of HEAD requests and opens nothing.
+      WATCHTOWER_POLL_INTERVAL: 300
+      # Removes the superseded image. Without it a host that updates
+      # on every merge accumulates one image per merge.
+      WATCHTOWER_CLEANUP: true
+      # Never restart a container the operator deliberately stopped.
+      WATCHTOWER_INCLUDE_STOPPED: false
