@@ -10,6 +10,7 @@ import EditIcon from '@mui/icons-material/EditOutlined'
 import ContentCopyIcon from '@mui/icons-material/ContentCopy'
 import PowerSettingsNewIcon from '@mui/icons-material/PowerSettingsNew'
 import type { ColumnDef } from '../lib/columns'
+import { splitVersion } from '../lib/cellFacts'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   api, type AgentEnrolled, type DroneAgent, type DroneRouting,
@@ -600,6 +601,59 @@ export function DronesView({ project }: { project: string | null }) {
               </Tooltip>
             ) : null}
           </Stack>
+        )
+      },
+    },
+    {
+      // What this drone is actually running, which is not what the
+      // repository is on. A fleet is updated one host at a time and the
+      // stragglers are the whole reason to show it per row — Health's
+      // card gives the distribution, this says which box to go and fix.
+      field: 'version', headerName: 'Version', width: 110,
+      valueGetter: (v) => v ?? '',
+      renderCell: (p) => {
+        // One decision, made once. `splitVersion` also decides what
+        // counts as absent — a whitespace-only value is not a version —
+        // and a second `!p.value` here would disagree with it on exactly
+        // that input and render an empty cell instead of the dash.
+        //
+        // A `-dev-<timestamp>` build is not a release and must not be
+        // read as one. It is marked rather than truncated, because the
+        // timestamp is the only thing that identifies which dev build
+        // it is.
+        const { label, dev } = splitVersion(p.value)
+        // Never reported is not "old". A drone enrolled before version
+        // reporting existed, or one that has not called in yet, has not
+        // told us anything — and showing a blank beside real versions
+        // reads as the lowest one rather than as an absence.
+        if (label === null) {
+          return (
+            <Tooltip title={p.row.enrolled_pending
+              ? 'Known once the agent connects for the first time'
+              : 'This drone has not reported a version'}>
+              <Box component="span" sx={{ color: alpha(neon.muted, 0.4) }}>—</Box>
+            </Tooltip>
+          )
+        }
+        return (
+          <Tooltip title={dev
+            ? `${p.value}\nA development build, not a release.`
+            : p.value}>
+            <Stack direction="row" spacing={0.6} alignItems="center"
+              sx={{ minWidth: 0 }}>
+              <Box sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12,
+                         color: dev ? neon.yellow : neon.text,
+                         overflow: 'hidden', textOverflow: 'ellipsis',
+                         whiteSpace: 'nowrap' }}>
+                {label}
+              </Box>
+              {dev && (
+                <Chip size="small" label="dev" sx={{
+                  height: 16, fontSize: 9, color: neon.yellow,
+                  bgcolor: alpha(neon.yellow, 0.14) }} />
+              )}
+            </Stack>
+          </Tooltip>
         )
       },
     },

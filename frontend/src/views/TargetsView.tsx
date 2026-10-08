@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react'
 import {
-  Alert, Badge, Box, Button, Chip, Snackbar, Tooltip, alpha,
+  Alert, Badge, Box, Button, Chip, Snackbar, Stack, Tooltip, alpha,
 } from '@mui/material'
 import ScanIcon from '@mui/icons-material/RadarOutlined'
 import type { ColumnDef } from '../lib/columns'
+import { extraAddresses } from '../lib/cellFacts'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Target } from '../lib/api'
 import { useAuth } from '../lib/auth'
@@ -216,9 +217,16 @@ export function TargetsView({ project }: { project: string | null }) {
       // it is part of the content even when no row is wide.
       kind: fit('Type', Math.max(widest((t) => chipWidth(kindLabel(t))),
                                  chipWidth('host'))),
-      ip: fit('IP Address', Math.max(
-        widest((t) => (t.kind === 'mobile' ? textWidth('N/A')
-                                           : textWidth(t.ip_address ?? ''))),
+      // A host can hold several addresses. The column shows the first and
+      // a `+N` for the rest, so the width has to allow for that chip on
+      // the widest address rather than on the widest row overall — those
+      // are not usually the same row.
+      ip: fit('IP Addresses', Math.max(
+        widest((t) => (t.kind === 'mobile'
+          ? textWidth('N/A')
+          : textWidth(t.ip_address ?? '') +
+            (extraAddresses(t.ip_addresses)
+              ? chipWidth(`+${extraAddresses(t.ip_addresses)}`) + 6 : 0))),
         textWidth('255.255.255.255'))),
       alive: fit('Alive', Math.max(chipWidth('DOWN'), textWidth('N/A'))),
       hacked: fit('Hacked', chipWidth('PWNED') + 18),   // + the lamp and its gap
@@ -260,19 +268,42 @@ export function TargetsView({ project }: { project: string | null }) {
     },
     { field: 'provider', headerName: 'Provider', width: 110,
       valueGetter: (v) => v ?? '' },
-    { field: 'ip_address', headerName: 'IP Address', width: widths.ip,
+    { field: 'ip_address', headerName: 'IP Addresses', width: widths.ip,
+      // Sorted and filtered on the first address, which is what the cell
+      // leads with. `ip_addresses` is the whole truth and the tooltip
+      // shows all of it, but sorting a row by an address the reader
+      // cannot see in it is worse than sorting by the one they can.
       valueGetter: (v) => v ?? '',
       // A mobile app has no address. "N/A" says that; a blank cell would
       // read as "not resolved yet", which is a claim about our coverage
       // rather than about the asset.
-      renderCell: (p) => (
+      renderCell: (p) => {
         // A mobile app has no address at all. A cloud resource may or
         // may not resolve, so a blank one there is still "unknown",
         // not "not applicable".
-        p.row.kind === 'mobile'
-          ? <Box sx={{ color: alpha(neon.muted, 0.7), fontStyle: 'italic' }}>N/A</Box>
-          : <>{p.value || ''}</>
-      ) },
+        if (p.row.kind === 'mobile') {
+          return <Box sx={{ color: alpha(neon.muted, 0.7), fontStyle: 'italic' }}>N/A</Box>
+        }
+        const all = p.row.ip_addresses ?? []
+        const extra = extraAddresses(all)
+        return (
+          <Stack direction="row" spacing={0.6} alignItems="center" sx={{ minWidth: 0 }}>
+            <Box sx={{ overflow: 'hidden', textOverflow: 'ellipsis',
+                       whiteSpace: 'nowrap' }}>{p.value || ''}</Box>
+            {extra > 0 ? (
+              // The count, not the addresses: a host behind a load
+              // balancer can hold a dozen, and spelling them into a
+              // fixed-height cell would clip them into a half-address
+              // that reads like a whole one.
+              <Tooltip title={<Box sx={{ whiteSpace: 'pre-line' }}>{all.join('\n')}</Box>}>
+                <Chip size="small" label={`+${extra}`} sx={{
+                  height: 17, fontSize: 9.5, color: neon.cyan,
+                  bgcolor: alpha(neon.cyan, 0.12) }} />
+              </Tooltip>
+            ) : null}
+          </Stack>
+        )
+      } },
     {
       // Tri-state. "Not probed" is shown as a dash, deliberately distinct from
       // a red DOWN: absence of a probe is not evidence the host is dead.

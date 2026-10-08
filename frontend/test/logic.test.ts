@@ -21,6 +21,7 @@ import { parse as parseRoute, build as buildRoute } from '../src/lib/route'
 import { classifyScopeEntry, entryLabel } from '../src/lib/scopeEntry'
 import { makeScopePills, scopePills } from '../src/components/scopePills'
 import { cap, windowSlice } from '../src/lib/pillLayout'
+import { extraAddresses, splitVersion } from '../src/lib/cellFacts'
 import scopeCases from './scope-cases.json'
 
 let pass = 0, fail = 0
@@ -540,6 +541,35 @@ check('an elastic overscroll past the end does not invert the slice', (() => {
 })())
 check('an empty list windows to nothing rather than to NaN',
       JSON.stringify(windowSlice(0, 0, 300, 30, 5)) === '{"first":0,"last":0}')
+
+console.log('\n== a host holds several addresses ==')
+check('one address needs no chip', extraAddresses(['10.0.0.1']) === 0)
+check('three addresses count the two the cell does not lead with',
+      extraAddresses(['10.0.0.1', '10.0.0.2', '::1']) === 2)
+// A host with no addresses must give 0. `length - 1` on an empty array
+// is -1, which would render as a "+-1" chip.
+check('no addresses is zero, not minus one', extraAddresses([]) === 0)
+// A response cached from before the field existed. A cell that throws
+// takes the whole table down with it.
+check('an absent array does not throw', extraAddresses(undefined) === 0)
+check('...nor a null one', extraAddresses(null) === 0)
+
+console.log('\n== a drone version says which build it is ==')
+check('a release shows as itself', splitVersion('0.1.0').label === '0.1.0')
+check('a release is not marked dev', splitVersion('0.1.0').dev === false)
+const dv = splitVersion('0.1.0-dev-20261008T174500Z')
+check('a dev build shows the triple', dv.label === '0.1.0')
+check('a dev build is marked', dv.dev === true)
+// "Has not reported" is a different statement from "is on an old one",
+// and the cell renders them differently -- so neither may come back as
+// an empty label that prints beside real versions.
+check('null is not a version', splitVersion(null).label === null)
+check('empty is not a version', splitVersion('').label === null)
+check('whitespace is not a version either', splitVersion('   ').label === null)
+// A value that is nothing but the suffix is malformed; showing an empty
+// string for it would be worse than showing it whole.
+check('a version that is only the suffix is left intact',
+      splitVersion('-dev-20261008').label === '-dev-20261008')
 
 console.log(`\n${'='.repeat(56)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(56)}`)
 process.exit(fail ? 1 : 0)
