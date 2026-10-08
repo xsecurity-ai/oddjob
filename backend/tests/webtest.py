@@ -403,6 +403,38 @@ st, bad = call(f"/api/web/{seed['id']}/replay", "POST", {"raw": "nonsense"}, tok
 check("an unparseable request line is refused with a reason",
       st == 422 and "request line" in str(bad), f"{st} {str(bad)[:110]}")
 
+# The host check used to be `host.split(":")[0]`, which is a complete
+# bypass of itself: everything after the colon is userinfo to a URL
+# parser, so the validated name becomes a username and the request
+# goes wherever follows the `@`. CodeQL called it py/partial-ssrf and
+# was right.
+#
+#   Host: <in-scope>:80@evil.example.net
+#     validated as : <in-scope>     passes the target lookup AND the
+#                                   scope gate
+#     actually hits: evil.example.net
+#
+# Worse here than a plain open proxy: it puts live traffic on a host
+# the scope gate just approved, during someone's engagement, and
+# writes the wrong name into the audit trail.
+print("-- the Host header cannot smuggle a second destination --")
+for smuggle, why in [
+    (f"{_hostport}@evil.example.net", "userinfo with no port"),
+    (f"{_hostport}:80@evil.example.net", "userinfo with a port"),
+    (f"{_hostport}:@evil.example.net", "userinfo with an empty port"),
+    (f"{_hostport}/evil.example.net", "a path in the host"),
+    (f"{_hostport}\\evil.example.net", "a backslash"),
+    (f"{_hostport}#evil.example.net", "a fragment"),
+    (f"{_hostport} evil.example.net", "whitespace"),
+]:
+    st, out = call(f"/api/web/{seed['id']}/replay", "POST",
+                   {"raw": f"GET /api/auth/methods HTTP/1.1\r\n"
+                           f"Host: {smuggle}\r\n\r\n"}, token=admin)
+    # 400 is the shape refusal, 422 is the raw-request parser getting
+    # there first. Either is a refusal; what must not happen is a 200
+    # with a response fetched from somewhere else.
+    check(f"refused: {why}", st in (400, 422), f"{st} {str(out)[:90]}")
+
 st, bad = call(f"/api/web/{seed['id']}/replay", "POST", {"raw": ""}, token=admin)
 check("an empty request is refused", st == 422, f"{st} {str(bad)[:80]}")
 
