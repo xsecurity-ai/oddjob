@@ -13,9 +13,14 @@ accept it.
 """
 
 # Run from anywhere: the suites import `app`, which lives one level up.
-import pathlib as _pathlib, sys as _sys
+import pathlib as _pathlib
+import sys as _sys
+
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
-import json, os, urllib.request, urllib.error
+import json
+import os
+import urllib.error
+import urllib.request
 
 BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8013")
 ok = fail = 0
@@ -146,7 +151,7 @@ check("an agent that says it is busy is given nothing",
 check("and is told what it is still holding",
       TID in ((hb3 or {}).get("holding") or []), str(hb3)[:140])
 
-st, agl = call(f"/api/agents?project=AGENT", token=admin)
+st, agl = call("/api/agents?project=AGENT", token=admin)
 me = next((x for x in agl if x["id"] == AID), {})
 check("the second task shows as queued against it",
       me.get("queued_tasks") == 1, str(me.get("queued_tasks")))
@@ -567,7 +572,7 @@ check("restarting one that is already queued is refused", st == 409,
 call(f"/api/agents/{FID}/kill?project=AGENT", "POST", {}, token=admin)
 
 print("== the queue can be looked at and taken back out ==")
-st, t3 = call(f"/api/agents/tasks?project=AGENT", "POST",
+st, t3 = call("/api/agents/tasks?project=AGENT", "POST",
               {"kind": "amass", "args": {"domain": "queued.example"}},
               token=admin)
 T3 = (t3 or {}).get("id")
@@ -710,7 +715,11 @@ check("and is counted so it cannot go round forever",
 
 
 print("== Ed25519 identity ==")
-import base64, hashlib, time, secrets
+import base64
+import hashlib
+import secrets
+import time
+
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -1044,11 +1053,14 @@ print("== read-only tools are available in read-only mode ==")
 # exploit. Registering them after the allow_writes gate left every one
 # of them unreachable in the mode the agent runs in by default, which
 # is the mode nearly every deployment uses.
-import asyncio as _aio                                           # noqa: E402
-from app.agent.tools import build as _build                      # noqa: E402
-from app.db import SessionLocal as _SL                           # noqa: E402
-from app.models import Project as _P, User as _U                 # noqa: E402
-from sqlalchemy import select as _sel                            # noqa: E402
+import asyncio as _aio  # noqa: E402
+
+from sqlalchemy import select as _sel  # noqa: E402
+
+from app.agent.tools import build as _build  # noqa: E402
+from app.db import SessionLocal as _SL  # noqa: E402
+from app.models import Project as _P  # noqa: E402
+from app.models import User as _U
 
 _READ_ONLY = ["rank_targets", "find_by_technology", "exploit_leads",
               "search_exploits", "get_host", "host_timeline"]
@@ -1065,7 +1077,7 @@ _ro = _aio.run(_names(False))
 _rw = _aio.run(_names(True))
 for _n in _READ_ONLY:
     check(f"{_n} is available without writes", _n in _ro,
-          f"only in write mode" if _n in _rw else "missing entirely")
+          "only in write mode" if _n in _rw else "missing entirely")
 check("no read-only tool is marked as writing",
       all(getattr(_ro[n], "writes", False) is False for n in _ro), "")
 check("and enabling writes only ever adds tools",
@@ -1080,8 +1092,9 @@ print("== the assistant can task enumeration, but previews first ==")
 # returns a plan and queues nothing until it is called again with
 # confirm=true. The preview is also the only guard on a project whose
 # scope index is not loaded, where every host passes the scope gate.
-from app.models import AgentTask as _AT                          # noqa: E402
-from sqlalchemy import func as _func                             # noqa: E402
+from sqlalchemy import func as _func  # noqa: E402
+
+from app.models import AgentTask as _AT  # noqa: E402
 
 _HOSTS = "alpha-one.example.com alpha-two.example.com"
 
@@ -1164,10 +1177,11 @@ print("== the channel is sealed, and cannot be talked out of it ==")
 # the two endpoints, and that an agent which can seal is not allowed
 # to stop.
 import base64 as _b64
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
 from cryptography.hazmat.primitives import hashes as _hashes
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 
 def kexpair():
@@ -1197,7 +1211,7 @@ st, claimed3 = raw("/api/agents/enroll", "POST",
                    {"enroll_token": en3["enroll_token"], "public_key": spub3,
                     "kex_public_key": kpub3})
 check("enrollment accepts a key-agreement half", st == 200, f"status={st}")
-check("and the server hands back its own", 
+check("and the server hands back its own",
       len(_b64.b64decode((claimed3 or {}).get("server_kex_public_key") or "")) == 32,
       str(claimed3)[:120])
 check("and confirms the channel will be sealed",
@@ -1287,8 +1301,9 @@ print("== a busy agent is not a dead one ==")
 # engagement was handed to a standby mid-scan.
 import asyncio as _asyncio
 import datetime as _dt
+
 from sqlalchemy import update as _update
-from app.db import SessionLocal as _SL
+
 from app.models import Agent as _Agent
 
 
@@ -1296,7 +1311,7 @@ async def _age_heartbeat(agent_id, seconds):
     """Push an agent's last_seen into the past, as a long scan would."""
     async with _SL() as s:
         await s.execute(_update(_Agent).where(_Agent.id == agent_id).values(
-            last_seen=_dt.datetime.now(_dt.timezone.utc)
+            last_seen=_dt.datetime.now(_dt.UTC)
             - _dt.timedelta(seconds=seconds)))
         await s.commit()
 
@@ -1457,9 +1472,13 @@ me = next((a for a in (rows or []) if a["id"] == AR), {})
 check("the agent now reports sealed", me.get("sealed") is True,
       str(me.get("sealed")))
 
-st, _ = call(f"/api/agents/{AR}/reenroll?project=AGENT", "POST", {}, token=rtok
-             if "rtok" in dir() else None)
-check("re-enrolling needs admin, not merely write access",
+# This was written as `token=rtok if "rtok" in dir() else None`, and no
+# `rtok` has ever been bound in this suite -- the guard meant the call
+# always went out unauthenticated. Written as what it does. Narrowing it
+# to a write-role caller needs a write-role user this suite does not
+# create, so the stronger claim is not made here.
+st, _ = call(f"/api/agents/{AR}/reenroll?project=AGENT", "POST", {}, token=None)
+check("re-enrolling is refused without credentials",
       st in (401, 403), f"status={st}")
 
 print("\n== enrolment appends a discriminator to the name ==")
@@ -1469,6 +1488,7 @@ print("\n== enrolment appends a discriminator to the name ==")
 # later agent holding the same name -- the logs then read as ONE agent
 # intermittently failing auth rather than as two, one of them an orphan.
 import re as _re
+
 st, e1 = call("/api/agents?project=AGENT", "POST",
               {"name": "kodi", "connection_mode": "callback"}, token=admin)
 st2, e2 = call("/api/agents?project=AGENT", "POST",
@@ -1524,7 +1544,7 @@ qpriv, qpub = keypair()
 raw("/api/agents/enrol", "POST",
     {"enroll_token": renr["enroll_token"], "public_key": qpub})
 
-st, before = call(f"/api/agents?project=AGENT", token=admin)
+st, before = call("/api/agents?project=AGENT", token=admin)
 _row = [a for a in (before or []) if a["id"] == RID]
 check("a live drone has no retirement recorded",
       _row and _row[0].get("retired_at") is None, str(_row[:1])[:120])

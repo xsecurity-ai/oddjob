@@ -1,9 +1,14 @@
 
 # Run from anywhere: the suites import `app`, which lives one level up.
-import pathlib as _pathlib, sys as _sys
+import pathlib as _pathlib
+import sys as _sys
+
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
-import json, urllib.request, urllib.error
+import json
 import os
+import urllib.error
+import urllib.request
+
 BASE=os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8007"); ok=fail=0
 def check(l,c,e=""):
     global ok,fail
@@ -118,7 +123,10 @@ st,_=call("/api/settings","PATCH",{"values":{"db.external_note":"customer-owned"
 check("an ungated field in the same group still saves", st==200, f"status={st}")
 
 print("\n== masking ==")
-from app.dsn import mask as _mask, parse as _parse, is_masked as _is_masked
+from app.dsn import is_masked as _is_masked
+from app.dsn import mask as _mask
+from app.dsn import parse as _parse
+
 m=_mask(DSN_IN)
 check("password replaced", "p@ss:w/rd" not in m and "p%40ss" not in m, m)
 check("host still visible", "db.corp.com" in m, m)

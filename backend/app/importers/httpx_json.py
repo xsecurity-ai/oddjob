@@ -13,8 +13,7 @@ shadowing it inside the package would be a genuinely nasty import bug.
 """
 from __future__ import annotations
 
-from .model import (ImportError_, ParsedHost, ParsedScan, ParsedService,
-                    ParsedWebAddress)
+from .model import ImportError_, ParsedScan, ParsedService, ParsedWebAddress
 from .nuclei import iter_json
 
 
@@ -96,7 +95,8 @@ def parse(text: str) -> ParsedScan:
                 url=url, host=name, scheme=scheme or "http", port=port,
                 status_code=_int(o.get("status_code") or o.get("status-code")),
                 title=str(o["title"])[:512] if o.get("title") else None,
-                content_type=str(o.get("content_type") or o.get("content-type") or "")[:128] or None,
+                content_type=(str(o.get("content_type")
+                                  or o.get("content-type") or "")[:128] or None),
                 content_length=_int(o.get("content_length") or o.get("content-length")),
                 webserver=str(o["webserver"])[:255] if o.get("webserver") else None,
                 tech=[str(t) for t in tech] if isinstance(tech, list) else [],

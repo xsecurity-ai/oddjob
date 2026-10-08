@@ -117,8 +117,10 @@ export function DataTable({
     const ordered = sortRows(matched, view.sort, columns)
     const cut = pageOf(ordered, clientPage, clientSize)
     return { rows: cut.rows as GridRowsProp, page: cut.page, total: ordered.length }
-  }, [server, rows, columns, view.filter, view.sort, clientPage, clientSize,
-      server?.query.page, server?.total])
+    // `server.query.page` and `server.total` used to be listed here too.
+    // They are already covered by `server`, which useServerTable rebuilds
+    // on every render, so naming the fields as well said nothing extra.
+  }, [server, rows, columns, view.filter, view.sort, clientPage, clientSize])
   const [gen, setGen] = useState(0)
   const [dialog, setDialog] = useState<'create' | 'bulk' | null>(null)
   const [confirm, setConfirm] = useState(false)

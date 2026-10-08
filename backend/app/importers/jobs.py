@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 
@@ -47,7 +47,7 @@ async def run(job_id: int) -> None:
         if job is None or job.status != "queued":
             return
         job.status = "running"
-        job.started_at = datetime.now(timezone.utc)
+        job.started_at = datetime.now(UTC)
         await session.commit()
 
     try:
@@ -59,7 +59,7 @@ async def run(job_id: int) -> None:
             if job is not None:
                 job.status = "failed"
                 job.error = f"{type(e).__name__}: {e}"[:2000]
-                job.finished_at = datetime.now(timezone.utc)
+                job.finished_at = datetime.now(UTC)
                 await session.commit()
         return
 
@@ -67,7 +67,7 @@ async def run(job_id: int) -> None:
         job = await session.get(ImportJob, job_id)
         if job is not None:
             job.status = "done"
-            job.finished_at = datetime.now(timezone.utc)
+            job.finished_at = datetime.now(UTC)
             job.result = json.dumps(result)
             job.rows_done = int(result.get("urls_created", 0)
                                 + result.get("urls_updated", 0))
@@ -120,7 +120,7 @@ async def reap_stale() -> int:
             r.error = ("the server restarted while this import was running. "
                        "Rows written before that are kept; importing the same "
                        "file again resumes rather than duplicating.")
-            r.finished_at = datetime.now(timezone.utc)
+            r.finished_at = datetime.now(UTC)
         if rows:
             await session.commit()
         return len(rows)

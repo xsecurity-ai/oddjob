@@ -25,6 +25,7 @@ import os
 from typing import Any
 
 import httpx
+
 # mcp 2.x renamed FastMCP -> MCPServer; the decorator API is otherwise the same.
 from mcp.server.mcpserver import MCPServer
 
@@ -32,7 +33,9 @@ BASE = os.environ.get("ODDJOB_URL", "http://127.0.0.1:8000").rstrip("/")
 KEY = os.environ.get("ODDJOB_API_KEY", "")
 
 mcp = MCPServer("oddjob",
-                instructions="Engagement data store: projects, targets, ports/services, vulns and PoCs. All access is scoped by the API key's per-project ACL.")
+                instructions="Engagement data store: projects, targets, "
+                             "ports/services, vulns and PoCs. All access is "
+                             "scoped by the API key's per-project ACL.")
 
 
 async def _req(method: str, path: str, *, params: dict | None = None,

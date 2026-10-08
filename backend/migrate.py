@@ -18,9 +18,11 @@ import sys
 
 print(__doc__)
 print("Running `alembic upgrade head` for you…\n")
-from alembic import command  # noqa: E402
-from alembic.config import Config  # noqa: E402
 from pathlib import Path  # noqa: E402
+
+from alembic.config import Config  # noqa: E402
+
+from alembic import command  # noqa: E402
 
 cfg = Config(str(Path(__file__).resolve().parent / "alembic.ini"))
 try:

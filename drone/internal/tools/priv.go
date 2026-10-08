@@ -1,10 +1,12 @@
 package tools
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Privileged reports whether this process can do the things that need
@@ -69,7 +71,22 @@ func RawSocketCapable() (bool, string) {
 	}
 	if runtime.GOOS == "linux" {
 		if p := Path("nmap"); p != "" && Path("getcap") != "" {
-			out, err := exec.Command("getcap", p).Output()
+			// Bounded, because of where this runs. RawSocketCapable is
+			// called from the call-in status handler while the agent
+			// mutex is held, so a getcap that does not return takes the
+			// heartbeat, the task dispatcher and the spool drain down
+			// with it — a wedged agent on a host nobody will log back
+			// into. getcap reads one file's xattrs and answers in
+			// microseconds; two seconds is already absurdly generous,
+			// and the failure path here is just "assume not capable",
+			// which is the safe answer anyway.
+			ctx, cancel := context.WithTimeout(context.Background(),
+				2*time.Second)
+			// `p` is not user input: it is whatever exec.LookPath found
+			// for "nmap" on this host's PATH, and the command name is a
+			// literal. No shell is involved.
+			out, err := exec.CommandContext(ctx, "getcap", p).Output() //nolint:gosec // G204: p is exec.LookPath("nmap"); command name is a literal; no shell
+			cancel()
 			if err == nil && strings.Contains(string(out), "cap_net_raw") {
 				return true, "nmap has cap_net_raw"
 			}
@@ -95,7 +112,14 @@ func npcapPresent() bool {
 		// would be its own wrong answer.
 		root + `\System32\wpcap.dll`,
 	} {
-		if _, err := os.Stat(p); err == nil {
+		// gosec traces %SystemRoot% in and calls the join a traversal.
+		// Nothing is opened and nothing is read: this is a Stat whose
+		// only output is the boolean "a capture library is present",
+		// and the path is a constant suffix on an environment variable
+		// Windows itself sets. An attacker who can rewrite this
+		// process's environment can set PATH and is already executing
+		// as us, at which point lying about Npcap is not the move.
+		if _, err := os.Stat(p); err == nil { //nolint:gosec // G703: Stat only, result is a bool; see above
 			return true
 		}
 	}

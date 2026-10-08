@@ -7,7 +7,7 @@ the grid update itself. Nothing blocks on a probe that may take minutes.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -35,7 +35,7 @@ async def _run(action_id: int) -> None:
         svc = await session.get(Service, a.service_id)
         if svc is None:
             a.status, a.error = "failed", "service no longer exists"
-            a.finished_at = datetime.now(timezone.utc)
+            a.finished_at = datetime.now(UTC)
             await session.commit()
             await broker.publish("actions", action=a.kind, status=a.status)
             return
@@ -61,7 +61,7 @@ async def _run(action_id: int) -> None:
                 for k, v in res.patch.items():
                     if hasattr(svc, k):
                         setattr(svc, k, v)
-        a.finished_at = datetime.now(timezone.utc)
+        a.finished_at = datetime.now(UTC)
         await session.commit()
         await broker.publish("actions", action=a.kind, status=a.status,
                              service_id=a.service_id)

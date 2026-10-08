@@ -8,20 +8,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_session
 from ..events import broker
 from ..hosts import normalise_host
-from ..models import (Event, Implant, Poc, Project, Service, Target,
-                      User, Vuln)
+from ..models import Event, Implant, Poc, Project, Service, Target, User, Vuln
+from ..models import Poc as PocM
+from ..models import Service as SvcM
+from ..models import Vuln as VulnM
 from ..query import apply_search, apply_sort, paginate
-from ..models import Poc as PocM, Service as SvcM, Vuln as VulnM
-from ..schemas import (EventCreate, EventOut, ImplantOut, Page, PocOut,
-                       ServiceOut,
-                       TargetCreate, TargetDetail,
-                       TargetOut, TargetUpdate, VulnOut)
-from .projects import resolve_project
+from ..schemas import (
+    EventCreate,
+    EventOut,
+    ImplantOut,
+    Page,
+    PocOut,
+    ServiceOut,
+    TargetCreate,
+    TargetDetail,
+    TargetOut,
+    TargetUpdate,
+    VulnOut,
+)
 from ..scopegate import assert_allowed
+from ..security import get_current_user, require_project, visible_project_ids
 from ..timeline import describe_changes, record
-from ..security import (get_current_user, require_project,
-                        visible_project_ids)
-
+from .projects import resolve_project
 
 router = APIRouter(prefix="/api/targets", tags=["targets"])
 

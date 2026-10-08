@@ -179,9 +179,6 @@ func defaultWorkDir() string {
 	return os.TempDir() + string(os.PathSeparator) + "drone"
 }
 
-// FromEnv fills anything still empty from DRONE_* variables, so a key
-// need never appear in a command line — process lists are readable by
-// every user on the box, which on an engagement host is the point.
 // SpoolDir is where results wait until the server has them. Under
 // WorkDir, which the operator already chose and which has to be
 // writable for the tools to stage output anyway.
@@ -197,6 +194,9 @@ func (c *Config) IdentityPath() string {
 
 func env(name string) string { return os.Getenv("DRONE_" + name) }
 
+// FromEnv fills anything still empty from DRONE_* variables, so a key
+// need never appear in a command line — process lists are readable by
+// every user on the box, which on an engagement host is the point.
 func (c *Config) FromEnv() {
 	if c.Server == "" {
 		c.Server = env("SERVER")

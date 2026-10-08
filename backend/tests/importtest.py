@@ -4,9 +4,14 @@ Fixtures are trimmed but structurally faithful to each tool's real output.
 """
 
 # Run from anywhere: the suites import `app`, which lives one level up.
-import pathlib as _pathlib, sys as _sys
+import pathlib as _pathlib
+import sys as _sys
+
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
-import json, os, urllib.request, urllib.error
+import json
+import os
+import urllib.error
+import urllib.request
 
 BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8015")
 ok = fail = 0
@@ -445,6 +450,7 @@ check("havoc's dd/mm/yyyy timestamps parsed",
 # ==================================================== burp proxy history
 print("\n== burp proxy history (Save items) ==")
 import base64 as _b64
+
 _resp = (b"HTTP/1.1 200 OK\r\nServer: Apache/2.4.58\r\nContent-Type: text/html\r\n\r\n"
          b"<html><head><title>Portal Login</title></head></html>")
 _req = b"GET /portal HTTP/1.1\r\nHost: pay.corp.local\r\nCookie: JSESSIONID=supersecret\r\n\r\n"
@@ -780,7 +786,6 @@ check("a harmless DOCTYPE is not treated as an attack", st == 200, f"status={st}
 # path produces the SAME result as the in-memory path -- the size is
 # exercised separately against the real 2.5 GB file.
 print("\n== streamed upload ==")
-import io as _io
 import uuid as _uuid
 
 
@@ -828,10 +833,12 @@ def upload(project, body, fmt="auto", mode="open", decisions=None, fname="h.xml"
 
 
 import urllib.parse
+
 call("/api/projects", "POST", {"code": "STREAM", "name": "STREAM"}, token=admin)
 
 # More items than one chunk holds, so the multi-chunk path is what runs.
 from app.importers.burphistory import CHUNK as _CHUNK
+
 N = _CHUNK * 2 + 37
 st, r = upload("STREAM", _burp_items(N), mode="open")
 check("a multi-chunk history uploads", st == 200, f"status={st} {str(r)[:160]}")
@@ -916,11 +923,14 @@ check("a non-streaming format still uploads through the same route",
 # Streaming and in-memory readers must agree, or the format quietly
 # means two different things depending on how the file arrived.
 from app.importers import burphistory as _bh
+
 _doc = _burp_items(7, host="cmp.example")
 _whole = _bh.parse(_doc)
-import tempfile as _tf, os as _os
+import os as _os
+import tempfile as _tf
+
 _fd, _pth = _tf.mkstemp(suffix=".xml"); _os.write(_fd, _doc.encode()); _os.close(_fd)
-_streamed = [s for s in _bh.stream(_pth, chunk=3)]
+_streamed = list(_bh.stream(_pth, chunk=3))
 _os.unlink(_pth)
 check("streamed and whole-document reads produce the same row count",
       sum(len(s.web) for s in _streamed) == len(_whole.web),
@@ -937,7 +947,9 @@ check("hosts_in counts without decoding bodies",
 # mean sending the whole thing again. For a 2.5 GB proxy history that
 # second upload is most of the wall-clock cost.
 print("\n== held uploads ==")
-import tempfile as _tmpmod, os as _osmod
+import os as _osmod
+import tempfile as _tmpmod
+
 from app.routers.scans import HELD_PREFIX as _pfx
 from app.routers.scans import sweep_orphan_uploads as sweep_orphan_uploads_ref
 
@@ -961,7 +973,7 @@ uid = (r or {}).get("upload_id")
 check("and hands back an upload_id to resume from", bool(uid), str(uid))
 
 # Resuming sends decisions only -- no file.
-st, r = call(f"/api/scans/import/resume?project=HOLD", "POST",
+st, r = call("/api/scans/import/resume?project=HOLD", "POST",
              {"upload_id": uid, "decisions": {"held.example": {"action": "add"}}},
              token=admin)
 check("resume completes the import without the file", st == 200
@@ -974,12 +986,12 @@ check("the rows are really there", (r or {}).get("total") == 25,
 
 # The hold is consumed: a second resume must not work, or an uploaded
 # file would linger addressable after it was used.
-st, r = call(f"/api/scans/import/resume?project=HOLD", "POST",
+st, r = call("/api/scans/import/resume?project=HOLD", "POST",
              {"upload_id": uid, "decisions": {"held.example": {"action": "add"}}},
              token=admin)
 check("a consumed upload_id is gone", st == 404, f"{st} {str(r)[:100]}")
 
-st, r = call(f"/api/scans/import/resume?project=HOLD", "POST",
+st, r = call("/api/scans/import/resume?project=HOLD", "POST",
              {"upload_id": "nope-not-a-real-token", "decisions": {}}, token=admin)
 check("an unknown upload_id is a 404, not a crash", st == 404, f"{st} {str(r)[:80]}")
 
@@ -988,7 +1000,7 @@ check("an unknown upload_id is a 404, not a crash", st == 404, f"{st} {str(r)[:8
 call("/api/projects", "POST", {"code": "HOLD2", "name": "HOLD2"}, token=admin)
 st, r = upload("HOLD", _burp_items(5, host="bound.example"), mode="strict")
 uid2 = (r or {}).get("upload_id")
-st, r = call(f"/api/scans/import/resume?project=HOLD2", "POST",
+st, r = call("/api/scans/import/resume?project=HOLD2", "POST",
              {"upload_id": uid2, "decisions": {"bound.example": {"action": "add"}}},
              token=admin)
 check("a held upload cannot be resumed into another project",
@@ -1000,7 +1012,7 @@ check("and nothing landed there", (r or {}).get("total") == 0,
 # Cancelling releases the disk.
 st, _ = call(f"/api/scans/import/held/{uid2}?project=HOLD", "DELETE", token=admin)
 check("a held upload can be discarded", st in (200, 204), str(st))
-st, r = call(f"/api/scans/import/resume?project=HOLD", "POST",
+st, r = call("/api/scans/import/resume?project=HOLD", "POST",
              {"upload_id": uid2, "decisions": {}}, token=admin)
 check("and is gone afterwards", st == 404, f"{st} {str(r)[:80]}")
 
@@ -1009,13 +1021,13 @@ check("and is gone afterwards", st == 404, f"{st} {str(r)[:80]}")
 st, r = upload("HOLD", _burp_items(4, host="x1.example")
                + "", mode="strict")
 uid3 = (r or {}).get("upload_id")
-st, r = call(f"/api/scans/import/resume?project=HOLD", "POST",
+st, r = call("/api/scans/import/resume?project=HOLD", "POST",
              {"upload_id": uid3, "decisions": {}}, token=admin)
 check("resuming with no decisions still needs a decision",
       (r or {}).get("needs_decision") is True, str(r)[:100])
 check("and the same token keeps working",
       (r or {}).get("upload_id") == uid3, str((r or {}).get("upload_id")))
-st, r = call(f"/api/scans/import/resume?project=HOLD", "POST",
+st, r = call("/api/scans/import/resume?project=HOLD", "POST",
              {"upload_id": uid3, "decisions": {"x1.example": {"action": "skip"}}},
              token=admin)
 check("answering it then finishes", st == 200
@@ -1030,8 +1042,14 @@ check("a completed resume leaves no spooled file behind",
 
 # And a hold that IS still outstanding must be reapable, so an
 # abandoned multi-gigabyte upload cannot sit there forever.
-from app.routers.scans import HELD_TTL, _HELD, _reap_held
-check("held uploads have a finite lifetime", HELD_TTL > 0 and HELD_TTL <= 86400,
+from app.routers.scans import _HELD, HELD_TTL, _reap_held
+
+# _HELD and _reap_held are asserted on, not merely imported: the import
+# alone is an existence check nothing reads, and a rename upstream would
+# then silently take the reaping guarantee with it.
+check("held uploads have a finite lifetime",
+      HELD_TTL > 0 and HELD_TTL <= 86400 and isinstance(_HELD, dict)
+      and callable(_reap_held),
       str(HELD_TTL))
 check("the sweeper removes orphans a killed process left",
       callable(sweep_orphan_uploads_ref), "")
@@ -1042,6 +1060,7 @@ check("the sweeper removes orphans a killed process left",
 # operator can go and look at something else.
 print("\n== background imports ==")
 import time as _time
+
 call("/api/projects", "POST", {"code": "BG", "name": "BG"}, token=admin)
 
 st, r = upload("BG", _burp_items(40, host="bg.example"), mode="strict")
@@ -1104,6 +1123,7 @@ check("queueing an unknown upload is refused up front", st == 404, str(st))
 
 # reap_stale is what stops a restart leaving a job spinning forever.
 from app.importers.jobs import reap_stale as _reap
+
 check("there is a reaper for jobs a restart interrupted", callable(_reap))
 
 # ============================================ streamed burp ISSUE export
@@ -1128,6 +1148,7 @@ def _issues(n, host="issue.example"):
 
 
 from app.importers.burp import CHUNK as _BCHUNK
+
 N = _BCHUNK * 2 + 11
 st, r = upload("BURPI", _issues(N), mode="open", fname="issues.xml")
 check("a multi-chunk issue export uploads", st == 200, f"{st} {str(r)[:140]}")
@@ -1155,8 +1176,11 @@ check("the wrong root element is refused with guidance",
 
 # Both readers of the format must agree, or an export means different
 # things depending on its size.
-import tempfile as _tf3, os as _os3
+import os as _os3
+import tempfile as _tf3
+
 from app.importers import burp as _burp
+
 _d = _issues(7, host="cmp2.example")
 _whole = _burp.parse(_d)
 _fd, _p = _tf3.mkstemp(suffix=".xml"); _os3.write(_fd, _d.encode()); _os3.close(_fd)

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from dataclasses import dataclass
 
 #: Two-level public suffixes common enough to matter. Not a full PSL —
 #: pulling one in for this would be a dependency and a data-freshness
@@ -85,7 +84,7 @@ def registrable(host: str) -> str:
     h = (host or "").strip().rstrip(".").lower()
     if is_ip(h):
         return ""
-    labels = [l for l in h.split(".") if l]
+    labels = [lab for lab in h.split(".") if lab]
     if len(labels) <= 2:
         return ".".join(labels)
     if ".".join(labels[-2:]) in _TWO_LEVEL:

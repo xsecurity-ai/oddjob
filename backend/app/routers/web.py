@@ -14,7 +14,6 @@ import re
 # it, and a deferred import that is now needed in two places is just a
 # NameError waiting for whichever one runs first.
 import httpx
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select, tuple_
@@ -22,23 +21,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
 from ..events import broker
-from ..hosts import InvalidHost, validate_host
-from ..models import Project, Service, Target, User, WebAddress
-from ..query import paginate
-from ..schemas import (Page, WebAddressCreate, WebAddressOut,
-                       WebAddressUpdate, WebPacket)
 from ..filtering import apply_filters
-from ..scopegate import assert_allowed
-from ..security import (assert_role_for_target, get_current_user,
-                        visible_project_ids)
-from ..timeline import record
-from ..weburl import BadUrl, merge_sources
-from ..weburl import parse as parse_url
-from ..weburl import exchange_key, url_key
+from ..hosts import InvalidHost, validate_host
 
 #: Same caps the importer uses, so a replayed exchange is stored on the
 #: same terms as a captured one.
 from ..importers.burphistory import REQ_CAP, RESP_CAP
+from ..models import Project, Service, Target, User, WebAddress
+from ..schemas import Page, WebAddressCreate, WebAddressOut, WebAddressUpdate, WebPacket
+from ..scopegate import assert_allowed
+from ..security import assert_role_for_target, get_current_user, visible_project_ids
+from ..timeline import record
+from ..weburl import BadUrl, exchange_key, merge_sources, url_key
+from ..weburl import parse as parse_url
 
 router = APIRouter(prefix="/api/web", tags=["web"])
 
@@ -242,7 +237,7 @@ async def list_web_grouped(
     if not pairs:
         return Page[WebGroupOut](items=[], total=total, limit=limit, offset=offset)
 
-    reps = {r: h for r, h in pairs}
+    reps = dict(pairs)
     rows = {r[0].id: r for r in (await session.execute(
         _base().where(WebAddress.id.in_(list(reps))))).all()}
 
@@ -419,7 +414,7 @@ async def replay(web_id: int, body: ReplayIn,
     try:
         hostname = validate_host(bare)
     except InvalidHost as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     port = m.group("port")
     if port is not None and not (0 < int(port) < 65536):
         raise HTTPException(400, f"port {port} is out of range")
@@ -653,7 +648,7 @@ async def add_web(body: WebAddressCreate,
     try:
         u = parse_url(body.url, base_host=t.host)
     except BadUrl as e:
-        raise HTTPException(422, str(e))
+        raise HTTPException(422, str(e)) from e
     method = (body.method or "").upper()[:12]
     dup = (await session.execute(
         select(WebAddress).where(WebAddress.target_id == t.id,

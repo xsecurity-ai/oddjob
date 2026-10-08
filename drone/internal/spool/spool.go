@@ -176,7 +176,10 @@ func (s *Spool) Orphaned() ([]*Entry, error) {
 	return out, nil
 }
 
-// Running is what this agent is working on now, for the call-in API.
+// Count is how much work the spool is holding: `running` is what this
+// agent is working on now and `pending` is what it still owes the
+// server. Both for the call-in API — an operator asking "is this agent
+// stuck?" wants the two numbers, not a boolean.
 func (s *Spool) Count() (running, pending int) {
 	r, _ := s.Orphaned()
 	p, _ := s.Pending()

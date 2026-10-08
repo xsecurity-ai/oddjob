@@ -11,6 +11,7 @@ package tasks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -150,13 +151,47 @@ func runCmd(ctx context.Context, limit time.Duration, name string,
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, name, argv...)
+	// Running a scanner with arguments chosen per task is what a Drone
+	// is, so G204 cannot be designed out of this line. What is true
+	// and what is not, written down rather than waved at:
+	//
+	// `name` is always a string literal at the call site — "nmap",
+	// "masscan", "nuclei" and so on — never anything off the wire. The
+	// argv slice goes to execve directly: there is no shell, so no
+	// argument can become a second command, a pipe or a redirect
+	// however it is spelled.
+	//
+	// The argv CONTENTS, though, include extraArgs(), which is
+	// `strings.Fields(args["extra"])` passed through unvalidated from
+	// the task. That is deliberate — operators need to hand flags to
+	// their own scanners — and it means a server that can task this
+	// agent can also pick nmap's flags, `--script` among them. So this
+	// is not a boundary that holds against a hostile Oddjob; it is not
+	// meant to be. The agent pins one server's key at enrollment and
+	// treats tasking from it as trusted, which is the same trust that
+	// lets a task say "install nuclei" or "scan this /8".
+	//
+	// Worth knowing, because `Known` in internal/tools is explicitly a
+	// second gate against "one compromised server away from running
+	// arbitrary installs". That gate is real for installs and there is
+	// no equivalent for scanner flags. Narrowing this would mean an
+	// allowlist of permitted flags per tool, which is a product
+	// decision, not a lint fix.
+	cmd := exec.CommandContext(ctx, name, argv...) //nolint:gosec // G204: name is a literal, no shell; argv intentionally carries operator-supplied flags — see above
 	var out, errb strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()
 
 	r := execResult{stdout: out.String(), stderr: errb.String(), err: err}
-	if ee, ok := err.(*exec.ExitError); ok {
+	// errors.As, not a bare type assertion. cmd.Run() returns the
+	// *ExitError unwrapped today, so the assertion happened to work —
+	// but the moment anything between here and there wraps it, the
+	// assertion stops matching and every tool that exited non-zero is
+	// reported with code -1 instead of the code it actually gave. nmap
+	// uses its exit codes to distinguish "host down" from "I crashed",
+	// and losing that turns a real result into an unexplained failure.
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
 		r.code = ee.ExitCode()
 	} else if err != nil {
 		r.code = -1

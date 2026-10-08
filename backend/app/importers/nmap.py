@@ -23,12 +23,11 @@ disabled, and a malformed document raises rather than yielding a half-host.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from xml.etree.ElementTree import Element, ParseError  # nosemgrep: use-defused-xml
 
-from .safexml import fromstring
-from datetime import datetime, timezone
-
 from .model import UNKNOWN, ImportError_, ParsedHost, ParsedScan, ParsedService
+from .safexml import fromstring
 
 
 class NmapParseError(ImportError_):
@@ -56,7 +55,7 @@ def parse(xml: str | bytes) -> ParsedScan:
 
     scan = ParsedScan(tool="nmap", args=root.get("args"), version=root.get("version"))
     if (start := root.get("start")) and start.isdigit():
-        scan.started = datetime.fromtimestamp(int(start), tz=timezone.utc)
+        scan.started = datetime.fromtimestamp(int(start), tz=UTC)
     if (fin := root.find("runstats/finished")) is not None:
         scan.summary = fin.get("summary")
 
@@ -151,7 +150,7 @@ def _host_extras(el: Element, out: ParsedHost) -> None:
                      ("ipidsequence", "ipid_sequence"),
                      ("tcptssequence", "tcpts_sequence")):
         if (s := el.find(tag)) is not None:
-            out.extra[key] = {k: v for k, v in s.attrib.items()}
+            out.extra[key] = dict(s.attrib)
     if (tr := el.find("trace")) is not None:
         out.extra["traceroute"] = {
             "port": _int(tr.get("port")), "protocol": tr.get("proto"),

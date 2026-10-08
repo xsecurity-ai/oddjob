@@ -10,22 +10,18 @@ Two flavours of input model exist on purpose:
 """
 from __future__ import annotations
 
-import json
-
 import ipaddress
+import json
 from datetime import datetime
-from typing import Generic, Literal, TypeVar
+from typing import Literal
 
-from pydantic import (BaseModel, ConfigDict, Field, field_validator,
-                      model_validator)
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .hosts import InvalidHost, validate_cloud_id, validate_host
 from .models import PROJECT_STATUSES, SEVERITIES
 
-T = TypeVar("T")
 
-
-class Page(BaseModel, Generic[T]):
+class Page[T](BaseModel):
     """Every list endpoint returns this. `total` is the count BEFORE
     limit/offset, so a client can page without a second request."""
     items: list[T]

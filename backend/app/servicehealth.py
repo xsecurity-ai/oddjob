@@ -19,9 +19,7 @@ at all — it reports green for a path nobody is watching.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
-
-from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import UTC, datetime, timedelta
 
 from .models import ServiceHealth
 
@@ -49,7 +47,7 @@ async def note(service: str, ok: bool, detail: str = "",
             if row is None:
                 row = ServiceHealth(service=service)
                 s.add(row)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if ok:
                 row.last_ok_at = now
                 row.ok_count = (row.ok_count or 0) + 1
@@ -80,7 +78,7 @@ def _aware(dt: datetime | None) -> datetime | None:
     page whose whole job is to be available when things are broken.
     """
     if dt is not None and dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -98,7 +96,7 @@ def describe(row: ServiceHealth | None, *,
                 "last_ok": None, "last_error_at": None, "last_error": None,
                 "ok_count": 0, "error_count": 0}
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ok_at, err_at = _aware(row.last_ok_at), _aware(row.last_error_at)
     if ok_at is not None and (err_at is None or ok_at >= err_at):
         state = "ok"

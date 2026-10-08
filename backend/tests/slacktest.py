@@ -11,9 +11,15 @@ it, drives the real endpoints, and asserts on what arrived.
 """
 
 # Run from anywhere: the suites import `app`, which lives one level up.
-import pathlib as _pathlib, sys as _sys
+import pathlib as _pathlib
+import sys as _sys
+
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
-import json, os, threading, urllib.error, urllib.request
+import json
+import os
+import threading
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8015")
@@ -133,6 +139,7 @@ check("and recorded as set", "slack.bot_token" in (cfg or {}).get("secrets_set",
 
 print("== message shapes ==")
 from app import slack
+
 check("finding line is `$severity on $host: $title`",
       "*HIGH* on `web01`: SQLi" in slack.finding_line("high", "web01", "SQLi"),
       slack.finding_line("high", "web01", "SQLi"))
@@ -224,6 +231,7 @@ NMAP = ("<?xml version='1.0'?><nmaprun scanner='nmap' args='x'>"
         "<ports><port protocol='tcp' portid='443'><state state='open'/>"
         "<service name='https'/></port></ports></host></nmaprun>")
 import uuid as _uuid
+
 b = "----s" + _uuid.uuid4().hex
 payload = (f"--{b}\r\nContent-Disposition: form-data; name=\"file\"; "
            f"filename=\"scan.xml\"\r\nContent-Type: application/xml\r\n\r\n").encode() \
@@ -273,7 +281,6 @@ import asyncio as _aio
 import threading as _th
 
 try:
-    import websockets
     from websockets.asyncio.server import serve as _ws_serve
     _HAVE_WS = True
 except Exception as _e:                      # noqa: BLE001
@@ -331,6 +338,7 @@ def _run_ws():
 
 
 import json as _json
+
 if _HAVE_WS:
     _th.Thread(target=_run_ws, daemon=True).start()
     _ws_ready.wait(timeout=10)
@@ -395,7 +403,7 @@ else:
 # themselves and typed in — went to Slack silently. Caught by posting
 # a real critical into a real channel and watching nothing arrive.
 print("\n== a hand-filed finding announces ==")
-call(f"/api/targets?project=SLK", "POST", {"host": "hand.slk.example"}, token=admin)
+call("/api/targets?project=SLK", "POST", {"host": "hand.slk.example"}, token=admin)
 POSTED.clear()
 st, v = call("/api/vulns?project=SLK", "POST",
              {"host": "hand.slk.example", "title": "Found by hand",

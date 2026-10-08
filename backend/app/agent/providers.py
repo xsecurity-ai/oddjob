@@ -196,7 +196,7 @@ async def openai_chat(token: str, model: str, system: str,
                         f"could not reach the local model server at "
                         f"{base_url}: {type(e).__name__}: {e}. The Oddjob "
                         f"server makes this request, not your browser — "
-                        f"'localhost' means localhost to it.")
+                        f"'localhost' means localhost to it.") from e
                 raise
             if r.status_code != 200:
                 raise AgentError(_http_error("the local server" if local

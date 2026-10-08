@@ -33,7 +33,23 @@ type Client struct {
 func (c *Client) UseIdentity(id *identity.Identity) { c.id = id }
 
 func New(base, key string, insecure bool) *Client {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
+	// Cloned from the default so the agent inherits HTTP_PROXY, the
+	// connection pool sizes and the timeouts Go tunes, rather than the
+	// zero value's none-of-that.
+	//
+	// Comma-ok, not a bare assertion. http.DefaultTransport is a
+	// package-level RoundTripper any imported library can replace with
+	// a wrapper of its own; a bare assertion would then panic inside
+	// New(), which runs before the agent has logged a single line, on a
+	// host nobody is watching. Proxy support is the one default worth
+	// carrying by hand into the fallback — a Drone on an engagement
+	// network frequently has no route out except the client's proxy.
+	tr, ok := http.DefaultTransport.(*http.Transport)
+	if ok {
+		tr = tr.Clone()
+	} else {
+		tr = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
 	if insecure {
 		// Opt-in, and never the default. Worth being precise about what
 		// it does and does not give up: the body is sealed end-to-end
@@ -62,7 +78,7 @@ func New(base, key string, insecure bool) *Client {
 	}
 }
 
-// Register tells the server what this agent is. Idempotent.
+// RegisterReq is what this agent tells the server about itself.
 type RegisterReq struct {
 	//: runtime.GOOS: what this binary is. Correct for choosing a
 	//: binary or an install snippet, and the wrong answer to "which
@@ -242,7 +258,7 @@ func (c *Client) do(ctx context.Context, method, path string,
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 256<<20))
 	if err != nil {
@@ -282,6 +298,7 @@ func (c *Client) do(ctx context.Context, method, path string,
 	return json.Unmarshal(payload, out)
 }
 
+// Register tells the server what this agent is. Idempotent.
 func (c *Client) Register(ctx context.Context, r RegisterReq) (*RegisterResp, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()

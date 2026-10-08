@@ -36,7 +36,7 @@ import io
 import json
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy import delete, func, or_, select
@@ -68,7 +68,7 @@ NVD_DELAY_KEY = 1.0
 #: NVD refuses a range wider than 120 days, so a first sync walks
 #: backwards in windows. 2002 is where its data begins.
 NVD_WINDOW = timedelta(days=110)
-NVD_EPOCH = datetime(2002, 1, 1, tzinfo=timezone.utc)
+NVD_EPOCH = datetime(2002, 1, 1, tzinfo=UTC)
 
 _TIMEOUT = httpx.Timeout(60.0, connect=20.0)
 _UA = "Oddjob vulnerability feed (authorised security assessment)"
@@ -116,8 +116,8 @@ def _parse_exploits(text: str) -> list[dict]:
         except (TypeError, ValueError):
             pass
         codes = (row.get("codes") or "").strip()
-        cves = ",".join(sorted({c for c in re.findall(r"CVE-\d{4}-\d{4,7}",
-                                                      codes.upper())}))
+        cves = ",".join(sorted(set(re.findall(r"CVE-\d{4}-\d{4,7}",
+                                              codes.upper()))))
         byid[edb] = {
             "id": edb,
             "title": (row.get("description") or "").strip()[:4000] or "(untitled)",
@@ -137,7 +137,7 @@ def _parse_exploits(text: str) -> list[dict]:
 async def sync_exploitdb(session: AsyncSession) -> dict:
     """Replace the exploit table from Exploit-DB. -> a status dict."""
     st = await _state(session, "exploitdb")
-    st.last_attempt_at = datetime.now(timezone.utc)
+    st.last_attempt_at = datetime.now(UTC)
     st.running = True
     await session.commit()
     try:
@@ -162,7 +162,7 @@ async def sync_exploitdb(session: AsyncSession) -> dict:
             await session.flush()
 
         st.records = len(rows)
-        st.last_success_at = datetime.now(timezone.utc)
+        st.last_success_at = datetime.now(UTC)
         st.error = None
         st.running = False
         await session.commit()
@@ -270,7 +270,7 @@ async def sync_nvd(session: AsyncSession, api_key: str = "",
     means the next run carries on rather than starting again.
     """
     st = await _state(session, "nvd")
-    st.last_attempt_at = datetime.now(timezone.utc)
+    st.last_attempt_at = datetime.now(UTC)
     st.running = True
     await session.commit()
 
@@ -279,7 +279,7 @@ async def sync_nvd(session: AsyncSession, api_key: str = "",
     if api_key:
         headers["apiKey"] = api_key
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     since = None
     if st.cursor:
         try:
@@ -413,7 +413,7 @@ async def status(session: AsyncSession) -> dict:
     from one that has never run.
     """
     out: dict = {"feeds": {}, "usable": True, "warnings": []}
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for source in ("exploitdb", "nvd"):
         st = await session.get(FeedState, source)
         if st is None or st.last_success_at is None:

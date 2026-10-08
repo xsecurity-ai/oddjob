@@ -100,28 +100,6 @@ type ReverseIP struct {
 	Note    string `json:"note,omitempty"`
 }
 
-// This is not the same question as a PTR record. PTR gives the one
-// name the address owner chose; shared hosting, a CDN or a reverse
-// proxy can serve hundreds of unrelated domains from the same IP, and
-// those are what an enumeration pass is after.
-//
-// There is no authoritative source for it, so several are consulted
-// and the union returned, with `partial` set when one failed. Saying
-// "47 domains" when a source timed out would present a floor as a
-// total.
-// ReverseIPLookup finds names associated with an address, using DNS
-// and nothing else.
-//
-// It used to also query a third-party reverse-IP API. That answered a
-// question DNS cannot -- which names point here -- but it did so by
-// sending the address to someone else, and on an engagement the
-// addresses are the client's. A list of a customer's infrastructure
-// arriving at a third party is not a trade worth making silently, and
-// it was the default.
-//
-// So: PTR, plus forward confirmation of `candidates`. The caller
-// supplies the candidates; the server fills them from names the
-// project already holds.
 // NameIndex maps an address to the known names that resolve to it.
 //
 // Built once for a whole batch. The first version resolved every
@@ -216,6 +194,29 @@ func BuildNameIndex(ctx context.Context, candidates []string) NameIndex {
 	return idx
 }
 
+// ReverseIPLookup finds names associated with an address, using DNS
+// and nothing else.
+//
+// This is not the same question as a PTR record. PTR gives the one
+// name the address owner chose; shared hosting, a CDN or a reverse
+// proxy can serve hundreds of unrelated domains from the same IP, and
+// those are what an enumeration pass is after.
+//
+// There is no authoritative source for it, so several are consulted
+// and the union returned, with `partial` set when one failed. Saying
+// "47 domains" when a source timed out would present a floor as a
+// total.
+//
+// It used to also query a third-party reverse-IP API. That answered a
+// question DNS cannot -- which names point here -- but it did so by
+// sending the address to someone else, and on an engagement the
+// addresses are the client's. A list of a customer's infrastructure
+// arriving at a third party is not a trade worth making silently, and
+// it was the default.
+//
+// So: PTR, plus forward confirmation of `candidates`. The caller
+// supplies the candidates; the server fills them from names the
+// project already holds.
 func ReverseIPLookup(ctx context.Context, ip string, index NameIndex) *ReverseIP {
 	out := &ReverseIP{IP: ip}
 	confirmed := 0

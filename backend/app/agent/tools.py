@@ -22,23 +22,38 @@ from __future__ import annotations
 
 import collections
 import json
-from datetime import datetime, timezone
 import re
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import false as sa_false, func, or_, select, true as sa_true, distinct
+from sqlalchemy import distinct, func, or_, select
+from sqlalchemy import false as sa_false
+
 #: `select` is also the name of a tool parameter (which hosts to pick),
 #: and a tool's parameter names are part of its API — renaming it to
 #: dodge the shadowing would make the schema worse to read.
 from sqlalchemy import select as select_
+from sqlalchemy import true as sa_true
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..domains import registrable
 from ..hosts import InvalidHost, validate_host
-from ..models import (ROLE_ORDER, Agent, AgentTask, Credential, DomainCandidate,
-                      Event, Exploit,
-                      Implant, Poc, Project,
-                      Service, Target, User, Vuln, WebAddress)
+from ..models import (
+    ROLE_ORDER,
+    Agent,
+    AgentTask,
+    Credential,
+    Event,
+    Exploit,
+    Implant,
+    Poc,
+    Project,
+    Service,
+    Target,
+    User,
+    Vuln,
+    WebAddress,
+)
 from ..scopegate import check_task_targets, index_for
 from ..timeline import record
 
@@ -731,7 +746,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
             return {"error": f"no target {host!r}"}
         sev = severity.lower()
         if sev not in ("critical", "high", "medium", "low", "info"):
-            return {"error": f"severity must be one of critical/high/medium/low/info"}
+            return {"error": "severity must be one of critical/high/medium/low/info"}
         v = Vuln(target_id=t.id, title=title[:1000], severity=sev,
                  description=description or None)
         session.add(v)
@@ -1012,7 +1027,7 @@ def build(session: AsyncSession, project: Project | None, user: User,
         cb_raw, cb_hash = new_agent_key()
         ci_raw, ci_hash = new_agent_key()
         tok_raw, tok_hash = new_agent_key()
-        expires = datetime.now(timezone.utc) + ENROLL_TTL
+        expires = datetime.now(UTC) + ENROLL_TTL
         a = Agent(project_id=pid, name=name.strip(),
                   callback_key_hash=cb_hash, call_in_key_hash=ci_hash,
                   enroll_token_hash=tok_hash, enroll_expires_at=expires,

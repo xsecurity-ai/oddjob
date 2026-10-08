@@ -24,27 +24,25 @@ true until something changes it.
 """
 from __future__ import annotations
 
-from dataclasses import asdict
-
-from datetime import datetime, timezone
 import ipaddress
 import json
+from dataclasses import asdict
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import get_session
-from ..events import broker
-from ..hosts import InvalidHost, validate_host
-from ..domains import registrable
-from ..models import (AgentTask, DomainCandidate, Project, ProjectScope,
-                      Target, User)
-from ..scopegate import index_for
-from ..security import get_current_user, require_project
 from .. import audit
 from .. import merge as merge_mod
+from ..db import get_session
+from ..domains import registrable
+from ..events import broker
+from ..hosts import InvalidHost, validate_host
+from ..models import AgentTask, DomainCandidate, Project, ProjectScope, Target, User
+from ..scopegate import index_for
+from ..security import get_current_user, require_project
 from ..timeline import record
 
 router = APIRouter(prefix="/api/enumerate", tags=["enumerate"])
@@ -231,7 +229,7 @@ async def pending(project: str = Query(...),
 
 
 async def _decide_others(session: AsyncSession, pr: Project, user: User,
-                         body: "ResolveIn", others: list[str]
+                         body: ResolveIn, others: list[str]
                          ) -> tuple[list[str], dict[str, str], list[str]]:
     """Act on the names the operator did not choose.
 
@@ -269,7 +267,7 @@ async def _decide_others(session: AsyncSession, pr: Project, user: User,
         return added, refused, denied
 
     idx = await index_for(session, pr.id)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for n in sorted(want_add):
         try:
             validate_host(n)
@@ -351,7 +349,7 @@ async def resolve(body: ResolveIn, project: str = Query(...),
         try:
             name = validate_host(value)
         except InvalidHost as e:
-            raise HTTPException(422, str(e))
+            raise HTTPException(422, str(e)) from e
         if _is_ip(name):
             raise HTTPException(
                 422, f"{name} is an address, not a name — a reverse lookup "

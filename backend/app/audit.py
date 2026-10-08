@@ -35,9 +35,9 @@ from __future__ import annotations
 import logging
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
@@ -88,7 +88,7 @@ def for_log(raw) -> str:
     s = str(raw).replace("\r", "\\r").replace("\n", "\\n")
     # Everything else unprintable — escapes, nulls, the terminal control
     # characters that rewrite a line already on screen.
-    s = "".join(ch if ch.isprintable() else "\\x%02x" % ord(ch) for ch in s)
+    s = "".join(ch if ch.isprintable() else f"\\x{ord(ch):02x}" for ch in s)
     return s[:200]
 
 
@@ -164,7 +164,7 @@ async def prune(session, days: int | None = None) -> int:
     # recording the change that caused it. Treated as the default.
     if d <= 0:
         d = DEFAULT_RETAIN_DAYS
-    cutoff = datetime.now(timezone.utc) - timedelta(days=d)
+    cutoff = datetime.now(UTC) - timedelta(days=d)
     try:
         res = await session.execute(
             delete(AuditEvent).where(AuditEvent.at < cutoff))

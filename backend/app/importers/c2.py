@@ -39,7 +39,7 @@ ever clears the flag: losing a beacon is not evidence the access is gone.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .model import ImportError_, ParsedImplant, ParsedScan
 from .nuclei import iter_json
@@ -57,7 +57,7 @@ def _records(text: str) -> list[dict]:
         try:
             doc = json.loads(stripped)
         except ValueError:
-            return [o for o in iter_json(text)]
+            return list(iter_json(text))
         if isinstance(doc, dict):
             for k in _LIST_KEYS:
                 v = doc.get(k)
@@ -69,7 +69,7 @@ def _records(text: str) -> list[dict]:
                         if isinstance(v.get(k2), list):
                             return [x for x in v[k2] if isinstance(x, dict)]
             return [doc]
-    return [o for o in iter_json(text)]
+    return list(iter_json(text))
 
 
 def _get(rec: dict, *names, default=None):
@@ -114,7 +114,7 @@ def _when(v):
         if n < 1e8:           # not a plausible epoch — likely "seconds ago"
             return None
         try:
-            return datetime.fromtimestamp(n, tz=timezone.utc)
+            return datetime.fromtimestamp(n, tz=UTC)
         except (OverflowError, OSError, ValueError):
             return None
     s = str(v).strip().replace("Z", "+00:00")
@@ -122,7 +122,7 @@ def _when(v):
                 "%d-%m-%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
         try:
             d = datetime.fromisoformat(s) if fmt is None else datetime.strptime(s, fmt)
-            return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+            return d if d.tzinfo else d.replace(tzinfo=UTC)
         except ValueError:
             continue
     return None
@@ -357,13 +357,14 @@ def parse_sliver(text: str) -> ParsedScan:
             # the only hint, and guessing beyond that would be invention.
             integrity="system" if str(_get(r, "UID", default="")).strip() == "0" else None,
             internal=None,
-            external=str(_get(r, "RemoteAddress", "remoteaddress", default="")).split(":")[0] or None,
+            external=(str(_get(r, "RemoteAddress", "remoteaddress", default=""))
+                      .split(":")[0] or None),
             os_=" ".join(str(x) for x in [_get(r, "OS"), _get(r, "Version")] if x) or None,
             listener=_get(r, "ActiveC2", "Transport"),
             domain=None,
             first=_get(r, "FirstContact", "firstcontact"),
             last=_get(r, "LastCheckin", "lastcheckin"),
-            active=(False if _bool(_get(r, "IsDead"), False) else True),
+            active=not _bool(_get(r, "IsDead"), False),
             note=_get(r, "Name", "name"),
             consumed=("Hostname", "host", "ID", "id", "Username", "user", "PID",
                       "pid", "Filename", "process", "Arch", "architecture", "UID",

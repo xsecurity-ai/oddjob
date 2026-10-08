@@ -42,9 +42,9 @@ _NUM_OPS = {"=", "!=", ">", ">=", "<", "<=", "isEmpty", "isNotEmpty", "isAnyOf"}
 def _as_number(v: Any, field: str) -> float:
     try:
         return float(str(v).strip())
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
         raise HTTPException(
-            400, f"filter on {field!r} needs a number, got {v!r}")
+            400, f"filter on {field!r} needs a number, got {v!r}") from e
 
 
 def _clause(col: ColumnElement, op: str, value: Any, field: str):
@@ -102,7 +102,7 @@ def apply_filters(stmt, raw: str | None, allowed: dict[str, ColumnElement],
     try:
         items = json.loads(raw)
     except ValueError as e:
-        raise HTTPException(400, f"filters is not valid JSON: {e}")
+        raise HTTPException(400, f"filters is not valid JSON: {e}") from e
     if not isinstance(items, list):
         raise HTTPException(400, "filters must be a JSON array")
 

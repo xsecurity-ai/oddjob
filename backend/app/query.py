@@ -5,7 +5,8 @@ and returns the same Page envelope, so the UI has one code path for all grids.
 """
 from __future__ import annotations
 
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import Select, asc, desc, func, or_, select
@@ -38,7 +39,8 @@ def apply_sort(stmt: Select, sort: str | None, order: str, allowed: dict[str, An
     return stmt.order_by(desc(col) if order.lower() == "desc" else asc(col))
 
 
-async def paginate(session: AsyncSession, stmt: Select, limit: int, offset: int) -> tuple[list, int]:
+async def paginate(session: AsyncSession, stmt: Select,
+                   limit: int, offset: int) -> tuple[list, int]:
     """Returns (rows, total). total is computed before limit/offset is applied."""
     if limit < 0 or limit > MAX_LIMIT:
         raise HTTPException(422, f"limit must be between 0 and {MAX_LIMIT}")

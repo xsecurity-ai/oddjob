@@ -3,9 +3,11 @@
 package capacity
 
 import (
+	"context"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // availableMemMB on macOS: free plus inactive plus speculative pages.
@@ -13,7 +15,15 @@ import (
 // with 8 GB spare routinely reports a few hundred megabytes, which
 // would have the agent decide it can run one thing.
 func availableMemMB() int {
-	out, err := exec.Command("vm_stat").Output()
+	// Bounded. Capacity is re-measured on a ticker for the life of the
+	// agent, so an unbounded exec here is an unbounded exec every
+	// minute forever: one vm_stat that never returns leaks a goroutine
+	// and a process per tick until the host runs out of either. Two
+	// seconds, and a host that cannot answer in two seconds reports
+	// zero — which the caller already handles as "unknown".
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "vm_stat").Output()
 	if err != nil {
 		return 0
 	}

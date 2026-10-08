@@ -179,7 +179,7 @@ class Policy:
         return None
 
 
-def survey(scan, known: set[str], policy: "Policy | None" = None) -> list[UnknownHost]:
+def survey(scan, known: set[str], policy: Policy | None = None) -> list[UnknownHost]:
     """Every host in the file the project does not already have.
 
     Counts what each one would bring, so the operator is choosing with

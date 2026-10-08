@@ -15,12 +15,17 @@ from __future__ import annotations
 
 import json
 import re
-from xml.etree.ElementTree import Element, ParseError  # nosemgrep: use-defused-xml
+from xml.etree.ElementTree import ParseError  # nosemgrep: use-defused-xml
 
+from .model import (
+    ImportError_,
+    ParsedScan,
+    ParsedService,
+    ParsedVuln,
+    ParsedWebAddress,
+    norm_severity,
+)
 from .safexml import fromstring
-
-from .model import (ImportError_, ParsedScan, ParsedService, ParsedVuln,
-                    ParsedWebAddress, norm_severity)
 
 # Ordered: first match wins.
 _BANDS: list[tuple[str, re.Pattern]] = [
@@ -96,12 +101,11 @@ def _block(scan: ParsedScan, b: dict) -> None:
     host.alive = True
     if ip and not host.ip_address:
         host.ip_address = str(ip)
-    if port:
-        if not any(s.port == port for s in host.services):
-            host.services.append(ParsedService(
-                port=port, protocol="tcp", state="open",
-                name="https" if port in (443, 8443) else "http",
-                banner_override=str(banner) if banner else None))
+    if port and not any(s.port == port for s in host.services):
+        host.services.append(ParsedService(
+            port=port, protocol="tcp", state="open",
+            name="https" if port in (443, 8443) else "http",
+            banner_override=str(banner) if banner else None))
 
     for v in b.get("vulnerabilities") or []:
         if not isinstance(v, dict):

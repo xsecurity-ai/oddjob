@@ -4,26 +4,43 @@ from __future__ import annotations
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy import func, or_, select
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..headers import cookies_secure
-from .. import audit
+from .. import audit, slack
 from ..db import get_session
 from ..events import broker
-from .. import slack
-from ..models import (ApiKey, Group, Project, ProjectACL, ROLE_ORDER, ROLES,
-                      SITE_ADMIN_GROUP, User)
-from pydantic import BaseModel, Field, field_validator
-
-from ..schemas import (AclGrant, AclOut, ApiKeyCreated, ApiKeyOut, GroupCreate,
-                       GroupOut, LoginRequest, LoginResponse, MeResponse,
-                       ProfileUpdate, UserCreate, UserOut, UserUpdate)
-from ..security import (COOKIE, TOKEN_TTL_HOURS, create_access_token,
-                        effective_role, get_current_user, hash_password,
-                        new_api_key, require_project, require_site_admin,
-                        verify_password)
+from ..headers import cookies_secure
+from ..models import ROLE_ORDER, ROLES, SITE_ADMIN_GROUP, ApiKey, Group, Project, ProjectACL, User
+from ..schemas import (
+    AclGrant,
+    AclOut,
+    ApiKeyCreated,
+    ApiKeyOut,
+    GroupCreate,
+    GroupOut,
+    LoginRequest,
+    LoginResponse,
+    MeResponse,
+    ProfileUpdate,
+    UserCreate,
+    UserOut,
+    UserUpdate,
+)
+from ..security import (
+    COOKIE,
+    TOKEN_TTL_HOURS,
+    create_access_token,
+    effective_role,
+    get_current_user,
+    hash_password,
+    new_api_key,
+    require_project,
+    require_site_admin,
+    verify_password,
+)
 from .magic import deliver_invite
 from .settings import load_all
 
@@ -64,11 +81,11 @@ async def first_run_setup(body: UserCreate, response: Response,
     session.add_all([admins, u])
     try:
         await session.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         # Two setup requests raced; the unique index on username is the real
         # guard, the count check above is just the friendly path.
         await session.rollback()
-        raise HTTPException(409, "setup already completed; sign in instead")
+        raise HTTPException(409, "setup already completed; sign in instead") from e
     token = create_access_token(u)
     response.set_cookie(COOKIE, token, httponly=True, samesite="lax",
                         max_age=TOKEN_TTL_HOURS * 3600, secure=cookies_secure())
@@ -429,11 +446,11 @@ async def invite_user(body: UserInvite, actor: User = Depends(get_current_user),
     session.add(u)
     try:
         await session.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         # Two invitations raced onto the same name. The unique index is the
         # real guard; the lookup above is only the friendly path.
         await session.rollback()
-        raise HTTPException(409, f"user {username!r} already exists")
+        raise HTTPException(409, f"user {username!r} already exists") from e
 
     acls = [ProjectACL(project_id=pr.id, user_id=u.id, role=role)
             for pr, role in grants]
@@ -442,7 +459,7 @@ async def invite_user(body: UserInvite, actor: User = Depends(get_current_user),
         # cannot already hold a grant on anything.
         session.add_all(acls)
         await session.commit()
-        for (pr, role), a in zip(grants, acls):
+        for pr, role in grants:
             await broker.publish("acl", action="grant", project=pr.code)
             await slack.announce(session, pr, slack.user_joined(u.username, role))
 
@@ -460,7 +477,7 @@ async def invite_user(body: UserInvite, actor: User = Depends(get_current_user),
         user=UserOut.model_validate(u), invited=result_ok, detail=detail,
         grants=[AclOut(id=a.id, project_code=pr.code, role=a.role,
                        username=u.username)
-                for (pr, _role), a in zip(grants, acls)])
+                for (pr, _role), a in zip(grants, acls, strict=True)])
 
 
 @router.patch("/users/{username}", response_model=UserOut)

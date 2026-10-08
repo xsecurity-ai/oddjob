@@ -5,21 +5,25 @@ them. Full CRUD so the API is complete and bulk import has somewhere to land.
 """
 from __future__ import annotations
 
-from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import slack
 from ..db import get_session
 from ..events import broker
 from ..hosts import normalise_host
-from .. import slack
 from ..models import Poc, Project, Target, User, Vuln
 from ..query import apply_search, apply_sort, paginate
 from ..schemas import Page, PocCreate, PocOut, VulnCreate, VulnOut
+from ..security import (
+    assert_role_for_target,
+    get_current_user,
+    require_project,
+    visible_project_ids,
+)
 from .projects import resolve_project
-from ..security import (assert_role_for_target, get_current_user,
-                        require_project, visible_project_ids)
 
 router = APIRouter(prefix="/api", tags=["findings"])
 

@@ -69,7 +69,7 @@ async def event_stream() -> AsyncIterator[str]:
             try:
                 payload = await asyncio.wait_for(q.get(), timeout=HEARTBEAT_SECS)
                 yield f"event: change\ndata: {payload}\n\n"
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Comment frame. Keeps idle connections off proxy/browser
                 # idle timeouts without the client treating it as an event.
                 yield ": keepalive\n\n"

@@ -16,10 +16,16 @@ from __future__ import annotations
 
 from xml.etree.ElementTree import Element, ParseError  # nosemgrep: use-defused-xml
 
+from .model import (
+    UNKNOWN,
+    ImportError_,
+    ParsedHost,
+    ParsedScan,
+    ParsedService,
+    ParsedVuln,
+    norm_severity,
+)
 from .safexml import fromstring
-
-from .model import (UNKNOWN, ImportError_, ParsedHost, ParsedScan,
-                    ParsedService, ParsedVuln, norm_severity)
 
 #: Plugin families that describe what is listening rather than what is wrong.
 _INVENTORY_FAMILIES = {"Service detection", "Port scanners", "General"}

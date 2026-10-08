@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import datetime
 import json
 import os
 import secrets
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -27,25 +27,39 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import importers
-from ..db import get_session
+from .. import importers, slack
+from ..db import SessionLocal, get_session
 from ..events import broker
 from ..hosts import InvalidHost, normalise_host
-from ..importers.policy import Decision, Policy, survey
-from ..importers.model import (ImportError_, ParsedCredential, ParsedHost,
-                               ParsedImplant, ParsedScan, ParsedService,
-                               ParsedVuln, ParsedWebAddress)
-from ..models import (Credential, Implant, Project, Service, Target, User,
-                      Vuln, WebAddress, implies_alive, ImportJob)
-from ..scopegate import index_for
-from ..weburl import BadUrl, merge_sources
-from ..weburl import parse as parse_url
-from ..weburl import exchange_key, url_key
-from .. import slack
-from ..security import get_current_user, require_project
-from ..db import SessionLocal
 from ..importers import jobs as import_jobs
+from ..importers.model import (
+    ImportError_,
+    ParsedCredential,
+    ParsedHost,
+    ParsedImplant,
+    ParsedScan,
+    ParsedService,
+    ParsedVuln,
+    ParsedWebAddress,
+)
+from ..importers.policy import Decision, Policy, survey
+from ..models import (
+    Credential,
+    Implant,
+    ImportJob,
+    Project,
+    Service,
+    Target,
+    User,
+    Vuln,
+    WebAddress,
+    implies_alive,
+)
+from ..scopegate import index_for
+from ..security import get_current_user, require_project
 from ..timeline import record
+from ..weburl import BadUrl, exchange_key, merge_sources, url_key
+from ..weburl import parse as parse_url
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
 
@@ -71,14 +85,14 @@ def _decisions_from(raw: str) -> dict:
     try:
         obj = json.loads(raw)
     except ValueError as e:
-        raise HTTPException(422, f"decisions is not valid JSON: {e}")
+        raise HTTPException(422, f"decisions is not valid JSON: {e}") from e
     if not isinstance(obj, dict):
         raise HTTPException(422, "decisions must be a JSON object")
     try:
         return {k: HostDecision(**v) if isinstance(v, dict) else HostDecision(action=v)
                 for k, v in obj.items()}
     except Exception as e:
-        raise HTTPException(422, f"decisions entry is not usable: {e}")
+        raise HTTPException(422, f"decisions entry is not usable: {e}") from e
 
 
 class UnknownHostOut(BaseModel):
@@ -174,12 +188,12 @@ async def _service(session: AsyncSession, target: Target, ps: ParsedService,
         select(Service).where(Service.target_id == target.id,
                               Service.port == ps.port,
                               Service.protocol == ps.protocol))).scalar_one_or_none()
-    fields = dict(
-        state=ps.state, name=ps.name, product=ps.product, version=ps.version,
-        extrainfo=ps.extrainfo, tunnel=ps.tunnel, method=ps.method,
-        confidence=ps.confidence, reason=ps.reason,
-        cpe=_j(ps.cpe), scripts=_j(ps.scripts), banner=ps.banner or None,
-    )
+    fields = {
+        "state": ps.state, "name": ps.name, "product": ps.product, "version": ps.version,
+        "extrainfo": ps.extrainfo, "tunnel": ps.tunnel, "method": ps.method,
+        "confidence": ps.confidence, "reason": ps.reason,
+        "cpe": _j(ps.cpe), "scripts": _j(ps.scripts), "banner": ps.banner or None,
+    }
     res.scripts_captured += len(ps.scripts)
     if ps.state == "open" and ps.name == "UNKNOWN":
         res.services_unknown += 1
@@ -236,12 +250,12 @@ async def _host(session: AsyncSession, project: Project, ph: ParsedHost,
     target = (await session.execute(
         select(Target).where(Target.project_id == project.id,
                              Target.host == host))).scalar_one_or_none()
-    fields = dict(
-        ip_address=ph.ip_address or ph.ipv6_address,
-        alive=ph.alive, os=ph.os, os_accuracy=ph.os_accuracy,
-        mac_address=ph.mac_address, mac_vendor=ph.mac_vendor,
-        hostnames=_j(ph.hostnames), extra=_j(ph.extra),
-    )
+    fields = {
+        "ip_address": ph.ip_address or ph.ipv6_address,
+        "alive": ph.alive, "os": ph.os, "os_accuracy": ph.os_accuracy,
+        "mac_address": ph.mac_address, "mac_vendor": ph.mac_vendor,
+        "hostnames": _j(ph.hostnames), "extra": _j(ph.extra),
+    }
     actor = scan.tool
 
     if target is None:
@@ -394,13 +408,13 @@ async def _implant(session: AsyncSession, target: Target, pi: ParsedImplant,
         select(Implant).where(Implant.target_id == target.id,
                               Implant.framework == pi.framework,
                               Implant.implant_id == ident))).scalar_one_or_none()
-    fields = dict(
-        listener=pi.listener, user=pi.user, domain=pi.domain, process=pi.process,
-        pid=pi.pid, arch=pi.arch, integrity=pi.integrity,
-        internal_ip=pi.internal_ip, external_ip=pi.external_ip, os=pi.os,
-        first_seen=pi.first_seen, last_seen=pi.last_seen, active=pi.active,
-        note=pi.note, extra=_j(pi.extra),
-    )
+    fields = {
+        "listener": pi.listener, "user": pi.user, "domain": pi.domain, "process": pi.process,
+        "pid": pi.pid, "arch": pi.arch, "integrity": pi.integrity,
+        "internal_ip": pi.internal_ip, "external_ip": pi.external_ip, "os": pi.os,
+        "first_seen": pi.first_seen, "last_seen": pi.last_seen, "active": pi.active,
+        "note": pi.note, "extra": _j(pi.extra),
+    }
     who = " as " + (f"{pi.domain}\\{pi.user}" if pi.domain and pi.user
                     else pi.user) if pi.user else ""
     integ = f" ({pi.integrity})" if pi.integrity else ""
@@ -695,7 +709,7 @@ async def _run_stream(session: AsyncSession, project: Project, path: str,
         try:
             counts = hosts_fn(path)
         except ImportError_ as e:
-            raise HTTPException(422, str(e))
+            raise HTTPException(422, str(e)) from e
         # A host scope will refuse is not offered as a decision; see
         # policy.survey for why asking about one is worse than not.
         unknown = [UnknownHostOut(host=h, web=c, total=c)
@@ -728,7 +742,7 @@ async def _run_stream(session: AsyncSession, project: Project, path: str,
             if on_progress is not None:
                 await on_progress(agg.urls_created + agg.urls_updated, len(seen))
     except ImportError_ as e:
-        raise HTTPException(422, str(e))
+        raise HTTPException(422, str(e)) from e
     finally:
         session.sync_session.expire_on_commit = was_expiring
     agg.hosts_seen = len(seen)
@@ -783,7 +797,7 @@ async def _write_chunk(session: AsyncSession, project: Project, scan,
                     f"the database stayed locked by another writer through "
                     f"{_LOCK_TRIES} attempts. Anything imported before this "
                     f"point is committed; re-running the import will resume "
-                    f"rather than duplicate.")
+                    f"rather than duplicate.") from e
             await asyncio.sleep(delay)
             delay *= 2
     raise AssertionError("unreachable")
@@ -795,7 +809,7 @@ async def _run(session: AsyncSession, project: Project, text: str, fmt: str,
     try:
         detected, scan = importers.parse(text, fmt)
     except ImportError_ as e:
-        raise HTTPException(422, str(e))
+        raise HTTPException(422, str(e)) from e
 
     known = await _known(session, project)
     policy = Policy(mode=("open" if mode == "open" else "strict"), known=set(known),
@@ -971,7 +985,10 @@ async def upload_report(file: UploadFile = File(...),
     """
     decisions = _decisions_from(decisions_json)
     _reap_held()
-    tmp = tempfile.NamedTemporaryFile(prefix=HELD_PREFIX, delete=False)
+    # Not a `with`: the file is meant to outlive this block. `delete=False`
+    # and the `keep` flag below are what hand it to the hold, and a context
+    # manager would close and unlink it out from under the resumed import.
+    tmp = tempfile.NamedTemporaryFile(prefix=HELD_PREFIX, delete=False)  # noqa: SIM115
     keep = False
     size = 0
     try:
@@ -1057,7 +1074,7 @@ class ImportJobOut(BaseModel):
     created_at: datetime | None = None
 
     @staticmethod
-    def of(row: ImportJob, code: str) -> "ImportJobOut":
+    def of(row: ImportJob, code: str) -> ImportJobOut:
         return ImportJobOut(
             id=row.id, project=code, filename=row.filename, format=row.fmt,
             status=row.status, rows_done=row.rows_done,

@@ -4,31 +4,50 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import audit
+from .. import audit, slack
 from ..db import get_session
 from ..events import broker
-from .. import slack
-from ..models import (Agent, Credential, Poc, Project, ProjectACL,
-                      ProjectContact, ProjectScope,
-                      ProjectSlackMember, UserSlackIdentity,
-                      Service, Target, User, Vuln, utcnow)
+from ..models import (
+    Agent,
+    Credential,
+    Poc,
+    Project,
+    ProjectACL,
+    ProjectContact,
+    ProjectScope,
+    ProjectSlackMember,
+    Service,
+    Target,
+    User,
+    UserSlackIdentity,
+    Vuln,
+    utcnow,
+)
 from ..query import apply_search, apply_sort, paginate
+from ..schemas import (
+    AclOut,
+    AgentOverride,
+    ContactIn,
+    ContactOut,
+    Page,
+    ProjectCreated,
+    ProjectCreateFull,
+    ProjectOut,
+    ProjectUpdate,
+    ScopeEntryOut,
+)
 from ..scope import classify_country, classify_many
 from ..scopegate import index_for
+from ..security import get_current_user, require_project, visible_project_ids
 from ..slack import channel_for, normalise_channel
 from .settings import load_all
-from ..schemas import (AgentOverride, AclOut, ContactIn, ContactOut, Page, ProjectCreate,
-                       ProjectCreated, ProjectCreateFull, ProjectOut,
-                       ProjectUpdate, ScopeEntryOut)
-from ..security import (get_current_user, require_project,
-                        visible_project_ids)
 
 log = logging.getLogger("oddjob.projects")
 
@@ -515,7 +534,7 @@ async def patch_scope(project: str, entry_id: int, body: ScopeEntryPatch,
             try:
                 e.country = classify_country(raw)
             except ValueError as err:
-                raise HTTPException(422, str(err))
+                raise HTTPException(422, str(err)) from err
     if "notes" in data:
         e.notes = data["notes"]
     await session.commit()
@@ -767,10 +786,10 @@ async def update_project(project: str, body: ProjectUpdate,
                          pr: Project = Depends(require_project("admin")),
                          session: AsyncSession = Depends(get_session)):
     data = body.model_dump(exclude_unset=True)
-    if data.get("slack_delivery") and data["slack_delivery"] != "site":
-        if not (data.get("slack_token") or pr.slack_token):
-            raise HTTPException(
-                422, f"slack_delivery={data['slack_delivery']!r} needs a slack_token")
+    if (data.get("slack_delivery") and data["slack_delivery"] != "site"
+            and not (data.get("slack_token") or pr.slack_token)):
+        raise HTTPException(
+            422, f"slack_delivery={data['slack_delivery']!r} needs a slack_token")
     if "slack_channel" in data:
         data["slack_channel"] = normalise_channel(data["slack_channel"])
     was = pr.status
@@ -1280,7 +1299,7 @@ async def slack_me_confirm(body: SlackMeIn,
         session.add(m)
     m.handle = handle
     m.declined_at = None
-    m.confirmed_at = datetime.now(timezone.utc)
+    m.confirmed_at = datetime.now(UTC)
     if body.save_as_default:
         user.slack_handle = handle
 
@@ -1297,7 +1316,7 @@ async def slack_me_confirm(body: SlackMeIn,
             ids[key] = ident
         ident.handle = handle
         ident.declined_at = None
-        ident.confirmed_at = datetime.now(timezone.utc)
+        ident.confirmed_at = datetime.now(UTC)
 
         # The resolved id is the expensive part — find_user has to walk
         # the member list when there is no email match — and it is the
@@ -1377,7 +1396,7 @@ async def slack_me_decline(pr: Project = Depends(require_project("readonly")),
     if m is None:
         m = ProjectSlackMember(project_id=pr.id, user_id=user.id)
         session.add(m)
-    m.declined_at = datetime.now(timezone.utc)
+    m.declined_at = datetime.now(UTC)
     m.confirmed_at = None
 
     # Declining is recorded against the workspace as well, or the next
@@ -1395,6 +1414,6 @@ async def slack_me_decline(pr: Project = Depends(require_project("readonly")),
             session.add(ident)
             ids[key] = ident
         if ident.confirmed_at is None:
-            ident.declined_at = datetime.now(timezone.utc)
+            ident.declined_at = datetime.now(UTC)
     await session.commit()
     return await slack_me(pr=pr, user=user, session=session)

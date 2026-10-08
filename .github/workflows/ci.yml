@@ -373,3 +373,120 @@ jobs:
           fi
 
           exit $fail
+
+  # ---------------------------------------------------------------- linters
+  # Separate jobs rather than steps bolted onto the suites above, so a
+  # style finding reads as a style finding and does not sit under a
+  # heading that says "tests". They also run in parallel with them,
+  # which the long ones do not leave room for otherwise.
+
+  python-lint:
+    name: python lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install
+        working-directory: backend
+        run: uv sync --locked
+
+      # Out of uv.lock rather than astral-sh/ruff-action: the action
+      # installs its own ruff, so CI and a developer's checkout could
+      # drift to different versions and disagree about a clean tree.
+      # This pins the linter in the same file as everything else and
+      # needs no fourth third-party action to vouch for.
+      #
+      # Lint only. `ruff format` would rewrite 103 of 105 files — see
+      # the comment above [tool.ruff] in backend/pyproject.toml.
+      - name: Ruff
+        working-directory: backend
+        run: uv run ruff check --output-format github .
+
+  go-lint:
+    name: go lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # golangci-lint only analyses the host GOOS, so a linux-only run
+    # never opens mem_darwin.go, priv_windows.go or priv_notlinux.go —
+    # the same blind spot the `drone` job's cross-compile step exists
+    # to close.
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, windows]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+          cache-dependency-path: drone/go.sum
+
+      # The linter version is pinned as well as the action: a new
+      # golangci-lint release adds checks, and an unpinned one turns a
+      # green PR red for a reason nobody in that PR introduced.
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        env:
+          GOOS: ${{ matrix.goos }}
+        with:
+          version: v2.14.0
+          working-directory: drone
+
+  frontend-lint:
+    name: frontend lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+
+      # ESLint parses the TypeScript through Babel, not through the
+      # compiler: typescript-eslint cannot load against TypeScript 7.
+      # See the header of frontend/eslint.config.js.
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+  dockerfile-lint:
+    name: dockerfile lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # One step per file. The action's `recursive` mode globs
+      # **/Dockerfile instead, which would quietly widen to whatever a
+      # future subdirectory drops in. Naming both is the version that
+      # cannot silently start or stop covering something.
+      #
+      # Severity lives in .hadolint.yaml (failure-threshold: style —
+      # every rule fails). The action always exports
+      # HADOLINT_FAILURE_THRESHOLD=info, and the config file beats the
+      # environment, so it is not restated here.
+      - name: Oddjob image
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+
+      # Runs even if the step above failed, so one push reports both
+      # files rather than making you fix one to see the other.
+      - name: Drone agent image
+        if: '!cancelled()'
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: drone/Dockerfile
+          config: .hadolint.yaml

@@ -1,9 +1,14 @@
 """Web addresses, and the domain roots they group under."""
 
 # Run from anywhere: the suites import `app`, which lives one level up.
-import pathlib as _pathlib, sys as _sys
+import pathlib as _pathlib
+import sys as _sys
+
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
-import json, os, urllib.request, urllib.error
+import json
+import os
+import urllib.error
+import urllib.request
 
 BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8017")
 ok = fail = 0
@@ -118,7 +123,7 @@ check("a bare path resolves against its host", st == 201
 check("not marked crawled unless said so", w["crawled"] is False)
 st, _ = call(f"/api/web/{w['id']}", "PATCH", {"status_code": 200, "crawled": True},
              token=admin)
-check("can be updated", call(f"/api/web?project=WEB&q=manual-find",
+check("can be updated", call("/api/web?project=WEB&q=manual-find",
                              token=admin)[1]["items"][0]["status_code"] == 200)
 st, _ = call(f"/api/web/{w['id']}", "DELETE", token=admin)
 check("can be deleted", st == 204 and
@@ -171,7 +176,8 @@ check("the scan importer applies the same rule",
 # holds one page, so filtering there would hide rows from that page and
 # leave the total describing something else.
 print("\n== chained column filters ==")
-import json as _json, urllib.parse as _up
+import json as _json
+import urllib.parse as _up
 
 
 def _f(items, logic="and"):
@@ -187,7 +193,7 @@ _seed = [
     ("http://c.filt.example/admin",  "c.filt.example", 503, "http",  "GET"),
     ("http://c.filt.example/health", "c.filt.example", 200, "http",  "GET"),
 ]
-for url, host, code, scheme, method in _seed:
+for url, host, code, _scheme, method in _seed:
     call(f"/api/targets?project={_P}", "POST", {"host": host}, token=admin)
     t = call(f"/api/targets?project={_P}&q={host}&limit=1", token=admin)[1]["items"][0]
     call("/api/web", "POST", {"target_id": t["id"], "url": url,
@@ -269,6 +275,7 @@ check("and does not act as a wildcard",
 # history that is the wrong unit: the same endpoint probed ten ways is
 # ten pieces of evidence, and the differences are usually the finding.
 import base64 as _b64
+
 print("\n== one row per exchange ==")
 _X = "EXCH"
 call("/api/projects", "POST", {"code": _X, "name": _X}, token=admin)
@@ -339,7 +346,6 @@ check("a search applies to the grouped listing too", (g2 or {}).get("total") == 
 # row: the original and the edited one sitting side by side under the
 # same URL is the entire point.
 print("\n== replay ==")
-import urllib.parse as _up2
 _hostport = BASE.split("//", 1)[1]
 _h, _, _p = _hostport.partition(":")
 call(f"/api/targets?project={_X}", "POST", {"host": _h}, token=admin)
@@ -504,6 +510,7 @@ print("\n== every page the app routes is a page the server will serve ==")
 # when navigated to and 404'd on refresh or from a pasted link. Checked
 # here because the next view will be added in one place too.
 import re as _re
+
 _root = _pathlib.Path(__file__).resolve().parents[2]
 _route_ts = _root / "frontend" / "src" / "lib" / "route.ts"
 if _route_ts.exists():

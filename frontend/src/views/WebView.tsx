@@ -121,19 +121,30 @@ export function WebView({ project }: { project: string | null }) {
     placeholderData: (prev) => prev,
   })
 
-  useEffect(() => { table.setTotal(data?.total ?? 0) }, [data?.total])
+  // Taken off `table` rather than called through it. useServerTable
+  // builds a new object on every render, so depending on `table` would
+  // re-run both of these every render; these two in particular are raw
+  // useState setters underneath and so are stable for the life of the
+  // component, which makes them honest dependencies.
+  const { setTotal, setPage } = table
+  useEffect(() => { setTotal(data?.total ?? 0) }, [setTotal, data?.total])
   // Changing the crawled/interesting shortcut changes the result set,
   // so page 7 of the old one is meaningless.
-  useEffect(() => { table.setPage(0) }, [filter, project])
+  useEffect(() => { setPage(0) }, [setPage, filter, project])
 
   // One row per URL, with the exchanges recorded against it spliced in
   // underneath when it is expanded. The grid is given the finished
   // array, which is how in-place expansion is possible at all: the MIT
   // DataGrid has no master-detail.
-  const groups = data?.items ?? []
+  //
+  // `data?.items ?? []` is read inside the callback rather than above it.
+  // Hoisted into a `const groups`, the `?? []` minted a new empty array
+  // on every render that had no data yet, so this memo's dependency
+  // changed identity every render and the memo never held anything —
+  // which is the whole point of it.
   const rows = useMemo(() => {
     const out: WebRow[] = []
-    for (const g of groups) {
+    for (const g of data?.items ?? []) {
       out.push(g)
       const kids = children[rowKey(g)]
       if (expanded.has(rowKey(g)) && kids) {
@@ -141,7 +152,7 @@ export function WebView({ project }: { project: string | null }) {
       }
     }
     return out
-  }, [groups, expanded, children])
+  }, [data?.items, expanded, children])
 
   const columns: GridColDef<WebAddress>[] = [
     {

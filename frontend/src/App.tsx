@@ -171,7 +171,7 @@ export default function App() {
   useEffect(() => {
     const items = projects?.items ?? []
     if (project === ALL && items.length === 1) setProject(items[0].code)
-  }, [projects, project])
+  }, [projects, project, setProject])
 
   // EVERY hook must be above the early returns below. Putting these two
   // after them meant React saw 15 hooks on the sign-in screen and 17

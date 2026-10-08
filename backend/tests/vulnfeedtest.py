@@ -11,9 +11,14 @@ empty feed is allowed to claim. "No known exploits" from a table that
 has never synced is a lie with a reassuring shape.
 """
 
-import pathlib as _pathlib, sys as _sys
+import pathlib as _pathlib
+import sys as _sys
+
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
-import json, os, urllib.error, urllib.request
+import json
+import os
+import urllib.error
+import urllib.request
 
 BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8019")
 ok = fail = 0
@@ -44,8 +49,7 @@ admin = call("/api/auth/setup", "POST",
              {"username": "root", "password": "root-password-1"})[1]["access_token"]
 
 print("== parsing, without touching the network ==")
-from app.vulnfeed import (_parse_exploits, parse_cve, product_terms,
-                          version_matches)
+from app.vulnfeed import _parse_exploits, parse_cve, product_terms, version_matches
 
 CSV = ("id,file,description,date_published,author,type,platform,port,codes,verified\n"
        "50383,exploits/multiple/webapps/50383.sh,Apache HTTP Server 2.4.49 - "
@@ -166,10 +170,11 @@ print("\n== NVD date windows stay inside what NVD accepts ==")
 # this bites: a backfill that runs out of page budget parks the cursor
 # years in the past, and asking for (cursor, now) as one span would
 # wedge every sync after it.
-from datetime import datetime, timedelta, timezone          # noqa: E402
-from app.vulnfeed import _nvd_windows, NVD_EPOCH            # noqa: E402
+from datetime import UTC, datetime, timedelta  # noqa: E402
 
-now = datetime(2026, 10, 7, tzinfo=timezone.utc)
+from app.vulnfeed import NVD_EPOCH, _nvd_windows  # noqa: E402
+
+now = datetime(2026, 10, 7, tzinfo=UTC)
 full = _nvd_windows(NVD_EPOCH, now)
 check("a full backfill splits into many windows", len(full) > 70, str(len(full)))
 check("none of them exceeds NVD's 120-day limit",
@@ -180,7 +185,7 @@ check("they cover the whole span without a gap",
       and all(full[i][1] == full[i + 1][0] for i in range(len(full) - 1)),
       f"{full[0][0]}..{full[-1][1]}")
 
-stale = _nvd_windows(datetime(2009, 3, 1, tzinfo=timezone.utc), now)
+stale = _nvd_windows(datetime(2009, 3, 1, tzinfo=UTC), now)
 check("resuming from a years-old cursor also chunks, rather than "
       "asking for one illegal 17-year range",
       len(stale) > 50 and all((b - a) <= timedelta(days=120) for a, b in stale),
@@ -193,7 +198,7 @@ check("a zero-width span still yields one window rather than none",
       len(_nvd_windows(now, now)) == 1, str(_nvd_windows(now, now)))
 
 print("\n== a wildcard CPE is not evidence about a version ==")
-from app.vulnfeed import match_kind, version_matches                # noqa: E402
+from app.vulnfeed import match_kind, version_matches  # noqa: E402
 
 exact = "cpe:2.3:a:apache:http_server:2.4.49:*:*:*:*:*:*:*"
 anyver = "cpe:2.3:a:apache:http_server:*:*:*:*:*:*:*:*"
@@ -216,10 +221,11 @@ print("\n== a failed sync keeps the ground it covered ==")
 # lookup means that on a flaky connection it never finishes at all --
 # which is how this was found: a real sync died at 21,545 records and
 # parked no cursor, so the next run would have started again at 2002.
-import asyncio as _aio                                           # noqa: E402
-from datetime import datetime as _dt, timezone as _tz            # noqa: E402
-import app.vulnfeed as _vf                                       # noqa: E402
-from app.db import SessionLocal as _SL                           # noqa: E402
+import asyncio as _aio  # noqa: E402
+from datetime import datetime as _dt  # noqa: E402
+
+import app.vulnfeed as _vf  # noqa: E402
+from app.db import SessionLocal as _SL  # noqa: E402
 
 
 async def _failing_sync():
@@ -275,7 +281,7 @@ check("and parks a cursor past the epoch, so the work already done "
 # a half-read window silently loses whatever it had not reached.
 check("at a boundary that actually completed",
       _cursor is not None
-      and _dt.fromisoformat(_cursor) <= _dt.now(_tz.utc),
+      and _dt.fromisoformat(_cursor) <= _dt.now(UTC),
       f"cursor={_cursor}")
 
 print("\n== a banner and a CPE spell a version differently ==")
@@ -285,7 +291,7 @@ print("\n== a banner and a CPE spell a version differently ==")
 # every OpenSSH lookup silently returned product-level hits only --
 # which reads as "nothing specific is known", the most reassuring
 # possible way to be wrong.
-from app.vulnfeed import version_candidates as _vc                  # noqa: E402
+from app.vulnfeed import version_candidates as _vc  # noqa: E402
 
 check("a patch-suffixed version also tries its base",
       _vc("8.2p1") == ["8.2p1", "8.2"], str(_vc("8.2p1")))
@@ -310,7 +316,7 @@ check("without making every version match",
 # 'a'*n + '!': 16ms at 2k characters, 16.7 SECONDS at 64k. The host that
 # chooses the input is the host being scanned, which is the whole threat
 # model of a tool like this.
-import time as _time                                                # noqa: E402
+import time as _time  # noqa: E402
 
 _t0 = _time.perf_counter()
 _vc("a" * 60000 + "!")

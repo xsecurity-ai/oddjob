@@ -2,9 +2,18 @@
 on agentic edits, and the email notification."""
 
 # Run from anywhere: the suites import `app`, which lives one level up.
-import pathlib as _pathlib, sys as _sys
+import pathlib as _pathlib
+import sys as _sys
+
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
-import json, os, socket, threading, time, urllib.request, urllib.error, zipfile
+import json
+import os
+import socket
+import threading
+import time
+import urllib.error
+import urllib.request
+import zipfile
 
 BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8019")
 SMTP_PORT = int(os.environ.get("ODDJOB_TEST_SMTP_PORT", "8035"))
@@ -30,7 +39,10 @@ def smtp_server():
 
 def handle(c):
     f = c.makefile("rwb")
-    say = lambda s: c.sendall((s + "\r\n").encode())
+
+    def say(s):
+        c.sendall((s + "\r\n").encode())
+
     say("220 localhost ESMTP test")
     body, in_data = [], False
     while True:
@@ -147,11 +159,11 @@ check("it is a real PDF", body[:5] == b"%PDF-" and body.rstrip()[-5:] == b"%%EOF
 check("served as a pdf attachment",
       "application/pdf" in hdrs.get("Content-Type", "")
       and ".pdf" in hdrs.get("Content-Disposition", ""), hdrs.get("Content-Disposition"))
-open("/tmp/rt-full.pdf", "wb").write(body)
+_pathlib.Path("/tmp/rt-full.pdf").write_bytes(body)
 
 st, body, hdrs = call(f"/api/reports/{full['id']}/download?format=docx", token=admin, raw=True)
 check("docx downloads", st == 200, f"status={st}")
-open("/tmp/rt-full.docx", "wb").write(body)
+_pathlib.Path("/tmp/rt-full.docx").write_bytes(body)
 check("it is a real DOCX", zipfile.is_zipfile("/tmp/rt-full.docx"))
 check("with a document part",
       "word/document.xml" in zipfile.ZipFile("/tmp/rt-full.docx").namelist())
@@ -159,9 +171,13 @@ check("an unknown format is refused",
       call(f"/api/reports/{full['id']}/download?format=txt", token=admin)[0] == 422)
 
 print("\n== content ==")
-import sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sqlite3
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from app.reports.model import ReportDoc
+
 db = sqlite3.connect(os.environ.get("ODDJOB_DB", "/tmp/ms-rep.db"))
 doc = ReportDoc.from_json(json.loads(
     db.execute("select content from reports where id=?", (full["id"],)).fetchone()[0]))
@@ -219,6 +235,7 @@ check("critical-only means critical only",
 
 print("\n== the agentic guard: edits may not alter figures ==")
 from app.reports.agentic import _apply, _collect, _keeps_numbers, _parse
+
 check("an edit that keeps the numbers is allowed",
       _keeps_numbers("47 hosts were scanned", "A total of 47 hosts were scanned"))
 check("an edit that drops a number is rejected",

@@ -16,12 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import audit
 from ..db import get_session
-from ..events import broker
 from ..dsn import is_masked
 from ..dsn import mask as dsn_mask
+from ..events import broker
 from ..models import Setting, User
-from ..provider_tests import (ENABLE_KEY, GATE_KEYS, issue_token, run_test,
-                              token_matches)
+from ..provider_tests import ENABLE_KEY, GATE_KEYS, issue_token, run_test, token_matches
 from ..security import get_current_user, require_site_admin
 from ..settings_spec import BY_KEY, GROUPS, SECRET_KEYS, SPEC
 
@@ -218,8 +217,8 @@ async def write_settings(body: SettingsPatch, user: User = Depends(require_site_
         elif spec["type"] == "number":
             try:
                 stored = str(int(val))  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                raise HTTPException(422, f"{key} must be a number")
+            except (TypeError, ValueError) as e:
+                raise HTTPException(422, f"{key} must be a number") from e
         elif spec["type"] == "select":
             if val not in spec["options"]:
                 raise HTTPException(422, f"{key} must be one of {spec['options']}")

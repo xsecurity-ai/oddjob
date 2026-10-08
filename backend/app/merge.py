@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import (Event, Implant, Poc, Service, Target, Vuln, WebAddress)
+from .models import Event, Implant, Poc, Service, Target, Vuln, WebAddress
 
 
 @dataclass
@@ -94,7 +94,7 @@ async def plan(session: AsyncSession, src: Target, dst: Target) -> Plan:
             f"really one asset before merging.")
 
     dst_svcs = await _svc_key(session, dst.id)
-    for (port, proto), s in (await _svc_key(session, src.id)).items():
+    for port, proto in await _svc_key(session, src.id):
         if (port, proto) in dst_svcs:
             p.service_conflicts.append(f"{port}/{proto}")
         else:

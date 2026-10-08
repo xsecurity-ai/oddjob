@@ -23,17 +23,17 @@ import hashlib
 import logging
 import secrets
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..headers import cookies_secure
 from ..db import get_session
 from ..events import broker
+from ..headers import cookies_secure
 from ..mailer import send_mail
 from ..models import MagicLink, User
 from ..security import COOKIE, TOKEN_TTL_HOURS, create_access_token, require_site_admin
@@ -88,7 +88,7 @@ async def _issue(session: AsyncSession, user: User, purpose: str) -> str:
     token = secrets.token_urlsafe(32)
     session.add(MagicLink(
         user_id=user.id, token_hash=_hash(token), purpose=purpose,
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=TTL_MINUTES)))
+        expires_at=datetime.now(UTC) + timedelta(minutes=TTL_MINUTES)))
     await session.commit()
     return token
 
@@ -176,7 +176,7 @@ async def request_magic_link(body: MagicRequest, request: Request,
 
 @router.get("/magic/{token}")
 async def redeem(token: str, session: AsyncSession = Depends(get_session)):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     link = (await session.execute(
         select(MagicLink).where(MagicLink.token_hash == _hash(token)))).scalar_one_or_none()
     if link is None:
@@ -184,7 +184,7 @@ async def redeem(token: str, session: AsyncSession = Depends(get_session)):
     if link.used_at is not None:
         raise HTTPException(400, "this link has already been used")
     # SQLite can hand back a naive datetime; compare like with like.
-    exp = link.expires_at if link.expires_at.tzinfo else link.expires_at.replace(tzinfo=timezone.utc)
+    exp = link.expires_at if link.expires_at.tzinfo else link.expires_at.replace(tzinfo=UTC)
     if exp < now:
         raise HTTPException(400, "this link has expired — request a new one")
 

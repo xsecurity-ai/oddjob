@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -20,8 +20,7 @@ from .. import domains as gen
 from ..db import get_session
 from ..events import broker
 from ..hosts import InvalidHost, validate_host
-from ..models import (DomainCandidate, Project, ProjectScope, Target, User,
-                      WebAddress)
+from ..models import DomainCandidate, Project, ProjectScope, Target, User, WebAddress
 from ..schemas import DomainCandidateOut, PromoteRequest
 from ..scopegate import index_for
 from ..security import get_current_user, require_project
@@ -146,7 +145,7 @@ async def roots(project: str = Query(...),
     searched: set[str] = set()
 
     counts = dict(gen.roots_in(hosts))
-    origin = {d: "targets" for d in counts}
+    origin = dict.fromkeys(counts, "targets")
 
     # Both name kinds. A wildcard is stored as its own kind and is the
     # likeliest way a whole zone gets put in scope — `*.acme.example` is
@@ -332,7 +331,7 @@ async def _promote_rows(session: AsyncSession, pr: Project, user: User,
     # address belongs to somebody else, so the scope check here is the
     # thing standing between a neighbour's hostname and the inventory.
     idx = await index_for(session, pr.id)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for c in rows:
         dup = (await session.execute(
             select(Target).where(Target.project_id == pr.id,
@@ -369,7 +368,7 @@ async def reject(body: PromoteRequest, project: str = Query(...),
     rows = (await session.execute(
         select(DomainCandidate).where(DomainCandidate.project_id == pr.id,
                                       DomainCandidate.id.in_(body.ids)))).scalars().all()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for c in rows:
         c.state, c.decided_by, c.decided_at = "rejected", user.id, now
     await session.commit()

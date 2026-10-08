@@ -106,7 +106,8 @@ def run(suite: str, db: pathlib.Path) -> tuple[int, int, str]:
     # nothing in the environment may override that.
     env.pop("ODDJOB_DATABASE_URL", None)
     srv = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(port), "--log-level", "warning"],
+        [sys.executable, "-m", "uvicorn", "app.main:app",
+         "--port", str(port), "--log-level", "warning"],
         cwd=HERE, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         if not wait_up(port, srv):
@@ -141,7 +142,7 @@ def run(suite: str, db: pathlib.Path) -> tuple[int, int, str]:
     if not m:
         return 0, 1, body[-2500:]
     p, f = int(m[-1][0]), int(m[-1][1])
-    detail = "\n".join(l for l in body.splitlines() if "FAIL" in l)
+    detail = "\n".join(ln for ln in body.splitlines() if "FAIL" in ln)
     return p, f, detail
 
 
@@ -180,12 +181,13 @@ def main() -> int:
         out = r.stdout + r.stderr
         m = re.findall(r"(\d+) passed, (\d+) failed", out)
         p, f = (int(m[-1][0]), int(m[-1][1])) if m else (0, 1)
-        tp += p; tf += f
+        tp += p
+        tf += f
         print(f"  {'ok  ' if not f else 'FAIL'} {'migrationtest.py':<16} "
               f"{p:>3} passed, {f} failed")
         if f:
             bad.append("--- migrationtest.py ---\n"
-                       + "\n".join(l for l in out.splitlines() if "FAIL" in l))
+                       + "\n".join(ln for ln in out.splitlines() if "FAIL" in ln))
     for suite, db in SUITES:
         name = suite.rsplit("/", 1)[-1]
         if only and name not in only and name.removesuffix(".py") not in only:
@@ -194,7 +196,8 @@ def main() -> int:
         _t0 = _t.time()
         p, f, detail = run(suite, db)
         _el = _t.time() - _t0
-        tp += p; tf += f
+        tp += p
+        tf += f
         mark = "ok  " if f == 0 else "FAIL"
         print(f"  {mark} {name:<16} {p:>3} passed, {f} failed  ({_el:.0f}s)")
         if f and detail:
