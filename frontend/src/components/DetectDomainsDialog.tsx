@@ -74,8 +74,6 @@ export function DetectDomainsDialog({ project, onClose, seed = [],
   //: Progress through a batched sweep, so a long run is visibly
   //: running rather than apparently hung.
   const [sweep, setSweep] = useState<{ done: number; total: number } | null>(null)
-  const [queued, setQueued] =
-    useState<Awaited<ReturnType<typeof api.enumerateDomains>> | null>(null)
   const [picked, setPicked] = useState<Set<number>>(new Set())
 
   const roots = useQuery({
@@ -91,18 +89,6 @@ export function DetectDomainsDialog({ project, onClose, seed = [],
     () => new Set((searched.data ?? []).map((s) => s.domain)),
     [searched.data])
 
-  /** Detect across every root this project touches.
-   *
-   *  Generation is offline — it extrapolates from names already held
-   *  and performs no lookups — so running it for every root costs
-   *  nothing on the wire and is the obvious thing to want. Doing them
-   *  one at a time was busywork.
-   *
-   *  Results accumulate rather than replace, because the point is one
-   *  list to triage. Roots already searched are included: the whole
-   *  reason to re-run is that new data has since made new names
-   *  derivable. */
-  const runAll = () => run(true, (roots.data ?? []).map((r) => r.domain))
 
   // Every hostname on the project, not just the registrable roots.
   // Searching under `web01.corp.com` finds names the root sweep never
@@ -127,7 +113,21 @@ export function DetectDomainsDialog({ project, onClose, seed = [],
     return out
   }, [allHosts, alreadySearched])
 
-  const runAllHosts = () => run(false, hostCandidates)
+  /** Everything worth sweeping, once. The roots and the hostnames
+   *  were two buttons; they are one list. Already-searched names stay
+   *  out — that is what the memory is for, and a sweep that re-asked
+   *  every host would report "nothing new" four hundred times. */
+  const sweepAll = useMemo(() => {
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const v of [...(roots.data ?? []).map((r) => r.domain), ...hostCandidates]) {
+      const k = (v || '').trim().toLowerCase().replace(/\.$/, '')
+      if (!k || seen.has(k) || alreadySearched.has(k)) continue
+      seen.add(k)
+      out.push(k)
+    }
+    return out
+  }, [roots.data, hostCandidates, alreadySearched])
 
   /** Detect against one domain, several, or every root.
    *
@@ -163,56 +163,64 @@ export function DetectDomainsDialog({ project, onClose, seed = [],
     } finally { setBusy(false); setSweep(null) }
   }
 
-  /** Hand the list to an agent and let the results file themselves.
-   *
-   *  The other button guesses names from patterns; this one has a
-   *  scanner go and look. Nothing to triage afterwards — a name a tool
-   *  resolved is a finding, so it becomes a target when the task
-   *  reports back. */
-  const sendToDrone = async () => {
-    const list = parseDomains(domain)
-    if (!list.length) return
-    setBusy(true); setErr(null); setQueued(null)
-    try {
-      const r = await api.enumerateDomains(project, domain, 'passive')
-      const bad0 = Object.keys(r.refused).length
-      if (onQueued && r.queued.length) {
-        onQueued(`Queued ${r.queued.length} enumeration`
-                 + `${r.queued.length === 1 ? '' : 's'} across `
-                 + `${r.agents_online} online agent`
-                 + `${r.agents_online === 1 ? '' : 's'}. Names found are added `
-                 + `as targets when each task reports`
-                 + (bad0 ? `. ${bad0} were refused.` : '.'))
-        return
-      }
-      setQueued(r)
-      const bad = Object.keys(r.refused)
-      if (bad.length) {
-        setErr(`${bad.length} not queued — `
-               + bad.slice(0, 3).map((d) => `${d}: ${r.refused[d]}`).join('; ')
-               + (bad.length > 3 ? ' …' : ''))
-      }
-      await qc.invalidateQueries({ queryKey: ['agents', project] })
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
-    } finally { setBusy(false) }
-  }
 
+  /** Promote, hand to a Drone, and get out of the way.
+   *
+   *  Adding a name as a target and then enumerating it were two
+   *  buttons, and nobody wanted the first without the second: a
+   *  candidate is a guess, and the only way it becomes worth anything
+   *  is an agent going and looking. So promotion queues the lookup
+   *  too, and the dialog closes, because the answer arrives on the
+   *  Drones page rather than here.
+   *
+   *  Promotion is what must not fail. If no agent is online the names
+   *  are still added — reported, not silently dropped — and the sweep
+   *  can be run again later from the Targets page. */
   const act = async (what: 'promote' | 'reject') => {
     const ids = [...picked]
     if (!ids.length) return
     setBusy(true); setErr(null)
     try {
-      if (what === 'promote') await api.promoteDomains(project, ids)
-      else await api.rejectDomains(project, ids)
-      // `ran`, not `result.domain` — after a sweep that string is
-      // "7 domain(s)", which is not a domain and came back 422.
-      setResult(await api.detectDomains(project, ran, false))
-      setPicked(new Set())
+      if (what !== 'promote') {
+        await api.rejectDomains(project, ids)
+        // `ran`, not `result.domain` — after a sweep that string is
+        // "7 domain(s)", which is not a domain and came back 422.
+        setResult(await api.detectDomains(project, ran, false))
+        setPicked(new Set())
+        await qc.invalidateQueries()
+        return
+      }
+
+      const names = (result?.candidates ?? [])
+        .filter((c) => picked.has(c.id)).map((c) => c.name)
+      await api.promoteDomains(project, ids)
+
+      let note = `Added ${ids.length} target${ids.length === 1 ? '' : 's'}`
+      if (!noAgents && names.length) {
+        try {
+          const q = await api.enumerateDomains(project, names.join('\n'), 'passive')
+          const refused = Object.keys(q.refused).length
+          note += `. Queued ${q.queued.length} enumeration`
+                + `${q.queued.length === 1 ? '' : 's'} across `
+                + `${q.agents_online} online agent`
+                + `${q.agents_online === 1 ? '' : 's'}`
+                + (refused ? `; ${refused} refused` : '')
+        } catch (e) {
+          // The targets are already in. Say what did not happen
+          // rather than failing the whole action over it.
+          note += `, but enumeration could not be queued: `
+                + (e instanceof Error ? e.message : String(e))
+        }
+      } else if (noAgents) {
+        note += `, not enumerated: ${noAgents}`
+      }
       await qc.invalidateQueries()
+      onQueued?.(note)
+      onClose()
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
-    } finally { setBusy(false) }
+      setBusy(false)
+    }
   }
 
   const toggle = (id: number) => setPicked((p) => {
@@ -292,60 +300,25 @@ export function DetectDomainsDialog({ project, onClose, seed = [],
                       + 'newlines all work; URLs and *. are trimmed.'} />
               )}
             />
-            <Button variant="outlined" disabled={busy || !typed.length}
-              onClick={() => run(false)}
-              sx={{ mt: 0.3, color: neon.cyan, borderColor: alpha(neon.cyan, 0.6) }}>
-              {busy ? '…' : `Detect${typed.length > 1 ? ` (${typed.length})` : ''}`}
-            </Button>
-            {/* The other half of the dialog's job: stop guessing and
-                have an agent actually look. */}
-            <Tooltip title={noAgents
-              ? noAgents
-              : 'Hand these to a Drone agent to enumerate for real. Names '
-                + 'that come back are resolved, so they are filed as '
-                + 'targets automatically — nothing to triage.'}>
-              <span>
-                <Button variant="contained" disableElevation
-                  disabled={busy || !typed.length || !!noAgents}
-                  onClick={sendToDrone}
-                  sx={{ mt: 0.3, bgcolor: alpha(neon.pink, 0.22),
-                        color: neon.pink,
-                        border: `1px solid ${alpha(neon.pink, 0.6)}`,
-                        '&:hover': { bgcolor: alpha(neon.pink, 0.3) } }}>
-                  Send to Drone
-                </Button>
-              </span>
-            </Tooltip>
-            <Tooltip title={hostCandidates.length
-              ? `Search under every hostname on this project that has not `
-                + `been searched before (${hostCandidates.length}). Offline, `
-                + `like the rest of detection — it extrapolates from names `
-                + `already held and sends nothing.`
-              : allHosts.length
-                ? 'Every host on this project has been searched already.'
-                : 'This project has no hosts yet.'}>
+            {/* One sweep, not two. "All" and "All hosts" differed only
+                in which list they walked — registrable roots versus
+                every hostname — and nobody picking between them was
+                choosing on that basis. The union is what both were
+                reaching for. */}
+            <Tooltip title={sweepAll.length
+              ? `Search under every domain and hostname this project `
+                + `touches that has not been searched yet `
+                + `(${sweepAll.length}). Offline — it extrapolates from `
+                + `names already held and sends nothing.`
+              : 'Nothing left to sweep: everything this project knows about '
+                + 'has been searched. Type a domain above instead.'}>
               <span>
                 <Button variant="outlined"
-                  disabled={busy || !hostCandidates.length}
-                  onClick={runAllHosts}
-                  sx={{ mt: 0.3, color: neon.purple,
-                        borderColor: alpha(neon.purple, 0.6) }}>
-                  All hosts {hostCandidates.length
-                    ? `(${hostCandidates.length})` : ''}
-                </Button>
-              </span>
-            </Tooltip>
-            <Tooltip title={(roots.data ?? []).length
-              ? `Run it for every domain this project covers (${(roots.data ?? []).length}) — from its targets, its scope, and anything searched before. Generation is offline, so this costs nothing on the wire.`
-              : 'Nothing to sweep: this project has no targets, no FQDNs in scope and nothing searched before. Type a domain above instead.'}>
-              <span>
-                <Button variant="outlined"
-                  disabled={busy || !(roots.data ?? []).length}
-                  onClick={runAll}
+                  disabled={busy || !sweepAll.length}
+                  onClick={() => run(false, sweepAll)}
                   sx={{ mt: 0.3, color: neon.green,
                         borderColor: alpha(neon.green, 0.6) }}>
-                  All {(roots.data ?? []).length
-                    ? `(${(roots.data ?? []).length})` : ''}
+                  {busy ? '…' : `All${sweepAll.length ? ` (${sweepAll.length})` : ''}`}
                 </Button>
               </span>
             </Tooltip>
@@ -378,20 +351,6 @@ export function DetectDomainsDialog({ project, onClose, seed = [],
               </Typography>
             )}
           </Stack>
-
-          {queued && (
-            <Alert severity={queued.queued.length ? 'success' : 'warning'}
-                   variant="outlined" sx={{ fontSize: 12 }}>
-              {queued.queued.length
-                ? <>Queued {queued.queued.length} enumeration
-                    {queued.queued.length === 1 ? '' : 's'} across{' '}
-                    {queued.agents_online} online agent
-                    {queued.agents_online === 1 ? '' : 's'}. Names found are
-                    added as targets when each task reports — you can close
-                    this.</>
-                : <>Nothing was queued.</>}
-            </Alert>
-          )}
 
           {result?.promoted?.length ? (
             <Alert severity="success" variant="outlined" sx={{ fontSize: 12 }}>

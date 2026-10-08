@@ -164,4 +164,50 @@ print("\n== unknown api path 404s as JSON ==")
 st, body = call("/api/definitely-not-a-thing")
 check("404 not HTML", st == 404, f"status={st}")
 
+print("\n== a trailing slash on an api path is SERVED, not redirected ==")
+# `/api/agents/?project=X` read as "no such endpoint" while
+# `/api/agents` worked: the SPA catch-all matched first and swallowed
+# the redirect FastAPI would otherwise have issued.
+#
+# Redirecting was the obvious fix and it was wrong. What produced the
+# slashed URL was a proxy emitting a 301 -- and a 301 is PERMANENT, so
+# browsers cache it and keep replaying it after the proxy is fixed.
+# Answering with a redirect back gives the browser two redirects
+# pointing at each other, which is ERR_TOO_MANY_REDIRECTS and reaches
+# a fetch() as "Failed to fetch". Serving the path leaves nothing to
+# loop against.
+import urllib.request as _ur                                        # noqa: E402
+
+_noredir = _ur.build_opener(type("NoRedirect", (_ur.HTTPRedirectHandler,), {
+    "redirect_request": lambda *a, **k: None})())
+
+
+def _raw_status(path):
+    rq = urllib.request.Request(BASE + path)
+    rq.add_header("Authorization", f"Bearer {TOKEN}")
+    try:
+        with _noredir.open(rq, timeout=20) as r:
+            return r.status, r.headers.get("Location")
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers.get("Location")
+
+
+_st, _loc = _raw_status("/api/stats/")
+check("a slashed api path is served directly", _st == 200, f"status={_st}")
+check("and does NOT redirect — a cached 301 pointing the other way "
+      "would make that an infinite loop", _loc is None, str(_loc))
+
+_st, _ = _raw_status("/api/stats/?project=APITEST")
+check("the query string survives the rewrite", _st == 200, f"status={_st}")
+
+# Still 404 when there is genuinely nothing there.
+st, _ = call("/api/definitely-not-a-thing/")
+check("a slashed path that does not exist still 404s", st == 404,
+      f"status={st}")
+# The gate matches exact paths, so normalising has to happen OUTSIDE it
+# or a slashed public path is refused before it is ever routed.
+st, _ = call("/api/auth/setup-required/")
+check("and the gatekeeper sees the normalised path too", st == 200,
+      f"status={st}")
+
 print(f"\n{'='*52}\n  {ok} passed, {fail} failed\n{'='*52}")

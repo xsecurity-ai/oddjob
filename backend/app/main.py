@@ -203,8 +203,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class ApiSlash:
+    """Route `/api/foo/` as `/api/foo`. A rewrite, NOT a redirect.
+
+    `/api/agents/?project=X` used to answer "no such endpoint" while
+    `/api/agents` worked, because the SPA catch-all matched first and
+    swallowed the redirect FastAPI would otherwise have issued.
+
+    Redirecting was the obvious fix and it was wrong. What produced the
+    slashed URL in the first place was a reverse proxy emitting a 301 —
+    and a 301 is PERMANENT, so browsers cache it and keep replaying it
+    long after the proxy is corrected. Answering it with a redirect
+    back to the unslashed form gives the browser two redirects pointing
+    at each other: ERR_TOO_MANY_REDIRECTS, which surfaces to a fetch()
+    as the uniquely unhelpful "Failed to fetch".
+
+    Rewriting the path leaves nothing to loop against. The slashed URL
+    is simply served, whatever any client has cached.
+
+    Outermost, so Gatekeeper sees the normalised path as well — its
+    allowlist matches exact strings, and a slashed public path would
+    otherwise be refused before routing.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            path = scope.get("path", "")
+            if path.startswith("/api/") and path.endswith("/") and len(path) > 5:
+                trimmed = path.rstrip("/")
+                scope = dict(scope)
+                scope["path"] = trimmed
+                if scope.get("raw_path"):
+                    # Kept in step, or anything reading raw_path (and
+                    # Starlette does, for routing) sees the old one.
+                    q = scope["raw_path"].split(b"?", 1)
+                    scope["raw_path"] = trimmed.encode() + (
+                        b"?" + q[1] if len(q) > 1 else b"")
+        await self.app(scope, receive, send)
+
+
 # Added last, so it is outermost and nothing escapes without it.
 app.add_middleware(_headers.SecurityHeaders)
+app.add_middleware(ApiSlash)
 
 # Outside Gatekeeper on purpose, so a REFUSED request is recorded as
 # well: a run of 401s from an address nobody recognises is the entry
@@ -279,6 +322,8 @@ if _DIST.is_dir():
         # index.html — a client getting HTML back from a typo'd endpoint is a
         # genuinely confusing way to debug.
         if full_path.startswith("api/"):
+            # Slashed paths never arrive here: ApiSlash (below) has
+            # already rewritten them. Anything left really is unknown.
             raise HTTPException(404, f"no such endpoint: /{full_path}")
         if (asset := dist_file(full_path)) is not None:
             return FileResponse(asset)
