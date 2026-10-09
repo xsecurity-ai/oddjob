@@ -1838,5 +1838,58 @@ check("the stale note goes with it",
       (a or {}).get("outbound_ip_note") is None,
       str((a or {}).get("outbound_ip_note")))
 
+print("\n== targets nothing has scanned yet ==")
+# "Never tasked", not "has no ports". The two differ in both
+# directions and the difference is the whole point:
+#
+#   * a host nmap scanned that answered on nothing has no services,
+#     so a ports-based rule would offer it again on every pass, for
+#     ever, at a client, for a question already answered
+#   * a host whose services came from an IMPORT has ports and has
+#     never been scanned by us at all
+call("/api/projects", "POST", {"code": "UNSC", "name": "Unscanned"}, token=admin)
+_uid, _ukey = None, None
+st, _en = call("/api/ghosts?project=UNSC", "POST",
+               {"name": "unsc", "target_os": "linux"}, token=admin)
+_uid = ((_en or {}).get("agent") or {}).get("id")
+for _h in ("fresh-a.example", "fresh-b.example", "scanned.example",
+           "emptyscan.example"):
+    call("/api/targets?project=UNSC", "POST", {"host": _h}, token=admin)
+
+st, u = call("/api/targets/unscanned?project=UNSC", token=admin)
+check("the endpoint answers", st == 200, f"{st} {str(u)[:120]}")
+check("with every host, since nothing has been scanned",
+      sorted((u or {}).get("hosts", [])) ==
+      ["emptyscan.example", "fresh-a.example", "fresh-b.example",
+       "scanned.example"], str((u or {}).get("hosts")))
+
+# Task one with nmap. It drops out even though it has no services yet
+# — the scan was ASKED FOR, and that is the question being answered.
+call(f"/api/ghosts/{_uid}/tasks?project=UNSC", "POST",
+     {"kind": "nmap", "args": {"targets": ["scanned.example"]}}, token=admin)
+st, u = call("/api/targets/unscanned?project=UNSC", token=admin)
+check("a host that has been tasked with nmap drops out",
+      "scanned.example" not in (u or {}).get("hosts", []),
+      str((u or {}).get("hosts")))
+check("...and the rest stay", len((u or {}).get("hosts", [])) == 3,
+      str((u or {}).get("hosts")))
+
+# masscan counts too — the request was "not scanned by nmap OR masscan".
+call(f"/api/ghosts/{_uid}/tasks?project=UNSC", "POST",
+     {"kind": "masscan", "args": {"targets": ["fresh-b.example"]}}, token=admin)
+st, u = call("/api/targets/unscanned?project=UNSC", token=admin)
+check("masscan counts as scanned as well as nmap",
+      "fresh-b.example" not in (u or {}).get("hosts", []),
+      str((u or {}).get("hosts")))
+
+# A different kind of task must NOT count. An amass or a lookup says
+# nothing about whether the ports were ever looked at.
+call(f"/api/ghosts/{_uid}/tasks?project=UNSC", "POST",
+     {"kind": "nslookup", "args": {"targets": ["fresh-a.example"]}}, token=admin)
+st, u = call("/api/targets/unscanned?project=UNSC", token=admin)
+check("a lookup does not make a host count as scanned",
+      "fresh-a.example" in (u or {}).get("hosts", []),
+      str((u or {}).get("hosts")))
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
