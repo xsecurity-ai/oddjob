@@ -42,8 +42,11 @@ func failed(format string, a ...any) Result {
 type Runner func(ctx context.Context, args map[string]any, workDir string) Result
 
 var Runners = map[string]Runner{
-	"nmap":       runNmap,
-	"masscan":    runMasscan,
+	"nmap":    runNmap,
+	"masscan": runMasscan,
+	// Port discovery with no binary. A CONNECT scan, so not a
+	// replacement for masscan's SYN sweep — see portscan.go.
+	"portscan":   runPortscan,
 	"amass":      runAmass,
 	"gobuster":   runGobuster,
 	"gospider":   runGospider,
