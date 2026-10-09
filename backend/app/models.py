@@ -129,8 +129,10 @@ class Project(Base, TimestampMixin):
     #: trigger only ever covers what arrives after it is switched on,
     #: which means turning one on does nothing visible and the operator
     #: concludes it is broken. These are evaluated against whatever is
-    #: outstanding, so switching one on drains the backlog too — paced,
-    #: see automation.PER_CYCLE.
+    #: outstanding, so switching one on drains the backlog too — all of
+    #: it, in the first cycle. What keeps that off the client's network
+    #: is the Ghost's own max_parallel, not a cap on the queue; see the
+    #: automation module docstring.
     #:
     #: Every candidate still goes through the scope gate individually.
     #: An automation that could queue one out-of-scope host is worse
