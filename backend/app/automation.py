@@ -24,11 +24,29 @@ cycle and every cycle after that, forever, against a client. Having
 been *tried* is what counts here, not having succeeded. Re-running a
 failed lookup is a deliberate act and stays a manual one.
 
-**Paced.** PER_CYCLE candidates per policy per project per cycle, so
-switching a policy on in a project with four thousand hosts drains over
-hours rather than queueing four thousand scans in one go. The ghost
-queue would survive that; the client's network is the thing that would
-not.
+**A cycle queues the whole backlog.** It used to take PER_CYCLE
+candidates per policy per cycle, on the reasoning that queueing four
+thousand scans at once was something "the client's network would not
+survive". That reasoning was wrong, and worth spelling out so it is
+not reinstated by someone reading the old comment:
+
+* Queueing is not scanning. Tasks sit in the database until a Ghost
+  asks for work, and a Ghost only ever takes what `max_parallel`
+  allows -- which is itself clamped by the host's free memory, and
+  clamped again for heavy kinds like amass by `heavy_allowance`. The
+  client-facing rate is set there, at dispatch, and is identical
+  whether the queue holds 25 items or four thousand.
+* So the cap paced the *queue*, not the network, and the only thing it
+  actually achieved was leaving work undone -- a backlog that needed
+  N more cycles, where the operator had already said to do all of it.
+
+What the cap did protect against is a single enormous transaction, and
+that is handled where it belongs: the candidates are gated and inserted
+in batches, so one cycle drains everything without one giant write.
+
+Scope is re-checked when a task is handed out, not only when it is
+queued (`scope_refusal` in routers/agents.py), so a deep queue cannot
+outlive a scope change.
 
 They are standing orders rather than triggers on insert, which is a
 deliberate difference. A trigger only ever covers what arrives after it
@@ -63,11 +81,13 @@ from .scopegate import index_for
 
 log = logging.getLogger(__name__)
 
-#: Candidates per policy, per project, per cycle. Small on purpose --
-#: see the module docstring. At one cycle a minute this is 1,500 an
-#: hour per policy, which drains a large backlog overnight without ever
-#: looking like an incident from the other end.
-PER_CYCLE = 25
+#: How many candidates to gate and insert in one database round trip.
+#:
+#: NOT a cap on how much a cycle does -- a cycle does all of it. This
+#: only stops a backlog of thousands becoming one enormous statement,
+#: which is the single real cost the old per-cycle cap was covering
+#: for. See the module docstring.
+BATCH = 250
 
 #: How often to look. Long enough that a quiet installation costs
 #: nothing, short enough that adding a host and seeing it resolve feels
@@ -134,12 +154,17 @@ class Snapshot:
     tasked: set[tuple[str, str]] = field(default_factory=set)
 
 
-def plan(s: Snapshot, limit: int = PER_CYCLE) -> list[Candidate]:
+def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
     """What the policies would like to do, before the gate is consulted.
 
-    Pure. Returns at most `limit` candidates per policy, in a stable
-    order, so a cycle that is interrupted resumes where it was rather
-    than starting from a different place each time.
+    Pure. `limit` is per policy and defaults to None, meaning all of
+    them: an operator who switched a policy on wants the backlog done,
+    not a page of it. Callers may still pass one, and the slices below
+    read `[:None]` as "everything", which is exactly the wanted
+    behaviour rather than a trick.
+
+    The order is stable regardless, so an interrupted cycle resumes
+    where it was rather than starting somewhere different.
     """
     out: list[Candidate] = []
 
@@ -278,6 +303,7 @@ async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
 
     idx = await index_for(session, pr.id)
     queued: dict[str, int] = {}
+    pending = 0
     for c in want:
         # A zone handed to amass is asked `check_zone`; everything else
         # is a host something will be done TO, and gets `check`. The two
@@ -298,6 +324,14 @@ async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
                       import_as=_import_as(c.kind), status="queued")
         session.add(t)
         queued[c.policy] = queued.get(c.policy, 0) + 1
+        pending += 1
+        # Flushed in batches rather than accumulating the whole backlog
+        # in one statement. A project switching a policy on for four
+        # thousand hosts is now one cycle, not a hundred and sixty, and
+        # that only works if the write is chunked.
+        if pending >= BATCH:
+            await session.flush()
+            pending = 0
 
     if queued:
         await session.commit()

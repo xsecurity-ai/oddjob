@@ -55,8 +55,8 @@ def call(p, m="GET", b=None, token=None):
 
 
 from app.automation import (  # noqa: E402
+    BATCH,
     NMAP_PROFILES,
-    PER_CYCLE,
     Snapshot,
     plan,
 )
@@ -148,23 +148,38 @@ check("...whether it was recorded as a search or as a task",
                     tasked={("amass", "acme.example")})) == [])
 
 # =====================================================================
-# Part 3 — pacing
+# Part 3 — a cycle does the whole backlog
 # =====================================================================
-print("\n--- a large backlog drains rather than arriving at once ---")
+print("\n--- a cycle leaves nothing for the next one ---")
 
-big = [(f"h{i:04d}.acme.example", False) for i in range(PER_CYCLE * 4)]
+# This used to assert the opposite: at most PER_CYCLE per policy, with
+# the rest deferred. That cap paced the QUEUE and not the client's
+# network -- a Ghost only ever runs what its memory-clamped
+# max_parallel and heavy_allowance permit, however deep the queue is --
+# so all it achieved was leaving work undone after an operator had
+# asked for all of it.
+N = BATCH * 4 + 7          # deliberately not a multiple of the batch size
+big = [(f"h{i:04d}.acme.example", False) for i in range(N)]
 p = plan(Snapshot(auto_resolve_ips=True, targets=big))
-check(f"at most {PER_CYCLE} per policy per cycle", len(p) == PER_CYCLE, len(p))
+check("every outstanding subject is planned, none deferred", len(p) == N, len(p))
 check("the order is stable, so an interrupted cycle resumes",
       [c.subject for c in p] == [c.subject for c in
                                  plan(Snapshot(auto_resolve_ips=True,
                                                targets=big))])
-check("...and it is the same first page each time until they are tried",
-      p[0].subject == "h0000.acme.example", p[0].subject)
-# Each policy gets its own allowance rather than sharing one.
+check("it still starts at the beginning", p[0].subject == "h0000.acme.example",
+      p[0].subject)
+check("nothing is dropped at a batch boundary",
+      len({c.subject for c in p}) == N, len({c.subject for c in p}))
+
+# Each policy is planned in full, rather than policies sharing one
+# allowance and starving each other.
 p = plan(Snapshot(auto_resolve_ips=True, auto_nmap="top100", targets=big))
-check("two policies get an allowance each, not half each",
-      len(p) == PER_CYCLE * 2, len(p))
+check("two policies are both planned in full, not half each",
+      len(p) == N * 2, len(p))
+
+# An explicit limit is still honoured for callers that want one.
+p = plan(Snapshot(auto_resolve_ips=True, targets=big), limit=10)
+check("an explicit limit still caps it", len(p) == 10, len(p))
 
 # =====================================================================
 # Part 4 — against a live server: the gate, and the API
