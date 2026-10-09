@@ -97,6 +97,24 @@ updates:
     groups:
       ghost-minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # The amass internals are a LOCKED SET, not independent
+      # libraries. amass v4.2.0 requires asset-db v0.3.3, config
+      # v0.1.4 and open-asset-model v0.2.0, and those three have to
+      # agree with each other: #59 moved config and open-asset-model
+      # to 0.8.0, left asset-db where amass pins it, and the build
+      # stopped compiling — `oam.ASN` and `network.RIROrganization`
+      # simply do not exist any more, and `Cidr` became `CIDR`.
+      #
+      # They are direct requirements because `ghost/internal/tasks/
+      # amass.go` imports config and open-asset-model by hand, not
+      # because they are ours to upgrade. They move when amass moves.
+      #
+      # These are pre-1.0, where the MINOR is the breaking position,
+      # so "minor-and-patch" is not the safe category it is for
+      # everything else in this group — which is exactly how a
+      # build-breaking change arrived labelled as a routine bump.
+      - dependency-name: "github.com/owasp-amass/*"
     labels: [dependencies, ghost]
     commit-message:
       prefix: "deps(ghost)"
