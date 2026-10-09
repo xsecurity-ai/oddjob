@@ -771,12 +771,12 @@ export const api = {
    *  answers "what has this scanner done"; this answers "what is
    *  happening here", which is the question with a queue in it. */
   ghostTasks: (project: string) =>
-    req<GhostTaskRow[]>('/api/agents/tasks' + qs({ project })),
+    req<GhostTaskRow[]>('/api/ghosts/tasks' + qs({ project })),
 
   /** Put a failed task back in the queue by hand. The automatic retry
    *  stops after two; this is what happens once a person has looked. */
   retryGhostTask: (project: string, id: number) =>
-    req<GhostTaskRow>(`/api/agents/tasks/${id}/retry` + qs({ project }),
+    req<GhostTaskRow>(`/api/ghosts/tasks/${id}/retry` + qs({ project }),
                   { method: 'POST' }),
 
   /** Everything waiting to run on this project, oldest first — the
@@ -787,13 +787,13 @@ export const api = {
     agent_id: number | null; agent_name: string | null
     region: string | null; requested_by: string | null
     created_at: string | null; status: string
-  }>>('/api/agents/queue' + qs({ project })),
+  }>>('/api/ghosts/queue' + qs({ project })),
 
   /** Take a queued task back out. Refused once an agent has it: the
    *  scan is already running and deleting the row would only lose the
    *  result. */
   cancelGhostTask: (project: string, id: number) =>
-    req<void>(`/api/agents/tasks/${id}` + qs({ project }),
+    req<void>(`/api/ghosts/tasks/${id}` + qs({ project }),
               { method: 'DELETE' }),
 
   agentStatus: (project: string) =>
@@ -940,11 +940,11 @@ export const api = {
   // Ghost agents. Every call is project-scoped because an agent is:
   // enrolled into one project, tasked only from that project, and its
   // results import only there.
-  agents: (project: string) => req<GhostAgent[]>('/api/agents' + qs({ project })),
+  agents: (project: string) => req<GhostAgent[]>('/api/ghosts' + qs({ project })),
   enrollAgent: (project: string, body: {
     name: string; connection_mode?: string; target_os?: string; notes?: string
   }) =>
-    req<AgentEnrolled>('/api/agents' + qs({ project }),
+    req<AgentEnrolled>('/api/ghosts' + qs({ project }),
       { method: 'POST', body: JSON.stringify(body) }),
   /** Rename, re-prioritise, set the regions it serves, or annotate it.
    *  Priority only matters in `primary` routing (lower goes first);
@@ -956,7 +956,7 @@ export const api = {
      *  supplied", so there has to be an explicit value for "undo". */
     parallel_override?: number
   }) =>
-    req<GhostAgent>(`/api/agents/${id}` + qs({ project }),
+    req<GhostAgent>(`/api/ghosts/${id}` + qs({ project }),
       { method: 'PATCH', body: JSON.stringify(body) }),
   /** Rotate an agent's keys, keeping its record and history.
    *
@@ -971,35 +971,35 @@ export const api = {
     server_public_key: string
     server_kex_public_key: string
     instructions: string
-  }>(`/api/agents/${id}/reenroll` + qs({ project }), { method: 'POST' }),
+  }>(`/api/ghosts/${id}/reenroll` + qs({ project }), { method: 'POST' }),
 
   /** Stop it. Keeps the agent and everything it found; see the backend
    *  route for why this is not a delete. */
   killAgent: (project: string, id: number) =>
-    req<GhostAgent>(`/api/agents/${id}/kill` + qs({ project }), { method: 'POST' }),
+    req<GhostAgent>(`/api/ghosts/${id}/kill` + qs({ project }), { method: 'POST' }),
   deleteAgent: (project: string, id: number) =>
-    req<void>(`/api/agents/${id}` + qs({ project }), { method: 'DELETE' }),
+    req<void>(`/api/ghosts/${id}` + qs({ project }), { method: 'DELETE' }),
 
   ghostDownloads: () => req<{
     builds: Array<{ os: string; arch: string; name: string
                     available: boolean; bytes: number }>
     any: boolean
-  }>('/api/agents/downloads'),
+  }>('/api/ghosts/downloads'),
   /** The binary itself is a normal authenticated GET; the cookie goes
    *  with it, so a plain link works and the browser streams it. */
   ghostDownloadUrl: (goos: string, arch: string) =>
-    `/api/agents/download/${encodeURIComponent(goos)}/${encodeURIComponent(arch)}`,
+    `/api/ghosts/download/${encodeURIComponent(goos)}/${encodeURIComponent(arch)}`,
   reachAgent: (project: string, id: number) =>
     req<{ ok: boolean; detail: string; status: Record<string, unknown> | null }>(
-      `/api/agents/${id}/reach` + qs({ project }), { method: 'POST' }),
+      `/api/ghosts/${id}/reach` + qs({ project }), { method: 'POST' }),
 
   ghostRouting: (project: string) =>
-    req<GhostRouting>('/api/agents/routing' + qs({ project })),
+    req<GhostRouting>('/api/ghosts/routing' + qs({ project })),
   /** Either field alone: changing the parallelism must not require
    *  restating the routing mode. */
   setGhostRouting: (project: string,
                    body: { mode?: string; max_parallel?: number }) =>
-    req<GhostRouting>('/api/agents/routing' + qs({ project }),
+    req<GhostRouting>('/api/ghosts/routing' + qs({ project }),
       { method: 'PUT', body: JSON.stringify(body) }),
   /** One task per subject, created server-side in one request.
    *
@@ -1011,7 +1011,7 @@ export const api = {
                    args: Record<string, unknown> = {},
                    agentId: number | null = null, region?: string) =>
     req<{ ids: number[]; refused: Record<string, string>; queued: number }>(
-      '/api/agents/tasks/bulk' + qs({ project }),
+      '/api/ghosts/tasks/bulk' + qs({ project }),
       { method: 'POST',
         body: JSON.stringify({ kind, subjects, args, agent_id: agentId,
                                region: region || undefined }) }),
@@ -1020,20 +1020,20 @@ export const api = {
    *  mode decides which Ghost runs it. */
   queuePooledTask: (project: string, kind: string,
                     args: Record<string, unknown>, region?: string) =>
-    req<GhostTask>('/api/agents/tasks' + qs({ project }),
+    req<GhostTask>('/api/ghosts/tasks' + qs({ project }),
       { method: 'POST', body: JSON.stringify({ kind, args, region }) }),
 
   agentTasks: (project: string, id: number, limit = 50) =>
-    req<GhostTask[]>(`/api/agents/${id}/tasks` + qs({ project, limit })),
+    req<GhostTask[]>(`/api/ghosts/${id}/tasks` + qs({ project, limit })),
   queueTask: (project: string, id: number, kind: string, args: Record<string, unknown>) =>
-    req<GhostTask>(`/api/agents/${id}/tasks` + qs({ project }),
+    req<GhostTask>(`/api/ghosts/${id}/tasks` + qs({ project }),
       { method: 'POST', body: JSON.stringify({ kind, args }) }),
   // The step that makes a scan count: a result arrives with no operator
   // attached, so anything the project has not seen is surveyed and
   // nothing is written until someone answers.
   importTaskResult: (project: string, agentId: number, taskId: number,
                      decisions: Record<string, HostDecision>) =>
-    req<ImportResult>(`/api/agents/${agentId}/tasks/${taskId}/import` + qs({ project }),
+    req<ImportResult>(`/api/ghosts/${agentId}/tasks/${taskId}/import` + qs({ project }),
       { method: 'POST', body: JSON.stringify({ decisions }) }),
 
   // --- slack handles ---

@@ -216,4 +216,42 @@ st, _ = call("/api/auth/setup-required/")
 check("and the gatekeeper sees the normalised path too", st == 200,
       f"status={st}")
 
+print("\n== the frontend calls routes the server actually serves ==")
+# Written after the same bug escaped three times in one rename.
+#
+# `drone` became `ghost` across 118 files, but every API path reads
+# `/api/agents/...` — neither word appears in it, so the sweep had
+# nothing to match. The server's routes moved and three callers did
+# not: the Go client, the frontend, and (nearly) the MCP server. Each
+# side's own tests passed, because each side was internally consistent.
+#
+# Nothing short of comparing the two could have caught it, so this
+# compares them: every `/api/<thing>` the frontend calls must be a
+# prefix the server really serves.
+import pathlib as _pl  # noqa: E402
+import re as _re  # noqa: E402
+
+_api_ts = (_pl.Path(__file__).resolve().parents[2]
+           / "frontend" / "src" / "lib" / "api.ts")
+if not _api_ts.exists():
+    check("the frontend api client is where this expects", False, str(_api_ts))
+else:
+    _used = sorted({m.group(1) for m in
+                    _re.finditer(r"[`'\"](/api/[a-z0-9_-]+)", _api_ts.read_text())})
+    check("the frontend's API prefixes were found", len(_used) >= 8,
+          f"{len(_used)}: {_used[:6]}")
+
+    _st, _spec = call("/openapi.json")
+    _served = sorted({"/" + "/".join(p.split("/")[1:3])
+                      for p in (_spec or {}).get("paths", {})
+                      if p.startswith("/api/")})
+    check("the server's route list was read", _st == 200 and len(_served) >= 8,
+          f"status={_st}, {len(_served)} prefixes")
+
+    _missing = [p for p in _used if p not in _served]
+    check("every prefix the frontend calls is one the server serves",
+          not _missing,
+          f"not served: {_missing}; server has {_served}" if _missing else
+          f"{len(_used)} prefixes all served")
+
 print(f"\n{'='*52}\n  {ok} passed, {fail} failed\n{'='*52}")
