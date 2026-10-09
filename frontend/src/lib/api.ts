@@ -624,6 +624,12 @@ export const api = {
    *  what the server holds and not what the browser last sent. */
   project: (code: string) =>
     req<Project>(`/api/projects/${encodeURIComponent(code)}`),
+
+  /** Hosts this project has never run nmap or masscan against.
+   *  "Never tasked", not "has no ports" — see the endpoint. */
+  unscannedTargets: (project: string) =>
+    req<{ hosts: string[]; count: number; out_of_scope: number
+          considered: number }>('/api/targets/unscanned' + qs({ project })),
   createProject: (b: Record<string, unknown>) =>
     req<ProjectCreated>('/api/projects', { method: 'POST', body: JSON.stringify(b) }),
   projectScope: (project: string) =>
