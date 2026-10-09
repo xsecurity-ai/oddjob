@@ -188,5 +188,106 @@ got = parse('''<?xml version="1.0"?><nmaprun args="nmap -oX /t h">
 <runstats><finished summary="done"/></runstats></nmaprun>''').coverage
 check("no scaninfo parses cleanly and records nothing", got == [], got)
 
+# =====================================================================
+# Part 7 — end to end: import a scan, ask what is still owed
+# =====================================================================
+print("\n--- against a live server ---")
+
+import json  # noqa: E402
+import os  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
+
+BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8013")
+
+
+def call(p, m="GET", b=None, token=None):
+    r = urllib.request.Request(BASE + p, method=m)
+    if b is not None:
+        r.data = json.dumps(b).encode()
+        r.add_header("Content-Type", "application/json")
+    if token:
+        r.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(r, timeout=60) as x:
+            raw = x.read()
+            return x.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw)
+        except Exception:
+            return e.code, raw[:300]
+
+
+admin = call("/api/auth/setup", "POST",
+             {"username": "root", "password": "root-password-1"})[1]["access_token"]
+call("/api/projects", "POST", {"code": "COV", "name": "COV"}, token=admin)
+
+# A syn sweep of 1-1024 against one host.
+SYN = '''<?xml version="1.0"?><nmaprun scanner="nmap" version="7.94"
+ args="nmap -sS -oX /t -p 1-1024 10.9.9.1" start="1760000000">
+<scaninfo type="syn" protocol="tcp" numservices="1024" services="1-1024"/>
+<host><address addr="10.9.9.1" addrtype="ipv4"/>
+<ports><port protocol="tcp" portid="80"><state state="open"/>
+<service name="http"/></port></ports></host>
+<runstats><finished summary="done"/></runstats></nmaprun>'''
+st, _ = call("/api/scans/import?project=COV", "POST",
+             {"content": SYN, "format": "auto", "mode": "open"}, token=admin)
+check("the syn scan imported", st == 200, st)
+
+st, r = call("/api/targets/unscanned?project=COV&technique=syn&ports=80,443", token=admin)
+check("after a -sS of 1-1024, 80 needs no further -sS",
+      st == 200 and "10.9.9.1" not in r["hosts"]
+      # Not vacuous: the host must have been looked at and allowed,
+      # or an empty list would pass for the wrong reason.
+      and r["considered"] == 1 and r["out_of_scope"] == 0,
+      f"hosts={r.get('hosts')} considered={r.get('considered')} "
+      f"refused={r.get('out_of_scope')}")
+
+st, r = call("/api/targets/unscanned?project=COV&technique=connect&ports=80,443", token=admin)
+by_host = {h["host"]: h for h in r.get("gaps", [])}
+check("...but a -sT is still owed on both",
+      "10.9.9.1" in by_host and by_host["10.9.9.1"]["ports"] == "80,443",
+      by_host.get("10.9.9.1"))
+
+# Now a -sV, but only on 80.
+VER = '''<?xml version="1.0"?><nmaprun scanner="nmap" version="7.94"
+ args="nmap -sT -sV -oX /t -p 80 10.9.9.1" start="1760000100">
+<scaninfo type="connect" protocol="tcp" numservices="1" services="80"/>
+<host><address addr="10.9.9.1" addrtype="ipv4"/>
+<ports><port protocol="tcp" portid="80"><state state="open"/>
+<service name="http" product="nginx"/></port></ports></host>
+<runstats><finished summary="done"/></runstats></nmaprun>'''
+st, _ = call("/api/scans/import?project=COV", "POST",
+             {"content": VER, "format": "auto", "mode": "open"}, token=admin)
+check("the version scan imported", st == 200, st)
+
+st, r = call("/api/targets/unscanned?project=COV&technique=connect&ports=80,443", token=admin)
+by_host = {h["host"]: h for h in r.get("gaps", [])}
+check("-sV on 80 clears the -sT there, leaving only 443",
+      by_host.get("10.9.9.1", {}).get("ports") == "443",
+      by_host.get("10.9.9.1"))
+
+st, r = call("/api/targets/unscanned?project=COV&technique=version&ports=80,443", token=admin)
+by_host = {h["host"]: h for h in r.get("gaps", [])}
+check("a -sV is still owed on 443", by_host.get("10.9.9.1", {}).get("ports") == "443",
+      by_host.get("10.9.9.1"))
+
+# A run of ports comes back as a range, not 998 comma-separated numbers.
+st, r = call("/api/targets/unscanned?project=COV&technique=version&ports=1-1024", token=admin)
+by_host = {h["host"]: h for h in r.get("gaps", [])}
+check("the gap is returned as a collapsed spec",
+      by_host.get("10.9.9.1", {}).get("ports", "").startswith("1-79,81-"),
+      by_host.get("10.9.9.1", {}).get("ports", "")[:24])
+
+st, r = call("/api/targets/unscanned?project=COV&technique=nonsense", token=admin)
+check("an unknown technique is refused, not silently ignored", st == 400, st)
+
+# The original behaviour is untouched when no technique is named.
+st, r = call("/api/targets/unscanned?project=COV", token=admin)
+check("without a technique it still answers the old question",
+      st == 200 and "gaps" not in r, sorted(r) if st == 200 else st)
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
