@@ -80,6 +80,13 @@ type Assessment struct {
 // taking new work. The loop is the real protection; this number only
 // decides how fast it gets there.
 //
+// That was written as though it were unconditional, and for a long
+// while it was not: setting a parallelism from Oddjob used to switch
+// the loop off entirely, and two hosts were driven into the ground by
+// a server number the agent had already measured as too high. The
+// agent now clamps one against the other on every cycle, so the
+// sentence above is true again — see clampCapacity in internal/agent.
+//
 // A per-tool weight would be better than one figure for all of them,
 // and wants the scheduler to know what a slot is holding. Not done
 // here.
