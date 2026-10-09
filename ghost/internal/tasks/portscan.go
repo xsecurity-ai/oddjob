@@ -56,16 +56,36 @@ func runPortscan(ctx context.Context, args map[string]any, _ string) Result {
 		}
 	}
 
+	// SYN when asked and possible. The scanner falls back to connect
+	// on its own where raw sockets are unavailable, and reports which
+	// it did -- that difference is reported below rather than
+	// assumed, because the two make very different amounts of noise.
 	started := time.Now()
 	res, err := portscan.Run(ctx, portscan.Config{
 		Targets:     tg,
 		Ports:       ports,
 		Rate:        rate,
+		SYN:         boolArg(args, "syn", false),
 		Timeout:     time.Duration(intArg(args, "port_timeout_ms", 2000)) * time.Millisecond,
 		Concurrency: intArg(args, "concurrency", 0),
 	})
 	if err != nil {
 		return failed("portscan: %v", err)
+	}
+
+	// What was actually done, never what was asked for. A connect
+	// scan reported as a SYN sweep is a wrong claim about how much
+	// noise was made at a client.
+	reason := "syn-ack"
+	note := ""
+	if res.Mode != "syn" {
+		reason = "conn-established"
+		note = "connect scan: the handshake completes, so this is louder " +
+			"than a SYN sweep and appears in the target's application logs"
+		if res.Fallback != "" {
+			note = "asked for SYN, ran a connect scan instead (" +
+				res.Fallback + "). " + note
+		}
 	}
 
 	// masscan's `-oJ` shape: one object per address, ports inside.
@@ -88,9 +108,9 @@ func runPortscan(ctx context.Context, args map[string]any, _ string) Result {
 		ip := o.Addr.String()
 		byAddr[ip] = append(byAddr[ip], jsonPort{
 			Port: int(o.Port), Proto: "tcp", Status: "open",
-			// Not "syn-ack". The handshake completed, which is a
-			// different observation and a louder one.
-			Reason: "conn-established",
+			// `syn-ack` or `conn-established`: how the port was
+			// actually observed, which is not the same claim.
+			Reason: reason,
 		})
 	}
 	ips := make([]string, 0, len(byAddr))
@@ -113,19 +133,18 @@ func runPortscan(ctx context.Context, args map[string]any, _ string) Result {
 		return failed("encoding results: %v", err)
 	}
 
-	note := "connect scan: the handshake completes, so this is louder " +
-		"than a SYN sweep and appears in the target's application logs"
+	summary := fmt.Sprintf(
+		"%d open port(s) across %d host(s) — %d probe(s) over %d address(es) "+
+			"and %d port(s) in %ds [%s scan]",
+		openPorts, len(out), res.Probes, res.Addrs, res.Ports,
+		int(time.Since(started).Seconds()), res.Mode)
+	if note != "" {
+		summary += "; " + note
+	}
 	return Result{
-		Status: "done",
-		Output: string(body),
-		Stderr: note,
-		// The denominator matters. "0 open of 12 probed" and "0 open
-		// of 64,000 probed" are different claims about coverage, and
-		// only one of them means the estate is quiet.
-		Summary: fmt.Sprintf(
-			"%d open port(s) across %d host(s) — %d probe(s) over %d address(es) "+
-				"and %d port(s) in %ds [%s]",
-			openPorts, len(out), res.Probes, res.Addrs, res.Ports,
-			int(time.Since(started).Seconds()), note),
+		Status:  "done",
+		Output:  string(body),
+		Stderr:  note,
+		Summary: summary,
 	}
 }

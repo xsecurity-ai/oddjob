@@ -27,6 +27,11 @@ type Config struct {
 	// be waiting at once, which is a different resource (file
 	// descriptors) and needs its own bound.
 	Concurrency int
+	// SYN asks for a half-open scan. It needs CAP_NET_RAW and Linux;
+	// where that is not available the scan falls back to connect and
+	// `Result.Mode` says so, because a connect scan reported as a SYN
+	// sweep is a wrong claim about how much noise was made.
+	SYN bool
 }
 
 // Open is one port that answered.
@@ -45,6 +50,12 @@ type Result struct {
 	// Addrs and Ports as expanded, for the same reason.
 	Addrs int
 	Ports int
+	// Mode is "syn" or "connect" — what was actually done, not what
+	// was asked for.
+	Mode string
+	// Fallback explains a SYN request that became a connect scan.
+	// Empty when nothing was substituted.
+	Fallback string
 }
 
 const (
@@ -91,6 +102,35 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	lim := newLimiter(rate)
 	defer lim.close()
+
+	if cfg.SYN {
+		res, fallback := runSYN(ctx, addrs, ports, lim, timeout)
+		if fallback == "" {
+			res.Addrs, res.Ports, res.Mode = len(addrs), len(ports), "syn"
+			return res, nil
+		}
+		// Fall through to connect, carrying the reason. Not silently:
+		// the caller prints this.
+		defer func() {}()
+		r, err := runConnect(ctx, addrs, ports, lim, timeout, conc)
+		if err != nil {
+			return nil, err
+		}
+		r.Addrs, r.Ports = len(addrs), len(ports)
+		r.Mode, r.Fallback = "connect", fallback
+		return r, nil
+	}
+
+	r, err := runConnect(ctx, addrs, ports, lim, timeout, conc)
+	if err != nil {
+		return nil, err
+	}
+	r.Addrs, r.Ports, r.Mode = len(addrs), len(ports), "connect"
+	return r, nil
+}
+
+func runConnect(ctx context.Context, addrs []netip.Addr, ports []uint16,
+	lim *limiter, timeout time.Duration, conc int) (*Result, error) {
 
 	var (
 		mu     sync.Mutex
@@ -142,8 +182,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		}
 		return open[i].Port < open[j].Port
 	})
-	return &Result{Open: open, Probes: probes,
-		Addrs: len(addrs), Ports: len(ports)}, nil
+	return &Result{Open: open, Probes: probes}, nil
 }
 
 // probe is one connect attempt.
