@@ -69,11 +69,13 @@ const (
 
 // Run performs the scan.
 //
-// Connect scans only. A SYN scan needs raw sockets and hand-built
-// packets, and shipping a half-tested one would be worse than
-// shipping none: this returns what it actually observed, which is a
-// completed TCP handshake. That is louder than SYN and the caller is
-// expected to say so — see the note where this is called.
+// `cfg.SYN` asks for a half-open scan; without Linux and CAP_NET_RAW
+// it falls back to connect. `Result.Mode` always reports what was
+// actually done rather than what was asked for, and `Result.Fallback`
+// carries the reason for a substitution. The caller is expected to
+// print both: a connect scan completes the handshake and lands in the
+// target's application logs, so reporting one as a SYN sweep is a
+// wrong claim about how much noise was made.
 func Run(ctx context.Context, cfg Config) (*Result, error) {
 	addrs, err := ExpandTargets(ctx, cfg.Targets)
 	if err != nil {
@@ -111,7 +113,6 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		}
 		// Fall through to connect, carrying the reason. Not silently:
 		// the caller prints this.
-		defer func() {}()
 		r, err := runConnect(ctx, addrs, ports, lim, timeout, conc)
 		if err != nil {
 			return nil, err

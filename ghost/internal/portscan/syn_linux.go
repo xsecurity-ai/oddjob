@@ -21,9 +21,9 @@ import (
 // Linux only, and that is not laziness. Raw TCP sockets on Windows
 // are restricted to the point of uselessness — this is why masscan
 // needs Npcap there — and darwin needs a BPF device with its own
-// permissions story. On everything else `synSupported` is false and
-// the caller falls back to a connect scan, loudly, rather than
-// silently doing something different from what was asked.
+// permissions story. Everywhere else `runSYN` lives in syn_other.go
+// and refuses, and the caller falls back to a connect scan loudly
+// rather than silently doing something different from what was asked.
 //
 // # The failure mode this code is written against
 //
@@ -34,6 +34,7 @@ import (
 // the test does not check that it runs; it checks that it FINDS a
 // listener it was told is there, and the checksum has its own test
 // against a known-good vector.
+
 // synScan probes one address's ports with SYNs.
 //
 // Returns the open ports it saw. An error here means the scan could
