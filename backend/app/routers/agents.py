@@ -155,6 +155,13 @@ def effective_parallel(a, ceiling: int) -> int:
 TASK_KINDS: dict[str, str | None] = {
     "nmap": "nmap",
     "masscan": "masscan",
+    #: Port discovery with no binary, in the agent's own process. A
+    #: CONNECT scan, so not a replacement for masscan's SYN sweep —
+    #: it completes the handshake and shows up in the target's
+    #: application logs. Imported as masscan output because that is
+    #: the shape it produces, and a port that answered is a port that
+    #: answered whoever observed it.
+    "portscan": "masscan",
     "amass": None,
     "gobuster": None,
     "gospider": None,
