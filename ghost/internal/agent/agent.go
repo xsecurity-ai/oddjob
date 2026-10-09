@@ -27,14 +27,24 @@ import (
 type Agent struct {
 	cfg *config.Config
 	// capFromServer: cap_ came from Oddjob rather than from measuring
-	// the host, so `retune` leaves it alone. A bool rather than
-	// sniffing capWhy for a phrase -- that string is for an operator
-	// to read, and making control flow depend on its wording means
-	// rewording it silently changes behaviour.
+	// the host. A bool rather than sniffing capWhy for a phrase --
+	// that string is for an operator to read, and making control flow
+	// depend on its wording means rewording it silently changes
+	// behaviour.
 	capFromServer bool
-	cli           *client.Client
-	sp            *spool.Spool
-	id            *identity.Identity
+	// capServerWant is the number Oddjob last asked for, 0 for no
+	// opinion. Kept separately from cap_ so that a host which had to
+	// be held below it can go back up on its own once the memory
+	// frees, without waiting for the server to repeat itself.
+	capServerWant int
+	// capMeasured is the last answer from measuring this host, and
+	// why. Kept even while Oddjob's number is in force, because it is
+	// the input to the clamp -- see clampCapacity.
+	capMeasured    int
+	capMeasuredWhy string
+	cli            *client.Client
+	sp             *spool.Spool
+	id             *identity.Identity
 	// When this process came up. The dead-man switch falls back to it
 	// when there has never been a successful contact to measure from,
 	// so a Ghost that enrolled and immediately lost the server still
@@ -375,6 +385,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	// re-read on a timer below, which is what makes the tuning live.
 	first := capacity.Measure(ctx, true, a.cfg.Parallel)
 	a.mu.Lock()
+	// Seeded, not just reported: this is the other half of the clamp,
+	// and without it the first heartbeat's number from Oddjob would be
+	// taken unclamped -- which is exactly the window in which a host
+	// picks up six tasks it cannot hold.
+	a.capMeasured, a.capMeasuredWhy = first.Parallel, first.Reason
 	a.cap_, a.capWhy = first.Parallel, first.Reason
 	a.mu.Unlock()
 	log.Printf("capacity: %d simultaneous task(s) — %s",
@@ -533,18 +548,70 @@ func (a *Agent) beat(ctx context.Context) (*client.HeartbeatResp, error) {
 // server sends by not sending the field at all. Neither is "run
 // nothing", and reading it that way would idle the fleet against any
 // server that had not been upgraded yet.
+// clampCapacity decides how many tasks to run, given what Oddjob asked
+// for and what the host was last measured able to stand.
+//
+// Oddjob's number wins, downwards. The engagement operator knows things
+// the agent cannot -- how much of the client's network will tolerate
+// being scanned at once, what else is pointed at the same estate -- and
+// a server asking for less than the host could manage is an instruction,
+// not a mistake to correct.
+//
+// What it cannot do is raise the number past what the memory will take.
+// That is not a second opinion about appetite, it is the host saying it
+// will fall over, and it has twice: a Ghost on a 5GB WSL2 VM ran six
+// tasks down to 101MB free until the VM stopped answering, and a 1GB
+// droplet asked for six against its own answer of three until it could
+// no longer fork sshd. Both were set from Oddjob, and in both cases the
+// agent had measured correctly and been overruled.
+//
+// `capacity.go` says the retune loop is what makes its deliberately low
+// per-task estimate safe -- "a ghost that starts an amass watches its
+// own headroom fall and stops taking new work". That was true only
+// while nobody had set a number from the server, because doing so used
+// to switch the loop off entirely. This is what reconnects them.
+//
+// want <= 0 is "no opinion", which is also what a server too old to
+// send the field looks like. measured <= 0 is "not assessed yet".
+func clampCapacity(want, measured int, measuredWhy string) (int, string) {
+	switch {
+	case want <= 0:
+		return measured, measuredWhy
+	case measured <= 0:
+		return want, fmt.Sprintf("set to %d from Oddjob", want)
+	case want <= measured:
+		return want, fmt.Sprintf("set to %d from Oddjob", want)
+	default:
+		// The interesting case, and the one that must be loud: the
+		// operator is not getting what they asked for, and an operator
+		// who cannot see that just sees an agent running slowly.
+		return measured, fmt.Sprintf(
+			"%d from Oddjob, held to %d by this host: %s",
+			want, measured, measuredWhy)
+	}
+}
+
+// applyCapacity recomputes cap_ from the two inputs and logs a change.
+// a.mu must NOT be held.
+func (a *Agent) applyCapacity() {
+	a.mu.Lock()
+	eff, why := clampCapacity(a.capServerWant, a.capMeasured, a.capMeasuredWhy)
+	changed := a.cap_ != eff
+	a.cap_, a.capWhy = eff, why
+	a.mu.Unlock()
+	if changed {
+		log.Printf("capacity now %d (%s)", eff, why)
+	}
+}
+
 func (a *Agent) adoptServerParallel(n int) {
 	if n <= 0 || a.cfg.Parallel > 0 {
 		return
 	}
 	a.mu.Lock()
-	changed := a.cap_ != n
-	a.cap_, a.capFromServer = n, true
-	a.capWhy = fmt.Sprintf("set to %d from Oddjob", n)
+	a.capServerWant, a.capFromServer = n, true
 	a.mu.Unlock()
-	if changed {
-		log.Printf("capacity now %d (set from Oddjob)", n)
-	}
+	a.applyCapacity()
 }
 
 // retune re-measures the host and adopts the new number.
@@ -556,24 +623,22 @@ func (a *Agent) adoptServerParallel(n int) {
 // doing that every minute to re-learn a number that does not change is
 // not a trade worth making. Cores and memory are free to read.
 func (a *Agent) retune(ctx context.Context) {
-	// A number the server set is not the host's to overrule. Without
-	// this the two fight on a sixty-second cycle: Oddjob says 8, the
-	// next retune measures the box and says 2, the heartbeat after
-	// that says 8 again, and the fleet table flickers between them.
-	a.mu.Lock()
-	serverSet := a.capFromServer
-	a.mu.Unlock()
-	if serverSet && a.cfg.Parallel == 0 {
-		return
-	}
+	// This used to return early whenever Oddjob had set a number, on
+	// the grounds that the two would otherwise fight on a sixty-second
+	// cycle -- Oddjob says 8, the retune measures the box and says 2,
+	// the next heartbeat says 8 again, and the fleet table flickers.
+	//
+	// That flicker was real, but it was caused by the two paths
+	// DISAGREEING: one wrote the server's number and the other wrote
+	// the measurement. Both now go through clampCapacity and compute
+	// the same answer from the same two inputs, so there is nothing
+	// left to flicker between -- and switching the measurement off was
+	// what let a server number drive two hosts into the ground.
 	as := capacity.Measure(ctx, false, a.cfg.Parallel)
 	a.mu.Lock()
-	changed := as.Parallel != a.cap_
-	a.cap_, a.capWhy = as.Parallel, as.Reason
+	a.capMeasured, a.capMeasuredWhy = as.Parallel, as.Reason
 	a.mu.Unlock()
-	if changed {
-		log.Printf("capacity now %d (%s)", as.Parallel, as.Reason)
-	}
+	a.applyCapacity()
 }
 
 func (a *Agent) registerWithRetry(ctx context.Context) error {
