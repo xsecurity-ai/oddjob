@@ -137,6 +137,25 @@ type Task struct {
 	Args json.RawMessage `json:"args"`
 }
 
+// HTTPError is a reply the server refused with.
+//
+// A typed error rather than a formatted string because one caller has
+// to make a decision on the code: a spooled result whose task the
+// server has never heard of will never be accepted, and retrying it
+// every heartbeat forever is the behaviour this replaces. Everything
+// else just prints it, and it prints the same as before.
+type HTTPError struct {
+	Method string
+	Path   string
+	Code   int
+	Status string
+	Body   string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("%s %s: %s: %s", e.Method, e.Path, e.Status, e.Body)
+}
+
 type HeartbeatResp struct {
 	OK bool `json:"ok"`
 	// Task is the first of Tasks, kept so an agent reading only this
@@ -295,8 +314,10 @@ func (c *Client) do(ctx context.Context, method, path string,
 		if len(snippet) > 600 {
 			snippet = snippet[:600]
 		}
-		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status,
-			strings.TrimSpace(string(snippet)))
+		return &HTTPError{
+			Method: method, Path: path, Code: resp.StatusCode,
+			Status: resp.Status, Body: strings.TrimSpace(string(snippet)),
+		}
 	}
 	if out == nil {
 		return nil

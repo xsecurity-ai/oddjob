@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -36,6 +37,16 @@ const (
 	//: Finished. The output is here and the server has not confirmed
 	//: receipt, so it must be re-sent until it does.
 	Pending = "pending"
+	//: Finished, and the server will never accept it -- it does not
+	//: know the task. Kept on disk and NOT retried.
+	//:
+	//: Not deleted, deliberately. The scan ran: the packets went to
+	//: the client's estate and the noise was made, which is the whole
+	//: reason this package exists. Throwing the output away because
+	//: the server lost track of the task would destroy the only
+	//: record that it happened. So the entry stays, stops being
+	//: re-sent every heartbeat, and says why.
+	Dead = "dead"
 )
 
 // Entry is one task as this agent sees it.
@@ -120,6 +131,47 @@ func (s *Spool) Attempted(id int) {
 	}
 	e.Attempts++
 	_ = s.writeLocked(e)
+}
+
+// Dropped stops re-sending a result the server will never accept,
+// without discarding it.
+//
+// The alternative was what this replaces: one task on a real agent
+// reached attempt 6,439, re-sending the same payload on every
+// heartbeat for a day against a 404 that was never going to change.
+func (s *Spool) Dropped(id int, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, err := s.read(id)
+	if err != nil || e == nil {
+		return err
+	}
+	e.State = Dead
+	e.Error = strings.TrimSpace(e.Error + " | undeliverable: " + reason)
+	return s.writeLocked(e)
+}
+
+// DeadCount is how many results are on disk that nobody will ever
+// receive. Surfaced rather than left to be discovered: an agent
+// quietly holding finished work is the thing this package exists to
+// prevent, and swapping "retried forever" for "forgotten silently"
+// would not be an improvement.
+func (s *Spool) DeadCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	names, _ := filepath.Glob(filepath.Join(s.dir, "task-*.json"))
+	n := 0
+	for _, f := range names {
+		raw, err := os.ReadFile(f) // #nosec G304 — our own spool dir
+		if err != nil {
+			continue
+		}
+		var e Entry
+		if json.Unmarshal(raw, &e) == nil && e.State == Dead {
+			n++
+		}
+	}
+	return n
 }
 
 // Pending is everything still owed to the server, oldest first.
