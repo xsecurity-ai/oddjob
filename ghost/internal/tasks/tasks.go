@@ -248,27 +248,67 @@ func nmapArgv(args map[string]any, outPath string, tg []string, rawSockets bool)
 	if ports != "" {
 		argv = append(argv, "-p", ports)
 	}
-	if str(args, "profile") == "quick" {
-		argv = append(argv, "-T4")
-		// -F and -p are mutually exclusive: nmap refuses the pair
-		// rather than preferring one, exits 1, and writes an XML file
-		// containing a successful-looking run of zero hosts. Only ask
-		// for the fast list when no explicit ports were given.
-		if ports == "" {
-			argv = append(argv, "-F")
-		}
-	} else {
-		argv = append(argv, "-sV")
-	}
-	// SYN only when we can actually do it. Asking for -sS without raw
-	// sockets makes nmap fall back to a connect scan silently: a
-	// different scan, louder on the wire, still labelled -sS in the
-	// report.
-	if rawSockets {
+
+	// An explicit technique, when the server asked for one. Oddjob
+	// tracks which of these has covered which port and only sends work
+	// that would learn something new, so "do a -sT here" has to mean
+	// exactly that.
+	//
+	// The trap this exists for: nmap's DEFAULT is -sS whenever it has
+	// the privileges for it. Leaving the technique off and hoping for
+	// a connect scan gets a syn scan on any root agent, which then
+	// records syn coverage and leaves the -sT owed for ever.
+	switch str(args, "technique") {
+	case "syn":
+		// Not degraded to a connect scan. Without raw sockets nmap
+		// would quietly run -sT, which is a different scan that is
+		// louder on the wire and answers a different question; the
+		// caller asked for this one specifically. Refusing lets the
+		// server hand it to an agent that can -- see runNmap.
 		argv = append(argv, "-sS")
+	case "connect":
+		argv = append(argv, "-sT")
+	case "version":
+		// Discovery is left to nmap: -sS where it can, -sT otherwise.
+		// Either is fine because -sV is the strongest level either
+		// way, and letting it pick keeps the privileged case fast.
+		argv = append(argv, "-sV")
+	default:
+		// No technique named: the behaviour from before this existed.
+		if str(args, "profile") == "quick" {
+			argv = append(argv, "-T4")
+			// -F and -p are mutually exclusive: nmap refuses the pair
+			// rather than preferring one, exits 1, and writes an XML
+			// file containing a successful-looking run of zero hosts.
+			// Only ask for the fast list when no explicit ports were
+			// given.
+			if ports == "" {
+				argv = append(argv, "-F")
+			}
+		} else {
+			argv = append(argv, "-sV")
+		}
+		// SYN only when we can actually do it. Asking for -sS without
+		// raw sockets makes nmap fall back to a connect scan silently:
+		// a different scan, louder on the wire, still labelled -sS in
+		// the report.
+		if rawSockets {
+			argv = append(argv, "-sS")
+		}
 	}
 	argv = append(argv, extraArgs(args)...)
 	return append(argv, tg...)
+}
+
+// needsRawSockets reports whether this task cannot run unprivileged.
+//
+// Only -sS. -sT is the ordinary connect() syscall and -sV is probing
+// over normal connections on top of whatever discovery ran, so an
+// unprivileged agent can do both -- and, under Oddjob's ordering,
+// therefore produces STRONGER coverage than a privileged one running
+// the default -sS.
+func needsRawSockets(args map[string]any) bool {
+	return str(args, "technique") == "syn"
 }
 
 // --------------------------------------------------------------- nmap
@@ -279,6 +319,15 @@ func runNmap(ctx context.Context, args map[string]any, workDir string) Result {
 	}
 	if tools.Path("nmap") == "" {
 		return failed("nmap is not installed on this agent")
+	}
+	// An explicit -sS this agent cannot perform is refused rather than
+	// quietly downgraded. nmap would run a connect scan instead and
+	// report success, and Oddjob would record syn coverage for a scan
+	// that never happened -- which suppresses the real one for good.
+	if needsRawSockets(args) {
+		if ok, advice := tools.RawSocketCapable(); !ok {
+			return failed("a -sS scan needs raw sockets: %s", advice)
+		}
 	}
 	path, cleanup, err := outFile(workDir, "nmap", "xml")
 	if err != nil {

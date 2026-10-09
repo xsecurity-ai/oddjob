@@ -1952,5 +1952,63 @@ check("a lookup does not make a host count as scanned",
       "fresh-a.example" in (u or {}).get("hosts", []),
       str((u or {}).get("hosts")))
 
+# =====================================================================
+# -sS needs raw sockets; -sT and -sV do not
+# =====================================================================
+print("\n== only a -sS is held back from an unprivileged ghost ==")
+
+# `in-a-box` registered above with privileged: False.
+UNPRIV = HID
+st, pg = call("/api/ghosts?project=AGENT", "POST", {"name": "rootly"}, token=admin)
+PKEY = (pg or {}).get("callback_key")
+PID = ((pg or {}).get("agent") or {}).get("id")
+call("/api/ghosts/register", "POST",
+     {"platform": "linux", "arch": "amd64", "version": "test",
+      "hostname": "rootbox", "privileged": True}, key=PKEY)
+
+
+def queue(aid, technique):
+    st, t = call(f"/api/ghosts/{aid}/tasks?project=AGENT", "POST",
+                 {"kind": "nmap", "args": {"targets": ["10.77.0.1"],
+                                           "ports": "80",
+                                           "technique": technique}},
+                 token=admin)
+    return st, (t or {}).get("id")
+
+
+def handed_out(key):
+    """Task ids this ghost is given on one beat, then reported done.
+
+    Reporting matters: a ghost still holding a task has no free slot,
+    so the next check would fail for that reason rather than for the
+    one under test.
+    """
+    st, hb = call("/api/ghosts/heartbeat", "POST", {"ready": True}, key=key)
+    got = hb.get("tasks") or ([hb["task"]] if hb.get("task") else [])
+    ids = [t["id"] for t in got]
+    for i in ids:
+        call(f"/api/ghosts/tasks/{i}/result", "POST",
+             {"status": "done", "output": "{}", "stderr": "",
+              "summary": "done", "exit_code": 0}, key=key)
+    return ids
+
+
+st, syn_id = queue(UNPRIV, "syn")
+check("a -sS can be queued against an unprivileged ghost", st == 201, st)
+check("...but it is not handed to it", syn_id not in handed_out(HKEY), syn_id)
+
+# Not vacuous: the same ghost takes a -sT and a -sV happily, because
+# neither needs the privilege it lacks.
+st, con_id = queue(UNPRIV, "connect")
+check("a -sT goes to the same unprivileged ghost", con_id in handed_out(HKEY),
+      con_id)
+st, ver_id = queue(UNPRIV, "version")
+check("a -sV goes to the same unprivileged ghost", ver_id in handed_out(HKEY),
+      ver_id)
+
+# And a privileged ghost does get a -sS.
+st, psyn = queue(PID, "syn")
+check("a privileged ghost is given the -sS", psyn in handed_out(PKEY), psyn)
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
