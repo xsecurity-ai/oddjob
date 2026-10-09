@@ -1099,7 +1099,7 @@ check("counting all three", "`3` new targets added" in (digests() or [""])[0],
       str(digests()))
 check("and nothing modified, because they are brand new",
       "`0` targets modified" in (digests() or [""])[0], str(digests()))
-check("the tick says what it did", r.get("DGST") == "posted 3/0", str(r))
+check("the tick says what it did", r.get("DGST") == "posted 3/0/0", str(r))
 
 # The whole point of the narrowing: a sweep marking hosts up must not
 # show up as "3 targets modified" every five minutes forever.
@@ -1152,6 +1152,61 @@ check("and no hostname reaches the channel",
 check("the whole import is one line of channel traffic",
       len([m for m in POSTED if m.get("channel") == CH]) == 1,
       str([m.get("text") for m in POSTED if m.get("channel") == CH])[:200])
+
+print("-- new open ports are reported alongside the targets --")
+# Both numbers, because they answer different questions: twelve ports
+# on one host is a host worth looking at, twelve across twelve hosts
+# is a sweep finishing.
+POSTED.clear()
+call("/api/targets?project=DGST", "POST", {"host": "ports01.acme.example"},
+     token=admin)
+call("/api/targets?project=DGST", "POST", {"host": "ports02.acme.example"},
+     token=admin)
+for _h, _p in (("ports01.acme.example", 22), ("ports01.acme.example", 443),
+               ("ports02.acme.example", 80)):
+    _sc, _sr = call("/api/services?project=DGST", "POST",
+                    {"host": _h, "port": _p, "protocol": "tcp",
+                     "state": "open", "name": "x"}, token=admin)
+    if _sc != 201:
+        check(f"service {_h}:{_p} was created", False, f"{_sc} {str(_sr)[:90]}")
+# Closed ports are coverage, not a finding. Counting them would report
+# thousands every time somebody sweeps a /24 and drown the one line
+# that matters.
+call("/api/services?project=DGST", "POST",
+     {"host": "ports02.acme.example", "port": 3306,
+      "protocol": "tcp", "state": "closed", "name": "y"}, token=admin)
+
+_r = tick()
+_all = [m.get("text") or "" for m in POSTED if m.get("channel") == CH]
+_ports = [t for t in _all if "new open port" in t]
+check("the open ports are reported", len(_ports) == 1, str(_all)[:200])
+check("counting only the open ones",
+      "`3` new open ports" in (_ports or [""])[0], str(_ports))
+check("across the hosts they are on, not one line per port",
+      "on `2` targets" in (_ports or [""])[0], str(_ports))
+check("in the SAME post as the target line, not a second message",
+      len(_all) == 1, f"{len(_all)} posts: {str(_all)[:160]}")
+check("and the tick reports all three counts",
+      (_r.get("DGST") or "").startswith("posted 2/0/3"), str(_r))
+
+# The operator's rule, extended: a window with ports but no target
+# changes still posts, and one with neither still says nothing.
+POSTED.clear()
+check("a window with nothing at all is still silent",
+      tick().get("DGST") == "quiet", str(POSTED)[:120])
+check("and posts nothing", [m for m in POSTED if m.get("channel") == CH] == [],
+      str(POSTED)[:120])
+
+POSTED.clear()
+call("/api/services?project=DGST", "POST",
+     {"host": "ports01.acme.example", "port": 8080,
+      "protocol": "tcp", "state": "open", "name": "z"}, token=admin)
+_r = tick()
+_all = [m.get("text") or "" for m in POSTED if m.get("channel") == CH]
+check("a window with only ports still posts", len(_all) == 1, str(_all)[:160])
+check("...and carries only the port line, since nothing else moved",
+      "new open port" in (_all or [""])[0]
+      and "targets modified" not in (_all or [""])[0], str(_all)[:160])
 
 # --- outage and restart ------------------------------------------------
 print("-- an outage holds the window rather than losing it --")

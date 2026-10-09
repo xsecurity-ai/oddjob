@@ -886,6 +886,19 @@ def target_digest(added: int, modified: int) -> str:
             f"`{modified}` targets modified.")
 
 
+def port_digest(ports: int, hosts: int) -> str:
+    """`Found 12 new open ports on 3 targets`.
+
+    Both numbers, because they answer different questions: twelve
+    ports on one host is a host worth looking at, and twelve across
+    twelve hosts is a sweep finishing. One figure would hide whichever
+    of those it is.
+    """
+    return (f":mag: Found `{ports}` new open port"
+            f"{'' if ports == 1 else 's'} on `{hosts}` target"
+            f"{'' if hosts == 1 else 's'}.")
+
+
 #: How often the digest runs. The operator's number.
 DIGEST_SECS = 300
 
@@ -980,13 +993,15 @@ async def _tick_project(session, project, now: datetime) -> str:
 
     added, modified, capped = await timeline.target_activity(
         session, project.id, start, now)
-    if capped:
+    ports, port_hosts, port_capped = await timeline.port_activity(
+        session, project.id, start, now)
+    if capped or port_capped:
         # Said out loud. A number quietly capped is a number that lies,
         # and the whole value of this line is that it can be trusted.
         log.warning("slack digest: %s hit the row cap; the counts are a "
                     "floor, not a total", project.code)
 
-    if added + modified == 0:
+    if added + modified + ports == 0:
         # The operator's rule, and the most important one here: silence
         # means nothing happened. A channel that posts "0 and 0" every
         # five minutes is a channel people mute, and a muted channel does
@@ -1011,7 +1026,16 @@ async def _tick_project(session, project, now: datetime) -> str:
         await _set_watermark(session, project.id, now)
         return "unconfigured"
 
-    text = target_digest(added, modified)
+    # One post, not two. Both lines are the same five-minute window,
+    # and a channel that gets two messages a tick is one people mute
+    # twice as fast. Each line appears only when its own numbers are
+    # non-zero, so a quiet half stays quiet.
+    lines = []
+    if added + modified:
+        lines.append(target_digest(added, modified))
+    if ports:
+        lines.append(port_digest(ports, port_hosts))
+    text = "\n".join(lines)
     results = [await post(tok, ch, text) for tok, ch in dests]
     if not any(r.ok for r in results):
         # Slack was down. Hold the window; next tick re-counts this one
@@ -1021,7 +1045,7 @@ async def _tick_project(session, project, now: datetime) -> str:
         # ground that was actually delivered.
         return "failed"
     await _set_watermark(session, project.id, now)
-    return f"posted {added}/{modified}"
+    return f"posted {added}/{modified}/{ports}"
 
 
 class Digest:

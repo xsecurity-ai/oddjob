@@ -18,7 +18,7 @@ from datetime import datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Event, Target, User
+from .models import Event, Service, Target, User
 
 
 def _clip(s: str, n: int = 400) -> str:
@@ -198,6 +198,39 @@ def is_notable(kind: str, summary: str) -> bool:
 #: by the caller rather than passed over: a number quietly capped is a
 #: number that lies.
 ACTIVITY_ROW_CAP = 50_000
+
+
+async def port_activity(session: AsyncSession, project_id: int,
+                        start: datetime, end: datetime) -> tuple[int, int, bool]:
+    """-> (ports, targets, capped) for one project over [start, end).
+
+    New OPEN ports, and how many hosts they are spread across. Both
+    numbers, because they answer different questions: forty ports on
+    one host is a host worth looking at, and forty ports across forty
+    hosts is a sweep finishing.
+
+    Only `open`. A closed or filtered port is a fact about coverage,
+    not a finding, and a digest that counted them would report
+    thousands every time somebody scanned a /24 and drown the one
+    line that matters.
+
+    Counted on the service row's own `created_at`, the same reasoning
+    as `target_activity`: a re-import that re-sees a port is not a new
+    port, and the creation stamp is the only unambiguous answer to "is
+    this new".
+
+    Capped like its sibling, and the cap is reported rather than
+    hidden — a number quietly truncated is a number that lies.
+    """
+    rows = (await session.execute(
+        select(Service.target_id)
+        .join(Target, Target.id == Service.target_id)
+        .where(Target.project_id == project_id,
+               Service.created_at >= start, Service.created_at < end,
+               Service.state == "open")
+        .limit(ACTIVITY_ROW_CAP))).all()
+    hosts = {tid for (tid,) in rows}
+    return len(rows), len(hosts), len(rows) >= ACTIVITY_ROW_CAP
 
 
 async def target_activity(session: AsyncSession, project_id: int,
