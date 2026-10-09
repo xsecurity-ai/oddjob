@@ -199,9 +199,46 @@ FROM cgr.dev/chainguard/wolfi-base:latest@sha256:05d24163df148be377275af8374c165
 # host, nslookup. There is no separate nmap-scripts package — Wolfi's
 # nmap carries all 605 .nse files and script.db in the one package,
 # which is checked below rather than hoped for.
-RUN apk add --no-cache nmap gobuster bind-tools ca-certificates libpcap
+#
+# The symlink is for masscan, which does not LINK libpcap but
+# dlopen()s it at runtime. The four names it tries are `libpcap.so`,
+# `libpcap.so.0.8` and two macOS spellings; Wolfi's runtime `libpcap`
+# package ships `libpcap.so.1` and `libpcap.so.1.11.0`, and the
+# unversioned symlink comes with `libpcap-dev`, which has no business
+# in a runtime image.
+#
+# So every name masscan looks for was absent and it failed at the
+# first packet with "failed to load libpcap shared library". `ldd`
+# shows nothing, because there is no link-time dependency to show:
+# the only way to find this is to run the thing.
+RUN apk add --no-cache nmap gobuster bind-tools ca-certificates libpcap \
+ && ln -sf libpcap.so.1 /usr/lib/libpcap.so
 
 COPY --from=masscan /src/bin/masscan /usr/local/bin/masscan
+
+# Make it SCAN, do not just ask its version.
+#
+# The ELF guard below proves the binary is the right architecture; it
+# cannot prove the binary can reach its libraries, and this one could
+# not. The obvious check does not work either: `masscan --version`
+# prints happily on an image where libpcap is missing, because the
+# dlopen happens when a scan starts and not before. A guard written
+# against `--version` passes on exactly the broken image it exists to
+# catch -- which is how the first version of this line was written.
+#
+# So it scans. 198.51.100.0/24 is TEST-NET-2, reserved for
+# documentation and routed nowhere, and `--wait 0` means it does not
+# linger. The build container has no NET_RAW, so this will fail; that
+# is fine and expected. Only ONE failure is fatal here, and it is the
+# one that says the library never loaded.
+RUN masscan -p80 198.51.100.1 --rate 10 --wait 0 > /tmp/mv 2>&1 || true; \
+    if grep -qi "failed to load libpcap" /tmp/mv; then \
+      echo "masscan cannot load libpcap — it dlopens one of"; \
+      echo "  libpcap.so / libpcap.so.0.8, and the runtime package"; \
+      echo "  ships only libpcap.so.1. See the symlink above."; \
+      cat /tmp/mv; exit 1; \
+    fi; \
+    rm -f /tmp/mv
 
 COPY --from=build /out/ghost /usr/local/bin/ghost
 COPY --from=build /out/gospider /usr/local/bin/gospider
