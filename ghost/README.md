@@ -225,6 +225,47 @@ docker run -d --name ghost --restart unless-stopped \
 There is a [`docker-compose.yml`](docker-compose.yml) with every option
 written out, `network_mode: host` included.
 
+### Keeping it current
+
+[`docker-compose.autoupdate.yaml`](docker-compose.autoupdate.yaml) pulls and
+restarts a Ghost when the tag it runs moves:
+
+```bash
+GHOST_IMAGE=cr0n1c/ghost:nightly GHOST_SERVER=https://oddjob.internal \
+  docker compose -f docker-compose.yml -f docker-compose.autoupdate.yaml up -d
+```
+
+It needs `GHOST_IMAGE` to name a **published** tag. The default `ghost-agent`
+is built locally and has no upstream digest to compare against, so
+auto-update silently does nothing — which is the state a host is in by
+default, without any sign that it is.
+
+**Nothing is lost when it fires, but the scan in flight is re-run.** The
+identity and the spool are on a named volume and survive a recreate; the
+agent drains the spool at its next start, and Oddjob returns a task the agent
+was holding to the queue once it checks back in ready for work. What that
+costs is the work itself: a half-finished sweep starts over, and **the
+client's estate sees it twice**.
+
+So prefer `:nightly` for agents even where the server runs `:develop`. The
+Ghost is the part that puts packets on someone else's network, and a merge
+that changes how it scans should get a night of soak before doing that
+unattended.
+
+The watchtower it adds is **scoped** (`WATCHTOWER_SCOPE=ghost`), which matters
+more here than on the server. A Ghost often sits on a host inside the assessed
+network that we do not own, and an unscoped watchtower there would restart the
+client's containers on our schedule.
+
+> **On a host that is not ours, this needs to be written down first.**
+> Mounting `/var/run/docker.sock` is root on that host for practical purposes,
+> granted to a container that polls a public registry and runs what it finds.
+> On our own server that grant is already held by the watchtower there. On a
+> client-provided host it is new, and it belongs in the rules of engagement.
+> Otherwise leave the overlay off and update by hand — `docker pull` then
+> `up -d`. A Ghost one release behind is a far smaller problem than an
+> undocumented root grant on a client's machine.
+
 ### Binary
 
 ```bash

@@ -14,8 +14,18 @@
 
 services:
   ghost:
+    # Both, in that order, for the same reason the server's compose
+    # has both: `docker compose up` finds an image already built by
+    # `docker buildx build -t` and starts it instead of rebuilding
+    # with the legacy builder, which has no layer cache; and setting
+    # GHOST_IMAGE to a published tag runs that instead of building at
+    # all — `GHOST_IMAGE=cr0n1c/ghost:v1.2.0 docker compose up -d`.
+    #
+    # A published tag is also what `docker-compose.autoupdate.yaml`
+    # needs. Auto-update against the default `ghost-agent` compares
+    # the local image to nothing and quietly never fires.
+    image: ${GHOST_IMAGE:-ghost-agent}
     build: .
-    image: ghost-agent
     container_name: ghost
     restart: unless-stopped
 
