@@ -99,6 +99,32 @@ def _project_ceiling(pr) -> int:
     return max(1, int(getattr(pr, "ghost_max_parallel", 5) or 5))
 
 
+#: Task kinds that cost far more than a slot.
+#:
+#: The capacity model budgets 128 MB a task, which is right for nmap
+#: and the lookups. amass is not in that class: measured resident at
+#: 438 MB on one of our own agents, and now linked INTO the agent
+#: rather than forked, so several at once share one process and one
+#: memory limit. An agent sized at six slots that was handed six amass
+#: tasks is the arithmetic that put a 1 GB box into the OOM killer.
+HEAVY_KINDS = frozenset({"amass"})
+
+
+def heavy_allowance(allowed: int) -> int:
+    """How many heavy tasks one agent may hold at once.
+
+    A third of its slots, never fewer than one. Proportional rather
+    than fixed because `allowed` is already derived from the host's
+    memory: a box that can carry six light tasks can carry two amass,
+    and one that can carry thirty can carry ten. A flat number would
+    be wrong at both ends.
+
+    Never zero. An agent that may run tasks but never a heavy one
+    would leave amass work queued for ever with nothing to say why.
+    """
+    return max(1, allowed // 3)
+
+
 def effective_parallel(a, ceiling: int) -> int:
     """How many tasks this agent may actually run at once.
 
@@ -129,6 +155,13 @@ def effective_parallel(a, ceiling: int) -> int:
 TASK_KINDS: dict[str, str | None] = {
     "nmap": "nmap",
     "masscan": "masscan",
+    #: Port discovery with no binary, in the agent's own process. A
+    #: CONNECT scan, so not a replacement for masscan's SYN sweep —
+    #: it completes the handshake and shows up in the target's
+    #: application logs. Imported as masscan output because that is
+    #: the shape it produces, and a port that answered is a port that
+    #: answered whoever observed it.
+    "portscan": "masscan",
     "amass": None,
     "gobuster": None,
     "gospider": None,
@@ -2395,6 +2428,18 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
     # comes first: the operator chose it, and a routing policy should
     # not second-guess that.
     chosen: list[AgentTask] = []
+    # Heavy work is capped separately from the slot count, because a
+    # slot is not a fixed amount of memory. What this agent already
+    # holds counts: the cap is about what is running on the host, not
+    # about what this one heartbeat hands out.
+    heavy_cap = heavy_allowance(allowed)
+    heavy_now = sum(1 for h in held
+                    if h.kind in HEAVY_KINDS
+                    and h.status in ("claimed", "running"))
+
+    def heavy_held() -> int:
+        return heavy_now + sum(1 for c in chosen if c.kind in HEAVY_KINDS)
+
     for cand in (await session.execute(
             select(AgentTask).where(AgentTask.agent_id == a.id,
                                     AgentTask.status == "queued")
@@ -2413,6 +2458,11 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
             drop(cand, f"{a.name} does not have {KIND_TOOL[cand.kind]} and "
                        f"could not install it. Queue this against an agent "
                        f"that has it, or to the project pool.")
+            continue
+        if cand.kind in HEAVY_KINDS and heavy_held() >= heavy_cap:
+            # Left queued, not dropped: it is a perfectly good task and
+            # this agent will take it on a later beat. Slots are counted
+            # in tasks and this one costs several.
             continue
         chosen.append(cand)
 
@@ -2439,6 +2489,10 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
                 # have the tool, and this is exactly what pooling is
                 # for. It only becomes a problem if none of them do,
                 # which the queue depth makes visible.
+                continue
+            if cand.kind in HEAVY_KINDS and heavy_held() >= heavy_cap:
+                # Stays in the pool for an agent with room. This is
+                # what pooling is for.
                 continue
             if project is not None and await _may_claim(session, project, a, cand):
                 cand.agent_id = a.id

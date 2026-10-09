@@ -3,10 +3,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -650,9 +653,50 @@ func (a *Agent) execute(ctx context.Context, t *client.Task) {
 	})
 }
 
+// undeliverable reports whether the server will NEVER accept this
+// result, as opposed to not having accepted it yet.
+//
+// The distinction is narrow on purpose, and the reason is recent: for
+// about an hour this agent's routes did not match the server's, and
+// every single call came back 404. An agent that treated "404" as
+// "give up" would have discarded real scan output from a client's
+// estate because of a deployment mistake.
+//
+// So the code alone is not enough. It has to be a 404 whose body says
+// the SERVER looked for this task and does not have it — which is a
+// fact about the task, not about the route. A 404 from a path that
+// does not exist says something quite different and is retried.
+//
+// Matching on a message is brittle, and the brittleness is in the
+// safe direction: if the wording changes, this stops recognising
+// anything and the old retry-forever behaviour comes back. That is a
+// bug to notice, not data to lose.
+func undeliverable(err error) (string, bool) {
+	var he *client.HTTPError
+	if !errors.As(err, &he) || he.Code != http.StatusNotFound {
+		return "", false
+	}
+	if strings.Contains(strings.ToLower(he.Body), "no such task") {
+		return he.Body, true
+	}
+	return "", false
+}
+
 func (a *Agent) report(ctx context.Context, id int, r client.Result) {
 	if err := a.cli.SubmitResult(ctx, id, r); err != nil {
 		if a.sp != nil {
+			if why, dead := undeliverable(err); dead {
+				// Kept on disk, not deleted: the scan ran, and the
+				// output is the only record that it did.
+				if derr := a.sp.Dropped(id, why); derr != nil {
+					log.Printf("task %d: spool: %v", id, derr)
+				}
+				log.Printf("task %d: the server does not know this task (%v) "+
+					"— it will NOT be retried. The result is kept in the "+
+					"spool; %d undeliverable result(s) are now held there",
+					id, err, a.sp.DeadCount())
+				return
+			}
 			a.sp.Attempted(id)
 			// Not lost any more: it is on disk and the next drain will
 			// try again. Worth saying at all because a result that is

@@ -137,6 +137,25 @@ type Task struct {
 	Args json.RawMessage `json:"args"`
 }
 
+// HTTPError is a reply the server refused with.
+//
+// A typed error rather than a formatted string because one caller has
+// to make a decision on the code: a spooled result whose task the
+// server has never heard of will never be accepted, and retrying it
+// every heartbeat forever is the behaviour this replaces. Everything
+// else just prints it, and it prints the same as before.
+type HTTPError struct {
+	Method string
+	Path   string
+	Code   int
+	Status string
+	Body   string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("%s %s: %s: %s", e.Method, e.Path, e.Status, e.Body)
+}
+
 type HeartbeatResp struct {
 	OK bool `json:"ok"`
 	// Task is the first of Tasks, kept so an agent reading only this
@@ -182,7 +201,7 @@ func (c *Client) Enroll(ctx context.Context, token, pub, kexPub string) (*Enroll
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var out EnrollResp
-	err := c.do(ctx, "POST", "/api/agents/enroll",
+	err := c.do(ctx, "POST", "/api/ghosts/enroll",
 		EnrollReq{EnrollToken: token, PublicKey: pub, KexPublicKey: kexPub}, &out)
 	return &out, err
 }
@@ -295,8 +314,10 @@ func (c *Client) do(ctx context.Context, method, path string,
 		if len(snippet) > 600 {
 			snippet = snippet[:600]
 		}
-		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status,
-			strings.TrimSpace(string(snippet)))
+		return &HTTPError{
+			Method: method, Path: path, Code: resp.StatusCode,
+			Status: resp.Status, Body: strings.TrimSpace(string(snippet)),
+		}
 	}
 	if out == nil {
 		return nil
@@ -309,7 +330,7 @@ func (c *Client) Register(ctx context.Context, r RegisterReq) (*RegisterResp, er
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var out RegisterResp
-	if err := c.do(ctx, http.MethodPost, "/api/agents/register", r, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/api/ghosts/register", r, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -345,7 +366,7 @@ func (c *Client) Heartbeat(ctx context.Context, req HeartbeatReq) (*HeartbeatRes
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var out HeartbeatResp
-	if err := c.do(ctx, http.MethodPost, "/api/agents/heartbeat", req, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/api/ghosts/heartbeat", req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -355,14 +376,14 @@ func (c *Client) StartTask(ctx context.Context, id int) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	return c.do(ctx, http.MethodPost,
-		fmt.Sprintf("/api/agents/tasks/%d/start", id), nil, nil)
+		fmt.Sprintf("/api/ghosts/tasks/%d/start", id), nil, nil)
 }
 
 // SubmitResult sends the output home, retrying because the scan has
 // already happened: throwing the result away over one bad minute of
 // network would mean running it again against the client's estate.
 func (c *Client) SubmitResult(ctx context.Context, id int, r Result) error {
-	path := fmt.Sprintf("/api/agents/tasks/%d/result", id)
+	path := fmt.Sprintf("/api/ghosts/tasks/%d/result", id)
 	var last error
 	for attempt := 0; attempt < 5; attempt++ {
 		if attempt > 0 {
@@ -412,7 +433,7 @@ func (c *Client) Retired(ctx context.Context, reason string,
 	removed, kept, failed []string) error {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	return c.do(ctx, http.MethodPost, "/api/agents/retired",
+	return c.do(ctx, http.MethodPost, "/api/ghosts/retired",
 		RetiredReq{Reason: reason, Removed: removed, Kept: kept,
 			Failed: failed}, nil)
 }

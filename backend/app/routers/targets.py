@@ -6,6 +6,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import addresses
+from ..automation import tasked_subjects
 from ..db import get_session
 from ..events import broker
 from ..hosts import normalise_host
@@ -38,7 +39,7 @@ from ..schemas import (
     TargetUpdate,
     VulnOut,
 )
-from ..scopegate import assert_allowed
+from ..scopegate import assert_allowed, index_for
 from ..security import get_current_user, require_project, visible_project_ids
 from ..timeline import describe_changes, record
 from .projects import resolve_project
@@ -197,6 +198,57 @@ async def _find(session: AsyncSession, project: str, host: str) -> Target:
     if not t:
         raise HTTPException(404, f"no target {host!r} in project {pr.code}")
     return t
+
+
+@router.get("/unscanned", response_model=dict)
+async def unscanned(pr: Project = Depends(require_project("readonly")),
+                    _: User = Depends(get_current_user),
+                    session: AsyncSession = Depends(get_session)):
+    """Hosts this project has never run nmap or masscan against.
+
+    **Never TASKED, not "has no ports."** The two are different and the
+    difference is the point:
+
+      * a host nmap scanned that answered on nothing has no services,
+        so "no ports recorded" would offer it again on every pass --
+        for ever, at a client, for a question already answered
+      * a host whose services came from an imported report has ports
+        and has never been scanned by us at all
+
+    So this reads task history. `tasked_subjects` is the same function
+    the standing orders use, deliberately: two implementations of "has
+    this been done" would disagree, and the disagreement would be
+    invisible -- one quietly re-scanning what the other considered
+    finished.
+
+    Mobile applications are left out. There is no address to send a
+    packet to, and offering them inflates a count somebody is about to
+    act on.
+
+    Out-of-scope hosts are counted but not offered. The queue path
+    gates every host anyway, so including them would mean a dialog
+    that says 40 and queues 31 with no explanation.
+    """
+    rows = (await session.execute(
+        select(Target).where(Target.project_id == pr.id,
+                             Target.kind != "mobile")
+        .order_by(Target.host))).scalars().unique().all()
+
+    done = await tasked_subjects(session, pr.id, ("nmap", "masscan"))
+    never = [t for t in rows
+             if ("nmap", t.host.lower()) not in done
+             and ("masscan", t.host.lower()) not in done]
+
+    idx = await index_for(session, pr.id)
+    hosts, refused = [], 0
+    for t in never:
+        if idx.check(t.host, ip=[a.address for a in t.addresses]).allowed:
+            hosts.append(t.host)
+        else:
+            refused += 1
+
+    return {"hosts": hosts, "count": len(hosts),
+            "out_of_scope": refused, "considered": len(rows)}
 
 
 @router.get("/{project}/{host}", response_model=TargetOut)

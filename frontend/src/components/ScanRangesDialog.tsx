@@ -109,6 +109,10 @@ export function ScanRangesDialog({ project, selected = [], onClose,
   // Pre-checked: the selection is a statement of intent already made,
   // and making it again in here would be asking twice.
   const [useSelected, setUseSelected] = useState(selected.length > 0)
+  // The fourth source: everything this project has never pointed nmap
+  // or masscan at. Off by default — the other three are a choice the
+  // operator has already made, and this one can be hundreds of hosts.
+  const [useUnscanned, setUseUnscanned] = useState(false)
   const [manual, setManual] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -120,6 +124,14 @@ export function ScanRangesDialog({ project, selected = [], onClose,
   const q = useQuery({
     queryKey: ['enumerate-ranges', project],
     queryFn: () => api.enumerateRanges(project),
+  })
+  // Fetched whether or not the box is ticked, so the count is on the
+  // label before you decide. "Scan everything unscanned" is not a
+  // choice anybody should make without knowing how many that is.
+  const unscanned = useQuery({
+    queryKey: ['targets-unscanned', project],
+    queryFn: () => api.unscannedTargets(project),
+    enabled: !!project,
   })
   const uncovered = useMemo(
     () => (q.data ?? []).filter((r) => r.targets === 0), [q.data])
@@ -137,16 +149,19 @@ export function ScanRangesDialog({ project, selected = [], onClose,
     () => (useSelected ? selected.map((t) => t.ip_address || t.host) : []),
     [useSelected, selected])
   const fromManual = useMemo(() => parseSubjects(manual), [manual])
+  const fromUnscanned = useMemo(
+    () => (useUnscanned ? (unscanned.data?.hosts ?? []) : []),
+    [useUnscanned, unscanned.data])
 
   const subjects = useMemo(() => {
     const seen = new Set<string>()
     const out: string[] = []
-    for (const v of [...fromSelected, ...fromManual,
+    for (const v of [...fromSelected, ...fromManual, ...fromUnscanned,
                      ...chosen.map((r) => r.value)]) {
       if (v && !seen.has(v)) { seen.add(v); out.push(v) }
     }
     return out
-  }, [fromSelected, fromManual, chosen])
+  }, [fromSelected, fromManual, fromUnscanned, chosen])
 
   // Only the scope ranges carry a known address count; a typed CIDR is
   // not expanded here. Reported as "at least", because claiming an
@@ -299,6 +314,38 @@ export function ScanRangesDialog({ project, selected = [], onClose,
                     {selected.slice(0, 6).map((t) => t.ip_address || t.host)
                             .join(', ')}
                     {selected.length > 6 ? ` …+${selected.length - 6}` : ''}
+                  </Typography>
+                </Box>
+              </Stack>
+            </Box>
+          )}
+
+          {/* Everything nmap and masscan have never been pointed at.
+              "Never tasked", not "has no open ports": a host that was
+              scanned and answered on nothing has no ports, and
+              offering it again on every pass would re-scan a client
+              for a question already answered. The server decides
+              this — see /api/targets/unscanned. */}
+          {(unscanned.data?.count ?? 0) > 0 && (
+            <Box sx={{ border: `1px solid ${alpha(neon.yellow, 0.4)}`,
+                       borderRadius: 1, p: 1.2 }}>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Checkbox size="small" checked={useUnscanned}
+                  onChange={(e) => setUseUnscanned(e.target.checked)} />
+                <Box sx={{ flex: 1 }}>
+                  <Typography sx={{ fontSize: 12.5, color: neon.yellow }}>
+                    Scan the {unscanned.data?.count} target
+                    {unscanned.data?.count === 1 ? '' : 's'} nothing has
+                    scanned yet
+                  </Typography>
+                  <Typography sx={{ fontSize: 11, color: neon.muted }}>
+                    Never handed to nmap or masscan on this engagement —
+                    not merely "no ports recorded", so a host that was
+                    scanned and answered on nothing stays out.
+                    {(unscanned.data?.out_of_scope ?? 0) > 0 && (
+                      <> {unscanned.data?.out_of_scope} more are outside
+                      the scope list and are not offered.</>
+                    )}
                   </Typography>
                 </Box>
               </Stack>
