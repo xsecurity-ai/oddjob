@@ -1838,6 +1838,67 @@ check("the stale note goes with it",
       (a or {}).get("outbound_ip_note") is None,
       str((a or {}).get("outbound_ip_note")))
 
+print("\n== heavy tasks are capped below the slot count ==")
+# The arithmetic that put a 1 GB box into the OOM killer today: the
+# capacity model budgets 128 MB a task, which is right for nmap and
+# the lookups and wrong for amass -- measured resident at 438 MB, and
+# now linked INTO the agent rather than forked, so several at once
+# share one process and one memory limit. An agent sized at six slots
+# was handed six amass tasks.
+from app.routers.agents import heavy_allowance  # noqa: E402
+
+check("a third of the slots, rounded down", heavy_allowance(6) == 2,
+      heavy_allowance(6))
+check("...scaling with the host rather than a flat number",
+      heavy_allowance(30) == 10, heavy_allowance(30))
+# Never zero: an agent that may run tasks but never a heavy one would
+# leave amass work queued for ever with nothing to say why.
+check("never zero, however small the agent", heavy_allowance(1) == 1,
+      heavy_allowance(1))
+check("...including a nonsense value", heavy_allowance(0) == 1,
+      heavy_allowance(0))
+
+call("/api/projects", "POST", {"code": "HEAVY", "name": "Heavy"}, token=admin)
+call("/api/ghosts/routing?project=HEAVY", "PUT", {"max_parallel": 6},
+     token=admin)
+st, _hv = call("/api/ghosts?project=HEAVY", "POST",
+               {"name": "heavy", "target_os": "linux"}, token=admin)
+HVID = ((_hv or {}).get("agent") or {}).get("id")
+HVKEY = (_hv or {}).get("callback_key")
+call("/api/projects/HEAVY/scope", "POST",
+     {"lines": ["*.heavy.example", "heavy.example"]}, token=admin)
+for _i in range(6):
+    call(f"/api/ghosts/{HVID}/tasks?project=HEAVY", "POST",
+         {"kind": "amass", "args": {"domain": "heavy.example"}}, token=admin)
+for _i in range(3):
+    call(f"/api/ghosts/{HVID}/tasks?project=HEAVY", "POST",
+         {"kind": "nslookup", "args": {"targets": [f"h{_i}.heavy.example"]}},
+         token=admin)
+
+st, hb = call("/api/ghosts/heartbeat", "POST",
+              {"ready": True, "running_tasks": [], "slots_free": 6,
+               "capacity": 6, "capacity_reason": "6 slots"}, key=HVKEY)
+_kinds = [t["kind"] for t in (hb or {}).get("tasks", [])]
+# Six slots and nine tasks waiting, six of them amass. Without the cap
+# it would take six amass; with it, two.
+check("no more than two of the six slots go to amass",
+      _kinds.count("amass") == 2, str(_kinds))
+# The other slots are not wasted on nothing — lighter work fills what
+# it can, which is all three nslookups.
+check("lighter work fills the rest",
+      _kinds.count("nslookup") == 3, str(_kinds))
+check("...so it is handed five, not six: there was no more light work",
+      len(_kinds) == 5, f"{len(_kinds)}: {_kinds}")
+# The four amass it did not take are left QUEUED, not failed. This
+# agent will pick them up on a later beat.
+st, hb2 = call("/api/ghosts/heartbeat", "POST",
+               {"ready": True, "running_tasks": [t["id"] for t in
+                (hb or {}).get("tasks", [])],
+                "slots_free": 1, "capacity": 6}, key=HVKEY)
+check("a later beat is still offered amass, so none were discarded",
+      all(t["kind"] == "amass" for t in (hb2 or {}).get("tasks", [])),
+      str([t["kind"] for t in (hb2 or {}).get("tasks", [])]))
+
 print("\n== targets nothing has scanned yet ==")
 # "Never tasked", not "has no ports". The two differ in both
 # directions and the difference is the whole point:
