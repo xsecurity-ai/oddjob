@@ -59,6 +59,25 @@ updates:
         update-types: [major, minor, patch]
       frontend-minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # TanStack Table v9 is a breaking rewrite, not a version bump:
+      # `getCoreRowModel` becomes `createCoreRowModel`, `useReactTable`
+      # becomes `useTable`, `VisibilityState` becomes
+      # `ColumnVisibilityState`, `ColumnDef` grows a features type
+      # argument, and the table is assembled from opt-in feature
+      # objects rather than one table with everything compiled in.
+      #
+      # It is a real upgrade worth doing — v9 is the stable line and
+      # v8 is now a major behind — but it is a deliberate migration
+      # against the documentation, not something to take on a
+      # dependabot PR. Every table in the app renders through
+      # `TableGrid.tsx`, so getting the feature set subtly wrong
+      # breaks selection or column visibility everywhere at once, and
+      # the type errors do not say which.
+      #
+      # Majors only: 9.x minors and patches still arrive once we go.
+      - dependency-name: "@tanstack/react-table"
+        update-types: [version-update:semver-major]
     labels: [dependencies, frontend]
     commit-message:
       prefix: "deps(frontend)"
