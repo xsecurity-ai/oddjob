@@ -183,6 +183,43 @@ def plan(s: Snapshot, limit: int = PER_CYCLE) -> list[Candidate]:
     return out
 
 
+async def tasked_subjects(
+        session: AsyncSession, project_id: int,
+        kinds: tuple[str, ...]) -> set[tuple[str, str]]:
+    """Every (kind, subject) this project has ever tasked.
+
+    "Ever", including failed and cancelled: the question both callers
+    ask is whether the work was ATTEMPTED, not whether it succeeded.
+    A scan that ran and found nothing has still been run, and the
+    packets still went to the client.
+
+    `args` is JSON, so it is parsed here rather than matched in SQL --
+    a LIKE against a serialised blob would match `a.example` inside
+    `xa.example` and silently skip a host.
+
+    Shared by the standing orders and by the "never scanned" selection
+    in the scan dialog, because two implementations of "has this been
+    done" would disagree and the disagreement would be invisible: one
+    would quietly re-scan what the other considered finished.
+    """
+    out: set[tuple[str, str]] = set()
+    for kind, raw in (await session.execute(
+            select(AgentTask.kind, AgentTask.args).where(
+                AgentTask.project_id == project_id,
+                AgentTask.kind.in_(kinds)))).all():
+        try:
+            a = json.loads(raw or "{}")
+        except ValueError:
+            continue
+        if kind == "amass":
+            if d := a.get("domain"):
+                out.add(("amass", str(d).lower()))
+            continue
+        for sub in (a.get("targets") or []):
+            out.add((kind, str(sub).lower()))
+    return out
+
+
 async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
     """Read one project's state into a `Snapshot`."""
     rows = (await session.execute(
@@ -205,26 +242,8 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
                 ProjectScope.kind == "wildcard"))).all()
         if inc and (v or "").strip()}
 
-    # Every subject this project has ever tasked, for the kinds the
-    # policies use. `args` is JSON, so it is parsed here rather than
-    # matched in SQL -- a LIKE against a serialised blob would match
-    # `a.example` inside `xa.example` and silently skip a host.
-    tasked: set[tuple[str, str]] = set()
-    for kind, raw in (await session.execute(
-            select(AgentTask.kind, AgentTask.args).where(
-                AgentTask.project_id == pr.id,
-                AgentTask.kind.in_(("amass", "nslookup", "reverse_ip", "nmap"))
-            ))).all():
-        try:
-            a = json.loads(raw or "{}")
-        except ValueError:
-            continue
-        if kind == "amass":
-            if d := a.get("domain"):
-                tasked.add(("amass", str(d).lower()))
-            continue
-        for sub in (a.get("targets") or []):
-            tasked.add((kind, str(sub).lower()))
+    tasked = await tasked_subjects(
+        session, pr.id, ("amass", "nslookup", "reverse_ip", "nmap"))
 
     return Snapshot(
         auto_amass=bool(pr.auto_amass),
