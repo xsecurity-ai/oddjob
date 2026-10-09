@@ -1,0 +1,118 @@
+# Optional: pull and restart a Ghost when a new image is published.
+#
+#   GHOST_IMAGE=cr0n1c/ghost:nightly GHOST_SERVER=https://oddjob.internal \
+#     docker compose -f docker-compose.yml -f docker-compose.autoupdate.yaml up -d
+#
+# Requires GHOST_IMAGE to name a published tag. A locally built image
+# has no upstream digest to compare against, so with the default
+# `ghost-agent` this does nothing at all — and says nothing about it
+# either, which is the state most hosts are in without realising.
+#
+#   GHOST_IMAGE=cr0n1c/ghost:develop    every merge to main
+#   GHOST_IMAGE=cr0n1c/ghost:nightly    one build, soaked overnight
+#   GHOST_IMAGE=cr0n1c/ghost:v1.4.0     deliberate releases only
+#
+# ----------------------------------------------------------- read this
+#
+# A Ghost is not the server, and the trade is a different one.
+#
+# There are no migrations here. The server's auto-update applies
+# `alembic upgrade head` unattended against a database of findings,
+# and that is the reason for most of the caution in
+# `deploy/docker-compose.autoupdate.yaml`. A Ghost holds an identity
+# and a spool, both of which survive a recreate untouched. Do not
+# inherit the server's nervousness for a reason that does not apply.
+#
+# What it costs instead is **the scan that was running**. Watchtower
+# stops the container, and the agent's main loop returns on SIGTERM
+# without waiting for tasks in flight. Nothing is lost: the spool is
+# on a named volume and gets drained at the next start, and Oddjob
+# releases a task the agent was holding back to `queued` once it
+# checks in ready for work again (ABANDON_AFTER, ten minutes). But the
+# work is re-done, which means **the client's estate is scanned
+# twice** for whatever was in flight. On a half-finished full-TCP
+# sweep that is a lot of packets nobody asked for, arriving in their
+# logs as a second pass with no explanation.
+#
+# So prefer `:nightly` here even if the server runs `:develop`. The
+# agent is the part that puts packets on somebody else's network, and
+# a merge that changes how it scans should get a night of soak before
+# it does that unattended. A tag that moves at 03:17 UTC also moves
+# when a sweep is least likely to be mid-flight.
+#
+# ------------------------------------------------- why a second one
+#
+# Scoped, rather than reusing whatever watchtower the host already
+# runs, and the reason is sharper here than on the server: a Ghost
+# often sits on a host inside the assessed network that **we do not
+# own**. An unscoped watchtower updates everything it can see, so
+# pointing one at a client's box to keep our agent current would also
+# restart their containers on our schedule. That is not a tuning
+# decision, it is an incident.
+#
+# `WATCHTOWER_SCOPE` is built for this: an instance with a scope only
+# touches containers carrying the matching label, and an instance
+# without one ignores every container that has a scope. So this one
+# cannot reach anything but the Ghost, and any watchtower the host
+# already runs leaves the Ghost alone.
+#
+# --------------------------------------------- the socket, on their host
+#
+# Mounting `/var/run/docker.sock` is root on that host for practical
+# purposes. On our own server that grant is already held by the
+# watchtower running there, which is what makes it unremarkable. On a
+# host provided for an engagement it is a **new** grant, to a
+# container that polls a public registry and executes what it finds.
+#
+# That belongs in the rules of engagement, not in a compose file
+# somebody ran. If the host is not ours, either get it written down or
+# leave this overlay off and update the agent by hand — `docker pull`
+# and `up -d` is two commands, and a Ghost that is one release behind
+# is a much smaller problem than an undocumented root grant on a
+# client's machine.
+
+services:
+  ghost:
+    # Claims this container for the scoped instance below, and tells
+    # any unscoped watchtower on the host to leave it alone.
+    labels:
+      com.centurylinklabs.watchtower.scope: ghost
+
+  watchtower-ghost:
+    image: ghcr.io/nicholas-fedor/watchtower:latest
+    restart: unless-stopped
+
+    # NOT host networking, unlike the Ghost itself. The agent needs it
+    # so the client sees packets from the host's real address; this
+    # needs to reach a registry and nothing else, and putting it on
+    # the host's network stack would bind it there for no reason.
+    network_mode: bridge
+
+    volumes:
+      # Read-write because updating a container means recreating it.
+      # See the note above on what this grants and on whose host.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    environment:
+      WATCHTOWER_SCOPE: ghost
+      # Five minutes. "On push" without an inbound hook: the
+      # alternative is exposing watchtower's HTTP API so CI can call
+      # it, which means a new listening port on a host inside the
+      # assessed network. Polling costs a handful of HEAD requests and
+      # opens nothing.
+      WATCHTOWER_POLL_INTERVAL: 300
+      # Removes the superseded image. Engagement hosts are usually
+      # small, and without this one accumulates an image per update
+      # until the disk that the spool lives on fills.
+      WATCHTOWER_CLEANUP: true
+      # Never restart a container the operator deliberately stopped.
+      # A Ghost is stopped on purpose — to pause scanning, or because
+      # the client asked — and starting it again from a registry poll
+      # would be sending packets nobody authorised.
+      WATCHTOWER_INCLUDE_STOPPED: false
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

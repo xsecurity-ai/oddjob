@@ -352,6 +352,66 @@ jobs:
           esac
           rm -f ghost
 
+      # The auto-update overlay, checked for the two ways it fails
+      # silently rather than loudly.
+      #
+      # Watchtower matches containers by label. A scope label that
+      # does not match WATCHTOWER_SCOPE — a typo, a rename, one of
+      # the two edited without the other — produces no error
+      # anywhere: watchtower starts, finds nothing in scope, polls
+      # happily forever, and the fleet simply never updates. The
+      # first sign is an agent discovered to be months behind.
+      #
+      # And the overlay must stay opt-in. If the label or the
+      # watchtower service ever leaked into the base compose, every
+      # Ghost deployed from it would acquire a container with the
+      # docker socket — on hosts that, for a Ghost, are often not
+      # ours to grant that on.
+      - name: The auto-update overlay is wired up and still opt-in
+        working-directory: ghost
+        env:
+          GHOST_SERVER: https://example.invalid
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml \
+                         -f docker-compose.autoupdate.yaml \
+                         config --format json > /tmp/overlay.json
+          docker compose -f docker-compose.yml config --format json > /tmp/base.json
+          python3 - <<'PY'
+          import json, sys
+
+          LABEL = "com.centurylinklabs.watchtower.scope"
+          fail = []
+
+          over = json.load(open("/tmp/overlay.json"))["services"]
+          base = json.load(open("/tmp/base.json"))["services"]
+
+          lab = over["ghost"].get("labels", {}).get(LABEL)
+          scope = over["watchtower-ghost"]["environment"]["WATCHTOWER_SCOPE"]
+          if lab != scope or not lab:
+              fail.append(f"scope label {lab!r} != WATCHTOWER_SCOPE {scope!r}: "
+                          "watchtower would match no container and the fleet "
+                          "would never update, silently")
+
+          # The overlay must not quietly undo what the Ghost needs to
+          # scan with. Merging compose files is positional and easy to
+          # get wrong.
+          if over["ghost"].get("network_mode") != "host":
+              fail.append("the overlay dropped host networking")
+          if set(over["ghost"].get("cap_add") or []) != {"NET_RAW", "NET_ADMIN"}:
+              fail.append(f"cap_add is now {over['ghost'].get('cap_add')}")
+
+          if LABEL in base["ghost"].get("labels", {}):
+              fail.append("the scope label leaked into the base compose")
+          if len(base) != 1 or "ghost" not in base:
+              fail.append(f"base compose grew services: {sorted(base)}")
+
+          for f in fail:
+              print(f"::error::{f}", file=sys.stderr)
+          sys.exit(1 if fail else 0)
+          PY
+          echo "overlay: label matches scope, opt-in, Ghost unchanged"
+
   docker:
     name: image builds and the stack comes up
     runs-on: ubuntu-latest
