@@ -56,6 +56,93 @@ var builtinWordlist string
 // the embedded list to the task's own work directory is less clever
 // and cannot race.
 func wordlistPath(args map[string]any, workDir string) (string, bool, error) {
+	base, builtin, err := baseWordlist(args, workDir)
+	if err != nil {
+		return "", false, err
+	}
+	extra := stringsArg(args, "extra_words")
+	if len(extra) == 0 {
+		return base, builtin, nil
+	}
+	// The project's own paths, APPENDED. Never substituted: an
+	// operator adding three paths means "also these", and reading it
+	// as "only these" would quietly turn a 4,751-entry sweep into a
+	// three-request one that still reports as content discovery.
+	merged, err := appendWords(base, extra, workDir)
+	if err != nil {
+		return "", false, err
+	}
+	return merged, builtin, nil
+}
+
+// appendWords writes base + extra to a new file, without duplicates.
+//
+// Deduplicated against the base list rather than blindly concatenated:
+// a project whose extra paths overlap SecLists would otherwise request
+// each twice, which is wasted traffic at a client and makes the found
+// list repeat itself.
+func appendWords(base string, extra []string, workDir string) (string, error) {
+	b, err := os.ReadFile(base) // #nosec G304 -- a path this package chose
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", base, err)
+	}
+	seen := make(map[string]struct{}, 8192)
+	for _, line := range strings.Split(string(b), "\n") {
+		if w := strings.TrimSpace(line); w != "" {
+			seen[w] = struct{}{}
+		}
+	}
+	var add []string
+	for _, w := range extra {
+		w = strings.TrimSpace(strings.TrimPrefix(w, "/"))
+		if w == "" {
+			continue
+		}
+		if _, dup := seen[w]; dup {
+			continue
+		}
+		seen[w] = struct{}{}
+		add = append(add, w)
+	}
+	if len(add) == 0 {
+		return base, nil
+	}
+	// Inside the task's own work directory, under a constant name.
+	// `workDir` is chosen by the agent for this task, never by the
+	// server or the target, and the filename is a literal -- so there
+	// is nothing here for a traversal to come from.
+	out := filepath.Join(workDir, "gobuster-wordlist.txt")
+	body := string(b)
+	if !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	body += strings.Join(add, "\n") + "\n"
+	// #nosec G703 -- see the note on `out` above
+	if err := os.WriteFile(out, []byte(body), 0o600); err != nil {
+		return "", fmt.Errorf("staging the merged wordlist: %w", err)
+	}
+	return out, nil
+}
+
+// stringsArg reads a list of strings from task args. JSON gives
+// []any, and a caller constructing args in Go gives []string.
+func stringsArg(args map[string]any, key string) []string {
+	switch v := args[key].(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, x := range v {
+			if s, ok := x.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+func baseWordlist(args map[string]any, workDir string) (string, bool, error) {
 	if w := str(args, "wordlist"); w != "" {
 		if _, err := os.Stat(w); err != nil {
 			return "", false, fmt.Errorf("wordlist %s: %w", w, err)
