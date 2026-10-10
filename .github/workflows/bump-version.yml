@@ -1,5 +1,14 @@
-# Bump the version. Manual, like promote.yml, and the only thing in
-# this repository that decides what the next version number is.
+# Bump the version. Manual, like promote.yml.
+#
+# No longer the only thing that writes VERSION: the BUILD component is
+# bumped automatically by scripts/bump-build.sh, as a pre-commit hook,
+# once per branch whenever shipped source changes. This workflow still
+# owns `minor` and `major`, and can still bump `build` by hand.
+#
+# The split is deliberate. "This ships different code" is a fact a
+# script can check, and leaving it to somebody remembering produced two
+# images with the same version and different contents. "This is 0.1.0
+# now" is a judgement about what changed, and stays here.
 #
 # ------------------------------------------------------ one decider
 #
