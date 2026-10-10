@@ -65,6 +65,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import domains as gen
+from . import geoip
 from .db import SessionLocal
 from .events import broker
 from .lookups import is_ip
@@ -341,6 +342,22 @@ async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
     tests read. An empty dict means there was nothing to do, which is
     the normal case and is not logged.
     """
+    # Geolocation, if it is switched on and has databases. Done here
+    # because this loop is already the project's "follow-up work"
+    # cycle and runs on a timer; a lookup is a memory-mapped tree walk
+    # against a local file, so it costs nothing to ask and nothing
+    # leaves this machine.
+    #
+    # Bounded inside `tag_missing`: a project with forty thousand
+    # addresses does them over several cycles rather than in one.
+    try:
+        if n := await geoip.tag_missing(session, pr.id):
+            log.info("geoip: located %d address(es) in %s", n, pr.code)
+    except Exception as e:                       # noqa: BLE001
+        # Never fatal to the standing orders. Geolocation is a nicety;
+        # the scans are the job.
+        log.warning("geoip: %s", e)
+
     snap = await snapshot(session, pr)
     want = plan(snap)
     if not want:
