@@ -154,6 +154,22 @@ class Project(Base, TimestampMixin):
     auto_nmap: Mapped[str] = mapped_column(
         String(16), default="off", server_default="off")
 
+    #: Extra paths for content discovery, one per line, APPENDED to
+    #: whichever wordlist the agent is using rather than replacing it.
+    #:
+    #: Engagements accumulate names nothing public knows: an internal
+    #: framework's console, a deploy path somebody mentioned in a
+    #: ticket, a vendor's admin route seen on a sibling host. Those are
+    #: the paths most worth asking for and the least likely to be in
+    #: SecLists, and before this the only way to use them was to build
+    #: a wordlist by hand and put it on every agent.
+    #:
+    #: Appended, never substituted. An operator adding three paths
+    #: means "also these", and reading it as "only these" would
+    #: silently turn a 4,751-entry sweep into a three-request one that
+    #: still reports as a content-discovery scan.
+    url_wordlist: Mapped[str | None] = mapped_column(Text)
+
     name: Mapped[str] = mapped_column(String(255))
     client: Mapped[str | None] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text)

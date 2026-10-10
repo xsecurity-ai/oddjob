@@ -137,6 +137,9 @@ class ProjectUpdate(BaseModel):
     auto_resolve_ips: bool | None = None
     auto_reverse_dns: bool | None = None
     auto_nmap: str | None = None
+    #: Extra content-discovery paths, one per line. Appended to the
+    #: agent's wordlist, never replacing it.
+    url_wordlist: str | None = None
 
     @field_validator("auto_nmap")
     @classmethod
