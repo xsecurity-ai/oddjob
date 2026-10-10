@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   Alert, Box, Button, Checkbox, Chip, CircularProgress, Dialog, DialogActions,
   DialogContent, DialogTitle, Divider, FormControlLabel, IconButton, MenuItem,
+  Select,
   Paper, Stack, Switch, Table, TableBody, TableCell, TableHead, TableRow,
   TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
@@ -73,6 +74,14 @@ export function ProjectConfigView({ project }: { project: string | null }) {
   const [addTo, setAddTo] = useState<'in' | 'out'>('in')
   const [addCountry, setAddCountry] = useState('')
   const [addSubs, setAddSubs] = useState(false)
+  const [addClouds, setAddClouds] = useState<string[]>([])
+  // Up here with the other hooks, not beside the handler that uses
+  // it: this component returns early while it loads, and a hook after
+  // that point runs in a different order between renders.
+  const cloudsQ = useQuery({
+    queryKey: ['cloud-providers'],
+    queryFn: () => api.cloudProviders(),
+  })
   const [countries, setCountries] = useState('')
   const [confirm, setConfirm] = useState<ScopeApplyResult | null>(null)
   // Ticking the box changes what every fqdn line in the box MEANS,
@@ -153,6 +162,26 @@ export function ProjectConfigView({ project }: { project: string | null }) {
     description: details.description.trim() || null,
     status: details.status,
   }))
+
+  /** Put the chosen providers' domains on the IN-SCOPE list.
+   *
+   *  Always in-scope, never out: this control exists to say "we are
+   *  allowed to work in this cloud". Barring a provider is a different
+   *  decision and belongs in the out list, typed deliberately.
+   */
+  const addCloudScope = () => {
+    const domains = (cloudsQ.data ?? [])
+      .filter((c) => addClouds.includes(c.key))
+      .flatMap((c) => c.domains)
+    if (!domains.length) return
+    run(`Approved ${addClouds.length} cloud provider(s).`, async () => {
+      await api.addProjectScope(project, {
+        lines: domains, countries: [], included: true,
+        country: null, include_subdomains: true,
+      })
+      setAddClouds([])
+    })
+  }
 
   const addEntries = () => {
     const ls = lines.split('\n').map((l) => l.trim()).filter(Boolean)
@@ -414,6 +443,49 @@ export function ProjectConfigView({ project }: { project: string | null }) {
               onChange={(e) => setAddCountry(e.target.value)} />
             <Button size="small" variant="outlined" disabled={busy}
               onClick={addEntries}>Add</Button>
+          </Stack>
+
+          {/* Approving a cloud is a different act from typing its
+              domains in by hand, so it gets its own control. What it
+              means is narrow and worth saying on screen: the project
+              may work inside that cloud. It does NOT put every tenant
+              there in scope — the gate still matches the names this
+              engagement listed — and no provider zone is ever
+              enumerated, approved or not, because a provider's zone
+              is millions of other people's hosts. */}
+          <Stack spacing={0.8} sx={{ minWidth: 280 }}>
+            <Select size="small" multiple displayEmpty disabled={busy}
+              value={addClouds}
+              onChange={(e) => setAddClouds(
+                typeof e.target.value === 'string'
+                  ? e.target.value.split(',')
+                  : (e.target.value as string[]))}
+              renderValue={(v) => (v as string[]).length
+                ? `${(v as string[]).length} cloud(s) approved`
+                : 'Approve cloud providers…'}
+              sx={{ fontSize: 12.5 }}>
+              {(cloudsQ.data ?? []).map((c) => (
+                <MenuItem key={c.key} value={c.key} sx={{ fontSize: 12.5 }}>
+                  <Checkbox size="small" checked={addClouds.includes(c.key)} />
+                  <Box>
+                    <Box sx={{ fontSize: 12.5 }}>{c.name}</Box>
+                    <Box sx={{ fontSize: 10.5, color: neon.muted }}>
+                      {c.domains.slice(0, 3).join(', ')}
+                      {c.domains.length > 3 ? ` +${c.domains.length - 3}` : ''}
+                    </Box>
+                  </Box>
+                </MenuItem>
+              ))}
+            </Select>
+            <Box sx={{ fontSize: 10.5, color: neon.muted }}>
+              Adds each provider's domains to the in-scope list. It does not
+              put other tenants of that cloud in scope, and no provider zone
+              is ever enumerated for more domains.
+            </Box>
+            <Button size="small" variant="outlined"
+              disabled={busy || !addClouds.length} onClick={addCloudScope}>
+              Approve {addClouds.length || ''} cloud{addClouds.length === 1 ? '' : 's'}
+            </Button>
           </Stack>
         </Stack>
       </Paper>

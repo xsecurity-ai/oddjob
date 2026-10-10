@@ -188,6 +188,10 @@ class AgentOut(BaseModel):
     tools: dict = {}
     #: Reported by the agent about itself, not observed here.
     outbound_ip: str | None = None
+    #: Where that address is, looked up against local MaxMind
+    #: databases. None when geolocation is off, no database is
+    #: installed, or the address is private — all ordinary.
+    geo: dict | None = None
     #: And how it found it, because a container's private address and
     #: a real egress address are the same shape.
     outbound_ip_source: str | None = None
@@ -457,7 +461,8 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         call_in_url=a.call_in_url, last_seen=a.last_seen, last_ip=a.last_ip,
         retired_at=a.retired_at, retired_reason=a.retired_reason,
         retired_cleanup=_json_or_none(a.retired_cleanup),
-        outbound_ip=a.outbound_ip, interfaces=_jlist(a.interfaces),
+        outbound_ip=a.outbound_ip, geo=_geo(a.outbound_ip),
+        interfaces=_jlist(a.interfaces),
         outbound_ip_source=a.outbound_ip_source,
         outbound_ip_note=a.outbound_ip_note,
         host_platform=a.host_platform,
@@ -620,6 +625,38 @@ async def _project_words(session: AsyncSession, project_id: int) -> list[str]:
 #: in a file on the agent, named with `wordlist`, rather than being
 #: carried on every heartbeat.
 MAX_EXTRA_WORDS = 5000
+
+
+def _geo(address: str | None) -> dict | None:
+    """Where this ghost is, from its own outbound address.
+
+    Looked up on READ rather than stored, unlike a target address.
+    Two reasons, and they are about ghosts specifically: there are a
+    handful of them rather than thousands, so the cost is nothing; and
+    a ghost's outbound address changes when it moves or its network
+    does, so a stored answer would go quietly stale while still
+    looking authoritative.
+
+    Returns None when geolocation is off, no database is installed, or
+    the address is private -- all of which are ordinary, and none of
+    which is an error worth surfacing on a fleet listing.
+    """
+    if not address:
+        return None
+    try:
+        from .. import geoip
+        loc = geoip.lookup(address)
+    except Exception:                            # noqa: BLE001
+        return None
+    if not loc.known:
+        return None
+    out = {"country": loc.country, "country_name": loc.country_name,
+           "city": loc.city, "subdivision": loc.subdivision,
+           "asn": loc.asn, "org": loc.organisation}
+    # Coordinates only when they mean something; see geoip.positioned.
+    if loc.positioned:
+        out["latitude"], out["longitude"] = loc.latitude, loc.longitude
+    return out
 
 
 def _needs_privilege(task: AgentTask) -> bool:

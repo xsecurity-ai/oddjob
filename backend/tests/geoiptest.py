@@ -28,13 +28,17 @@ def check(label, cond, got=None):
         print(f"  FAIL  {label}" + (f" {got}" if got is not None else ""))
 
 
-def call(p, m="GET", b=None, token=None):
+def call(p, m="GET", b=None, token=None, key=None):
     r = urllib.request.Request(BASE + p, method=m)
     if b is not None:
         r.data = json.dumps(b).encode()
         r.add_header("Content-Type", "application/json")
     if token:
         r.add_header("Authorization", f"Bearer {token}")
+    if key:
+        # A ghost authenticates with its callback key, not a bearer
+        # token. Without this the register call below is a TypeError.
+        r.add_header("X-Ghost-Key", key)
     try:
         with urllib.request.urlopen(r, timeout=60) as x:
             raw = x.read()
@@ -183,6 +187,54 @@ check("a 1000 km country centroid is NOT a position",
       far.positioned is False, far.accuracy_km)
 check("...though the country is still known from it",
       geoip.Location(country="US").known is True)
+
+# =====================================================================
+# Part 5 — it reaches targets and ghosts
+# =====================================================================
+print("\n--- wired to targets and to ghosts ---")
+
+# A ghost carries its located address on the fleet listing. With no
+# database installed that is None, which is the honest answer and is
+# what the field means -- not an error, and not a guess.
+st, g = call("/api/ghosts?project=GEO", "POST", {"name": "geo-ghost"},
+             token=admin)
+GKEY = (g or {}).get("callback_key")
+call("/api/ghosts/register", "POST",
+     {"platform": "linux", "arch": "amd64", "version": "t",
+      "hostname": "geo-box", "privileged": False,
+      "outbound_ip": "8.8.8.8"}, key=GKEY)
+st, rows = call("/api/ghosts?project=GEO", token=admin)
+ghost = next((a for a in (rows or []) if a.get("name", "").startswith("geo-ghost")), None)
+check("a ghost reports its outbound address", ghost is not None
+      and ghost.get("outbound_ip") == "8.8.8.8", (ghost or {}).get("outbound_ip"))
+check("...and carries a geo field, null until a database is installed",
+      ghost is not None and "geo" in ghost, sorted(ghost or {}))
+
+# A private address is never located, database or not, and that is
+# not an error -- it is what RFC1918 means.
+from app import geoip as _g  # noqa: E402
+
+check("a private address is not located",
+      _g.lookup("10.0.0.1").known is False)
+
+# The standing-order cycle is where target addresses get tagged. With
+# geolocation off it must do nothing at all rather than looking up
+# every address on every pass.
+import asyncio as _a  # noqa: E402
+
+from app.db import SessionLocal as _S  # noqa: E402
+
+
+async def _off():
+    async with _S() as db:
+        from sqlalchemy import select as _sel
+
+        from app.models import Project as _Pr
+        pr = (await db.execute(_sel(_Pr).where(_Pr.code == "GEO"))).scalar_one()
+        return await _g.tag_missing(db, pr.id)
+
+
+check("with geolocation off, nothing is tagged", _a.run(_off()) == 0)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

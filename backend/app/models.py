@@ -69,6 +69,13 @@ class TimestampMixin:
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 PROJECT_STATUSES = ("active", "paused", "complete", "archived")
 
+#: What `Project.auto_web` may be.
+#:
+#: `crawl` follows the application's own links; `gobuster` asks for
+#: paths nothing links to. They answer different questions, which is
+#: why `both` exists and why neither is the default.
+WEB_CHOICES = ("off", "crawl", "gobuster", "both")
+
 #: What `Project.auto_nmap` may be. Here rather than in
 #: app/automation.py because `schemas.py` validates against it and
 #: importing the worker module into the schemas to read one tuple is
@@ -152,6 +159,15 @@ class Project(Base, TimestampMixin):
     #: traffic at a client, and that is the operator's call to make
     #: explicitly rather than a default hiding behind a checkbox.
     auto_nmap: Mapped[str] = mapped_column(
+        String(16), default="off", server_default="off")
+
+    #: "off" | "crawl" | "gobuster" | "both". Not a bool because the
+    #: two do different things and cost different amounts: a crawl
+    #: follows what the application links to, content discovery asks
+    #: for 4,751 paths it does not. Running both against every web
+    #: address in a large estate is a great deal of traffic, so which
+    #: of them runs is the operator's call rather than a default.
+    auto_web: Mapped[str] = mapped_column(
         String(16), default="off", server_default="off")
 
     #: Extra paths for content discovery, one per line, APPENDED to
