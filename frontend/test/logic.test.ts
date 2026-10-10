@@ -9,6 +9,8 @@
  * (symptom: severity listed critical, high, info, low, medium, which
  * reads as a ranking and is the wrong one).
  */
+import { readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { prune, describe as describeState, visibilityDiff } from '../src/lib/useTableState'
 import {
   describeItem, filterableColumns, isArmed, nextSort, operatorsFor,
@@ -600,6 +602,37 @@ check('a port stays attached, because the server keeps it',
       parseDomains('acme.example:8443')[0] === 'acme.example:8443')
 check('the first spelling of a duplicate wins',
       JSON.stringify(parseDomains('dup.example DUP.EXAMPLE')) === '["dup.example"]')
+
+// ---------------------------------------------------------------------
+// DataTable needs a parent that gives it a height
+// ---------------------------------------------------------------------
+//
+// It sizes itself with `flex: 1; min-height: 0; overflow: hidden`,
+// which only resolves inside a flex container that has a height. In a
+// plain block `flex` is ignored, `overflow: hidden` then clips, and
+// the grid inside asks for `height: 100%` of a parent that has none —
+// a table cut off with no way to scroll to the rest of the rows. That
+// is what GhostsView did.
+//
+// No type can express that contract, so it is checked against the
+// source: a view either hands DataTable straight to the app shell
+// (fragment root) or puts something with a height in between.
+const viewDir = new URL('../src/views', import.meta.url).pathname
+for (const f of readdirSync(viewDir).filter((x) => x.endsWith('.tsx'))) {
+  const src = readFileSync(join(viewDir, f), 'utf8')
+  const at = src.indexOf('<DataTable')
+  if (at < 0) continue
+  const head = src.slice(src.lastIndexOf('return (', at), at)
+  const fragmentRoot = /return \(\s*(\/\/[^\n]*\n\s*)*<>/.test(head)
+  const directChild = /return \(\s*(\/\/[^\n]*\n\s*)*$/.test(head)
+  // A real height, not `minHeight: 0`. That one is the OPPOSITE of
+  // giving a height -- it is what lets a flex child shrink -- and an
+  // earlier version of this check accepted it, which made the whole
+  // assertion pass against the very bug it was written for.
+  const givesHeight = /height:\s*'[^']*(vh|px|%)'|minHeight:\s*[1-9]/.test(head)
+  check(`${f} gives DataTable a height to fill`,
+        fragmentRoot || directChild || givesHeight)
+}
 
 console.log(`\n${'='.repeat(56)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(56)}`)
 process.exit(fail ? 1 : 0)
