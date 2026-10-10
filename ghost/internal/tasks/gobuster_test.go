@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -125,5 +126,75 @@ func TestBuiltinWordlistIsUsable(t *testing.T) {
 	if _, _, err := wordlistPath(map[string]any{
 		"wordlist": "/nonexistent/list.txt"}, dir); err == nil {
 		t.Error("a missing named wordlist was accepted")
+	}
+}
+
+// A project's own paths are APPENDED, never substituted.
+//
+// The failure this guards against is the quiet one: reading "add
+// these three" as "use only these three" turns a 4,751-entry sweep
+// into a three-request one that still reports as content discovery
+// and still says "done".
+func TestProjectWordsAppend(t *testing.T) {
+	dir := t.TempDir()
+	merged, builtin, err := wordlistPath(map[string]any{
+		// []any is what arrives over JSON.
+		"extra_words": []any{"deploy-internal", "/leading-slash", "admin", ""},
+	}, dir)
+	if err != nil {
+		t.Fatalf("merging failed: %v", err)
+	}
+	// #nosec G304 -- `merged` is the path wordlistPath just
+	// returned, inside this test's own TempDir
+	b, err := os.ReadFile(merged)
+	if err != nil {
+		t.Fatalf("reading the merged list: %v", err)
+	}
+	words := strings.Split(strings.TrimSpace(string(b)), "\n")
+	set := map[string]int{}
+	for _, w := range words {
+		set[strings.TrimSpace(w)]++
+	}
+
+	// The base list survives in full.
+	if len(words) < 4000 {
+		t.Errorf("merged list has %d entries — the base list was replaced, "+
+			"not appended to", len(words))
+	}
+	for _, keep := range []string{".env", "phpmyadmin", "backup"} {
+		if set[keep] == 0 {
+			t.Errorf("base entry %q was lost", keep)
+		}
+	}
+	// The project's additions are there.
+	if set["deploy-internal"] == 0 {
+		t.Error("the project's path was not appended")
+	}
+	// A leading slash is stripped: a wordlist holds paths relative to
+	// the base url, and `/admin` would be requested as `//admin`.
+	if set["leading-slash"] == 0 {
+		t.Errorf("a leading slash was not stripped: %v",
+			[]string{"leading-slash", "/leading-slash"})
+	}
+	// `admin` is already in SecLists; it must not be requested twice.
+	if set["admin"] > 1 {
+		t.Errorf("%q appears %d times — the merge did not deduplicate",
+			"admin", set["admin"])
+	}
+	// Blank entries are dropped rather than becoming a request for "/".
+	if set[""] > 0 {
+		t.Error("a blank line became a wordlist entry")
+	}
+	if !builtin {
+		t.Log("a host wordlist was used as the base, which is also correct")
+	}
+
+	// No extras means no merged file and no copying.
+	plain, _, err := wordlistPath(map[string]any{}, dir)
+	if err != nil {
+		t.Fatalf("plain path failed: %v", err)
+	}
+	if strings.Contains(plain, "gobuster-wordlist.txt") {
+		t.Error("a merged file was written when there was nothing to merge")
 	}
 }

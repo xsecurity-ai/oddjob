@@ -635,6 +635,12 @@ export const api = {
    *  as an nmap spec — so the caller queues the gap rather than the
    *  whole range again. See app/portcoverage.py for the ordering that
    *  decides when one technique makes another redundant. */
+  /** Cloud providers an engagement may be authorised against.
+   *  Approving one adds its domains to the in-scope list; it does not
+   *  widen scope to every tenant there, and no provider zone is ever
+   *  enumerated regardless. */
+  cloudProviders: () =>
+    req<{ key: string; name: string; domains: string[] }[]>('/api/projects/clouds'),
   unscannedTargets: (project: string, technique?: string, ports?: string) =>
     req<{ hosts: string[]; count: number; out_of_scope: number
           considered: number

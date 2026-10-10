@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import audit, slack
+from .. import audit, clouds, slack
 from ..db import get_session
 from ..events import broker
 from ..models import (
@@ -459,6 +459,23 @@ class ScopeAdd(BaseModel):
     #: Declared country for every host entry in this batch. See
     #: models.ProjectScope.country — nothing resolves this for you.
     country: str | None = None
+
+
+@router.get("/clouds", response_model=list[dict])
+async def cloud_providers(_: User = Depends(get_current_user)):
+    """The cloud providers an engagement may be authorised against.
+
+    Served rather than hardcoded in the UI so the list has one home.
+    Note what approving one does and does not mean: it puts the
+    provider's domains on the in-scope list, which says this
+    engagement may work inside that cloud. It does NOT widen the
+    scope to every tenant there -- the gate still matches the names
+    the engagement actually listed.
+
+    And no provider zone is ever enumerated, approved or not. See
+    app/clouds.py.
+    """
+    return clouds.listing()
 
 
 @router.post("/{project}/scope", response_model=ProjectCreated)

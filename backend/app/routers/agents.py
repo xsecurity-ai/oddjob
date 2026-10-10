@@ -188,6 +188,10 @@ class AgentOut(BaseModel):
     tools: dict = {}
     #: Reported by the agent about itself, not observed here.
     outbound_ip: str | None = None
+    #: Where that address is, looked up against local MaxMind
+    #: databases. None when geolocation is off, no database is
+    #: installed, or the address is private — all ordinary.
+    geo: dict | None = None
     #: And how it found it, because a container's private address and
     #: a real egress address are the same shape.
     outbound_ip_source: str | None = None
@@ -457,7 +461,8 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         call_in_url=a.call_in_url, last_seen=a.last_seen, last_ip=a.last_ip,
         retired_at=a.retired_at, retired_reason=a.retired_reason,
         retired_cleanup=_json_or_none(a.retired_cleanup),
-        outbound_ip=a.outbound_ip, interfaces=_jlist(a.interfaces),
+        outbound_ip=a.outbound_ip, geo=_geo(a.outbound_ip),
+        interfaces=_jlist(a.interfaces),
         outbound_ip_source=a.outbound_ip_source,
         outbound_ip_note=a.outbound_ip_note,
         host_platform=a.host_platform,
@@ -584,6 +589,74 @@ def _has_tool(a: Agent, kind: str) -> bool:
     if not have:
         return True
     return need in have
+
+
+async def _project_words(session: AsyncSession, project_id: int) -> list[str]:
+    """The project's extra content-discovery paths, cleaned.
+
+    Returns a list rather than the raw text so the agent does not have
+    to agree with this about what a line is. Leading slashes are
+    stripped because a wordlist holds paths relative to the base url
+    and `/admin` would be requested as `//admin`, which some servers
+    answer differently and others refuse outright.
+
+    Capped. A project that pastes a 200,000-line list into a text box
+    should not have that travel on every heartbeat; at that size it
+    belongs on the agent as a file and named with `wordlist`.
+    """
+    pr = await session.get(Project, project_id)
+    raw = (getattr(pr, "url_wordlist", None) or "") if pr else ""
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in raw.splitlines():
+        w = line.strip().lstrip("/")
+        # A comment line is how people annotate a list they maintain.
+        if not w or w.startswith("#"):
+            continue
+        if w not in seen:
+            seen.add(w)
+            out.append(w)
+        if len(out) >= MAX_EXTRA_WORDS:
+            break
+    return out
+
+
+#: Most extra paths a project may append. Past this the list belongs
+#: in a file on the agent, named with `wordlist`, rather than being
+#: carried on every heartbeat.
+MAX_EXTRA_WORDS = 5000
+
+
+def _geo(address: str | None) -> dict | None:
+    """Where this ghost is, from its own outbound address.
+
+    Looked up on READ rather than stored, unlike a target address.
+    Two reasons, and they are about ghosts specifically: there are a
+    handful of them rather than thousands, so the cost is nothing; and
+    a ghost's outbound address changes when it moves or its network
+    does, so a stored answer would go quietly stale while still
+    looking authoritative.
+
+    Returns None when geolocation is off, no database is installed, or
+    the address is private -- all of which are ordinary, and none of
+    which is an error worth surfacing on a fleet listing.
+    """
+    if not address:
+        return None
+    try:
+        from .. import geoip
+        loc = geoip.lookup(address)
+    except Exception:                            # noqa: BLE001
+        return None
+    if not loc.known:
+        return None
+    out = {"country": loc.country, "country_name": loc.country_name,
+           "city": loc.city, "subdivision": loc.subdivision,
+           "asn": loc.asn, "org": loc.organisation}
+    # Coordinates only when they mean something; see geoip.positioned.
+    if loc.positioned:
+        out["latitude"], out["longitude"] = loc.latitude, loc.longitude
+    return out
 
 
 def _needs_privilege(task: AgentTask) -> bool:
@@ -2542,6 +2615,7 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
     now = datetime.now(UTC)
     out = []
     _reverse_candidates: list[str] | None = None
+    _extra_words: list[str] | None = None
     for t in chosen:
         t.status = "claimed"
         t.claimed_at = now
@@ -2552,6 +2626,16 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
                 _reverse_candidates = await _candidates(session, a.project_id)
             if _reverse_candidates:
                 targs = {**targs, "candidates": _reverse_candidates}
+        if t.kind == "gobuster" and not targs.get("extra_words"):
+            # The project's own paths, appended to whatever wordlist the
+            # agent uses. Filled in HERE rather than stored on the task
+            # for the same reason as the candidates above: a task
+            # queued on Monday should use the list as it stands when it
+            # runs, not as it stood when somebody pressed the button.
+            if _extra_words is None:
+                _extra_words = await _project_words(session, a.project_id)
+            if _extra_words:
+                targs = {**targs, "extra_words": _extra_words}
         out.append({"id": t.id, "kind": t.kind, "args": targs})
     await session.commit()
     # `task` singular is kept alongside `tasks`: an agent built before
