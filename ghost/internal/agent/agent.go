@@ -63,6 +63,9 @@ type Agent struct {
 	// tuning live rather than a decision taken once at install.
 	cap_   int
 	capWhy string
+	//: Why the host is refusing new work, "" when it is not. Held so
+	//: the log records the transition rather than every heartbeat.
+	pressure string
 	// missing is {tool: why} for everything this host could not get.
 	// The server reads it to avoid sending work that needs them.
 	missing map[string]string
@@ -502,6 +505,25 @@ func (a *Agent) Run(ctx context.Context) error {
 // State is read from the agent rather than passed in, so the beats
 // sent while working and the one sent from the idle loop cannot
 // disagree about what this agent is doing.
+// notePressure logs when the host starts or stops holding off, and
+// not on every beat between. A 15-second heartbeat on a host that
+// stays starved for an hour is otherwise 240 identical lines, which
+// buries the one that said when it began.
+func (a *Agent) notePressure(reason string) {
+	a.mu.Lock()
+	changed := a.pressure != reason
+	a.pressure = reason
+	a.mu.Unlock()
+	if !changed {
+		return
+	}
+	if reason == "" {
+		log.Printf("capacity: pressure cleared, taking work again")
+	} else {
+		log.Printf("capacity: %s", reason)
+	}
+}
+
 func (a *Agent) beat(ctx context.Context) (*client.HeartbeatResp, error) {
 	a.mu.Lock()
 	ids := make([]int, 0, len(a.running))
@@ -509,19 +531,42 @@ func (a *Agent) beat(ctx context.Context) (*client.HeartbeatResp, error) {
 		ids = append(ids, id)
 	}
 	sort.Ints(ids)
-	first, capacity, why := a.current, a.cap_, a.capWhy
+	// Named `allowed`, not `capacity`: the package of that name is
+	// called just below, and a local would shadow it.
+	first, allowed, why := a.current, a.cap_, a.capWhy
 	a.mu.Unlock()
 
-	free := capacity - len(ids)
+	free := allowed - len(ids)
 	if free < 0 {
 		free = 0
 	}
+
+	// A slot is not the only thing that can run out. `capacity` is
+	// re-derived on a timer and floors at one, so a host down to its
+	// last few megabytes still reports a slot free and still takes
+	// work -- which is how three hosts in this fleet were driven to
+	// the point of not completing an SSH banner exchange while their
+	// agent cheerfully asked for more.
+	//
+	// Asked here, on the beat, because this is the moment the server
+	// decides what to hand over. `ready: false` is honoured whether
+	// or not an operator has set a per-ghost override, while
+	// `slots_free` is skipped when one is set -- so the veto has to
+	// travel on `ready` to be a veto at all.
+	if p := capacity.Check(ctx); p.Blocked {
+		free = 0
+		why = p.Reason
+		a.notePressure(p.Reason)
+	} else {
+		a.notePressure("")
+	}
+
 	return a.cli.Heartbeat(ctx, client.HeartbeatReq{
 		Ready:          free > 0,
 		RunningTask:    first,
 		RunningTasks:   ids,
 		SlotsFree:      free,
-		Capacity:       capacity,
+		Capacity:       allowed,
 		CapacityReason: why,
 	})
 }
