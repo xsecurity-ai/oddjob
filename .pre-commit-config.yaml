@@ -109,6 +109,23 @@ repos:
         files: ^(VERSION|scripts/(version|check-version)\.sh)$
         entry: scripts/check-version.sh
 
+      # Bump the build component when shipped source changes, once
+      # per branch. See scripts/bump-build.sh for why it is once per
+      # BRANCH rather than once per commit, and why `minor` and
+      # `major` are still decided by hand in bump-version.yml.
+      #
+      # `files` is the definition of "shipped": the agent, the server,
+      # the UI, the images that carry them, and the migrations that
+      # run on start. `exclude` takes documentation back out, because
+      # a README fix is not a new build.
+      - id: bump-build
+        name: shipped source bumps the build number
+        language: system
+        pass_filenames: true
+        files: ^(ghost/|backend/|frontend/src/|frontend/package(-lock)?\.json$|Dockerfile$|docker-compose\.yml$)
+        exclude: (\.md$|^ghost/README|^backend/tests/|^frontend/test/|/__snapshots__/)
+        entry: scripts/bump-build.sh
+
       # ------------------------------------------------- the linters
       - id: python-lint
         name: ruff

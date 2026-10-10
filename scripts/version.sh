@@ -16,8 +16,16 @@
 #   .github/workflows/images.yml    stamps the OCI version label
 #   .github/workflows/promote.yml   reads it back off the image
 #
-# The file is changed by .github/workflows/bump-version.yml and by
-# nothing else. Before this existed, promote.yml computed the next
+# The file is changed by two things and nothing else:
+#
+#   scripts/bump-build.sh            the BUILD component, automatically,
+#                                    once per branch, when shipped source
+#                                    changes. Run as a pre-commit hook.
+#   .github/workflows/bump-version.yml   minor and major, by hand
+#
+# The split is deliberate. "This ships different code" is a fact a
+# script can check; "this is 0.1.0 now" is a judgement about what
+# changed, and no script can make it. Before this existed, promote.yml computed the next
 # version from the highest git tag, which meant the number lived in two
 # places that could disagree — and the one people would have trusted is
 # whichever they looked at last. Git tags are still created, but they
