@@ -49,6 +49,32 @@ SPEC = [
      "help": "Optional, and free from nvd.nist.gov. Without one NVD allows "
              "5 requests per 30 seconds, which makes a first sync take "
              "hours; with one it allows 50."},
+    # --------------------------------------------------------- geoip
+    {"key": "geoip.enabled", "group": "Site",
+     "label": "Geolocate addresses (MaxMind GeoLite2)", "type": "bool",
+     "default": False,
+     "help": "Looks up which country, city and network an address belongs "
+             "to, using databases this installation downloads with your own "
+             "MaxMind licence key. Lookups are LOCAL — no address from the "
+             "engagement is ever sent to MaxMind. The only outbound request "
+             "is for the database files themselves, which carry no addresses "
+             "with them. Needs a free GeoLite2 account."},
+    {"key": "geoip.account_id", "group": "Site",
+     "label": "MaxMind account ID", "type": "text", "default": "",
+     "help": "The numeric account id from your MaxMind account page, e.g. "
+             "123456. Used with the licence key as HTTP basic auth on the "
+             "download."},
+    {"key": "geoip.license_key", "group": "Site",
+     "label": "MaxMind licence key", "type": "secret",
+     "help": "From your MaxMind account. Stored here rather than in a file "
+             "on the host, and never written to a log or an audit entry."},
+    {"key": "geoip.editions", "group": "Site",
+     "label": "GeoLite2 editions", "type": "text",
+     "default": "GeoLite2-ASN GeoLite2-City GeoLite2-Country",
+     "help": "Space or comma separated, matching the EditionIDs line in "
+             "MaxMind's own GeoIP.conf. City answers country too and is "
+             "27 MB against Country's 3 MB, so an installation that only "
+             "wants a country code can drop it."},
     {"key": "audit.retain_days", "group": "Site",
      "label": "Audit retention (days)", "type": "number", "default": 7,
      "help": "How long /audit/<type>/<format> keeps entries, where type is "

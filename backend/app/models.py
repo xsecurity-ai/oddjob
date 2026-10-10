@@ -403,6 +403,34 @@ class TargetAddress(Base, TimestampMixin):
     version: Mapped[int] = mapped_column(Integer, nullable=False,
                                          server_default="4", default=4)
 
+    # ------------------------------------------------------- geoip
+    #: Where MaxMind places this address, tagged onto the ADDRESS
+    #: rather than onto any target, because that is what it is a fact
+    #: about. Every name that answers here shares it, for the same
+    #: reason an open port does.
+    #:
+    #: All nullable: geolocation is optional, often partial, and
+    #: absent entirely for private ranges. A null country means "not
+    #: looked up or not known", which `geo_at` disambiguates.
+    geo_country: Mapped[str | None] = mapped_column(String(2))
+    geo_country_name: Mapped[str | None] = mapped_column(String(80))
+    geo_subdivision: Mapped[str | None] = mapped_column(String(80))
+    geo_city: Mapped[str | None] = mapped_column(String(120))
+    geo_latitude: Mapped[float | None] = mapped_column(Float)
+    geo_longitude: Mapped[float | None] = mapped_column(Float)
+    #: MaxMind's stated precision in km, and the field that stops the
+    #: coordinates lying. An address it cannot place answers with the
+    #: centroid of its country and a radius near 1000 km; a real city
+    #: answers with 20. Without this the two are identical and a map
+    #: pins Google's resolvers to a field in Kansas.
+    geo_accuracy_km: Mapped[int | None] = mapped_column(Integer)
+    geo_asn: Mapped[int | None] = mapped_column(Integer, index=True)
+    geo_org: Mapped[str | None] = mapped_column(String(160))
+    #: When the lookup ran. Distinguishes "no data for this address"
+    #: from "never asked", which otherwise look the same and lead to
+    #: re-looking-up every private address on every pass.
+    geo_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     targets: Mapped[list[Target]] = relationship(
         secondary=target_address_links,
         back_populates="addresses",
