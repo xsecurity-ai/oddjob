@@ -74,9 +74,9 @@ from .models import (
     AgentTask,
     DomainSearch,
     Project,
-    ProjectScope,
     Target,
 )
+from .roots import enumerable_roots
 from .scopegate import index_for
 
 log = logging.getLogger(__name__)
@@ -171,6 +171,12 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
     if s.auto_amass:
         zones: list[str] = []
         seen: set[str] = set()
+        # Redundant against a snapshot built by `snapshot()`, whose
+        # scope_zones already covers every known host. Kept so `plan`
+        # stays a total function of its Snapshot rather than depending
+        # on one particular caller having filled a field -- the unit
+        # tests construct Snapshots directly, and so would anyone
+        # reasoning about this in isolation.
         derived = [gen.registrable(h) for h, _ in s.targets if not is_ip(h)]
         for z in list(s.scope_zones) + derived:
             if not z or "." not in z or z in seen:
@@ -256,16 +262,20 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
         select(DomainSearch.domain).where(
             DomainSearch.project_id == pr.id))).scalars().all())
 
-    # A wildcard names its zone outright. Excluded entries are left out
-    # here as well as refused by the gate later: offering work that is
-    # certain to be refused is noise in every cycle for ever.
-    scope_zones = {
-        v.strip().lstrip("*.").lower()
-        for v, inc in (await session.execute(
-            select(ProjectScope.value, ProjectScope.included).where(
-                ProjectScope.project_id == pr.id,
-                ProjectScope.kind == "wildcard"))).all()
-        if inc and (v or "").strip()}
+    # Every zone worth enumerating, from the same function the
+    # "Search for more domains" dialog uses.
+    #
+    # This used to read only `kind == "wildcard"` and derive the rest
+    # from `Target.host`. Both halves were too narrow, and on a real
+    # project both mattered: one had three scope entries, all `fqdn`
+    # and no wildcards, so this set came back EMPTY and the only
+    # authorised domains were invisible to the automation meant to
+    # enumerate them; and 626 of its 1,038 targets carried alternate
+    # names or TLS SANs that only the dialog's wider sweep read.
+    #
+    # The symptom was an operator with auto_amass on still finding
+    # domains waiting every single time they opened the dialog.
+    scope_zones = await enumerable_roots(session, pr.id)
 
     tasked = await tasked_subjects(
         session, pr.id, ("amass", "nslookup", "reverse_ip", "nmap"))
