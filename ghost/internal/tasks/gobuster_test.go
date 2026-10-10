@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -14,8 +15,14 @@ import (
 // out, and a missing binary or a missing wordlist produced a clean
 // "0 paths found" that looked like a scanned site with nothing on it.
 func TestGobusterFindsPaths(t *testing.T) {
+	// Guarded: gobuster sends concurrently, so the handler runs on
+	// several goroutines at once and the test reads these afterwards.
+	// Without the mutex this is a data race, which `go test -race`
+	// fails on — CI does, and this did.
+	var mu sync.Mutex
 	var seenUA, seenAuth, seenCookie string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		seenUA = r.UserAgent()
 		if a := r.Header.Get("Authorization"); a != "" {
 			seenAuth = a
@@ -23,6 +30,7 @@ func TestGobusterFindsPaths(t *testing.T) {
 		if c := r.Header.Get("Cookie"); c != "" {
 			seenCookie = c
 		}
+		mu.Unlock()
 		switch strings.TrimPrefix(r.URL.Path, "/") {
 		case "admin":
 			w.WriteHeader(http.StatusOK)
@@ -76,6 +84,8 @@ func TestGobusterFindsPaths(t *testing.T) {
 	}
 
 	// Attribution: the target's own logs should say who this was.
+	mu.Lock()
+	defer mu.Unlock()
 	if !strings.Contains(seenUA, "Oddjob") {
 		t.Errorf("user agent was %q, which does not identify the scan", seenUA)
 	}
