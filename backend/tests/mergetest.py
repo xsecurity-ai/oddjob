@@ -100,7 +100,13 @@ print("== the plan, before anything is touched ==")
 st, p = call("/api/enumerate/merge-plan?project=MRG"
              "&host=198.51.100.50&into=web.acme.example", token=admin)
 check("a plan is produced", st == 200, f"status={st} {str(p)[:120]}")
-check("it names the port seen on both", p.get("service_conflicts") == ["443/tcp"],
+# Both ports, not just 443. These two records are the same machine --
+# that is why they are being merged -- and they share an address, so
+# an open port found on either is now recorded on both. 8080 was seen
+# only by the name scan and 443 by both; after co-tenancy propagation
+# each record carries each port, so each is a conflict to reconcile.
+check("it names the ports seen on both",
+      p.get("service_conflicts") == ["443/tcp", "8080/tcp"],
       str(p.get("service_conflicts")))
 check("and the services that simply move", p.get("services_moved") == 1,
       f"{p.get('services_moved')} (22/tcp)")
