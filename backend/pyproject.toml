@@ -25,6 +25,12 @@ dependencies = [
     # depending on it directly means an upstream dropping it does not
     # silently take agent authentication with it.
     "cryptography>=43",
+    # The MaxMind DB reader. Pure Python with an optional C extension,
+    # so it installs on the distroless image without a toolchain. Only
+    # the READER -- the databases themselves are downloaded at runtime
+    # with the operator's own licence key and are not vendored, because
+    # GeoLite2 may not be redistributed and this repository is public.
+    "maxminddb>=2.6",
 ]
 
 [dependency-groups]

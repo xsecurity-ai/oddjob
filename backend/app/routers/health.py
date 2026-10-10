@@ -239,6 +239,30 @@ async def site_health(_: User = Depends(require_site_admin),
     if not smtp["configured"] and smtp["state"] == "unused":
         smtp["note"] = "no SMTP host is set"
 
+    # MaxMind. "Configured" is the key being present; "state" is
+    # whether a download has ever worked. The two are separate on
+    # purpose -- a key that was set but has never successfully fetched
+    # a database is the common misconfiguration, and one boolean
+    # cannot show it.
+    from .. import geoip
+    maxmind = servicehealth.describe(
+        rows.get("maxmind"),
+        never_used="no database has ever been downloaded")
+    maxmind["configured"] = bool(
+        str(cfg.get("geoip.account_id") or "").strip()
+        and str(cfg.get("geoip.license_key") or "").strip())
+    maxmind["enabled"] = bool(cfg.get("geoip.enabled"))
+    maxmind["editions"] = geoip.parse_editions(cfg.get("geoip.editions"))
+    # Which databases are actually on disk, and when each was built.
+    # The age is the thing worth seeing: GeoLite2 is rebuilt twice a
+    # week, and a year-old City database answers confidently and wrongly.
+    maxmind["databases"] = geoip.installed()
+    if not maxmind["configured"] and maxmind["state"] == "unused":
+        maxmind["note"] = "no account id and licence key are set"
+    elif maxmind["configured"] and not maxmind["databases"]:
+        maxmind["note"] = ("configured, but no database has been downloaded "
+                           "yet — lookups will return nothing until one is")
+
     try:
         from ..slack_socket import worker as slack_worker
         socket = {"connected": bool(slack_worker.connected),
@@ -309,6 +333,7 @@ async def site_health(_: User = Depends(require_site_admin),
         "slack_socket": socket,
         "workers": workers,
         "smtp": smtp,
+        "maxmind": maxmind,
         "ghosts": await _ghosts(session),
         "audit": {
             "state": "ok" if audit_newest else "unused",
