@@ -18,7 +18,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .hosts import InvalidHost, validate_cloud_id, validate_host
-from .models import NMAP_CHOICES, PROJECT_STATUSES, SEVERITIES
+from .models import NMAP_CHOICES, PROJECT_STATUSES, SEVERITIES, WEB_CHOICES
 
 
 class Page[T](BaseModel):
@@ -137,6 +137,8 @@ class ProjectUpdate(BaseModel):
     auto_resolve_ips: bool | None = None
     auto_reverse_dns: bool | None = None
     auto_nmap: str | None = None
+    #: "off" | "crawl" | "gobuster" | "both".
+    auto_web: str | None = None
     #: Extra content-discovery paths, one per line. Appended to the
     #: agent's wordlist, never replacing it.
     url_wordlist: str | None = None
@@ -153,6 +155,22 @@ class ProjectUpdate(BaseModel):
         if v not in NMAP_CHOICES:
             raise ValueError(
                 f"auto_nmap must be one of {', '.join(NMAP_CHOICES)}")
+        return v
+
+    @field_validator("auto_web")
+    @classmethod
+    def _web(cls, v: str | None) -> str | None:
+        """Same refusal as auto_nmap, for the same reason.
+
+        A typo quietly becoming "off" is the failure where the
+        operator believes the estate is being crawled and it is not.
+        """
+        if v is None:
+            return None
+        v = (v or "").strip().lower()
+        if v not in WEB_CHOICES:
+            raise ValueError(
+                f"auto_web must be one of {', '.join(WEB_CHOICES)}")
         return v
 
 

@@ -57,10 +57,14 @@ def call(p, m="GET", b=None, token=None):
 from app.automation import (  # noqa: E402
     BATCH,
     NMAP_PROFILES,
+    WEB_KINDS,
     Snapshot,
     plan,
 )
-from app.models import NMAP_CHOICES  # noqa: E402
+from app.models import (
+    NMAP_CHOICES,  # noqa: E402
+    WEB_CHOICES,  # noqa: E402
+)
 
 # =====================================================================
 # Part 1 — what the policies choose
@@ -335,6 +339,54 @@ async def zones():
 
 
 asyncio.run(zones())
+
+# =====================================================================
+# web discovery: crawl, gobuster, or both
+# =====================================================================
+print("\n--- the web policy queues per URL, not per host ---")
+
+WEB = {"http://a.acme.example/", "https://b.acme.example/app"}
+
+check("off plans nothing",
+      plan(Snapshot(auto_web="off", web_urls=WEB)) == [])
+check("an unknown value plans nothing rather than guessing",
+      plan(Snapshot(auto_web="nonsense", web_urls=WEB)) == [])
+
+p = plan(Snapshot(auto_web="crawl", web_urls=WEB))
+check("crawl queues katana only",
+      {c.kind for c in p} == {"katana"}, {c.kind for c in p})
+check("...one task per url", len(p) == 2, len(p))
+check("...addressed to the url, which is what a crawler needs",
+      all(c.args["targets"] == [c.subject] for c in p))
+
+p = plan(Snapshot(auto_web="gobuster", web_urls=WEB))
+check("gobuster queues gobuster only",
+      {c.kind for c in p} == {"gobuster"}, {c.kind for c in p})
+
+p = plan(Snapshot(auto_web="both", web_urls=WEB))
+check("both queues both kinds",
+      {c.kind for c in p} == {"katana", "gobuster"}, {c.kind for c in p})
+# They answer different questions, so `both` is two tasks per url and
+# not one tool standing in for the other.
+check("...two tasks per url", len(p) == 4, len(p))
+
+# One attempt per subject, like every other standing order. A crawl
+# that found nothing has still been run, and the packets still went.
+tried = Snapshot(auto_web="both", web_urls=WEB,
+                 tasked={("katana", "http://a.acme.example/"),
+                         ("gobuster", "http://a.acme.example/")})
+left = {(c.kind, c.subject) for c in plan(tried)}
+check("a url already tasked is not queued again",
+      left == {("katana", "https://b.acme.example/app"),
+               ("gobuster", "https://b.acme.example/app")}, sorted(left))
+
+# A host with no web address has nothing to crawl. Queueing the
+# hostname would hand the agent something it cannot use.
+check("no web addresses means nothing to do",
+      plan(Snapshot(auto_web="both", targets=ESTATE)) == [])
+
+check("the vocabulary is not written down twice",
+      set(WEB_CHOICES) == {"off", *WEB_KINDS})
 
 # =====================================================================
 # The dialog and the standing order must see the same zones

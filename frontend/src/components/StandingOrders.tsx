@@ -52,6 +52,16 @@ const SWITCHES = [
   },
 ]
 
+const WEB = [
+  { value: 'off', label: 'off' },
+  // Different questions, which is why `both` exists: a crawl follows
+  // what the application links to, content discovery asks for paths
+  // nothing links to.
+  { value: 'crawl', label: 'crawl only' },
+  { value: 'gobuster', label: 'gobuster only' },
+  { value: 'both', label: 'crawl + gobuster' },
+]
+
 const NMAP = [
   { value: 'off', label: 'Off' },
   { value: 'top100', label: 'Top 100 ports' },
@@ -80,8 +90,10 @@ export function StandingOrders({ project }: { project: string }) {
 
   const on = (f: string) => Boolean((pr.data as Record<string, unknown> | undefined)?.[f])
   const nmap = String((pr.data as { auto_nmap?: string } | undefined)?.auto_nmap ?? 'off')
+  const web = String((pr.data as { auto_web?: string } | undefined)?.auto_web ?? 'off')
   const busy = pr.isLoading || save.isPending
-  const live = SWITCHES.filter((s) => on(s.field)).length + (nmap !== 'off' ? 1 : 0)
+  const live = SWITCHES.filter((s) => on(s.field)).length
+    + (nmap !== 'off' ? 1 : 0) + (web !== 'off' ? 1 : 0)
 
   return (
     <Stack direction="row" spacing={1.4} alignItems="center" useFlexGap
@@ -138,6 +150,30 @@ export function StandingOrders({ project }: { project: string }) {
           sx={{ fontSize: 11.5, height: 26,
                 color: nmap === 'off' ? neon.muted : neon.yellow }}>
           {NMAP.map((o) => (
+            <MenuItem key={o.value} value={o.value} sx={{ fontSize: 11.5 }}>
+              {o.label}
+            </MenuItem>
+          ))}
+        </Select>
+      </Stack>
+
+      {/* Tooltip on the label, not around the control — see the note
+          on the nmap select above. */}
+      <Stack direction="row" spacing={0.7} alignItems="center">
+        <Tooltip title={'Crawls each web address this project knows, asks for '
+          + 'paths nothing links to, or both. A crawl follows the '
+          + "application's own links; content discovery asks for 4,751 paths "
+          + 'it does not. Both against a large estate is a great deal of '
+          + 'traffic at the far end.'}>
+          <Box sx={{ fontSize: 11.5, color: neon.text, cursor: 'help' }}>
+            web discovery
+          </Box>
+        </Tooltip>
+        <Select size="small" value={web} disabled={!admin || busy}
+          onChange={(e) => save.mutate({ auto_web: e.target.value })}
+          sx={{ fontSize: 11.5, height: 26,
+                color: web === 'off' ? neon.muted : neon.yellow }}>
+          {WEB.map((o) => (
             <MenuItem key={o.value} value={o.value} sx={{ fontSize: 11.5 }}>
               {o.label}
             </MenuItem>

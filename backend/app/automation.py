@@ -70,11 +70,13 @@ from .events import broker
 from .lookups import is_ip
 from .models import (
     NMAP_CHOICES,
+    WEB_CHOICES,
     Agent,
     AgentTask,
     DomainSearch,
     Project,
     Target,
+    WebAddress,
 )
 from .roots import enumerable_roots
 from .scopegate import index_for
@@ -110,6 +112,23 @@ NMAP_PROFILES: dict[str, dict] = {
     "full": {"ports": "1-65535"},
 }
 
+#: Which task kinds each web policy queues.
+#:
+#: `katana` follows what the application links to; `gobuster` asks for
+#: paths nothing links to. Different questions, which is why `both`
+#: runs both rather than one being a superset of the other.
+WEB_KINDS: dict[str, tuple[str, ...]] = {
+    "crawl": ("katana",),
+    "gobuster": ("gobuster",),
+    "both": ("katana", "gobuster"),
+}
+
+#: `WEB_CHOICES` and `NMAP_CHOICES` live in models.py, where
+#: schemas.py can validate against them without importing this
+#: module. They have to agree, and the test asserts that rather than
+#: trusting two lists.
+assert set(WEB_CHOICES) == {"off", *WEB_KINDS}
+
 #: `NMAP_CHOICES` lives in models.py, where schemas.py can validate
 #: against it without importing this module. They have to agree, and
 #: the test asserts that they do rather than trusting two lists.
@@ -138,6 +157,7 @@ class Snapshot:
     auto_resolve_ips: bool = False
     auto_reverse_dns: bool = False
     auto_nmap: str = "off"
+    auto_web: str = "off"
     #: (host, has_address) for every target in the project.
     targets: list[tuple[str, bool]] = field(default_factory=list)
     #: Zones already handed to amass (`DomainSearch.domain`).
@@ -149,6 +169,9 @@ class Snapshot:
     #: alone means the engagement never enumerates the zone it was
     #: actually authorised against. Same reasoning as `domainRoots`.
     scope_zones: set[str] = field(default_factory=set)
+    #: Every web address in the project, as a url. The subject
+    #: a crawl or a content-discovery run actually needs.
+    web_urls: set[str] = field(default_factory=set)
     #: (kind, subject) this project has ever tasked. See "one attempt
     #: per subject" in the module docstring.
     tasked: set[tuple[str, str]] = field(default_factory=set)
@@ -204,6 +227,16 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
             if is_ip(h) and ("reverse_ip", h) not in s.tasked)
         out += [Candidate("reverse_ip", h, {}, "auto_reverse_dns")
                 for h in want[:limit]]
+
+    if s.auto_web in WEB_KINDS:
+        # Crawl and content discovery are queued per URL, not per
+        # host: a host can serve several sites, and "scan example.com"
+        # is not a thing either tool can do -- they need somewhere to
+        # start.
+        for kind in WEB_KINDS[s.auto_web]:
+            want = sorted(u for u in s.web_urls if (kind, u) not in s.tasked)
+            out += [Candidate(kind, u, {"targets": [u]}, "auto_web")
+                    for u in want[:limit]]
 
     if s.auto_nmap in NMAP_PROFILES:
         args = NMAP_PROFILES[s.auto_nmap]
@@ -278,15 +311,27 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
     scope_zones = await enumerable_roots(session, pr.id)
 
     tasked = await tasked_subjects(
-        session, pr.id, ("amass", "nslookup", "reverse_ip", "nmap"))
+        session, pr.id,
+        ("amass", "nslookup", "reverse_ip", "nmap", "katana", "gobuster"))
+
+    # Every web address in the project. A crawl and a content-discovery
+    # run both need a URL to start from -- "scan example.com" is not a
+    # thing either can do -- and one host can serve several sites.
+    web_urls = {
+        u for (u,) in (await session.execute(
+            select(WebAddress.url).join(
+                Target, Target.id == WebAddress.target_id)
+            .where(Target.project_id == pr.id))).all()
+        if u}
 
     return Snapshot(
         auto_amass=bool(pr.auto_amass),
         auto_resolve_ips=bool(pr.auto_resolve_ips),
         auto_reverse_dns=bool(pr.auto_reverse_dns),
         auto_nmap=str(pr.auto_nmap or "off"),
+        auto_web=str(getattr(pr, "auto_web", None) or "off"),
         targets=targets, searched=searched, tasked=tasked,
-        scope_zones=scope_zones)
+        scope_zones=scope_zones, web_urls=web_urls)
 
 
 async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
