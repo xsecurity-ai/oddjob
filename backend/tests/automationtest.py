@@ -336,5 +336,68 @@ async def zones():
 
 asyncio.run(zones())
 
+# =====================================================================
+# The dialog and the standing order must see the same zones
+# =====================================================================
+print("\n--- auto_amass sees what the dialog offers ---")
+
+# The bug: /domains/roots read scope of kind fqdn AND wildcard and
+# mined every hostname the project had seen, while the standing order
+# read only wildcard scope and only Target.host. A project scoped
+# entirely by `fqdn` therefore had an EMPTY zone list in the
+# automation -- which is the live case that prompted this -- and
+# names learnt from TLS SANs were invisible to it either way.
+call("/api/projects", "POST", {"code": "ROOTS", "name": "ROOTS"}, token=admin)
+# fqdn scope, deliberately: no wildcard anywhere in this project.
+# Apexes, as a real project has them: `mufg.jp` and friends are
+# stored as kind `fqdn`, and registrable() returns them unchanged so
+# the gate allows enumerating them. A scope of `www.scoped.example`
+# would NOT authorise `scoped.example`, and the gate refusing that is
+# correct rather than a bug — checked, by writing it that way first.
+call("/api/projects/ROOTS/scope", "POST",
+     {"lines": ["alpha.example", "beta.example"]}, token=admin)
+
+
+async def roots_agree():
+    from app.roots import enumerable_roots
+    async with SessionLocal() as s:
+        pr = (await s.execute(
+            select(Project).where(Project.code == "ROOTS"))).scalar_one()
+        s.add(Agent(project_id=pr.id, name="roots-ghost", status="online",
+                    callback_key_hash="r" * 64))
+        # A target whose ALTERNATE name is under a different zone. Only
+        # the wider sweep reads `hostnames`, so this is the half of the
+        # bug that is not about scope kinds.
+        s.add(Target(project_id=pr.id, host="box.alpha.example", kind="host",
+                     hostnames=json.dumps(["vhost.beta.example"])))
+        pr.auto_amass = True
+        await s.commit()
+
+        found = await enumerable_roots(s, pr.id)
+        check("an fqdn scope entry yields its zone",
+              "alpha.example" in found and "beta.example" in found,
+              sorted(found))
+        check("a name learnt as an alternate yields its zone too",
+              "beta.example" in found, sorted(found))
+
+        await run_once(s, pr)
+        queued = {json.loads(r)["domain"] for k, r in (await s.execute(
+            select(AgentTask.kind, AgentTask.args).where(
+                AgentTask.project_id == pr.id,
+                AgentTask.kind == "amass"))).all()}
+        # The actual complaint: with the toggle on, nothing should be
+        # left for the dialog to offer.
+        check("auto_amass queues the fqdn-scoped zone",
+              "alpha.example" in queued, sorted(queued))
+        check("auto_amass queues the zone from the alternate name",
+              "beta.example" in queued, sorted(queued))
+        check("...and the target's own zone", "alpha.example" in queued,
+              sorted(queued))
+        check("nothing the dialog would offer is left over",
+              not (found - queued), sorted(found - queued))
+
+
+asyncio.run(roots_agree())
+
 print(f"\n{ok} passed, {fail} failed")
 raise SystemExit(1 if fail else 0)

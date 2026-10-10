@@ -24,11 +24,10 @@ from ..models import (
     DomainCandidate,
     DomainSearch,
     Project,
-    ProjectScope,
     Target,
     User,
-    WebAddress,
 )
+from ..roots import known_hosts, scope_roots
 from ..schemas import DomainCandidateOut, PromoteRequest
 from ..scopegate import index_for
 from ..security import get_current_user, require_project
@@ -51,72 +50,6 @@ def _conflict_insert(session, model):
 
 
 router = APIRouter(prefix="/api/domains", tags=["domains"])
-
-
-async def known_hosts(session: AsyncSession, project_id: int) -> list[str]:
-    """Every hostname the project has seen, from every source.
-
-    Not just the target list: alternate names from DNS and TLS, and the
-    hosts of web addresses, are exactly the material that makes a
-    suggestion good — and they are the names most often absent from the
-    inventory, because nobody got round to adding them.
-    """
-    out: set[str] = set()
-    rows = (await session.execute(
-        select(Target.host, Target.hostnames, Target.extra)
-        .where(Target.project_id == project_id))).all()
-    for host, names_json, extra_json in rows:
-        if host:
-            out.add(host.lower())
-        for blob, key in ((names_json, None), (extra_json, "hostscripts")):
-            if not blob:
-                continue
-            try:
-                data = json.loads(blob)
-            except (TypeError, ValueError):
-                continue
-            if isinstance(data, list):
-                out.update(str(x).lower() for x in data if x)
-            elif isinstance(data, dict) and key:
-                # TLS SANs captured by nmap's ssl-cert script are a rich
-                # source of names nothing else has recorded.
-                for script_out in data.get(key, {}).values() if isinstance(
-                        data.get(key), dict) else []:
-                    out.update(_names_in(str(script_out)))
-        if extra_json:
-            try:
-                ex = json.loads(extra_json)
-            except (TypeError, ValueError):
-                ex = {}
-            if isinstance(ex, dict):
-                for v in ex.values():
-                    if isinstance(v, dict):
-                        for vv in v.values():
-                            if isinstance(vv, str):
-                                out.update(_names_in(vv))
-
-    urls = (await session.execute(
-        select(WebAddress.url).join(Target, Target.id == WebAddress.target_id)
-        .where(Target.project_id == project_id))).scalars().all()
-    for u in urls:
-        from urllib.parse import urlsplit
-        h = (urlsplit(u).hostname or "").lower()
-        if h:
-            out.add(h)
-    return sorted(x for x in out if x and "." in x)
-
-
-_NAME_RE = None
-
-
-def _names_in(text: str) -> set[str]:
-    """Hostnames embedded in free text — certificate SANs, mostly."""
-    global _NAME_RE
-    if _NAME_RE is None:
-        import re
-        _NAME_RE = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
-                              r"[a-z]{2,24}\b", re.I)
-    return {m.group(0).lower().rstrip(".") for m in _NAME_RE.finditer(text or "")}
 
 
 @router.get("/roots")
@@ -159,27 +92,11 @@ async def roots(project: str = Query(...),
     # likeliest way a whole zone gets put in scope — `*.acme.example` is
     # exactly the entry that means "enumerate this" — so reading only
     # `fqdn` missed the entries that matter most here.
-    for value, included, kind in (await session.execute(
-            select(ProjectScope.value, ProjectScope.included, ProjectScope.kind)
-            .where(ProjectScope.project_id == pr.id,
-                   ProjectScope.kind.in_(("fqdn", "wildcard"))))).all():
-        if not included:
-            # An excluded domain is the one thing that must not be
-            # offered: generating names under it proposes work that is
-            # refused the moment anyone promotes it.
-            continue
-        v = (value or "").strip().lstrip("*.")
-        # A wildcard NAMES the zone; a plain hostname does not, and there
-        # is nothing to do with one but infer. `registrable()` guesses,
-        # and a guess has no business overruling the authority that
-        # authorised the work: `*.sub.acme.example` was offered as
-        # `acme.example`, while `sub.acme.example` — the zone actually
-        # written down, and the entry that most means "enumerate this" —
-        # was never offered at all. It went wrong the same way wherever
-        # `_TWO_LEVEL` is short, turning `*.example.com.ve` into the
-        # public suffix `com.ve`.
-        r = v if kind == "wildcard" else gen.registrable(v)
-        if r and "." in r and r not in counts:
+    # The same function the auto_amass standing order uses. They
+    # disagreed before — this offered zones the automation could not
+    # see, so an operator with the toggle on kept finding work here.
+    for r in await scope_roots(session, pr.id):
+        if r not in counts:
             counts[r] = 0
             origin[r] = "scope"
 
