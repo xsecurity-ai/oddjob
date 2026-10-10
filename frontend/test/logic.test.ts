@@ -617,7 +617,11 @@ check('the first spelling of a duplicate wins',
 // No type can express that contract, so it is checked against the
 // source: a view either hands DataTable straight to the app shell
 // (fragment root) or puts something with a height in between.
-const viewDir = new URL('../src/views', import.meta.url).pathname
+// Relative to the package root, not to this file. CI bundles this
+// test into /tmp with esbuild before running it, so `import.meta.url`
+// points at the bundle and resolved to `/src/views` — which exists
+// nowhere. The npm script runs from `frontend/`, so cwd is stable.
+const viewDir = join(process.cwd(), 'src', 'views')
 for (const f of readdirSync(viewDir).filter((x) => x.endsWith('.tsx'))) {
   const src = readFileSync(join(viewDir, f), 'utf8')
   const at = src.indexOf('<DataTable')
