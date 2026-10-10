@@ -1056,8 +1056,24 @@ export function GhostsView({ project }: { project: string | null }) {
   }
 
   return (
-    <Box sx={{ p: 2 }}>
+    // This view is the only one with content BELOW its table, so it
+    // scrolls as a page rather than letting the table fill the
+    // viewport the way every other view does.
+    //
+    // That is why the height below is explicit. `DataTable` is built
+    // to be a flex child of the app shell -- `flex: 1; min-height: 0;
+    // overflow: hidden` -- and in a plain block those do nothing:
+    // `flex` is ignored outside a flex container, `overflow: hidden`
+    // then clips, and the grid inside asks for `height: 100%` of a
+    // parent that has no definite height. The result was a table cut
+    // off with no way to scroll to the rest of the fleet, which is
+    // what this is fixing. It only became visible when #38 moved the
+    // tables off MUI's DataGrid, which did its own scrolling and did
+    // not care what its parent was.
+    <Box sx={{ p: 2, flex: 1, minHeight: 0, overflowY: 'auto' }}>
       <Routing project={project} routing={routing} />
+      <Box sx={{ height: '60vh', minHeight: 320,
+                 display: 'flex', flexDirection: 'column' }}>
       <DataTable
         rows={rows}
         columns={columns}
@@ -1088,6 +1104,7 @@ export function GhostsView({ project }: { project: string | null }) {
           </Stack>
         }
       />
+      </Box>
 
       {/* Under the fleet, because the question it answers comes second:
           what have I got, then what is it doing. */}
