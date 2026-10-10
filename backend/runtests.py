@@ -52,6 +52,7 @@ SUITES = [
     ("tests/mcptest.py",       TMP / "ms-mcp.db"),
     ("tests/eventstest.py",    TMP / "ms-events.db"),
     ("tests/automationtest.py", TMP / "ms-auto2.db"),
+    ("tests/portcoveragetest.py", TMP / "ms-portcov.db"),
 ]
 
 

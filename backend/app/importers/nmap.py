@@ -26,6 +26,7 @@ import json
 from datetime import UTC, datetime
 from xml.etree.ElementTree import Element, ParseError  # nosemgrep: use-defused-xml
 
+from ..portcoverage import technique_from_scan
 from .model import UNKNOWN, ImportError_, ParsedHost, ParsedScan, ParsedService
 from .safexml import fromstring
 
@@ -58,6 +59,23 @@ def parse(xml: str | bytes) -> ParsedScan:
         scan.started = datetime.fromtimestamp(int(start), tz=UTC)
     if (fin := root.find("runstats/finished")) is not None:
         scan.summary = fin.get("summary")
+
+    # What nmap says it actually did. There is one <scaninfo> per
+    # technique, so `-sS -sU` in one run yields two, and each carries
+    # the exact port list that technique covered.
+    #
+    # Taken from here rather than from `args` because the two disagree
+    # in the case that matters: -sS without raw sockets silently runs
+    # a connect scan, and only scaninfo records that it did.
+    for si in root.findall("scaninfo"):
+        tech = technique_from_scan(si.get("type"), scan.args)
+        if tech is None:
+            continue   # ack/window scans and the like are not coverage
+        proto = (si.get("protocol") or "tcp").strip().lower()
+        services = si.get("services")
+        if not services:
+            continue   # nothing to record a range against
+        scan.coverage.append((tech, proto, services))
 
     for h in root.findall("host"):
         parsed = _host(h)

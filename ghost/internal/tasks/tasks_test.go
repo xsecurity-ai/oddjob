@@ -178,3 +178,67 @@ func TestAmassAndGobusterRefuseMoreThanOneSubject(t *testing.T) {
 		}
 	}
 }
+
+// An explicit technique must produce exactly that scan, because
+// Oddjob records what ran and will not send the work again.
+//
+// The case that matters most is `connect` on a PRIVILEGED agent:
+// nmap's default is -sS wherever it can, so omitting -sT would run a
+// syn scan, record syn coverage, and leave the -sT owed for ever.
+func TestNmapTechnique(t *testing.T) {
+	cases := []struct {
+		name      string
+		technique string
+		raw       bool
+		want      string
+		notWant   string
+	}{
+		{"syn asks for -sS", "syn", true, "-sS", "-sT"},
+		{"connect asks for -sT", "connect", false, "-sT", "-sS"},
+		// The trap: privileged, and still must be -sT.
+		{"connect on a root agent is still -sT", "connect", true, "-sT", "-sS"},
+		{"version asks for -sV", "version", false, "-sV", ""},
+		{"version on a root agent is still -sV", "version", true, "-sV", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			argv := nmapArgv(map[string]any{"technique": c.technique},
+				"/tmp/o.xml", []string{"h"}, c.raw)
+			if !has(argv, c.want) {
+				t.Errorf("technique %q gave %v, wanted %s", c.technique, argv, c.want)
+			}
+			if c.notWant != "" && has(argv, c.notWant) {
+				t.Errorf("technique %q also passed %s: %v",
+					c.technique, c.notWant, argv)
+			}
+		})
+	}
+
+	// No technique named keeps the old behaviour exactly.
+	if argv := nmapArgv(map[string]any{}, "/tmp/o.xml", []string{"h"}, true); !has(argv, "-sS") {
+		t.Errorf("with no technique a privileged agent should still -sS: %v", argv)
+	}
+	if argv := nmapArgv(map[string]any{"profile": "quick"}, "/tmp/o.xml",
+		[]string{"h"}, false); !has(argv, "-F") {
+		t.Errorf("the quick profile still means -F: %v", argv)
+	}
+}
+
+// Only -sS needs the privilege. Getting this wrong the other way
+// would idle every unprivileged agent on work it can perfectly well
+// do -- and which produces stronger coverage than -sS does.
+func TestOnlySynNeedsRawSockets(t *testing.T) {
+	for _, tc := range []struct {
+		technique string
+		want      bool
+	}{
+		{"syn", true},
+		{"connect", false},
+		{"version", false},
+		{"", false},
+	} {
+		if got := needsRawSockets(map[string]any{"technique": tc.technique}); got != tc.want {
+			t.Errorf("needsRawSockets(%q) = %v, want %v", tc.technique, got, tc.want)
+		}
+	}
+}

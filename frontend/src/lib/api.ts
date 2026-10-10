@@ -627,9 +627,20 @@ export const api = {
 
   /** Hosts this project has never run nmap or masscan against.
    *  "Never tasked", not "has no ports" — see the endpoint. */
-  unscannedTargets: (project: string) =>
+  /** Hosts that still owe a scan.
+   *
+   *  With no `technique` this is the old question: never tasked with
+   *  nmap or masscan at all. With one it becomes "has THIS technique
+   *  run, on these ports", and `gaps` carries the per-host remainder
+   *  as an nmap spec — so the caller queues the gap rather than the
+   *  whole range again. See app/portcoverage.py for the ordering that
+   *  decides when one technique makes another redundant. */
+  unscannedTargets: (project: string, technique?: string, ports?: string) =>
     req<{ hosts: string[]; count: number; out_of_scope: number
-          considered: number }>('/api/targets/unscanned' + qs({ project })),
+          considered: number
+          technique?: string; ports_asked?: number
+          gaps?: { host: string; ports: string; count: number }[] }>(
+      '/api/targets/unscanned' + qs({ project, technique, ports })),
   createProject: (b: Record<string, unknown>) =>
     req<ProjectCreated>('/api/projects', { method: 'POST', body: JSON.stringify(b) }),
   projectScope: (project: string) =>

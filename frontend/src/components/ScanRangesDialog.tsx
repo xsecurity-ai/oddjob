@@ -105,6 +105,13 @@ export function ScanRangesDialog({ project, selected = [], onClose,
   const [region, setRegion] = useState('')
   const [tool, setTool] = useState<'masscan' | 'nmap'>('masscan')
   const [ports, setPorts] = useState('80,443,8080,8443')
+  /** Which nmap scan to run, or '' to let the agent decide as before.
+   *
+   *  Naming one makes "everything unscanned" a sharper question: not
+   *  "has anything ever run here" but "has THIS run, on these ports".
+   *  A host swept with -sS still owes a -sT, because the two learn
+   *  different things. */
+  const [technique, setTechnique] = useState<'' | 'syn' | 'connect' | 'version'>('')
   const [picked, setPicked] = useState<Set<string>>(new Set())
   // Pre-checked: the selection is a statement of intent already made,
   // and making it again in here would be asking twice.
@@ -128,9 +135,13 @@ export function ScanRangesDialog({ project, selected = [], onClose,
   // Fetched whether or not the box is ticked, so the count is on the
   // label before you decide. "Scan everything unscanned" is not a
   // choice anybody should make without knowing how many that is.
+  // nmap only: masscan has no technique, so asking a coverage
+  // question on its behalf would answer about a scan it cannot run.
+  const covTech = tool === 'nmap' ? technique : ''
   const unscanned = useQuery({
-    queryKey: ['targets-unscanned', project],
-    queryFn: () => api.unscannedTargets(project),
+    queryKey: ['targets-unscanned', project, covTech, covTech ? ports : ''],
+    queryFn: () => api.unscannedTargets(project, covTech || undefined,
+                                        covTech ? ports : undefined),
     enabled: !!project,
   })
   const uncovered = useMemo(
@@ -174,9 +185,14 @@ export function ScanRangesDialog({ project, selected = [], onClose,
   // rather than falling back, so offering it against an unprivileged
   // agent queues a task that can only fail.
   const masscanImpossible = tool === 'masscan' && priv === false
+  // -sS is the only technique that needs the privilege. -sT is an
+  // ordinary connect() and -sV probes over normal connections, so an
+  // unprivileged agent runs both — and, by the coverage ordering,
+  // then produces stronger results than -sS would.
+  const synImpossible = tool === 'nmap' && technique === 'syn' && priv === false
   const regionMissing = needsRegion(fleet, agent) && !region.trim()
   const stop = !subjects.length || !!fleet.blocked || regionMissing
-               || masscanImpossible
+               || masscanImpossible || synImpossible
 
   const toggle = (v: string) => setPicked((p) => {
     const n = new Set(p)
@@ -192,9 +208,14 @@ export function ScanRangesDialog({ project, selected = [], onClose,
   const argv = tool === 'masscan'
     ? `masscan -oX <task output> -p ${ports || '80,443,8080,8443'} --rate 1000 `
       + head + more
-    : `nmap -oX <task output>${ports ? ` -p ${ports}` : ''} -sV`
-      + (priv === true ? ' -sS' : priv === null
-         ? ' [-sS if the agent has raw sockets]' : '')
+    : `nmap -oX <task output>${ports ? ` -p ${ports}` : ''}`
+      + (technique === 'syn' ? ' -sS'
+         : technique === 'connect' ? ' -sT'
+         : technique === 'version' ? ' -sV'
+         // No technique named: what the agent does on its own, which
+         // depends on whether it has raw sockets.
+         : ' -sV' + (priv === true ? ' -sS' : priv === null
+             ? ' [-sS if the agent has raw sockets]' : ''))
       + ` ${head}${more}`
 
   const run = async () => {
@@ -205,6 +226,7 @@ export function ScanRangesDialog({ project, selected = [], onClose,
       // rest of the fleet is idle, and one failure takes the lot.
       const extra: Record<string, unknown> = {}
       if (ports.trim()) extra.ports = ports.trim()
+      if (tool === 'nmap' && technique) extra.technique = technique
       const { ids, failed } = await queueEach(project, agent, tool, subjects,
                                               extra, region)
       if (!ids.length) {
@@ -436,6 +458,30 @@ export function ScanRangesDialog({ project, selected = [], onClose,
                 ? 'masscan needs ports; the agent defaults to 80,443,8080,8443.'
                 : 'Empty lets the agent choose. Naming ports also stops it adding -F.'} />
           </Stack>
+
+          {tool === 'nmap' && (
+            <TextField select size="small" label="Scan type" value={technique}
+              slotProps={{ select: { native: true } }}
+              onChange={(e) => setTechnique(
+                e.target.value as '' | 'syn' | 'connect' | 'version')}
+              helperText={technique
+                ? 'Hosts already covered by this or a stronger scan are left out.'
+                : 'Let the agent decide: -sV, plus -sS where it has raw sockets.'}>
+              <option value="">agent decides</option>
+              <option value="syn">-sS half-open — needs raw sockets</option>
+              <option value="connect">-sT full handshake</option>
+              <option value="version">-sV identify the service</option>
+            </TextField>
+          )}
+
+          {synImpossible && (
+            <Alert severity="error" variant="outlined" sx={{ fontSize: 11.5 }}>
+              A -sS needs raw sockets and this agent has none. It is refused
+              rather than quietly run as a -sT, because that is a different
+              scan and recording it as a -sS would stop the real one ever
+              being offered again. Pick -sT, or an agent with raw sockets.
+            </Alert>
+          )}
 
           {masscanImpossible && (
             <Alert severity="error" variant="outlined" sx={{ fontSize: 11.5 }}>
