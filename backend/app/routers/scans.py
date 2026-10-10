@@ -119,6 +119,11 @@ class ImportResult(BaseModel):
     targets_updated: int = 0
     services_created: int = 0
     services_updated: int = 0
+    #: Ports recorded on a host because something else at the same
+    #: address answered on them. Counted separately from
+    #: `services_created` so a reader can tell what was observed by
+    #: addressing the host from what was inferred from co-tenancy.
+    services_shared: int = 0
     services_unknown: int = Field(
         0, description="Open ports whose service could not be identified")
     vulns_created: int = 0
@@ -577,6 +582,104 @@ async def _weburl(session: AsyncSession, target: Target, pw: ParsedWebAddress,
     return None
 
 
+# ------------------------------------------------------- co-tenancy
+#: Most co-tenants one address may propagate to in a single import.
+#:
+#: A CDN edge or a shared-hosting IP can carry hundreds of names, and
+#: an import that quietly wrote a service row onto four hundred hosts
+#: would be a surprise nobody asked for. The cap is reported rather
+#: than silently applied -- see the note where it is hit.
+MAX_COTENANTS = 50
+
+
+async def _propagate_ports(session: AsyncSession, project: Project,
+                           scanned: Target, idx, res: ImportResult) -> None:
+    """An open port belongs to the ADDRESS, not to the name.
+
+    Scanning `10.0.0.1` and finding 443 open says 443 is open on
+    `10.0.0.1`. Every name in this project that answers at that
+    address shares the socket, and recording the fact only against
+    whichever name the scan happened to be addressed to leaves the
+    others looking unexamined when they are not.
+
+    # What is copied, and what deliberately is not
+
+    The port, the protocol and its state. NOT the product, version,
+    banner or script output: on a shared address those are answers the
+    server gave to a request for ONE virtual host, and attributing
+    them to every other name at that address would be inventing
+    evidence. A name recorded this way carries a note saying so, so a
+    report can tell an observation from an inference.
+
+    Coverage is not propagated either, and that asymmetry is
+    deliberate. `port_scan_coverage` is what stops a future scan
+    running; claiming a name was covered because its neighbour was
+    would suppress a real scan permanently, while under-claiming only
+    costs a rescan. Positive findings travel; permission to stop
+    looking does not.
+
+    # Scope
+
+    Co-tenants are gated individually. `TargetAddress` says in terms
+    that sharing an address with an in-scope name is not inheritance
+    and must never become it, so a neighbour the scope does not cover
+    gets nothing written about it -- it is somebody else's host that
+    happens to sit on the same IP.
+    """
+    addrs = [a.address for a in scanned.addresses]
+    if not addrs:
+        return
+
+    mine = {(x.port, x.protocol): x for x in (await session.execute(
+        select(Service).where(Service.target_id == scanned.id))).scalars().all()}
+    open_ports = [(port, proto, svc) for (port, proto), svc in mine.items()
+                  if implies_alive(svc.state)]
+    if not open_ports:
+        return
+
+    seen: set[int] = {scanned.id}
+    spread = 0
+    for addr in addrs:
+        for other in await addresses.targets_sharing(session, project.id, addr):
+            if other.id in seen:
+                continue
+            seen.add(other.id)
+            if spread >= MAX_COTENANTS:
+                res.errors.append(
+                    f"{scanned.host}: more than {MAX_COTENANTS} other names "
+                    f"answer at {addr}; ports were not copied to the rest. "
+                    f"That many co-tenants usually means a CDN edge rather "
+                    f"than shared hosting.")
+                return
+            if not idx.check(other.host, ip=[addr]).allowed:
+                continue
+            spread += 1
+            await _copy_ports(session, other, addr, open_ports, res)
+
+
+async def _copy_ports(session: AsyncSession, other: Target, addr: str,
+                      open_ports: list, res: ImportResult) -> None:
+    """Write the port facts onto one co-tenant, without overwriting."""
+    existing = {(x.port, x.protocol) for x in (await session.execute(
+        select(Service.port, Service.protocol)
+        .where(Service.target_id == other.id))).all()}
+    for port, proto, svc in open_ports:
+        if (port, proto) in existing:
+            # Already known here, by whatever means. Not touched: a row
+            # written by addressing this host directly is better
+            # evidence than this inference, and must not be downgraded.
+            continue
+        session.add(Service(
+            target_id=other.id, port=port, protocol=proto, state=svc.state,
+            # `name` is the port's service type, which follows the
+            # socket. Product, version, banner and scripts are left
+            # unset on purpose -- see _propagate_ports.
+            name=svc.name,
+            notes=f"observed at {addr}, which this host also answers at; "
+                  f"not scanned by name"))
+        res.services_shared += 1
+
+
 # -------------------------------------------------------------- coverage
 def _record_coverage(session: AsyncSession, target: Target,
                      scan: ParsedScan) -> None:
@@ -614,6 +717,11 @@ async def ingest(session: AsyncSession, project: Project, scan: ParsedScan,
                        errors=list(scan.errors))
 
     targets: dict[str, Target] = {}
+    #: Scanned this import, for the co-tenancy pass below. Deferred
+    #: rather than done inline because the services are written by
+    #: `_host` as it goes, and propagating before they exist would
+    #: copy nothing.
+    cotenants: list[Target] = []
     for ph in scan.hosts:
         t = await _host(session, project, ph, scan, res, source, policy)
         if t is not None:
@@ -621,6 +729,7 @@ async def ingest(session: AsyncSession, project: Project, scan: ParsedScan,
             # reference it resolve — even when it was mapped elsewhere.
             targets[ph.host.strip().rstrip(".").lower()] = t
             _record_coverage(session, t, scan)
+            cotenants.append(t)
 
     async def resolve(name: str | None) -> Target | None:
         """Children name their host as a string; attach them to its row.
@@ -640,6 +749,17 @@ async def ingest(session: AsyncSession, project: Project, scan: ParsedScan,
         if t is not None:
             targets[key] = t
         return t
+
+    # An open port belongs to the address, not to the name, so every
+    # other name in this project that answers at the same address gets
+    # the fact too. Flushed first: the services were added to the
+    # session as each host was read and a SELECT would not see them
+    # otherwise, which would copy nothing and look like it worked.
+    if cotenants:
+        await session.flush()
+        idx = await index_for(session, project.id)
+        for t in cotenants:
+            await _propagate_ports(session, project, t, idx, res)
 
     for pv in scan.vulns:
         t = await resolve(pv.host)

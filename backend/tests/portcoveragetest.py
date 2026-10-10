@@ -289,5 +289,113 @@ st, r = call("/api/targets/unscanned?project=COV", token=admin)
 check("without a technique it still answers the old question",
       st == 200 and "gaps" not in r, sorted(r) if st == 200 else st)
 
+
+# =====================================================================
+# Part 8 — an open port belongs to the address, not to the name
+# =====================================================================
+print("\n--- ports reach every name at the same address ---")
+
+call("/api/projects", "POST", {"code": "COT", "name": "COT"}, token=admin)
+# Scope: two names in, one deliberately out. The out-of-scope one is
+# the case that matters -- it is somebody else's host that happens to
+# share an IP, and nothing may be written about it.
+call("/api/projects/COT/scope", "POST",
+     {"lines": ["a.cot.example", "b.cot.example"]}, token=admin)
+# The two in-scope names, at one shared address. Addresses live on
+# the target, not behind a route of their own.
+for h in ("a.cot.example", "b.cot.example"):
+    call("/api/targets?project=COT", "POST",
+         {"host": h, "ip_address": "198.51.100.7"}, token=admin)
+
+# The out-of-scope neighbour has to be inserted DIRECTLY. The API
+# refuses to create it -- 422, because the scope does not cover it --
+# and an absent target would make the assertion below pass without
+# testing anything: nothing propagates to a host that does not exist.
+# Checked by removing the co-tenancy scope gate and watching the whole
+# suite still pass, which is what sent me here.
+#
+# A target that exists and is out of scope is a real state: scope gets
+# narrowed after hosts are added, and co-tenants arrive from DNS.
+import asyncio  # noqa: E402
+
+from sqlalchemy import select as _select  # noqa: E402
+
+from app.db import SessionLocal  # noqa: E402
+from app.models import Project as _Project  # noqa: E402
+from app.models import Target as _Target  # noqa: E402
+from app.models import TargetAddress as _Addr  # noqa: E402
+
+
+async def _plant_stranger():
+    async with SessionLocal() as db:
+        pr = (await db.execute(
+            _select(_Project).where(_Project.code == "COT"))).scalar_one()
+        addr = (await db.execute(
+            _select(_Addr).where(_Addr.project_id == pr.id,
+                                 _Addr.address == "198.51.100.7"))).scalar_one()
+        t = _Target(project_id=pr.id, host="stranger.example", kind="host")
+        t.addresses.append(addr)
+        db.add(t)
+        await db.commit()
+
+
+asyncio.run(_plant_stranger())
+
+SHARED = '''<?xml version="1.0"?><nmaprun scanner="nmap" version="7.94"
+ args="nmap -sT -sV -oX /t -p 443 a.cot.example" start="1760000200">
+<scaninfo type="connect" protocol="tcp" numservices="1" services="443"/>
+<host><address addr="198.51.100.7" addrtype="ipv4"/>
+<hostnames><hostname name="a.cot.example" type="user"/></hostnames>
+<ports><port protocol="tcp" portid="443"><state state="open"/>
+<service name="https" product="nginx" version="1.25"/></port></ports></host>
+<runstats><finished summary="done"/></runstats></nmaprun>'''
+st, r = call("/api/scans/import?project=COT", "POST",
+             {"content": SHARED, "format": "auto", "mode": "open"}, token=admin)
+check("the shared-address scan imported", st == 200, st)
+
+
+def ports_of(host):
+    st, d = call(f"/api/targets/COT/{host}/detail", token=admin)
+    return {s["port"]: s for s in (d or {}).get("services", [])}
+
+
+a_ports = ports_of("a.cot.example")
+b_ports = ports_of("b.cot.example")
+stranger = ports_of("stranger.example")
+
+check("the scanned host has 443", 443 in a_ports, sorted(a_ports))
+check("the other in-scope name at that address has it too",
+      443 in b_ports, sorted(b_ports))
+
+# The out-of-scope neighbour must get nothing. Sharing an address with
+# an in-scope name is not inheritance.
+check("an out-of-scope co-tenant is left alone",
+      443 not in stranger, sorted(stranger))
+
+# What was copied, and what was not. The product came from a request
+# for ONE virtual host; claiming it for every name at the address
+# would be inventing evidence.
+check("the copy carries the port's service type",
+      b_ports.get(443, {}).get("name") == "https", b_ports.get(443))
+check("...but not the product the scanned vhost returned",
+      not b_ports.get(443, {}).get("product"), b_ports.get(443))
+check("...and says it was not scanned by name",
+      "not scanned by name" in (b_ports.get(443, {}).get("notes") or ""),
+      b_ports.get(443, {}).get("notes"))
+# The directly-scanned host keeps its full detail.
+check("the scanned host keeps the product",
+      a_ports.get(443, {}).get("product") == "nginx", a_ports.get(443))
+
+# Coverage must NOT travel. It is what stops a future scan running,
+# and claiming a name was covered because its neighbour was would
+# suppress a real scan for ever.
+st, r = call("/api/targets/unscanned?project=COT&technique=connect&ports=443",
+             token=admin)
+owed = {h["host"] for h in r.get("gaps", [])}
+check("the neighbour still owes its own -sT", "b.cot.example" in owed,
+      sorted(owed))
+check("...while the scanned host does not", "a.cot.example" not in owed,
+      sorted(owed))
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
