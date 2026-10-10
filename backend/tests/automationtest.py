@@ -396,6 +396,16 @@ async def roots_agree():
         check("nothing the dialog would offer is left over",
               not (found - queued), sorted(found - queued))
 
+        # And the dialog now offers only what may be enumerated. A
+        # zone the gate refuses used to sit here for ever: picking it
+        # queued nothing and the toggle never cleared it, so the
+        # dialog reported work outstanding on every visit.
+        from app.scopegate import index_for
+        idx = await index_for(s, pr.id)
+        offered = {d for d in found if idx.check_zone(d).allowed}
+        check("every offered zone is one the gate allows",
+              offered == found, sorted(found - offered))
+
 
 asyncio.run(roots_agree())
 
