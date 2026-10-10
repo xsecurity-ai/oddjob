@@ -1149,9 +1149,26 @@ check("an unlisted two-level suffix does not become a public suffix",
       "com.ve" not in _names, sorted(_names))
 check("...it offers the client's zone instead",
       "example.com.ve" in _names, sorted(_names))
-# The other half: a single hostname is not a zone and still gets inferred.
+# The other half: a single hostname is not a zone and still gets
+# inferred — but the inference is then GATED, and `acme.example` is
+# not in scope, so it is correctly absent from the offer.
+#
+# Offering it was the bug: /enumerate and the auto_amass standing
+# order both refuse it, so it sat in this list for ever, reporting
+# work outstanding that nothing was ever allowed to do.
+check("a refused registrable domain is not offered",
+      "acme.example" not in _names, sorted(_names))
+
+# ...and registrable() is still being called, which the check above
+# cannot show on its own: a project whose scope names the apex gets
+# that apex offered, inferred from a host below it.
+call("/api/projects", "POST", {"code": "ROOTS2", "name": "Roots2"}, token=admin)
+call("/api/projects/ROOTS2/scope", "POST",
+     {"lines": ["walk.example", "deep.sub.walk.example"]}, token=admin)
+_st2, _r2 = call("/api/domains/roots?project=ROOTS2", token=admin)
+_n2 = {row["domain"] for row in (_r2 or [])}
 check("a plain FQDN is still walked back to its registrable domain",
-      "host.acme.example" in _names or "acme.example" in _names, sorted(_names))
+      "walk.example" in _n2, sorted(_n2))
 # What the gate makes of the roots that are offered.
 #
 # Asked of the scope index directly, not through /enumerate: that

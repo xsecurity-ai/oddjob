@@ -88,14 +88,11 @@ async def roots(project: str = Query(...),
     counts = dict(gen.roots_in(hosts))
     origin = dict.fromkeys(counts, "targets")
 
-    # Both name kinds. A wildcard is stored as its own kind and is the
-    # likeliest way a whole zone gets put in scope — `*.acme.example` is
-    # exactly the entry that means "enumerate this" — so reading only
-    # `fqdn` missed the entries that matter most here.
     # The same function the auto_amass standing order uses. They
     # disagreed before — this offered zones the automation could not
     # see, so an operator with the toggle on kept finding work here.
-    for r in await scope_roots(session, pr.id):
+    scoped = await scope_roots(session, pr.id)
+    for r in scoped:
         if r not in counts:
             counts[r] = 0
             origin[r] = "scope"
@@ -104,6 +101,27 @@ async def roots(project: str = Query(...),
         if d not in counts:
             counts[d] = 0
             origin[d] = "searched"
+
+    # Offer only what may actually be enumerated.
+    #
+    # This list used not to consult the gate at all, while
+    # `/enumerate` and the auto_amass standing order both do. So a
+    # zone nothing was allowed to touch sat here being offered for
+    # ever: picking it queued nothing, the toggle never cleared it,
+    # and the dialog reported work outstanding on every visit.
+    #
+    # Only when the project names domains. A project with no domain
+    # scope yet — day one, before anyone has written it down — would
+    # otherwise show an empty list, which reads as "nothing to
+    # enumerate" when the truth is "nobody has said yet". That is the
+    # case this endpoint's own docstring calls out as mattering most.
+    #
+    # `check_zone`, not `check`: a zone is being enumerated under, not
+    # a host scanned, and the two disagree on exactly the apex of a
+    # wildcard — which is the entry most likely to be here.
+    if scoped:
+        idx = await index_for(session, pr.id)
+        counts = {d: n for d, n in counts.items() if idx.check_zone(d).allowed}
 
     return [{"domain": d, "known_hosts": n, "searched": d in searched,
              "source": origin.get(d, "targets")}

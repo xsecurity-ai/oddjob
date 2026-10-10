@@ -542,7 +542,11 @@ call("/api/projects/FRESH/scope", "POST",
      token=admin)
 st, roots = call("/api/domains/roots?project=FRESH", token=admin)
 got = {r["domain"] for r in roots}
-check("scope alone produces roots", {"scoped.example", "other-scoped.example"} <= got,
+# Only the wildcard's zone. `portal.other-scoped.example` is one
+# host, and a host does not authorise enumerating the zone above it —
+# /enumerate would refuse `other-scoped.example`, so offering it here
+# was offering work that could never run. The list is gated now.
+check("scope alone produces roots", "scoped.example" in got,
       str(got))
 check("marked as coming from scope, not invented from targets",
       all(r["source"] == "scope" for r in roots), str(roots)[:200])
