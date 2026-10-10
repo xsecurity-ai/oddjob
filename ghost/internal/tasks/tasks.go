@@ -423,52 +423,6 @@ func runAmass(ctx context.Context, args map[string]any, workDir string) Result {
 	return runAmassLib(ctx, args, workDir)
 }
 
-// ----------------------------------------------------------- gobuster
-func runGobuster(ctx context.Context, args map[string]any, workDir string) Result {
-	us := subjects(args, "url", "urls")
-	if len(us) == 0 {
-		return failed("gobuster needs `targets` (or `url`)")
-	}
-	if len(us) > 1 {
-		return failed(
-			"gobuster takes one url per task; got %d — queue one task each",
-			len(us))
-	}
-	url := us[0]
-	if tools.Path("gobuster") == "" {
-		return failed("gobuster is not installed on this agent")
-	}
-	wordlist := str(args, "wordlist")
-	if wordlist == "" {
-		wordlist = firstExisting(
-			"/usr/share/dirb/wordlists/common.txt",
-			"/usr/share/wordlists/dirb/common.txt",
-			"/usr/share/seclists/Discovery/Web-Content/common.txt",
-			"/opt/homebrew/share/dirb/wordlists/common.txt",
-		)
-	}
-	if wordlist == "" {
-		return failed("no wordlist: pass `wordlist`, or install one " +
-			"(dirb/seclists) on the agent")
-	}
-	if _, err := os.Stat(wordlist); err != nil {
-		return failed("wordlist %s: %v", wordlist, err)
-	}
-	argv := []string{"dir", "-u", url, "-w", wordlist, "-q", "--no-color"}
-	argv = append(argv, extraArgs(args)...)
-
-	r := runCmd(ctx, timeout(args, 60*time.Minute), "gobuster", argv...)
-	found := uniqueLines(r.stdout)
-	return Result{
-		Status: "done",
-		Output: recon.JSON(map[string]any{
-			"url": url, "wordlist": wordlist, "found": found}),
-		Stderr:   tail(r.stderr, 4000),
-		Summary:  fmt.Sprintf("gobuster: %d path(s) on %s", len(found), url),
-		ExitCode: r.code,
-	}
-}
-
 // ----------------------------------------------------------- gospider
 // gospider crawls a site and reports what it links to, including URLs
 // it finds inside JavaScript. Run with -json so the output is parsed
@@ -740,20 +694,6 @@ func isHostname(s string) bool {
 		}
 	}
 	return true
-}
-
-func uniqueLines(s string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, line := range strings.Split(s, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || seen[line] {
-			continue
-		}
-		seen[line] = true
-		out = append(out, line)
-	}
-	return out
 }
 
 func countLines(s string) int {
