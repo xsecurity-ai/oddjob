@@ -461,5 +461,36 @@ async def roots_agree():
 
 asyncio.run(roots_agree())
 
+# =====================================================================
+# Cloud providers: approved is not the same as enumerable
+# =====================================================================
+print("\n--- a cloud zone is never enumerated ---")
+
+from app import clouds  # noqa: E402
+
+check("twenty providers", len(clouds.PROVIDERS) == 20, len(clouds.PROVIDERS))
+check("the big four are there",
+      all(k in clouds.PROVIDERS for k in ("aws", "azure", "gcp", "oracle")))
+
+# Matched on a label boundary, like the scope index. A look-alike is
+# somebody else's domain, and treating it as the provider's would
+# quietly exclude a real target from enumeration.
+for name, want in [
+    ("amazonaws.com", True), ("s3.amazonaws.com", True),
+    ("notamazonaws.com", False), ("mypages.dev", False),
+    ("pages.dev", True), ("x.pages.dev", True),
+    ("acme.example", False), ("", False), (None, False),
+]:
+    check(f"is_cloud_domain({name!r}) is {want}",
+          clouds.is_cloud_domain(name) is want)
+
+check("approving providers yields their domains",
+      "amazonaws.com" in clouds.domains_for(["aws"])
+      and "azurewebsites.net" in clouds.domains_for(["azure"]))
+check("an unknown provider key is ignored, not fatal",
+      clouds.domains_for(["aws", "not-a-cloud"]) == clouds.domains_for(["aws"]))
+check("nothing selected yields nothing", clouds.domains_for([]) == []
+      and clouds.domains_for(None) == [])
+
 print(f"\n{ok} passed, {fail} failed")
 raise SystemExit(1 if fail else 0)

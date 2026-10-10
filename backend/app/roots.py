@@ -31,6 +31,7 @@ from urllib.parse import urlsplit
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import clouds
 from . import domains as gen
 from .models import ProjectScope, Target, WebAddress
 
@@ -140,4 +141,18 @@ async def enumerable_roots(session: AsyncSession, project_id: int) -> set[str]:
     hosts = await known_hosts(session, project_id)
     out = {r for r, _ in gen.roots_in(hosts) if r and "." in r}
     out |= await scope_roots(session, project_id)
-    return out
+
+    # Never a cloud provider's own zone.
+    #
+    # `amazonaws.com` has millions of names under it and none of them
+    # belong to the client. Enumerating it produces an enormous list
+    # of other people's infrastructure, burns hours, and -- if any of
+    # it were acted on -- means touching hosts nobody authorised.
+    # There is no engagement on which it is the right thing to do.
+    #
+    # Dropped here rather than refused at the gate, because the gate
+    # answers "may we touch this" and the answer for a client's own
+    # bucket is yes. The question this answers is different: "is there
+    # anything to be learnt by walking this zone", and for a provider
+    # it is no even when the project is authorised to work inside it.
+    return {r for r in out if not clouds.is_cloud_domain(r)}
