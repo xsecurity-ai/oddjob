@@ -47,6 +47,7 @@ from ..models import (
     Credential,
     Implant,
     ImportJob,
+    PortScanCoverage,
     Project,
     Service,
     Target,
@@ -55,6 +56,7 @@ from ..models import (
     WebAddress,
     implies_alive,
 )
+from ..portcoverage import parse_ports
 from ..scopegate import index_for
 from ..security import get_current_user, require_project
 from ..timeline import record
@@ -575,6 +577,32 @@ async def _weburl(session: AsyncSession, target: Target, pw: ParsedWebAddress,
     return None
 
 
+# -------------------------------------------------------------- coverage
+def _record_coverage(session: AsyncSession, target: Target,
+                     scan: ParsedScan) -> None:
+    """Note which ports this scan looked at, and how.
+
+    Recorded per host rather than per scan because that is how it is
+    read back: the next scan asks "what does THIS target already
+    have". A scan covering forty hosts writes the same ranges forty
+    times, which is the shape that makes the lookup an index hit
+    instead of a join through a scan table.
+
+    Only what the scanner said it did. `scan.coverage` is empty for
+    tools that do not report their technique and port list — most of
+    them — and an empty list writes nothing rather than guessing that
+    a host was swept. A wrong entry here suppresses a real scan later,
+    so silence is the safe default.
+    """
+    if not scan.coverage:
+        return
+    for technique, protocol, spec in scan.coverage:
+        for lo, hi in parse_ports(spec):
+            session.add(PortScanCoverage(
+                target_id=target.id, protocol=protocol, technique=technique,
+                port_lo=lo, port_hi=hi, source=scan.label[:64]))
+
+
 # ---------------------------------------------------------------- ingest
 async def ingest(session: AsyncSession, project: Project, scan: ParsedScan,
                  fmt: str, source: str, policy: Policy) -> ImportResult:
@@ -592,6 +620,7 @@ async def ingest(session: AsyncSession, project: Project, scan: ParsedScan,
             # Keyed on the name as the FILE spelled it, so children that
             # reference it resolve — even when it was mapped elsewhere.
             targets[ph.host.strip().rstrip(".").lower()] = t
+            _record_coverage(session, t, scan)
 
     async def resolve(name: str | None) -> Target | None:
         """Children name their host as a string; attach them to its row.

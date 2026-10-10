@@ -252,6 +252,18 @@ class ParsedScan(_Scrubbed):
     implants: list[ParsedImplant] = field(default_factory=list)
     web: list[ParsedWebAddress] = field(default_factory=list)
     notes: list[ParsedNote] = field(default_factory=list)
+    #: What the scanner actually did, per protocol, as (technique,
+    #: protocol, port-spec) — e.g. ("version", "tcp", "1-1024").
+    #:
+    #: Read from the tool's own record of the run rather than from the
+    #: arguments it was given, because the two differ: nmap asked for
+    #: -sS without raw sockets performs a connect scan and says so.
+    #: This is what lets a later scan skip ports where an equal or
+    #: stronger technique has already been run — see app.portcoverage.
+    #:
+    #: It records what was ATTEMPTED, not what was found, so a port
+    #: scanned and found closed still counts as covered.
+    coverage: list[tuple[str, str, str]] = field(default_factory=list)
     #: Lines the importer could not use. Reported, never silently dropped.
     errors: list[str] = field(default_factory=list)
 

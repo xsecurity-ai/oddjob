@@ -14,6 +14,7 @@ from ..models import (
     Event,
     Implant,
     Poc,
+    PortScanCoverage,
     Project,
     Service,
     Target,
@@ -25,6 +26,7 @@ from ..models import (
 from ..models import Poc as PocM
 from ..models import Service as SvcM
 from ..models import Vuln as VulnM
+from ..portcoverage import LEVELS, Range, needed, parse_ports
 from ..query import apply_search, apply_sort, paginate
 from ..schemas import (
     EventCreate,
@@ -201,10 +203,24 @@ async def _find(session: AsyncSession, project: str, host: str) -> Target:
 
 
 @router.get("/unscanned", response_model=dict)
-async def unscanned(pr: Project = Depends(require_project("readonly")),
+async def unscanned(technique: str | None = None,
+                    ports: str = "",
+                    pr: Project = Depends(require_project("readonly")),
                     _: User = Depends(get_current_user),
                     session: AsyncSession = Depends(get_session)):
     """Hosts this project has never run nmap or masscan against.
+
+    With `technique` (syn | connect | version) the question becomes a
+    sharper one: not "has anything ever been run here" but "has THIS
+    been run, on these ports". A host swept with `-sS` is finished as
+    far as the default answer is concerned and still owes a `-sT`,
+    because the two learn different things — see app.portcoverage for
+    the ordering and why it is a total one.
+
+    `ports` is an nmap-style spec and defaults to the top ports a
+    quick scan covers. The reply then carries, per host, exactly which
+    ports still need the technique, so the caller queues the gap
+    rather than the whole range again.
 
     **Never TASKED, not "has no ports."** The two are different and the
     difference is the point:
@@ -234,6 +250,9 @@ async def unscanned(pr: Project = Depends(require_project("readonly")),
                              Target.kind != "mobile")
         .order_by(Target.host))).scalars().unique().all()
 
+    if technique:
+        return await _unscanned_by_technique(session, pr, rows, technique, ports)
+
     done = await tasked_subjects(session, pr.id, ("nmap", "masscan"))
     never = [t for t in rows
              if ("nmap", t.host.lower()) not in done
@@ -249,6 +268,90 @@ async def unscanned(pr: Project = Depends(require_project("readonly")),
 
     return {"hosts": hosts, "count": len(hosts),
             "out_of_scope": refused, "considered": len(rows)}
+
+
+#: What a technique-aware ask covers when the caller names no ports.
+#: nmap's `-F` list is 100 ports chosen by frequency and is not a
+#: contiguous range, so a default of "1-1024" would claim coverage of
+#: ports -F never touches. The top 20 by frequency, written out,
+#: is defensible as a default and small enough to be quick.
+DEFAULT_PORTS = ("21,22,23,25,53,80,110,111,135,139,143,443,445,"
+                 "993,995,1723,3306,3389,5900,8080")
+
+
+async def _unscanned_by_technique(session: AsyncSession, pr: Project,
+                                  rows: list[Target], technique: str,
+                                  ports: str) -> dict:
+    """Which hosts still owe `technique` on which ports.
+
+    Split out rather than branching inside `unscanned` because the two
+    answer genuinely different questions and share only the target
+    list: one reads task history, this reads what the scanners
+    reported they did.
+    """
+    if technique not in LEVELS:
+        raise HTTPException(
+            400, f"unknown technique {technique!r}; "
+                 f"expected one of {', '.join(sorted(LEVELS))}")
+    want_ports = [p for lo, hi in parse_ports(ports or DEFAULT_PORTS)
+                  for p in range(lo, hi + 1)]
+    if not want_ports:
+        raise HTTPException(400, f"no usable ports in {ports!r}")
+
+    # One query for the whole project rather than one per host: a
+    # project with four thousand targets would otherwise make four
+    # thousand round trips to answer a dialog.
+    by_target: dict[int, list[Range]] = {}
+    cov = (await session.execute(
+        select(PortScanCoverage).where(
+            PortScanCoverage.target_id.in_([t.id for t in rows]),
+            PortScanCoverage.protocol == "tcp"))).scalars().all()
+    for c in cov:
+        by_target.setdefault(c.target_id, []).append(
+            Range(c.technique, c.port_lo, c.port_hi))
+
+    idx = await index_for(session, pr.id)
+    hosts: list[dict] = []
+    refused = 0
+    for t in rows:
+        gap = needed(want_ports, by_target.get(t.id, []), technique)
+        if not gap:
+            continue
+        if not idx.check(t.host, ip=[a.address for a in t.addresses]).allowed:
+            refused += 1
+            continue
+        hosts.append({"host": t.host, "ports": _spec(gap), "count": len(gap)})
+
+    # Not "detail": that is the key FastAPI puts an error message in,
+    # so a client could not tell a refusal from a result.
+    return {"technique": technique, "hosts": [h["host"] for h in hosts],
+            "gaps": hosts, "count": len(hosts),
+            "out_of_scope": refused, "considered": len(rows),
+            "ports_asked": len(want_ports)}
+
+
+def _spec(ports: list[int]) -> str:
+    """Ports back into an nmap spec, collapsing runs.
+
+    A gap of 998 individual ports is a command line nmap will refuse
+    on length alone, and "1-1024" is the same request in eleven
+    characters.
+    """
+    out: list[str] = []
+    for p in sorted(ports):
+        if out and p == _hi(out[-1]) + 1:
+            out[-1] = f"{_lo(out[-1])}-{p}"
+        else:
+            out.append(str(p))
+    return ",".join(out)
+
+
+def _lo(part: str) -> int:
+    return int(part.split("-")[0])
+
+
+def _hi(part: str) -> int:
+    return int(part.split("-")[-1])
 
 
 @router.get("/{project}/{host}", response_model=TargetOut)

@@ -453,6 +453,58 @@ class Service(Base, TimestampMixin):
     target: Mapped[Target] = relationship(back_populates="services")
 
 
+class PortScanCoverage(Base):
+    """Which ports have been scanned with which technique, per target.
+
+    Separate from `services` because the two answer different
+    questions. A `Service` row says *something was found here*;
+    coverage says *this was looked at*. A scan of 1-65535 that finds
+    one open port leaves one service row, and without this table
+    "was 8080 ever checked?" cannot be distinguished from "8080 is
+    closed" — which is exactly the question the next scan needs
+    answered.
+
+    Stored as ranges rather than a row per port: a full TCP sweep of
+    one host would otherwise be 65,535 rows for each technique.
+
+    `technique` is one of `app.portcoverage.LEVELS` — syn, connect or
+    version, weakest to strongest — and is taken from what the scanner
+    reported it actually did, never from what it was asked to do. See
+    the module docstring there for why those differ and which way the
+    ambiguity is resolved.
+
+    Rows accumulate rather than being updated in place. A host scanned
+    `1-1024` with syn and later `80` with version holds both, and the
+    stronger one wins on 80 by the ordering, not by having overwritten
+    anything. Keeping the weaker row means "when was this last swept
+    at all" stays answerable.
+    """
+
+    __tablename__ = "port_scan_coverage"
+    __table_args__ = (
+        Index("ix_pscov_target_proto", "target_id", "protocol"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), index=True
+    )
+    protocol: Mapped[str] = mapped_column(String(8), default="tcp")
+    technique: Mapped[str] = mapped_column(String(16))
+    #: Inclusive, both ends.
+    port_lo: Mapped[int] = mapped_column(Integer)
+    port_hi: Mapped[int] = mapped_column(Integer)
+    scanned_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    #: What produced this, for "why does it think 80 is covered" — the
+    #: tool and version as the importer reported them, e.g. "nmap 7.94".
+    #: A string rather than a foreign key: coverage arrives from agent
+    #: results and from hand uploads alike, and there is no one table
+    #: that both land in to point at.
+    source: Mapped[str | None] = mapped_column(String(64))
+
+
 class Vuln(Base, TimestampMixin):
     __tablename__ = "vulns"
     __table_args__ = (Index("ix_vulns_target_sev", "target_id", "severity"),)

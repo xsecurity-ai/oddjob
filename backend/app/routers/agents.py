@@ -586,6 +586,36 @@ def _has_tool(a: Agent, kind: str) -> bool:
     return need in have
 
 
+def _needs_privilege(task: AgentTask) -> bool:
+    """Does this task need raw sockets, so only a privileged agent?
+
+    Only two things do, and the narrowness is the point:
+
+      * masscan, which builds its own packets or does nothing
+      * nmap asked for `-sS` specifically
+
+    `-sT` is the ordinary connect() syscall and `-sV` probes over
+    normal connections on top of whatever discovery ran, so an
+    unprivileged agent runs both perfectly well -- and under the
+    coverage ordering it therefore produces STRONGER results than a
+    privileged agent running the default `-sS`. Gating those on
+    privilege would idle good agents for no reason.
+
+    The reason `-sS` has to be gated rather than attempted: nmap
+    without the privilege runs a connect scan, reports success, and
+    the coverage recorded would be for a syn scan that never happened.
+    """
+    if task.kind == "masscan":
+        return True
+    if task.kind != "nmap":
+        return False
+    try:
+        args = json.loads(task.args) if task.args else {}
+    except (TypeError, ValueError):
+        return False
+    return isinstance(args, dict) and args.get("technique") == "syn"
+
+
 #: How many times a failed task goes back in the queue before it waits
 #: for a person.
 #:
@@ -2459,6 +2489,12 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
                        f"could not install it. Queue this against an agent "
                        f"that has it, or to the project pool.")
             continue
+        if _needs_privilege(cand) and not a.privileged:
+            # Left queued, not dropped, unlike the missing-tool case
+            # above: a privileged agent elsewhere in the fleet can run
+            # this, and nothing about the task is wrong. Only this one
+            # cannot take it.
+            continue
         if cand.kind in HEAVY_KINDS and heavy_held() >= heavy_cap:
             # Left queued, not dropped: it is a perfectly good task and
             # this agent will take it on a later beat. Slots are counted
@@ -2489,6 +2525,11 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
                 # have the tool, and this is exactly what pooling is
                 # for. It only becomes a problem if none of them do,
                 # which the queue depth makes visible.
+                continue
+            if _needs_privilege(cand) and not a.privileged:
+                # Same reasoning as the tool check: a privileged agent
+                # in the pool will take it. Only -sS and masscan land
+                # here; -sT and -sV are open to everyone.
                 continue
             if cand.kind in HEAVY_KINDS and heavy_held() >= heavy_cap:
                 # Stays in the pool for an agent with room. This is
