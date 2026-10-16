@@ -9,6 +9,11 @@ type Ctx = {
   /** Effective role on a project code, or null if no grant. */
   roleOn: (code: string | null) => string | null
   canWrite: (code: string | null) => boolean
+  /** Administers this engagement. Site admins are already folded in
+   *  by the server, which resolves `projects` with the site-admin
+   *  bypass applied, so this is a plain comparison and not a second
+   *  place that rule has to be reimplemented. */
+  isAdmin: (code: string | null) => boolean
   refresh: () => Promise<void>
   signOut: () => Promise<void>
 }
@@ -57,6 +62,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const r = roleOn(code)
         return r === 'user' || r === 'admin'
       },
+      isAdmin: (code) => roleOn(code) === 'admin',
       refresh,
       signOut,
     }

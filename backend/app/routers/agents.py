@@ -3244,14 +3244,30 @@ async def ship_debug(body: DebugBatch, a: Agent = Depends(agent_from_key),
 async def read_debug(agent_id: int | None = Query(None),
                      limit: int = Query(500, ge=1, le=5000),
                      contains: str | None = Query(None),
-                     pr: Project = Depends(require_project("readonly")),
+                     pr: Project = Depends(require_project("admin")),
                      _: User = Depends(get_current_user),
                      session: AsyncSession = Depends(get_session)):
     """What the fleet has been saying, newest first.
 
-    Scoped to the project like everything else: a debug line names the
-    hosts an engagement is scanning, so it is not less sensitive than
-    the findings and is not read more widely than they are.
+    Scoped to the project like everything else, and then **admin on
+    top of that**.
+
+    This read was `readonly` on the reasoning that a debug line names
+    the hosts an engagement is scanning, so it is no more sensitive
+    than the findings. That is true of one line and wrong about the
+    stream. A finding is a conclusion somebody chose to record; this
+    is the agent's unedited running commentary, and it carries the
+    live shape of the engagement -- which hosts are being probed right
+    now, in what order, with which tool, and what came back. It also
+    carries whatever a scanner library decided to print, which is not
+    a set anybody has reviewed.
+
+    The switch that produces it has always been `admin` (`PATCH
+    /{agent_id}`, `body.debug`). Collecting it being an
+    administrator's decision while reading it was open to every member
+    of the engagement is the asymmetry this closes: the person who
+    turns it on and the person who can read it are now the same
+    person.
     """
     q = select(AgentDebugLog).where(AgentDebugLog.project_id == pr.id)
     if agent_id is not None:

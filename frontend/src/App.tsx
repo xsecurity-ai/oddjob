@@ -95,7 +95,7 @@ function StatChip({ label, value, colour }: { label: string; value: number; colo
 }
 
 export default function App() {
-  const { me, loading, setupRequired, signOut } = useAuth()
+  const { me, loading, setupRequired, signOut, isAdmin } = useAuth()
   // Initialised FROM the URL, so a theme switch — which remounts the
   // tree to recompute alpha() colours — lands back where you were
   // instead of resetting to Targets.
@@ -301,8 +301,15 @@ export default function App() {
       key: 'ghosts', label: 'Ghosts', icon: <MemoryIcon fontSize="small" />,
       children: [
         { key: 'ghosts', label: 'Fleet', icon: <MemoryIcon fontSize="small" /> },
-        { key: 'ghost-debug', label: 'Debug',
-          icon: <BugReportIcon fontSize="small" /> },
+        // Administrators of this engagement only, matching the
+        // endpoint. A tab that is always visible and answers 403 for
+        // most of the people who can see it teaches them to ignore
+        // the ones that do not -- and the view behind it refuses on
+        // its own account too, because a sidebar is not a control.
+        ...(isAdmin(scope)
+          ? ([{ key: 'ghost-debug', label: 'Debug',
+               icon: <BugReportIcon fontSize="small" /> }] satisfies NavLeaf[])
+          : []),
       ],
     },
     // No sidebar entry for Project Config: it is reached from the edit

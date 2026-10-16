@@ -2738,6 +2738,44 @@ st, other = call("/api/ghosts/debug?project=DBGX", token=admin)
 check("another engagement cannot read this one's debug log",
       len((other or {}).get("lines", [])) == 0, str(other)[:140])
 
+# Role, which is a different question from scope. Being ON the
+# engagement is not enough: the log is the agent's unedited running
+# commentary -- which hosts it is probing right now, in what order,
+# and what came back -- so it is read by the same people who can
+# switch it on, and switching it on has always been `admin`.
+call("/api/users", "POST",
+     {"username": "deputy", "password": "deputy-password-1"}, token=admin)
+st, deputy = call("/api/auth/login", "POST",
+                  {"username": "deputy", "password": "deputy-password-1"})
+dtok = (deputy or {}).get("access_token")
+check("a non-admin member of the engagement can log in", bool(dtok),
+      f"status={st}")
+st, _ = call("/api/projects/AGENT/acl", "POST",
+             {"username": "deputy", "role": "user"}, token=admin)
+check("and is granted `user` on AGENT -- a writer, not an admin",
+      st in (200, 201, 204), f"status={st}")
+
+# They can do ordinary work on the engagement, so a refusal below is
+# about this endpoint and not about the grant having failed to apply.
+st, _ = call("/api/ghosts?project=AGENT", token=dtok)
+check("a `user` can see the fleet", st == 200, st)
+
+st, denied = call("/api/ghosts/debug?project=AGENT", token=dtok)
+check("but a `user` cannot read the debug log", st == 403,
+      f"{st} {str(denied)[:90]}")
+
+# The other half of the same rule, asserted rather than assumed: if
+# this ever became writable by a non-admin, collecting the log would
+# be open to somebody who still could not read it, which is the
+# asymmetry the read being admin-only exists to close.
+st, _ = call(f"/api/ghosts/{DID}?project=AGENT", "PATCH", {"debug": True},
+             token=dtok)
+check("and a `user` cannot switch it on either", st == 403, st)
+
+st, still = call("/api/ghosts/debug?project=AGENT", token=admin)
+check("while an admin still reads it", st == 200,
+      f"{st} {str(still)[:90]}")
+
 # The allowlist itself, asserted directly. Going through HTTP cannot
 # tell these two layers apart: the route's own dependencies refuse an
 # anonymous read whether or not the middleware already did, so a test
