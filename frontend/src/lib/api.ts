@@ -187,11 +187,30 @@ export interface VulnOccurrence {
  *  into the file — the window is already subtracted. They are what
  *  the highlight uses: a line number names the whole of a minified
  *  file and so points at nothing. */
+/** One readable rendering of the asset a credential sits in. */
+export interface SourceView {
+  origin: string
+  path: string
+  bytes: number
+  /** Produced for this request rather than read from storage — so
+   *  its line numbers have never been stored and cannot be quoted. */
+  generated: boolean
+  /** The file the finding was recorded against. Only this one has a
+   *  meaningful `line`. */
+  recorded: boolean
+}
+
 export interface SecretSource {
   path: string
   /** raw | beautified | source. A line in `beautified` is a line in
    *  a file we produced, not in the developer's own source. */
   origin: string
+  generated: boolean
+  /** The origin of the file the finding was RECORDED against, which
+   *  is not always the one on screen. */
+  recorded_origin: string
+  /** Every rendering that can be asked for. */
+  views: SourceView[]
   asset_url: string | null
   line: number | null
   body: string
@@ -201,9 +220,10 @@ export interface SecretSource {
   truncated: boolean
   match_start: number | null
   match_end: number | null
-  /** confirmed | moved | absent — see the endpoint. Three answers,
-   *  because scrolling confidently to the wrong place is worse than
-   *  saying the file has shifted. */
+  /** confirmed | moved | found | absent — see the endpoint. Four
+   *  answers, because scrolling confidently to the wrong place is
+   *  worse than saying the file has shifted, and quoting a line from
+   *  a rendering the scanner never read is worse again. */
   located: string
 }
 
@@ -1305,8 +1325,9 @@ export const api = {
   /** The source around a credential. Same guards as `revealSecret`:
    *  it returns a file that CONTAINS the value, so it discloses
    *  everything that endpoint does and the surrounding code too. */
-  secretSource: (vulnId: number) =>
-    req<SecretSource>(`/api/vulns/${vulnId}/secret/source`),
+  secretSource: (vulnId: number, view?: string) =>
+    req<SecretSource>(
+      `/api/vulns/${vulnId}/secret/source` + qs({ view })),
 
   ghostRouting: (project: string) =>
     req<GhostRouting>('/api/ghosts/routing' + qs({ project })),

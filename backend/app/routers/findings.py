@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import audit, slack
+from .. import assetfetch, audit, slack
 from ..db import get_session
 from ..events import broker
 from ..hosts import normalise_host
@@ -346,6 +346,28 @@ async def reveal_secret(vuln_id: int,
 #: strictly more useful than the first 120 kB of a minified file.
 SOURCE_WINDOW = 120_000
 
+#: Views of one asset, most readable first.
+#:
+#: `source` is what the developer wrote, `beautified` is our
+#: reformatting of a bundle, `raw` is what the server sent. That is
+#: also the order anybody wants to read them in, so it doubles as
+#: the default choice.
+VIEW_ORDER = ("source", "beautified", "raw")
+
+
+class SourceView(BaseModel):
+    """One readable rendering of the asset this credential is in."""
+    origin: str
+    path: str
+    bytes: int
+    #: Produced for this request rather than read from storage, which
+    #: is a different claim about the line numbers: nothing else has
+    #: ever seen them, so they cannot be quoted anywhere.
+    generated: bool = False
+    #: The file the finding was actually recorded against. Only this
+    #: one has a meaningful `line`.
+    recorded: bool = False
+
 
 class SecretSourceOut(BaseModel):
     """The file a credential was found in, and where in it.
@@ -361,6 +383,15 @@ class SecretSourceOut(BaseModel):
     #: is the difference between sending somebody to their own source
     #: and sending them to our reformatting of it.
     origin: str
+    #: True when this rendering was produced for this request.
+    generated: bool = False
+    #: The origin of the file the finding was RECORDED against, which
+    #: is not always the one being shown. `line` belongs to that file
+    #: and to no other.
+    recorded_origin: str
+    #: Every rendering that can be asked for, so the caller can offer
+    #: the choice without guessing which exist.
+    views: list[SourceView] = []
     asset_url: str | None = None
     line: int | None = None
     body: str
@@ -377,18 +408,27 @@ class SecretSourceOut(BaseModel):
     #: the entire file and is no help at all.
     match_start: int | None = None
     match_end: int | None = None
-    #: Three answers, not two. `confirmed` -- the value is at the
-    #: recorded line. `moved` -- it is in this file at a different
-    #: line, so the file was re-fetched and shifted since the scan.
-    #: `absent` -- it is not in this file at all, which means the
-    #: stored body is not the one that was scanned. Collapsing the
-    #: last two into "here it is" would scroll somebody confidently
-    #: to the wrong place.
+    #: Four answers, not two.
+    #:
+    #:   confirmed  the recorded file, value at the recorded line
+    #:   moved      the recorded file, value at a DIFFERENT line --
+    #:              re-fetched and shifted since the scan
+    #:   found      a different rendering of the same asset. The
+    #:              recorded line belongs to another file and is not
+    #:              claimed here; the value was located by searching
+    #:   absent     not in this body at all
+    #:
+    #: Collapsing `moved` into `confirmed` would scroll somebody
+    #: confidently to the wrong place, and collapsing `found` into
+    #: `confirmed` would quote a line number from a file the scanner
+    #: never read.
     located: str
 
 
 @router.get("/vulns/{vuln_id}/secret/source", response_model=SecretSourceOut)
 async def secret_source(vuln_id: int,
+                        view: str | None = Query(
+                            None, description="raw | beautified | source"),
                         user: User = Depends(get_current_user),
                         session: AsyncSession = Depends(get_session)):
     """The source this credential was found in, positioned on it.
@@ -404,6 +444,22 @@ async def secret_source(vuln_id: int,
     `WebAssetFile` at a time, so the `path` and `line` stored on the
     finding name that row exactly -- the asset by URL, then the file
     by path within it.
+
+    **Views.** A secret found in a minified bundle is a secret on one
+    line two megabytes long, which is not something anybody can read.
+    The same bytes usually exist in a second form already -- the
+    source map's originals, or the `.pretty` copy `assetfetch` writes
+    when a bundle is minified and has no map -- so the readable one
+    is offered by default and the others are offered beside it.
+
+    Nothing is reformatted that does not need to be. `assetfetch`
+    stores a `beautified` copy only when a file is minified AND no
+    map gave us the originals, which means a readable rendering
+    already exists for every case it recognised. The on-the-fly
+    beautify below is for the files it did not -- rows written before
+    that logic, or a bundle whose map has since gone -- and it is
+    flagged as `generated` because its line numbers have never been
+    stored and must not be quoted as though they had.
     """
     row = (await session.execute(
         select(Vuln).where(Vuln.id == vuln_id))).scalar_one_or_none()
@@ -434,46 +490,94 @@ async def secret_source(vuln_id: int,
             404, "the asset this came from is no longer recorded: it was "
                  "removed, or the project was re-imported since the scan")
 
-    # Path identifies the file within the asset. The three origins do
-    # not collide in practice -- `raw` is the URL's basename,
-    # `beautified` is that plus `.pretty`, and `source` paths come out
-    # of a source map -- so this is a lookup and not a guess. Ordered
-    # so that, if one ever did collide, the scanned row wins: that is
-    # the one the line number came from.
+    # Every stored file of this asset that has contents. Ordered so a
+    # scanned row comes first, which is the one a line number came
+    # from if two ever shared a path.
     files = (await session.execute(
         select(WebAssetFile)
         .where(WebAssetFile.asset_id == asset.id,
-               WebAssetFile.path == sec.path)
+               WebAssetFile.body.is_not(None))
         .order_by(WebAssetFile.scanned_at.is_(None),
                   WebAssetFile.id))).scalars().all()
-    f = next((x for x in files if x.body), None)
-    if f is None:
+
+    recorded = next((f for f in files if f.path == sec.path), None)
+    if recorded is None:
         raise HTTPException(
             404, "the file is recorded but its contents are not: the asset "
                  "was known by reference and never pulled back, or the "
                  "fetch failed")
 
-    body: str = f.body or ""
+    # The choice offered. The recorded file always, plus this asset's
+    # raw and beautified renderings -- at most three. NOT every source
+    # a map produced: those are a hundred different files and only one
+    # of them holds this value, so offering them all would be offering
+    # ninety-nine wrong answers.
+    chosen: dict[str, WebAssetFile] = {}
+    for f in files:
+        if f is recorded or f.origin in ("raw", "beautified"):
+            chosen.setdefault(f.origin, f)
+    # The recorded file wins its own slot even if another row of the
+    # same origin sorted first.
+    chosen[recorded.origin] = recorded
+
+    generated_body: str | None = None
+    if "beautified" not in chosen:
+        raw = chosen.get("raw")
+        if raw and raw.body and assetfetch.looks_minified(raw.body):
+            pretty = assetfetch.beautify(raw.body)
+            if pretty and pretty != raw.body:
+                generated_body = pretty
+
+    def _describe(origin: str) -> SourceView:
+        if origin == "beautified" and generated_body is not None:
+            return SourceView(origin=origin, path=f"{chosen['raw'].path}.pretty",
+                              bytes=len(generated_body), generated=True,
+                              recorded=False)
+        f = chosen[origin]
+        return SourceView(origin=origin, path=f.path, bytes=len(f.body or ""),
+                          generated=False, recorded=f is recorded)
+
+    available = [o for o in VIEW_ORDER
+                 if o in chosen or (o == "beautified" and generated_body)]
+    views = [_describe(o) for o in available]
+
+    # What to show. An explicit `view` wins; otherwise the most
+    # readable available, which is what VIEW_ORDER is sorted by. The
+    # recorded file is NOT the default when a more readable rendering
+    # of the same bytes exists -- reading the credential in context is
+    # the whole point, and one line of two megabytes is not context.
+    want = view if view in available else available[0]
+
+    if want == "beautified" and generated_body is not None:
+        body, shown_path, shown_generated = (
+            generated_body, f"{chosen['raw'].path}.pretty", True)
+    else:
+        f = chosen[want]
+        body, shown_path, shown_generated = (f.body or ""), f.path, False
+    is_recorded = (not shown_generated) and chosen.get(want) is recorded
     total = len(body)
 
     # Where the value actually is, rather than where it was recorded.
-    # The recorded line is checked FIRST so an unchanged file reports
-    # `confirmed` even when the same value appears more than once --
-    # a key repeated in a bundle would otherwise resolve to whichever
-    # copy came first and call a correct record "moved".
+    # The recorded line is checked FIRST, and only on the recorded
+    # file: on any other rendering it names a line in a different
+    # file, so the only honest way to find the value there is to look
+    # for it. Checking the line first also means an unchanged file
+    # reports `confirmed` when the same value appears more than once,
+    # instead of resolving to whichever copy came first.
     lines = body.split("\n")
-    start = end = None
+    start = end_ = None
     located = "absent"
-    if sec.line and 1 <= sec.line <= len(lines):
+    if is_recorded and sec.line and 1 <= sec.line <= len(lines):
         at = lines[sec.line - 1].find(sec.secret)
         if at >= 0:
             start = sum(len(x) + 1 for x in lines[:sec.line - 1]) + at
-            end = start + len(sec.secret)
+            end_ = start + len(sec.secret)
             located = "confirmed"
     if start is None:
         at = body.find(sec.secret)
         if at >= 0:
-            start, end, located = at, at + len(sec.secret), "moved"
+            start, end_ = at, at + len(sec.secret)
+            located = "moved" if is_recorded else "found"
 
     # Window around the match when the file is too big to send. An
     # unlocated secret in a huge file windows from the top: there is
@@ -483,24 +587,28 @@ async def secret_source(vuln_id: int,
         truncated = True
         centre = start if start is not None else 0
         offset = max(0, centre - SOURCE_WINDOW // 2)
-        body = body[offset:offset + SOURCE_WINDOW]
+        whole = body
+        body = whole[offset:offset + SOURCE_WINDOW]
         if start is not None:
-            start, end = start - offset, (end or 0) - offset
+            start, end_ = start - offset, (end_ or 0) - offset
         # Which line the window opens on, so the gutter counts from
         # the file's numbering and not from the window's.
-        first_line = (f.body or "")[:offset].count("\n") + 1
+        first_line = whole[:offset].count("\n") + 1
 
     await audit.record(
         session, "ui", "finding.secret.source", user=user, commit=True,
         project_code=None,
         detail=(f"read the source around the credential on finding {vuln_id} "
-                f"({sec.path}) on {target.host or target.id}"))
+                f"({shown_path}) on {target.host or target.id}"))
 
     return SecretSourceOut(
-        path=sec.path, origin=f.origin, asset_url=sec.asset_url,
-        line=sec.line, body=body, total=total, offset=offset,
-        first_line=first_line, truncated=truncated,
-        match_start=start, match_end=end, located=located)
+        path=shown_path, origin=want, generated=shown_generated,
+        recorded_origin=recorded.origin, views=views,
+        asset_url=sec.asset_url,
+        line=sec.line if is_recorded else None,
+        body=body, total=total, offset=offset, first_line=first_line,
+        truncated=truncated, match_start=start, match_end=end_,
+        located=located)
 
 
 class SecretRow(BaseModel):
