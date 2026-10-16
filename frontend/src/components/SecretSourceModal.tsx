@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert, Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle,
-  IconButton, MenuItem, Stack, TextField, Tooltip, Typography, alpha,
+  IconButton, MenuItem, Stack, TextField, ToggleButton, ToggleButtonGroup,
+  Tooltip, Typography, alpha,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -30,8 +31,14 @@ const ORIGIN_WHY: Record<string, string> = {
  *  stored body that no longer contains it at all is a third thing
  *  again — scrolling confidently to a line in either case would be
  *  the tool asserting something it has not checked. */
-const LOCATED: Record<string, { sev: 'success' | 'warning' | 'error'; say: string }> = {
+const LOCATED: Record<string, { sev: 'success' | 'warning' | 'error' | 'info'; say: string }> = {
   confirmed: { sev: 'success', say: 'Found at the recorded line.' },
+  found: {
+    sev: 'info',
+    say: 'This is a readable rendering of the same file. The scanner read '
+      + 'the other one, so its line number does not apply here — the value '
+      + 'was located by searching for it, and is highlighted below.',
+  },
   moved: {
     sev: 'warning',
     say: 'The file has changed since it was scanned: the value is still '
@@ -88,9 +95,16 @@ export function SecretSourceModal({ vulnId, triage, onClose }: {
     },
   })
 
+  // Which rendering is on screen. `undefined` means "whichever the
+  // server thinks is most readable", which is what it opens on.
+  // Reset per secret: a view chosen for one bundle says nothing about
+  // which renderings the next one even has.
+  const [pick, setPick] = useState<string | undefined>(undefined)
+  useEffect(() => { setPick(undefined) }, [vulnId])
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ['secret-source', vulnId],
-    queryFn: () => api.secretSource(vulnId!),
+    queryKey: ['secret-source', vulnId, pick],
+    queryFn: () => api.secretSource(vulnId!, pick),
     enabled: vulnId != null,
     // Source containing a credential. Same reasoning as the secrets
     // list: it does not sit in the cache after navigating away.
@@ -215,6 +229,32 @@ export function SecretSourceModal({ vulnId, triage, onClose }: {
             {(mark.error as Error).message}
           </Typography>
         )}
+
+        {/* Which rendering of the same bytes to read. Only shown when
+            there is a choice: one button that cannot be turned off is
+            furniture. `raw` is labelled Minified rather than Raw
+            because that is the property a reader cares about -- it is
+            the reason the other option exists. */}
+        {data && data.views.length > 1 && (
+          <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: 1 }}>
+            <ToggleButtonGroup size="small" exclusive value={data.origin}
+              onChange={(_e, v) => { if (v) setPick(v) }}>
+              {data.views.map((v) => (
+                <ToggleButton key={v.origin} value={v.origin}
+                  sx={{ fontSize: 10.5, py: 0.25, px: 1.25,
+                        letterSpacing: '0.06em' }}>
+                  {v.origin === 'raw' ? 'Minified'
+                    : v.origin === 'beautified' ? 'Beautified' : 'Source'}
+                  {v.recorded && (
+                    <Tooltip title="The file the scanner actually read">
+                      <Box component="span" sx={{ ml: 0.5, color: neon.cyan }}>•</Box>
+                    </Tooltip>
+                  )}
+                </ToggleButton>
+              ))}
+            </ToggleButtonGroup>
+          </Box>
+        )}
       </Box>
 
       <DialogContent dividers
@@ -235,6 +275,13 @@ export function SecretSourceModal({ vulnId, triage, onClose }: {
             {loc && (
               <Alert severity={loc.sev} sx={{ m: 1.5, mb: 0.5, py: 0.25, fontSize: 12 }}>
                 {loc.say}
+              </Alert>
+            )}
+            {data.generated && (
+              <Alert severity="info" sx={{ mx: 1.5, my: 0.5, py: 0.25, fontSize: 12 }}>
+                No readable copy of this file was stored, so this one was
+                produced just now. Its line numbers exist only here — quote
+                the minified file's if you need to cite a position.
               </Alert>
             )}
             {data.truncated && (

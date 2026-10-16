@@ -899,6 +899,111 @@ st, _ = call(f"/api/vulns/{_bare_id}/secret/source", token=admin)
 check("a finding with no stored credential has no source either",
       st == 404, st)
 
+# ------------------------------------------------- readable views
+# A secret in a minified bundle is a secret on one line thousands of
+# characters long. The same bytes usually exist in a second, readable
+# form, so that is what opens.
+#
+# One line, and long enough that `looks_minified` agrees -- it judges
+# on the longest line, not on file size.
+MIN_BODY = ("var a=1;" * 80) + f"var k='{PLANTED}';" + ("var b=2;" * 80)
+PRETTY_BODY = "\n".join(["var a=1;"] * 80 + [f"var k='{PLANTED}';"]
+                        + ["var b=2;"] * 80)
+
+
+async def _plant_views(tag, pretty: bool):
+    """A finding recorded against a minified RAW file.
+
+    `pretty` decides whether a beautified sibling is already stored,
+    which is the difference between the two cases that matter: one
+    where a readable rendering exists and one where it has to be
+    produced.
+    """
+    url = f"https://app.acme.example/static/bundle-{tag}.js"
+    async with SessionLocal() as s:
+        pr = (await s.execute(select(Project).where(
+            Project.code == "ASSET"))).scalar_one()
+        t = (await s.execute(select(Target).where(
+            Target.project_id == pr.id))).scalars().first()
+        v = Vuln(target_id=t.id, title="credential in a minified bundle",
+                 severity="high", status="open",
+                 external_id=f"detect-secrets:views-{tag}")
+        s.add(v)
+        await s.flush()
+        # Recorded against the RAW file, on its only line.
+        s.add(_FS(vuln_id=v.id, secret=PLANTED, detector="AWS Access Key",
+                  asset_url=url, path=f"bundle-{tag}.js", line=1))
+        a = WebAsset(project_id=pr.id, target_id=t.id, url=url,
+                     kind="script", host="app.acme.example")
+        s.add(a)
+        await s.flush()
+        s.add(WebAssetFile(asset_id=a.id, project_id=pr.id, origin="raw",
+                           path=f"bundle-{tag}.js", body=MIN_BODY,
+                           bytes=len(MIN_BODY)))
+        if pretty:
+            s.add(WebAssetFile(asset_id=a.id, project_id=pr.id,
+                               origin="beautified",
+                               path=f"bundle-{tag}.js.pretty",
+                               body=PRETTY_BODY, bytes=len(PRETTY_BODY)))
+        await s.commit()
+        return v.id
+
+
+# A stored .pretty exists, so it is what opens.
+_v_stored = asyncio.run(_plant_views("stored", pretty=True))
+st, w = call(f"/api/vulns/{_v_stored}/secret/source", token=admin)
+w = w or {}
+check("a minified bundle opens on its readable copy",
+      st == 200 and w.get("origin") == "beautified", f"{st} {w.get('origin')}")
+check("...which is stored, not produced for this request",
+      w.get("generated") is False, w.get("generated"))
+check("...and both renderings are offered",
+      sorted(v["origin"] for v in w.get("views", [])) == ["beautified", "raw"],
+      [v.get("origin") for v in w.get("views", [])])
+# The line belongs to the file the scanner read, and that is not the
+# one on screen. Quoting it here would name a line in another file.
+check("...the recorded origin is still reported as raw",
+      w.get("recorded_origin") == "raw", w.get("recorded_origin"))
+check("...the value is located by searching, not by the recorded line",
+      w.get("located") == "found", w.get("located"))
+check("...so no line number is claimed for a file the scanner never read",
+      w.get("line") is None, w.get("line"))
+_ms, _me = w.get("match_start"), w.get("match_end")
+check("...and the highlight still selects exactly the credential",
+      _ms is not None and w.get("body", "")[_ms:_me] == PLANTED, f"{_ms}:{_me}")
+
+# And the other rendering is still reachable, where the line DOES mean
+# something.
+st, r = call(f"/api/vulns/{_v_stored}/secret/source?view=raw", token=admin)
+r = r or {}
+check("the raw file can still be asked for", st == 200
+      and r.get("origin") == "raw", f"{st} {r.get('origin')}")
+check("...and there the recorded line is confirmed",
+      r.get("located") == "confirmed" and r.get("line") == 1,
+      f"{r.get('located')} line={r.get('line')}")
+
+# No stored .pretty: one is produced, and says so.
+_v_gen = asyncio.run(_plant_views("gen", pretty=False))
+st, g = call(f"/api/vulns/{_v_gen}/secret/source", token=admin)
+g = g or {}
+check("a bundle with no stored readable copy gets one made",
+      st == 200 and g.get("origin") == "beautified", f"{st} {g.get('origin')}")
+check("...and it is flagged as produced for this request, because its "
+      "line numbers have never been stored",
+      g.get("generated") is True, g.get("generated"))
+check("...and the credential is found in it",
+      g.get("located") == "found", g.get("located"))
+_gs, _ge = g.get("match_start"), g.get("match_end")
+check("...and highlighted exactly",
+      _gs is not None and g.get("body", "")[_gs:_ge] == PLANTED, f"{_gs}:{_ge}")
+
+# An unreadable `view` is not an error: it falls back to the default
+# rather than 400ing a UI that asked for something reasonable.
+st, bad = call(f"/api/vulns/{_v_gen}/secret/source?view=nonsense", token=admin)
+check("an unknown view falls back rather than failing",
+      st == 200 and (bad or {}).get("origin") == "beautified",
+      f"{st} {(bad or {}).get('origin')}")
+
 # And the page must not OFFER the reveal in the first place.
 #
 # The UI used to decide from the external_id prefix, which is true
