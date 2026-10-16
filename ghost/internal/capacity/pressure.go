@@ -3,6 +3,7 @@ package capacity
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -34,6 +35,23 @@ import (
 // there is an override, and `ready` is not.
 const reserveFraction = 0.20
 
+// resumeFraction is where it starts again, and it is deliberately
+// NOT reserveFraction.
+//
+// One threshold means the host flips state every time the figure
+// crosses it, and a host under load sits exactly there: on this fleet
+// one agent made 171 hold/resume transitions in 312 minutes -- a
+// change every 1.8 minutes -- while memory hovered either side of
+// 20%. Each flip is a line in the debug log and a `ready` change on
+// the next heartbeat, so the fleet table flickered and the log filled
+// with the agent changing its mind.
+//
+// Five points of gap. Enough that ordinary variation does not cross
+// both, small enough that a host which genuinely recovers is working
+// again within a beat or two rather than being held off until it is
+// nearly idle.
+const resumeFraction = 0.25
+
 // Unknown is what an unmeasurable figure reports. Negative rather
 // than zero, because zero free is the most alarming reading there is
 // and must never be produced by not looking.
@@ -45,6 +63,15 @@ type Pressure struct {
 	Blocked bool
 	// Reason names what ran out, for the fleet table and the log.
 	Reason string
+	// Key is what the reason IS, without the measurement in it:
+	// "memory", "cpu", or "" when nothing is wrong.
+	//
+	// Reason carries a live percentage, so it is a different string
+	// on almost every beat. Anything deduplicating on it -- which is
+	// what the agent's log did -- sees a change every time the figure
+	// ticks and reports a state change that never happened. The
+	// state is this.
+	Key string
 	// MemFree and CPUIdle are fractions in [0,1], or Unknown.
 	MemFree float64
 	CPUIdle float64
@@ -58,18 +85,42 @@ type Pressure struct {
 // read must keep working: refusing all work because the measurement is
 // missing turns a monitoring gap into an outage, and the sizing path
 // already treats unreadable memory as "unknown" rather than as "none".
-func assess(memFree, cpuIdle float64) (bool, string) {
-	switch {
-	case memFree != Unknown && memFree < reserveFraction:
-		return true, fmt.Sprintf(
-			"holding off: %.0f%% memory free, under the %.0f%% this host keeps spare",
-			memFree*100, reserveFraction*100)
-	case cpuIdle != Unknown && cpuIdle < reserveFraction:
-		return true, fmt.Sprintf(
-			"holding off: %.0f%% CPU idle, under the %.0f%% this host keeps spare",
-			cpuIdle*100, reserveFraction*100)
+func assess(memFree, cpuIdle float64, blocked bool) (bool, string, string) {
+	// Which line has to be crossed depends on which way we are
+	// going. Already holding off: climb above resumeFraction to
+	// start again. Working: fall below reserveFraction to stop.
+	limit := reserveFraction
+	if blocked {
+		limit = resumeFraction
 	}
-	return false, ""
+	switch {
+	case memFree != Unknown && memFree < limit:
+		return true, fmt.Sprintf(
+			"holding off: %s memory free, under the %s this host keeps spare",
+			pct(memFree), pct(limit)), "memory"
+	case cpuIdle != Unknown && cpuIdle < limit:
+		return true, fmt.Sprintf(
+			"holding off: %s CPU idle, under the %s this host keeps spare",
+			pct(cpuIdle), pct(limit)), "cpu"
+	}
+	return false, "", ""
+}
+
+// pct renders a fraction as a percentage, rounding TOWARDS ZERO.
+//
+// `%.0f` rounds to nearest, which produced lines reading "20% memory
+// free, under the 20% this host keeps spare" -- 19.96% displayed as
+// 20, against a limit of 20. The comparison was right and the
+// sentence was not, and a reader checking the rule against the
+// numbers in front of them concludes the rule is broken.
+//
+// Truncating keeps the invariant the sentence claims: the figure
+// shown when blocked is always strictly below the limit shown beside
+// it. One decimal, because at zero decimals 19.96 and 19.04 are both
+// "19" and the difference is the whole reason somebody is reading
+// this line.
+func pct(f float64) string {
+	return fmt.Sprintf("%.1f%%", math.Trunc(f*1000)/10)
 }
 
 // Check reads the host and applies the rule.
@@ -80,9 +131,13 @@ func assess(memFree, cpuIdle float64) (bool, string) {
 // is unpleasant but recoverable. Both block, and the reason says
 // which, so an operator looking at a stalled agent is not left
 // guessing.
-func Check(ctx context.Context) Pressure {
+// `blocked` is what this host decided last time, which is what makes
+// the two thresholds mean anything -- see resumeFraction. The caller
+// holds it: this package deliberately keeps no state of its own, so
+// that every case can still be tested by passing figures in.
+func Check(ctx context.Context, blocked bool) Pressure {
 	p := Pressure{MemFree: memFreeFraction(), CPUIdle: cpuIdleFraction(ctx)}
-	p.Blocked, p.Reason = assess(p.MemFree, p.CPUIdle)
+	p.Blocked, p.Reason, p.Key = assess(p.MemFree, p.CPUIdle, blocked)
 	return p
 }
 

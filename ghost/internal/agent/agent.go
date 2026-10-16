@@ -69,6 +69,12 @@ type Agent struct {
 	//: Why the host is refusing new work, "" when it is not. Held so
 	//: the log records the transition rather than every heartbeat.
 	pressure string
+	// What the LAST check concluded, which capacity.Check needs to
+	// know which threshold applies -- see capacity.resumeFraction.
+	// Separate from `pressure`, which is the message: that is empty
+	// both before the first check and when nothing is wrong, and
+	// those are not the same state.
+	pressureOn bool
 	// missing is {tool: why} for everything this host could not get.
 	// The server reads it to avoid sending work that needs them.
 	missing map[string]string
@@ -537,15 +543,28 @@ func (a *Agent) Run(ctx context.Context) error {
 // not on every beat between. A 15-second heartbeat on a host that
 // stays starved for an hour is otherwise 240 identical lines, which
 // buries the one that said when it began.
-func (a *Agent) notePressure(reason string) {
+//
+// Keyed on what the state IS, not on the sentence describing it.
+// That was the bug: the sentence carries the live percentage, so
+// "18% memory free" and "19% memory free" are different strings and
+// every tick of the figure read as a state change. The comment above
+// has always said "not on every beat between" and the code did the
+// opposite -- 590 holding-off lines against 132 cleared ones in one
+// sample, when the two should be roughly equal, and 74% of the whole
+// debug log was this one message repeating.
+//
+// `key` is "" when nothing is wrong, "memory" or "cpu" otherwise, so
+// a host that runs out of memory and then of CPU still says so.
+func (a *Agent) notePressure(key, reason string) {
 	a.mu.Lock()
-	changed := a.pressure != reason
-	a.pressure = reason
+	changed := a.pressure != key
+	a.pressure = key
+	a.pressureOn = key != ""
 	a.mu.Unlock()
 	if !changed {
 		return
 	}
-	if reason == "" {
+	if key == "" {
 		log.Printf("capacity: pressure cleared, taking work again")
 	} else {
 		log.Printf("capacity: %s", reason)
@@ -581,12 +600,15 @@ func (a *Agent) beat(ctx context.Context) (*client.HeartbeatResp, error) {
 	// or not an operator has set a per-ghost override, while
 	// `slots_free` is skipped when one is set -- so the veto has to
 	// travel on `ready` to be a veto at all.
-	if p := capacity.Check(ctx); p.Blocked {
+	a.mu.Lock()
+	wasBlocked := a.pressureOn
+	a.mu.Unlock()
+	if p := capacity.Check(ctx, wasBlocked); p.Blocked {
 		free = 0
 		why = p.Reason
-		a.notePressure(p.Reason)
+		a.notePressure(p.Key, p.Reason)
 	} else {
-		a.notePressure("")
+		a.notePressure("", "")
 	}
 
 	return a.cli.Heartbeat(ctx, client.HeartbeatReq{
