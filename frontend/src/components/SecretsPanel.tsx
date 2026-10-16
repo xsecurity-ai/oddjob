@@ -1,12 +1,14 @@
+import { useState } from 'react'
 import { Box, Stack, Tooltip, alpha } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
 import type { ColumnDef } from '../lib/columns'
 import { api, type SecretRow } from '../lib/api'
 import { DataTable } from './DataTable'
+import { SecretSourceModal } from './SecretSourceModal'
 import { SEVERITY_COLOUR as SEV_COLOUR } from '../lib/severity'
 import { neon, glow } from '../theme'
 
-/** The value, in clear, in a monospace cell you can select.
+/** The value, in clear, in a monospace cell. Click it for the source.
  *
  *  Never shortened. An ellipsis through the middle of a credential
  *  is the one place it is actively harmful: half a key is not a
@@ -15,26 +17,38 @@ import { neon, glow } from '../theme'
  *  the end as the start.
  *
  *  So the whole value is in the DOM and the cell scrolls sideways
- *  rather than wrapping — `user-select: all` then copies all of it
- *  in one click whatever is currently visible. */
-function SecretCell({ value }: { value: string }) {
+ *  rather than wrapping.
+ *
+ *  `user-select: all` is deliberately NOT set any more. It made one
+ *  click copy the whole value, which is a good trick and the wrong
+ *  one here now that the same click opens the source: selecting and
+ *  opening on the same gesture meant doing both every time. Dragging
+ *  across the text still selects it, and the modal shows the value
+ *  in context for anyone who wants to copy it from there. */
+function SecretCell({ value, onSource }: {
+  value: string
+  onSource: () => void
+}) {
   return (
-    <Box
-      component="code"
-      onClick={(e) => e.stopPropagation()}
-      sx={{
-        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-        fontSize: 11.5, color: neon.yellow,
-        userSelect: 'all', cursor: 'text',
-        whiteSpace: 'nowrap', overflowX: 'auto', maxWidth: '100%',
-        display: 'block',
-        '&::-webkit-scrollbar': { height: 4 },
-        '&::-webkit-scrollbar-thumb': {
-          background: alpha(neon.muted, 0.4), borderRadius: 2,
-        },
-      }}>
-      {value}
-    </Box>
+    <Tooltip title="Show the source this was found in" enterDelay={400}>
+      <Box
+        component="code"
+        onClick={(e) => { e.stopPropagation(); onSource() }}
+        sx={{
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+          fontSize: 11.5, color: neon.yellow,
+          cursor: 'pointer',
+          whiteSpace: 'nowrap', overflowX: 'auto', maxWidth: '100%',
+          display: 'block',
+          '&:hover': { textShadow: glow(neon.yellow, 0.6) },
+          '&::-webkit-scrollbar': { height: 4 },
+          '&::-webkit-scrollbar-thumb': {
+            background: alpha(neon.muted, 0.4), borderRadius: 2,
+          },
+        }}>
+        {value}
+      </Box>
+    </Tooltip>
   )
 }
 
@@ -65,6 +79,8 @@ export function SecretsPanel({ project, onFinding }: {
   project: string | null
   onFinding: (vulnId: number) => void
 }) {
+  const [sourceFor, setSourceFor] = useState<number | null>(null)
+
   const { data, isLoading, error } = useQuery({
     queryKey: ['secrets', project],
     queryFn: () => api.secrets(project ?? undefined),
@@ -77,7 +93,10 @@ export function SecretsPanel({ project, onFinding }: {
   const columns: ColumnDef<SecretRow>[] = [
     {
       field: 'secret', headerName: 'Secret', flex: 3, minWidth: 300,
-      renderCell: (p) => <SecretCell value={String(p.value ?? '')} />,
+      renderCell: (p) => (
+        <SecretCell value={String(p.value ?? '')}
+          onSource={() => setSourceFor((p.row as SecretRow).vuln_id)} />
+      ),
     },
     {
       field: 'asset_url', headerName: 'URL', flex: 3, minWidth: 280,
@@ -165,6 +184,7 @@ export function SecretsPanel({ project, onFinding }: {
   ]
 
   return (
+    <>
     <DataTable
       rows={data ?? []}
       columns={columns as ColumnDef[]}
@@ -180,5 +200,7 @@ export function SecretsPanel({ project, onFinding }: {
       hiddenColumns={project ? { project_code: false } : undefined}
       note={`${data?.length ?? 0} stored in clear — reading this list is written to the audit log`}
     />
+    <SecretSourceModal vulnId={sourceFor} onClose={() => setSourceFor(null)} />
+    </>
   )
 }

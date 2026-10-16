@@ -176,6 +176,37 @@ export interface VulnOccurrence {
  *  recorded in columns — rows written before they existed whose
  *  description did not parse. That is "not recorded", not "no
  *  URL", and the table says so rather than showing a blank. */
+/** The file a credential was found in, positioned on it.
+ *
+ *  `body` may be a WINDOW rather than the whole file: a `raw` bundle
+ *  is routinely megabytes on one line, and sending all of it to
+ *  highlight forty characters in the middle is what `offset` and
+ *  `first_line` exist to avoid.
+ *
+ *  `match_start`/`match_end` are character offsets INTO `body`, not
+ *  into the file — the window is already subtracted. They are what
+ *  the highlight uses: a line number names the whole of a minified
+ *  file and so points at nothing. */
+export interface SecretSource {
+  path: string
+  /** raw | beautified | source. A line in `beautified` is a line in
+   *  a file we produced, not in the developer's own source. */
+  origin: string
+  asset_url: string | null
+  line: number | null
+  body: string
+  total: number
+  offset: number
+  first_line: number
+  truncated: boolean
+  match_start: number | null
+  match_end: number | null
+  /** confirmed | moved | absent — see the endpoint. Three answers,
+   *  because scrolling confidently to the wrong place is worse than
+   *  saying the file has shifted. */
+  located: string
+}
+
 export interface SecretRow {
   vuln_id: number
   secret: string
@@ -1270,6 +1301,12 @@ export const api = {
    *  role per project and one audit entry per read. */
   secrets: (project?: string) =>
     req<SecretRow[]>('/api/secrets' + qs({ project })),
+
+  /** The source around a credential. Same guards as `revealSecret`:
+   *  it returns a file that CONTAINS the value, so it discloses
+   *  everything that endpoint does and the surrounding code too. */
+  secretSource: (vulnId: number) =>
+    req<SecretSource>(`/api/vulns/${vulnId}/secret/source`),
 
   ghostRouting: (project: string) =>
     req<GhostRouting>('/api/ghosts/routing' + qs({ project })),
