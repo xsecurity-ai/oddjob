@@ -96,6 +96,20 @@ export interface Target {
   /** Anything the scanner reported that has no column: uptime, traceroute,
    *  competing OS matches, host-level NSE output. */
   extra: Record<string, unknown>
+  /** Which provider naming template this host's NAME matches, e.g.
+   *  `gcp-compute`, or null for a name somebody chose.
+   *
+   *  Derived server-side from the hostname — see
+   *  backend/app/cloudnames.py. It says nothing about whether the
+   *  host matters: a `*.bc.googleusercontent.com` with an open port
+   *  is a finding, the PTR just is not its name. */
+  cloud_family: string | null
+  /** Which cloud, when the name is a provider template. */
+  cloud_provider: string | null
+  /** True when the provider assigns the name per address, so it
+   *  carries no information about who is using it. These are the
+   *  rows worth condensing; a name chosen inside a cloud is not. */
+  cloud_ephemeral: boolean
   /** ISO code of the first located address, or null when none has
    *  been. Read `geo_pending` before reading null as "not known": a
    *  null with addresses still unlooked-up means nobody asked. */

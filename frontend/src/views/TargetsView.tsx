@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import {
-  Alert, Badge, Box, Button, Chip, Snackbar, Stack, Tooltip, alpha,
+  Alert, Badge, Box, Button, Chip, Snackbar, Stack, Tab, Tabs, Tooltip, alpha,
 } from '@mui/material'
 import ScanIcon from '@mui/icons-material/RadarOutlined'
 import type { ColumnDef } from '../lib/columns'
@@ -10,6 +10,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Target } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { DataTable } from '../components/DataTable'
+import { CloudTargetsPanel } from '../components/CloudTargetsPanel'
 import { useHostModal } from '../components/HostModal'
 import { ImportScanDialog } from '../components/ImportScanDialog'
 import { MergeTargetsDialog } from '../components/MergeTargetsDialog'
@@ -26,7 +27,7 @@ import { NmapScanDialog } from '../components/NmapScanDialog'
 import { ScanRangesDialog } from '../components/ScanRangesDialog'
 import { WebDiscoveryDialog } from '../components/WebDiscoveryDialog'
 import { ProbeDialog } from '../components/ProbeDialog'
-import { neon, glow } from '../theme'
+import { neon, glow, TAB_SX } from '../theme'
 
 /** Zero is muted so the eye lands on the non-zero numbers. */
 function Count({ n, color }: { n: number; color?: string }) {
@@ -112,6 +113,7 @@ export function TargetsView({ project }: { project: string | null }) {
   const { canWrite } = useAuth()
   const { open } = useHostModal()
   const writable = canWrite(project)
+  const [tab, setTab] = useState<'scope' | 'cloud'>('scope')
   const [importing, setImporting] = useState(false)
   // The target that would be absorbed and removed.
   const [merging, setMerging] = useState<Target | null>(null)
@@ -199,6 +201,20 @@ export function TargetsView({ project }: { project: string | null }) {
   const choices = useMemo(() => openChoices(pending.data), [pending.data])
 
   const rows = useMemo(() => data?.items ?? [], [data])
+
+  // Two tabs over one fetch. A name a provider assigned per address
+  // is the provider's naming, not the client's estate -- on this
+  // engagement that is the large majority of the list, and mixing
+  // the two is what makes the real estate hard to see.
+  //
+  // `rows` itself is deliberately NOT narrowed: selection, the
+  // enumerate counts and the merge candidates all read it, and a
+  // cloud-named host is still a host you can look up or scan. Only
+  // what each tab DISPLAYS is split.
+  const scopeRows = useMemo(
+    () => rows.filter((t) => !t.cloud_family && t.kind !== 'cloud'), [rows])
+  const cloudRows = useMemo(
+    () => rows.filter((t) => !!t.cloud_family || t.kind === 'cloud'), [rows])
   const selectedRows = useMemo(() => {
     const want = new Set(selected)
     return rows.filter((t) => want.has(t.id))
@@ -644,8 +660,21 @@ export function TargetsView({ project }: { project: string | null }) {
           something that scans a client on its own should be visible
           from the screen that shows what it scanned. */}
       {project && <StandingOrders project={project} />}
+      <Tabs value={tab} onChange={(_, v) => setTab(v)}
+        sx={{ minHeight: 34, px: 2, pt: 0.5,
+              borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
+        <Tab value="scope" sx={TAB_SX}
+          label={`In Scope${scopeRows.length ? ` (${scopeRows.length.toLocaleString()})` : ''}`} />
+        <Tab value="cloud" sx={TAB_SX}
+          label={`Cloud${cloudRows.length ? ` (${cloudRows.length.toLocaleString()})` : ''}`} />
+      </Tabs>
+      {tab === 'cloud' ? (
+        <Box sx={{ flex: 1, minHeight: 0, height: '100%' }}>
+          <CloudTargetsPanel rows={cloudRows} onOpen={(t) => open(t.project_code, t.host)} />
+        </Box>
+      ) : (
       <DataTable
-        rows={rows}
+        rows={scopeRows}
         columns={columns as ColumnDef[]}
         loading={isLoading}
         error={error as Error | null}
@@ -697,6 +726,7 @@ export function TargetsView({ project }: { project: string | null }) {
           </>
         ) : undefined}
       />
+      )}
     </>
   )
 }
