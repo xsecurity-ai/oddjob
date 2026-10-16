@@ -1,0 +1,856 @@
+name: CI
+
+# Actions are pinned to commit SHAs, not tags. A tag is mutable: whoever
+# controls the action's repository can repoint v4 at new code, and that
+# code then runs in CI with this repository checked out. The trailing
+# comment is the tag the SHA came from, so Dependabot can still offer an
+# upgrade and a human can still read it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a branch makes the previous run pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # What this push actually touched.
+  #
+  # `ghost builds for every target` is thirteen minutes and most of
+  # it is cross-compiling the agent for six platforms. On a change
+  # that does not go near the agent that is thirteen minutes proving
+  # something nobody altered still compiles.
+  #
+  # **The job is never skipped, only its work.** `ghost builds for
+  # every target` and `image builds and the stack comes up` are
+  # REQUIRED status checks on main. A job removed by an `if:` reports
+  # `skipped`, and a required check that never reports success is a
+  # pull request that can never merge. So the job always runs and
+  # always reports; when the agent is untouched it finishes in
+  # seconds having said so out loud.
+  #
+  # Plain `git diff` rather than a paths-filter action. Every action
+  # here is pinned to a SHA because a tag is mutable, and the cheapest
+  # supply chain to audit is the one with nothing new in it.
+  changes:
+    name: what changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ghost: ${{ steps.f.outputs.ghost }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Enough history to diff against the base. 0 is the whole
+          # repository, which is the only depth that is correct for a
+          # branch of unknown length.
+          fetch-depth: 0
+
+      - name: Which trees were touched
+        id: f
+        env:
+          BASE: ${{ github.event_name == 'pull_request'
+                 && github.event.pull_request.base.sha
+                 || github.event.before }}
+        run: |
+          set -eu
+          # A force push, a new branch, or a manual run leaves no
+          # usable base. Build everything: the honest answer to "what
+          # changed" is "cannot tell", and cannot-tell must not be
+          # read as nothing.
+          if [ -z "${BASE:-}" ] \
+             || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "no usable base ref; treating everything as changed"
+            echo "ghost=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only "$BASE" "${{ github.sha }}")
+          echo "$files" | sed 's/^/  /'
+          # The agent's own tree, plus the workflow that builds it and
+          # the Dockerfile that compiles it in. A change to how it is
+          # built is a change to it.
+          if echo "$files" | grep -qE \
+              '^(ghost/|Dockerfile$|\.github/workflows/ci\.yml$)'; then
+            echo "ghost=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ghost=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  backend:
+    name: backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # The backend serves the built UI, and the suite checks that it
+      # does — the sign-in page, the SPA routes and the favicons are all
+      # read off disk. Without a build those are 404s, which is a
+      # missing artifact, not a broken app.
+      - name: Build the UI
+        working-directory: frontend
+        run: npm ci && npm run build
+
+      - name: Install
+        working-directory: backend
+        run: uv sync --locked
+
+      # Each suite builds its own SQLite database from the migrations and
+      # runs against its own server on its own port, so this needs no
+      # services and no fixtures.
+      - name: Tests
+        working-directory: backend
+        run: uv run python runtests.py
+
+  migrations:
+    name: migrations build the models
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install
+        working-directory: backend
+        run: uv sync --locked
+
+      # If the migrations and the models disagree, every other test is
+      # passing against a schema no deployment will ever have.
+      - name: Upgrade, then check for undeclared drift
+        working-directory: backend
+        env:
+          ODDJOB_DB: /tmp/ci-migrations.db
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+
+      - name: Downgrade to base and back
+        working-directory: backend
+        env:
+          ODDJOB_DB: /tmp/ci-downgrade.db
+        run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade base
+          uv run alembic upgrade head
+
+  postgres:
+    name: backend tests on postgres
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        # The same image and digest the compose file deploys, so this
+        # job tests the major version that actually ships. It was left
+        # on postgres:17 when the db service moved to 18, which made
+        # the one job whose whole purpose is catching Postgres-specific
+        # behaviour the one job testing the wrong Postgres.
+        image: cgr.dev/chainguard/postgres:latest@sha256:0c4eaf6cb9bd65337d834f5ebfe79add4312ee2125ab584bf1fbc071abc6bb8f
+        env:
+          POSTGRES_USER: oddjob
+          POSTGRES_PASSWORD: oddjob
+          POSTGRES_DB: oddjob
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U oddjob"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install
+        working-directory: backend
+        run: uv sync --locked
+
+      # SQLite forgives things Postgres does not — it ignores VARCHAR
+      # lengths and stores NUL bytes in text — so a suite that only ever
+      # runs on SQLite passes right up until the first real deployment.
+      # One database per suite. Every suite starts by creating the admin
+      # through /api/auth/setup, which refuses once a user exists — so
+      # sharing a database means the second suite dies on its first line.
+      - name: Run the suites against Postgres
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          port=8099
+          for suite in importtest webtest projecttest; do
+            db="ci_$suite"
+            PGPASSWORD=oddjob psql -h 127.0.0.1 -U oddjob -d postgres \
+              -c "DROP DATABASE IF EXISTS $db" -c "CREATE DATABASE $db"
+            export ODDJOB_DATABASE_URL="postgresql://oddjob:oddjob@127.0.0.1:5432/$db"
+            uv run alembic upgrade head
+            uv run alembic check
+            uv run uvicorn app.main:app --host 127.0.0.1 --port $port &
+            srv=$!
+            for i in $(seq 1 40); do
+              curl -sf "http://127.0.0.1:$port/api/auth/setup-required" >/dev/null && break
+              sleep 1
+            done
+            ODDJOB_TEST_BASE="http://127.0.0.1:$port" uv run python "tests/$suite.py"
+            kill $srv 2>/dev/null || true
+            wait $srv 2>/dev/null || true
+            port=$((port + 1))
+          done
+
+  frontend:
+    name: frontend typecheck and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+      # React re-runs hooks in the order they were called. A hook after
+      # an early return changes that order between renders and blanks
+      # the page at runtime, which a typecheck cannot see.
+      - name: Hooks order
+        working-directory: frontend
+        run: node test/hooks.check.mjs
+
+      - name: Logic tests
+        working-directory: frontend
+        run: npm run test:logic --if-present
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+  ghost:
+    name: ghost builds for every target
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: changes
+    # NOT `if:` on the job. This is a required check on main, and a
+    # job that reports `skipped` is one a pull request waits on for
+    # ever. Each step below carries the condition instead, so the
+    # check always reports and costs seconds when there is nothing
+    # to build. See the `changes` job.
+    env:
+      RUN: ${{ needs.changes.outputs.ghost }}
+    steps:
+      - name: Nothing in the agent changed
+        if: needs.changes.outputs.ghost != 'true'
+        run: |
+          echo "No change under ghost/, Dockerfile or ci.yml."
+          echo "The agent is unchanged, so it is not rebuilt."
+          echo "This check passes without having compiled anything —"
+          echo "which is the point, and is said out loud so nobody"
+          echo "reads a green tick as 'the agent was tested'."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.changes.outputs.ghost == 'true'
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: needs.changes.outputs.ghost == 'true'
+        with:
+          go-version: '1.26'
+          cache-dependency-path: ghost/go.sum
+          # Off, and cached explicitly below instead. setup-go's own
+          # cache saved NOTHING here: after two full runs of this job
+          # the repository held forty caches, every one of them a
+          # buildkit layer blob, and not a single go-build entry. The
+          # symptom was the cross-compile step taking 396s cold and
+          # 415s warm -- no reuse at all, because there was nothing to
+          # reuse. Two mechanisms writing the same two directories is
+          # also how the one that works gets blamed for the one that
+          # does not, so this leaves exactly one.
+          cache: false
+
+      # The module cache and the build cache, kept by hand.
+      #
+      # This is the whole cost of the job. `make release` compiles six
+      # GOOS/GOARCH targets and each one builds the entire dependency
+      # graph for itself -- amass, katana and gobuster, 1412 lines of
+      # go.sum -- sharing none of that work with the other five. Cold
+      # that is 415 seconds, and without a cache every run is cold.
+      #
+      # Keyed on go.sum, so it is rewritten only when the dependencies
+      # actually move. A key carrying github.run_id would refresh on
+      # every run and would also write a new multi-hundred-megabyte
+      # entry every time, evicting the buildkit blobs that make the
+      # agent image build 17s instead of 503s -- paying for this cache
+      # with the one that already works.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: needs.changes.outputs.ghost == 'true'
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-ghost-${{ hashFiles('ghost/go.sum') }}
+          # A dependency bump should start from the previous graph
+          # rather than from nothing: most of it is unchanged, and a
+          # partial hit still saves the bulk of those 415 seconds.
+          restore-keys: |
+            go-${{ runner.os }}-ghost-
+
+      # The release version, from the one file that decides it. Used
+      # both as the agent image's build argument and as the value the
+      # built binaries are checked against.
+      - name: The version
+        if: env.RUN == 'true'
+        id: ver
+        run: echo "version=$(scripts/version.sh --release)" >> "$GITHUB_OUTPUT"
+
+      - name: Formatted
+        if: env.RUN == 'true'
+        working-directory: ghost
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt would change:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: Vet
+        if: env.RUN == 'true'
+        working-directory: ghost
+        run: go vet ./...
+
+      - name: Tests
+        if: env.RUN == 'true'
+        working-directory: ghost
+        run: go test -race ./...
+
+      # The agent is only useful if it reaches the host it is needed
+      # on, and that host is whatever the client has. A target that
+      # stops compiling is found here rather than at the point someone
+      # needs a Windows binary.
+      - name: Cross-compile every release target
+        if: env.RUN == 'true'
+        working-directory: ghost
+        # ODDJOB_RELEASE=1 so these are built the way a release is
+        # built — bare version, no `-dev-` suffix. The step below
+        # proves it, and the one after that proves the suffix still
+        # appears when nobody asks for a release, so neither direction
+        # of the mechanism can rot unnoticed.
+        env:
+          ODDJOB_RELEASE: '1'
+        run: make release
+
+      # Layer cache for the image build below. Without it every PR
+      # recompiles amass, nuclei, httpx and gospider from source —
+      # four large Go programs, and the bulk of this job's four
+      # minutes.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v3
+        if: env.RUN == 'true'
+
+      # Through the action rather than `docker buildx build`, because
+      # `type=gha` needs ACTIONS_RUNTIME_TOKEN and GitHub exposes that
+      # to actions and not to `run:` steps. The CLI form builds fine
+      # and then caches nothing, which is the failure that looks like
+      # success.
+      - name: Build the agent image
+        if: env.RUN == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v6
+        with:
+          context: ./ghost
+          load: true
+          tags: ghost-agent
+          # The same build argument images.yml passes, from the same
+          # script and the same file. The agent image's context is
+          # `ghost/`, which has no VERSION in it — see the comment
+          # above the ARG in ghost/Dockerfile.
+          build-args: |
+            GHOST_VERSION=${{ steps.ver.outputs.version }}
+          cache-from: type=gha,scope=ci-ghost
+          cache-to: type=gha,scope=ci-ghost,mode=max
+
+      # The agent image is how most people will actually deploy this,
+      # and it has already hidden one bug the binaries could not: file
+      # capabilities that are present and not effective.
+      - name: The agent image can raw-socket
+        if: env.RUN == 'true'
+        working-directory: ghost
+        run: |
+          docker run --rm --cap-drop=ALL --cap-add=NET_RAW --cap-add=NET_ADMIN \
+            ghost-agent check > /tmp/check.json || true
+          cat /tmp/check.json
+          python3 - <<'EOF'
+          import json
+          d = json.load(open("/tmp/check.json"))
+          missing = d.get("missing_baseline") or []
+          assert not missing, f"baseline tools missing from the image: {missing}"
+          assert d["privileged"], (
+              "the image reports no raw sockets with NET_RAW granted — "
+              "masscan would refuse and nmap would silently connect-scan")
+          EOF
+
+      - name: The binaries are static
+        if: env.RUN == 'true'
+        working-directory: ghost
+        run: |
+          # A dynamically linked agent fails on the older glibc it will
+          # meet in the field, which is exactly where it cannot be
+          # debugged.
+          if file dist/ghost-linux-amd64 | grep -q 'dynamically linked'; then
+            file dist/ghost-linux-amd64; exit 1
+          fi
+          ./dist/ghost-linux-amd64 version
+
+      # The version a ghost reports is the one an operator uses to
+      # answer "which agent produced this scan", so it is checked out
+      # of the artefact rather than trusted from the Makefile.
+      #
+      # `ghost version` prints "ghost <ver> (os/arch, goVER)". The
+      # second field is the version; cut it out rather than regex the
+      # line, so a change to the surrounding text fails loudly here
+      # instead of quietly matching nothing.
+      - name: The release binaries carry a release version
+        if: env.RUN == 'true'
+        working-directory: ghost
+        env:
+          WANT: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          got=$(./dist/ghost-linux-amd64 version | awk '{print $2}')
+          ../scripts/check-version.sh "$got"
+          if [ "$got" != "$WANT" ]; then
+            echo "::error::the binary says $got and VERSION says $WANT." >&2
+            exit 1
+          fi
+
+      # And the image, which is what most deployments actually run.
+      # Built with the same argument, checked the same way: an image
+      # that reports a dev version must never be publishable, and
+      # images.yml and this job build it identically.
+      - name: The agent image carries a release version
+        if: env.RUN == 'true'
+        env:
+          WANT: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          got=$(docker run --rm --entrypoint /usr/local/bin/ghost \
+                  ghost-agent version | awk '{print $2}')
+          scripts/check-version.sh "$got"
+          if [ "$got" != "$WANT" ]; then
+            echo "::error::the image says $got and VERSION says $WANT." >&2
+            exit 1
+          fi
+
+      # The other direction, and it is not symmetry for its own sake.
+      # Every check above would still pass if the dev suffix had simply
+      # stopped being produced — and then a developer's build would
+      # wear a release number, which is the failure the whole
+      # arrangement exists to prevent. A guard that cannot fail is not
+      # a guard.
+      - name: A plain build is still marked as a dev build
+        if: env.RUN == 'true'
+        working-directory: ghost
+        run: |
+          set -euo pipefail
+          make build
+          got=$(./ghost version | awk '{print $2}')
+          echo "unreleased build reports $got"
+          case "$got" in
+            *-dev-*) ;;
+            *) echo "::error::a build with no ODDJOB_RELEASE reported '$got'," >&2
+               echo "::error::which carries no -dev- marker. The suffix has" >&2
+               echo "::error::stopped working and nothing downstream would" >&2
+               echo "::error::notice a dev build wearing a release number." >&2
+               exit 1 ;;
+          esac
+          rm -f ghost
+
+      # The auto-update overlay, checked for the two ways it fails
+      # silently rather than loudly.
+      #
+      # Watchtower matches containers by label. A scope label that
+      # does not match WATCHTOWER_SCOPE — a typo, a rename, one of
+      # the two edited without the other — produces no error
+      # anywhere: watchtower starts, finds nothing in scope, polls
+      # happily forever, and the fleet simply never updates. The
+      # first sign is an agent discovered to be months behind.
+      #
+      # And the overlay must stay opt-in. If the label or the
+      # watchtower service ever leaked into the base compose, every
+      # Ghost deployed from it would acquire a container with the
+      # docker socket — on hosts that, for a Ghost, are often not
+      # ours to grant that on.
+      - name: The auto-update overlay is wired up and still opt-in
+        if: env.RUN == 'true'
+        working-directory: ghost
+        env:
+          GHOST_SERVER: https://example.invalid
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml \
+                         -f docker-compose.autoupdate.yaml \
+                         config --format json > /tmp/overlay.json
+          docker compose -f docker-compose.yml config --format json > /tmp/base.json
+          python3 - <<'PY'
+          import json, sys
+
+          LABEL = "com.centurylinklabs.watchtower.scope"
+          fail = []
+
+          over = json.load(open("/tmp/overlay.json"))["services"]
+          base = json.load(open("/tmp/base.json"))["services"]
+
+          lab = over["ghost"].get("labels", {}).get(LABEL)
+          scope = over["watchtower-ghost"]["environment"]["WATCHTOWER_SCOPE"]
+          if lab != scope or not lab:
+              fail.append(f"scope label {lab!r} != WATCHTOWER_SCOPE {scope!r}: "
+                          "watchtower would match no container and the fleet "
+                          "would never update, silently")
+
+          # The overlay must not quietly undo what the Ghost needs to
+          # scan with. Merging compose files is positional and easy to
+          # get wrong.
+          if over["ghost"].get("network_mode") != "host":
+              fail.append("the overlay dropped host networking")
+          if set(over["ghost"].get("cap_add") or []) != {"NET_RAW", "NET_ADMIN"}:
+              fail.append(f"cap_add is now {over['ghost'].get('cap_add')}")
+
+          if LABEL in base["ghost"].get("labels", {}):
+              fail.append("the scope label leaked into the base compose")
+          if len(base) != 1 or "ghost" not in base:
+              fail.append(f"base compose grew services: {sorted(base)}")
+
+          for f in fail:
+              print(f"::error::{f}", file=sys.stderr)
+          sys.exit(1 if fail else 0)
+          PY
+          echo "overlay: label matches scope, opt-in, Ghost unchanged"
+
+  docker:
+    name: image builds and the stack comes up
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v3
+
+      # Built separately from `compose up` so it can use the layer
+      # cache: `compose up --build` drives the legacy builder, which
+      # has none. Compose then finds the tag already present and
+      # starts it rather than building again.
+      #
+      # Single-arch on purpose. This job asks "does it start", and the
+      # arm64 answer is the same one — the multi-arch build belongs in
+      # images.yml, where it is published.
+      - name: Build the image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v6
+        with:
+          context: .
+          load: true
+          tags: oddjob-ci:latest
+          cache-from: type=gha,scope=ci-oddjob
+          # WRITTEN ONLY ON MAIN, read everywhere.
+          #
+          # Exporting this cost 252 seconds of an 11m42s build -- 108
+          # of them in "preparing build cache for export" alone --
+          # and `mode=max` exports every intermediate layer of every
+          # stage, including the Go builder.
+          #
+          # A branch writing it is near-pure waste: the scope is
+          # shared, so each branch overwrites the last, and the
+          # layer it most wants to preserve is invalidated on the
+          # next commit anyway because `bump-build` moves VERSION
+          # and `COPY VERSION` sits above the compile. Main writes
+          # the baseline; branches read it and skip the export.
+          cache-to: ${{ github.event_name == 'push'
+                     && 'type=gha,scope=ci-oddjob,mode=max' || '' }}
+
+      # Building is not the claim worth testing — starting is. The
+      # interesting failures are the entrypoint, the migrations against
+      # a real database, and whether the API actually serves the built
+      # UI out of the image.
+      - name: Bring the stack up
+        env:
+          ODDJOB_IMAGE: oddjob-ci:latest
+        run: |
+          set -euo pipefail
+          printf 'POSTGRES_PASSWORD=ci-not-a-real-secret\nAPP_PORT=8000\n' > .env
+          docker compose up -d
+          for i in $(seq 1 60); do
+            state=$(docker inspect --format '{{.State.Health.Status}}' oddjob-app-1 2>/dev/null || echo starting)
+            [ "$state" = "healthy" ] && break
+            [ "$i" = "60" ] && { docker compose logs; exit 1; }
+            sleep 5
+          done
+
+      - name: It serves the API and the built UI
+        run: |
+          set -euo pipefail
+          curl -fsS http://127.0.0.1:8000/api/auth/setup-required | grep -q setup_required
+          curl -fsS -H 'Accept: text/html' http://127.0.0.1:8000/ | grep -qE 'assets/index-[^"]+\.js'
+          curl -fsS -o /dev/null http://127.0.0.1:8000/favicon.ico
+
+      # The one check that actually proves a `-dev-` version cannot
+      # reach main: it asks the built image what version it is, rather
+      # than asking the repository what it ought to be.
+      #
+      # The image gets its answer from app/version.py, which appends
+      # the dev suffix whenever a `.git` directory sits beside VERSION.
+      # `.git` is in .dockerignore, so a correctly built image cannot
+      # report one — and if that ever stops being true, this fails on
+      # the PR that broke it rather than on the first promotion after.
+      #
+      # Asked of python for the same reason as the uid check below:
+      # the runtime image is distroless and there is no shell in it.
+      - name: The image reports a release version
+        run: |
+          set -euo pipefail
+          got=$(docker compose exec -T app /opt/venv/bin/python \
+                  -c 'from app.version import VERSION; print(VERSION)' | tr -d '\r')
+          scripts/check-version.sh "$got"
+          want=$(scripts/version.sh --release)
+          if [ "$got" != "$want" ]; then
+            echo "::error::the image says $got and VERSION says $want." >&2
+            exit 1
+          fi
+
+      - name: Migrations ran, and against Postgres
+        run: |
+          set -euo pipefail
+          docker compose exec -T app alembic current | grep -q '(head)'
+          docker compose logs app | grep -q 'db: postgresql'
+
+      # Asked of python, not of `id`. The runtime image is distroless:
+      # no shell and no coreutils, so `id -u` is not in it to run.
+      # That is the point of the image rather than a limitation of it,
+      # but it does mean this check has to go through the one
+      # interpreter that is present.
+      - name: It does not run as root
+        run: |
+          uid=$(docker compose exec -T app /opt/venv/bin/python -c 'import os;print(os.getuid())' | tr -d '\r')
+          echo "running as uid $uid"
+          test "$uid" != "0"
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  version:
+    name: the version is a releasable one
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The dev suffix is the commit timestamp, so the check needs
+          # a commit to read. A shallow checkout has one; this is here
+          # to say the dependency is deliberate.
+          fetch-depth: 1
+
+      # `VERSION` is a bare semver triple, the release path produces
+      # no `-dev-` suffix, and the default path still produces one.
+      #
+      # The test lives in scripts/check-version.sh because the
+      # pre-commit hook, bump-version.yml, images.yml and promote.yml
+      # all run the same one. Two copies would eventually disagree,
+      # and the one that matters is whichever is weaker.
+      #
+      # This job checks the FILE and the SCRIPT. The checks that a
+      # built artefact carries a release version live in the `ghost`
+      # and `docker` jobs, where the artefacts are — a clean file and
+      # an image built without --release is the interesting failure,
+      # and nothing here could see it.
+      - name: Version
+        run: scripts/check-version.sh
+
+  secrets:
+    name: no secrets or client data
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # This repository is public and the application it builds handles
+      # client engagement data. A credential or a client hostname landing
+      # here is a disclosure, so it fails the build rather than waiting
+      # to be noticed in review.
+      #
+      # The test itself lives in scripts/check-secrets.sh, because the
+      # pre-commit hook runs the same one. Two copies would eventually
+      # disagree, and the one that matters is whichever is weaker.
+      - name: Scan for credentials and committed databases
+        run: scripts/check-secrets.sh
+
+      # A different job from the check above, not a replacement for it.
+      # TruffleHog verifies a candidate against the provider, so it
+      # finds live keys in shapes nobody here thought to write down.
+      # The check above finds the shapes that matter to this repository
+      # even when the key is already revoked — which is most of them by
+      # the time anyone looks. Neither subsumes the other.
+      #
+      # `--only-verified`: without it every high-entropy string is a
+      # finding, and on a repository full of example tokens and test
+      # fixtures that is all noise. A scanner people learn to ignore is
+      # worse than no scanner.
+      #
+      # Scans the full history, which is why the checkout above is
+      # fetch-depth: 0 — a key removed in the next commit is still
+      # disclosed, and that is the case worth catching.
+      - name: TruffleHog
+        uses: trufflesecurity/trufflehog@b2b0a92070f206ab7b5a1105d82a7f2f48d92341 # v3.99.0
+        with:
+          path: ./
+          extra_args: --only-verified
+
+  # ---------------------------------------------------------------- linters
+  # Separate jobs rather than steps bolted onto the suites above, so a
+  # style finding reads as a style finding and does not sit under a
+  # heading that says "tests". They also run in parallel with them,
+  # which the long ones do not leave room for otherwise.
+
+  python-lint:
+    name: python lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install
+        working-directory: backend
+        run: uv sync --locked
+
+      # Out of uv.lock rather than astral-sh/ruff-action: the action
+      # installs its own ruff, so CI and a developer's checkout could
+      # drift to different versions and disagree about a clean tree.
+      # This pins the linter in the same file as everything else and
+      # needs no fourth third-party action to vouch for.
+      #
+      # Lint only. `ruff format` would rewrite 103 of 105 files — see
+      # the comment above [tool.ruff] in backend/pyproject.toml.
+      - name: Ruff
+        working-directory: backend
+        run: uv run ruff check --output-format github .
+
+  go-lint:
+    name: go lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # golangci-lint only analyses the host GOOS, so a linux-only run
+    # never opens mem_darwin.go, priv_windows.go or priv_notlinux.go —
+    # the same blind spot the `ghost` job's cross-compile step exists
+    # to close.
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, windows]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+          cache-dependency-path: ghost/go.sum
+          # See the ghost job: setup-go's cache stored nothing, so it
+          # is off here too and the caching is explicit below.
+          cache: false
+
+      # Per-GOOS, because that is what is being cached. golangci-lint
+      # type-checks the whole dependency graph for the GOOS it is
+      # analysing, and a linux build cache does nothing for the darwin
+      # leg -- which is the entire reason this job is a matrix.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-lint-${{ matrix.goos }}-${{ hashFiles('ghost/go.sum') }}
+          restore-keys: |
+            go-${{ runner.os }}-lint-${{ matrix.goos }}-
+
+      # The linter version is pinned as well as the action: a new
+      # golangci-lint release adds checks, and an unpinned one turns a
+      # green PR red for a reason nobody in that PR introduced.
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        env:
+          GOOS: ${{ matrix.goos }}
+        with:
+          version: v2.14.0
+          working-directory: ghost
+
+  frontend-lint:
+    name: frontend lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+
+      # ESLint parses the TypeScript through Babel, not through the
+      # compiler: typescript-eslint cannot load against TypeScript 7.
+      # See the header of frontend/eslint.config.js.
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+  dockerfile-lint:
+    name: dockerfile lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # One step per file. The action's `recursive` mode globs
+      # **/Dockerfile instead, which would quietly widen to whatever a
+      # future subdirectory drops in. Naming both is the version that
+      # cannot silently start or stop covering something.
+      #
+      # Severity lives in .hadolint.yaml (failure-threshold: style —
+      # every rule fails). The action always exports
+      # HADOLINT_FAILURE_THRESHOLD=info, and the config file beats the
+      # environment, so it is not restated here.
+      - name: Oddjob image
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+
+      # Runs even if the step above failed, so one push reports both
+      # files rather than making you fix one to see the other.
+      - name: Ghost agent image
+        if: '!cancelled()'
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: ghost/Dockerfile
+          config: .hadolint.yaml

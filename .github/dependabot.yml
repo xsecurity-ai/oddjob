@@ -1,0 +1,139 @@
+# Dependency updates.
+#
+# Grouped, because this repository has three ecosystems and ungrouped
+# updates produce a dozen pull requests a week that nobody reads — which
+# is worse than none, since the security ones get lost among them.
+#
+# Security updates are NOT grouped: they arrive separately and
+# immediately, whatever the schedule below says.
+version: 2
+
+updates:
+  - package-ecosystem: uv
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+    # Hold a new release for a week before offering it. The window
+    # a malicious publish is live before it is caught and yanked is
+    # usually hours; opening the PR immediately is how it gets
+    # merged inside that window. Security advisories are exempt and
+    # still arrive at once.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      backend-minor-and-patch:
+        update-types: [minor, patch]
+    labels: [dependencies, backend]
+    commit-message:
+      prefix: "deps(backend)"
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    # Hold a new release for a week before offering it. The window
+    # a malicious publish is live before it is caught and yanked is
+    # usually hours; opening the PR immediately is how it gets
+    # merged inside that window. Security advisories are exempt and
+    # still arrive at once.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      # MUI first: a dependency goes to the FIRST group it matches, and
+      # the catch-all below would otherwise claim it. Its packages ship
+      # in lockstep, and splitting them across pull requests produces a
+      # build that cannot resolve peer versions — which is exactly what
+      # happened on the first run, with @mui/material and
+      # @mui/x-data-grid arriving as separate majors.
+      mui:
+        patterns: ["@mui/*"]
+        update-types: [major, minor, patch]
+      # Vite and its React plugin have to move together too; the plugin
+      # pins a vite peer range.
+      vite:
+        patterns: ["vite", "@vitejs/*"]
+        update-types: [major, minor, patch]
+      frontend-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # TanStack Table v9 is a breaking rewrite, not a version bump:
+      # `getCoreRowModel` becomes `createCoreRowModel`, `useReactTable`
+      # becomes `useTable`, `VisibilityState` becomes
+      # `ColumnVisibilityState`, `ColumnDef` grows a features type
+      # argument, and the table is assembled from opt-in feature
+      # objects rather than one table with everything compiled in.
+      #
+      # It is a real upgrade worth doing — v9 is the stable line and
+      # v8 is now a major behind — but it is a deliberate migration
+      # against the documentation, not something to take on a
+      # dependabot PR. Every table in the app renders through
+      # `TableGrid.tsx`, so getting the feature set subtly wrong
+      # breaks selection or column visibility everywhere at once, and
+      # the type errors do not say which.
+      #
+      # Majors only: 9.x minors and patches still arrive once we go.
+      - dependency-name: "@tanstack/react-table"
+        update-types: [version-update:semver-major]
+    labels: [dependencies, frontend]
+    commit-message:
+      prefix: "deps(frontend)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    # Hold a new release for a week before offering it. The window
+    # a malicious publish is live before it is caught and yanked is
+    # usually hours; opening the PR immediately is how it gets
+    # merged inside that window. Security advisories are exempt and
+    # still arrive at once.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: "deps(ci)"
+
+  # The agent's Go module. It was missing entirely — the one component
+  # that runs on someone else's network had no dependency updates at
+  # all, which is the opposite of the order you would choose.
+  - package-ecosystem: gomod
+    directory: /ghost
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    groups:
+      ghost-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # The amass internals are a LOCKED SET, not independent
+      # libraries. amass v4.2.0 requires asset-db v0.3.3, config
+      # v0.1.4 and open-asset-model v0.2.0, and those three have to
+      # agree with each other: #59 moved config and open-asset-model
+      # to 0.8.0, left asset-db where amass pins it, and the build
+      # stopped compiling — `oam.ASN` and `network.RIROrganization`
+      # simply do not exist any more, and `Cidr` became `CIDR`.
+      #
+      # They are direct requirements because `ghost/internal/tasks/
+      # amass.go` imports config and open-asset-model by hand, not
+      # because they are ours to upgrade. They move when amass moves.
+      #
+      # These are pre-1.0, where the MINOR is the breaking position,
+      # so "minor-and-patch" is not the safe category it is for
+      # everything else in this group — which is exactly how a
+      # build-breaking change arrived labelled as a routine bump.
+      - dependency-name: "github.com/owasp-amass/*"
+    labels: [dependencies, ghost]
+    commit-message:
+      prefix: "deps(ghost)"

@@ -501,7 +501,7 @@ build or release anything.
 
 Then **promote** turns a published image into a release: it reads the
 version off the image's own label, retags that **digest** as
-`cr0n1c/oddjob:vX.Y.Z` / `:X.Y.Z` and the same for `cr0n1c/ghost`, and
+`cr0n1cx/oddjob:vX.Y.Z` / `:X.Y.Z` and the same for `cr0n1cx/ghost`, and
 pushes the matching git tag onto the commit the image was built from.
 It never rebuilds — the released bytes are the bytes that were running
 overnight — and it computes no version of its own.
@@ -511,8 +511,8 @@ hub tags get pruned and hand-edited, a git tag is what you check out to
 reproduce a release. To prove a release is the image it claims to be:
 
 ```bash
-docker buildx imagetools inspect cr0n1c/oddjob:v0.0.2 --format '{{json .Manifest.Digest}}'
-docker buildx imagetools inspect cr0n1c/oddjob:nightly --format '{{json .Manifest.Digest}}'
+docker buildx imagetools inspect cr0n1cx/oddjob:v0.0.2 --format '{{json .Manifest.Digest}}'
+docker buildx imagetools inspect cr0n1cx/oddjob:nightly --format '{{json .Manifest.Digest}}'
 ```
 
 ### Local builds say so

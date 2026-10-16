@@ -19,7 +19,7 @@ services:
     # `docker buildx build -t` and starts it instead of rebuilding
     # with the legacy builder, which has no layer cache; and setting
     # GHOST_IMAGE to a published tag runs that instead of building at
-    # all — `GHOST_IMAGE=cr0n1c/ghost:v1.2.0 docker compose up -d`.
+    # all — `GHOST_IMAGE=cr0n1cx/ghost:v1.2.0 docker compose up -d`.
     #
     # A published tag is also what `docker-compose.autoupdate.yaml`
     # needs. Auto-update against the default `ghost-agent` compares

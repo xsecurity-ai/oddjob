@@ -1,0 +1,352 @@
+# Published images for oddjob and ghost.
+#
+# Three triggers, three moving pointers, one build:
+#
+#   push to main   -> :develop     every merge, so there is always an
+#                                  image of what main currently is
+#   schedule       -> :nightly     what promote.yml draws from
+#   workflow_dispatch              either, for a rebuild by hand
+#
+# and under all of them `:src-<key>`, which is the durable one. The
+# moving names are conveniences; `src-<key>` is the fact.
+#
+# ---------------------------------------------------------------- keys
+#
+# Each image is keyed on a hash of ITS OWN inputs and the build is
+# skipped when an image already exists for that key. `paths:` cannot do
+# this: path filters are ignored on a `schedule` trigger, so a nightly
+# either rebuilds every night regardless — republishing byte-identical
+# images and making "when did this change?" unanswerable — or it does
+# not run at all. The key is also stricter than "did any commit land":
+# a README change, or a change to the other image's source, correctly
+# rebuilds nothing.
+#
+# The two images are not symmetric, and this is the part worth reading:
+#
+#   ghost  <- ghost/
+#   oddjob <- backend/ frontend/ docker/ Dockerfile AND ghost/
+#
+# because the oddjob image compiles the ghost binaries into itself for
+# the download endpoint. A ghost-only change therefore rebuilds both,
+# which is exactly what a naive `paths: ghost/**` filter on the oddjob
+# job would get wrong.
+#
+# ------------------------------------------------- why a retag branch
+#
+# "Already built" cannot mean "do nothing", now that there is more than
+# one pointer. A merge builds `src-X` and moves `:develop` to it; the
+# 03:17 run that night finds `src-X` already published and, if it
+# simply skipped, would leave `:nightly` on whatever it pointed at
+# before — and promote.yml draws from `:nightly`, so the version number
+# would go on stale bytes.
+#
+# So a skipped build still moves its pointer, with `imagetools create`
+# against the existing digest. Seconds rather than twenty minutes, and
+# `:develop` and `:nightly` are then provably the same bytes whenever
+# the source is the same, rather than two builds that ought to match.
+name: images
+
+on:
+  push:
+    branches: [main]
+    # Deliberately no `paths:` filter. The content key below already
+    # decides, and a second mechanism that can disagree with it is how
+    # you get a push that skips a build the key says is needed — after
+    # a revert, for instance, where the paths changed but the tree went
+    # back to one already built.
+  schedule:
+    # 03:17 UTC. Not on the hour: GitHub queues scheduled runs hard at
+    # :00 and a nightly that waits twenty minutes for a runner is a
+    # nightly that sometimes does not happen.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      pointer:
+        description: 'Which moving tag to move'
+        type: choice
+        options: [develop, nightly]
+        default: develop
+      force:
+        description: 'Rebuild even if an image already exists for this source'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # Grouped by the pointer this run owns, not by the workflow. Two
+  # merges in quick succession should cancel each other — the first
+  # build is already superseded and the arm64 leg has twenty minutes
+  # left to run — but a merge must NOT kill the 03:17 run, or
+  # `:nightly` silently misses a night on a busy day.
+  group: images-${{ (github.event_name == 'workflow_dispatch' && inputs.pointer) || (github.event_name == 'schedule' && 'nightly') || 'develop' }}
+  # Safe to cancel mid-build because of the retag branch below. buildx
+  # pushes blobs before manifests, so a tag that resolves at all is
+  # complete; the worst a cancellation leaves is `src-<key>` published
+  # with its pointer not yet moved, and the next run finds that key,
+  # takes the retag path and moves the pointer onto it. The failure
+  # mode repairs itself on the next run rather than needing a human.
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      ghost_key: ${{ steps.k.outputs.ghost_key }}
+      oddjob_key: ${{ steps.k.outputs.oddjob_key }}
+      ghost_build: ${{ steps.k.outputs.ghost_build }}
+      oddjob_build: ${{ steps.k.outputs.oddjob_build }}
+      pointer: ${{ steps.k.outputs.pointer }}
+      dated: ${{ steps.k.outputs.dated }}
+      version: ${{ steps.k.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Work out what changed, and which pointer this run owns
+        id: k
+        env:
+          FORCE: ${{ inputs.force }}
+          EVENT: ${{ github.event_name }}
+          WANT: ${{ inputs.pointer }}
+        run: |
+          set -euo pipefail
+          # The version is an input to both images — it is stamped
+          # into the Go binaries and into the OCI labels — so it has to
+          # be part of both keys. Without it, a release that only bumps
+          # VERSION changes no tree under `ghost/`, the key is
+          # unchanged, this job takes the retag path, and `:nightly`
+          # ends up pointing at bytes whose label still says the old
+          # number. promote.yml then reads that label and puts the old
+          # version on the new release. The whole chain is only
+          # coherent if a version bump is a rebuild.
+          version=$(scripts/version.sh --release)
+          scripts/check-version.sh "$version"
+
+          # `git rev-parse HEAD:<path>` is the tree hash: it changes
+          # when the contents change and not otherwise. Commit SHAs
+          # would rebuild on every merge, which is the thing being
+          # avoided.
+          ghost_key=$(
+            { git rev-parse "HEAD:ghost"
+              printf 'version=%s\n' "$version"
+            } | sha256sum | cut -c1-16)
+          odd_tree=$(
+            { git rev-parse "HEAD:backend" "HEAD:frontend" "HEAD:docker" "HEAD:ghost"
+              git rev-parse "HEAD:Dockerfile"
+              printf 'version=%s\n' "$version"
+            } | sha256sum | cut -c1-16)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          case "$EVENT" in
+            schedule)          pointer=nightly ;;
+            workflow_dispatch) pointer="${WANT:-develop}" ;;
+            *)                 pointer=develop ;;
+          esac
+          # A second, immutable name alongside the moving one, so a
+          # deployment can pin to the exact thing it was given rather
+          # than to a label that moves under it.
+          if [ "$pointer" = "nightly" ]; then
+            dated="nightly-$(date -u +%Y%m%d)"
+          else
+            dated="develop-$(git rev-parse --short HEAD)"
+          fi
+          {
+            echo "ghost_key=$ghost_key"
+            echo "oddjob_key=$odd_tree"
+            echo "pointer=$pointer"
+            echo "dated=$dated"
+          } >> "$GITHUB_OUTPUT"
+
+          # Does an image already exist for that exact source? If so
+          # this run retags rather than rebuilds. `docker manifest
+          # inspect` needs no login for a public repo and no pull.
+          need() {
+            if [ "$FORCE" = "true" ]; then echo true; return; fi
+            if docker manifest inspect "docker.io/cr0n1cx/$1:src-$2" >/dev/null 2>&1
+            then echo false; else echo true; fi
+          }
+          echo "ghost_build=$(need ghost "$ghost_key")"   >> "$GITHUB_OUTPUT"
+          echo "oddjob_build=$(need oddjob "$odd_tree")"  >> "$GITHUB_OUTPUT"
+
+      - name: Say what will happen
+        run: |
+          {
+            echo "### Plan — moving \`:${{ steps.k.outputs.pointer }}\`"
+            echo ""
+            echo "Version \`${{ steps.k.outputs.version }}\`, from \`VERSION\`."
+            echo "It is stamped into the binaries and into the"
+            echo "\`org.opencontainers.image.version\` label, and promote.yml"
+            echo "reads it back off the label to decide the release tag."
+            echo ""
+            echo "| image | source key | action |"
+            echo "|---|---|---|"
+            echo "| ghost | \`${{ steps.k.outputs.ghost_key }}\` | ${{ steps.k.outputs.ghost_build == 'true' && 'build' || 'retag existing' }} |"
+            echo "| oddjob | \`${{ steps.k.outputs.oddjob_key }}\` | ${{ steps.k.outputs.oddjob_build == 'true' && 'build' || 'retag existing' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # One job per architecture, each on a runner of that architecture.
+  # Nothing is emulated: `ubuntu-24.04-arm` is real arm64 hardware, and
+  # it is free for public repositories.
+  #
+  # Each leg pushes BY DIGEST — no tag — and hands its digest to the
+  # merge job, which assembles one manifest list and puts the names on
+  # it. Tagging in the legs instead would have the second one overwrite
+  # the first and leave a single-architecture image under a name that
+  # claims to serve both.
+  build:
+    needs: plan
+    if: needs.plan.outputs.ghost_build == 'true' || needs.plan.outputs.oddjob_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v3
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: ghost
+        id: ghost
+        if: needs.plan.outputs.ghost_build == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v6
+        with:
+          context: ./ghost
+          platforms: linux/${{ matrix.arch }}
+          # The ghost image's build context is `ghost/`, which does not
+          # contain the repository-root VERSION file and cannot without
+          # creating a second copy of it. So the version is handed in.
+          # It came from `scripts/version.sh --release` in the plan job
+          # above, which read that one file.
+          build-args: |
+            GHOST_VERSION=${{ needs.plan.outputs.version }}
+          # Labels, not tags. A version TAG means "this was released",
+          # and only promote.yml says that — see its header. A version
+          # LABEL means "these bytes were built from VERSION = X",
+          # which is true of every develop and nightly build and is
+          # exactly what promote.yml needs to read back so it can put
+          # the right number on the digest it is promoting without
+          # recomputing it from anywhere else.
+          #
+          # `revision` is the commit, so promote.yml can put the git
+          # tag on the commit that produced the image rather than on
+          # whatever main happens to be when somebody presses the
+          # button. "Check out the tag to reproduce the release" is
+          # only true if the tag is on that commit.
+          #
+          # `source-key` is this repository's content key, so the
+          # release tag can be checked against the `src-<key>` tag it
+          # came from: the two must resolve to the same digest.
+          labels: |
+            org.opencontainers.image.version=${{ needs.plan.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            ai.xsecurity.source-key=${{ needs.plan.outputs.ghost_key }}
+          outputs: type=image,name=docker.io/cr0n1cx/ghost,push-by-digest=true,name-canonical=true,push=true
+          # Registry, not type=gha. GitHub's Actions cache is 10 GB for
+          # the whole repository with LRU eviction, and `mode=max` on
+          # four scopes here plus two in CI does not fit — they evict
+          # each other and the cache silently stops working, which
+          # looks exactly like having no cache at all. A cache ref in
+          # the registry has no such cap, and is shared across
+          # branches and runners rather than per-repo-per-key.
+          cache-from: type=registry,ref=docker.io/cr0n1cx/ghost:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=docker.io/cr0n1cx/ghost:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
+
+      - name: oddjob
+        id: oddjob
+        if: needs.plan.outputs.oddjob_build == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          # No build-args: this context is the repository root, so the
+          # Dockerfile reads VERSION out of it directly. The labels are
+          # here for the same reason as on the ghost image above —
+          # promote.yml reads them rather than recomputing anything.
+          labels: |
+            org.opencontainers.image.version=${{ needs.plan.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            ai.xsecurity.source-key=${{ needs.plan.outputs.oddjob_key }}
+          outputs: type=image,name=docker.io/cr0n1cx/oddjob,push-by-digest=true,name-canonical=true,push=true
+          # Registry for the same reason as ghost above. `image-manifest`
+          # so Docker Hub accepts it as an ordinary tag rather than
+          # rejecting the OCI index form.
+          cache-from: type=registry,ref=docker.io/cr0n1cx/oddjob:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=docker.io/cr0n1cx/oddjob:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
+
+      # A file per digest rather than one file both legs write: two
+      # runners uploading the same artifact name is a race, and the
+      # loser's architecture silently vanishes from the manifest.
+      - name: Hand the digests to the merge
+        env:
+          GHOST_DIGEST: ${{ steps.ghost.outputs.digest }}
+          ODDJOB_DIGEST: ${{ steps.oddjob.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          # Empty when that image did not need building. Written only
+          # when there is something to write, so the merge can tell
+          # "not built this run" from "built and lost".
+          [ -z "$GHOST_DIGEST" ]  || echo "$GHOST_DIGEST"  > "/tmp/digests/ghost-$ARCH"
+          [ -z "$ODDJOB_DIGEST" ] || echo "$ODDJOB_DIGEST" > "/tmp/digests/oddjob-$ARCH"
+          ls -l /tmp/digests
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assemble the per-architecture images into one manifest list and put
+  # the names on it. Also the home of the retag path: an image that
+  # already exists for this source is not rebuilt, only pointed at.
+  publish:
+    needs: [plan, build]
+    # `always()` so the retag path still runs when `build` was skipped
+    # for having nothing to build. Without it a run that only needs to
+    # move a pointer would do nothing at all — which is the bug this
+    # whole arrangement exists to avoid.
+    if: always() && needs.plan.result == 'success' && needs.build.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v3
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        if: needs.build.result == 'success'
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Name the images
+        env:
+          GHOST_KEY: ${{ needs.plan.outputs.ghost_key }}
+          ODDJOB_KEY: ${{ needs.plan.outputs.oddjob_key }}
+          GHOST_BUILD: ${{ needs.plan.outputs.ghost_build }}
+          ODDJOB_BUILD: ${{ needs.plan.outputs.oddjob_build }}
+          POINTER: ${{ needs.plan.outputs.pointer }}
+          DATED: ${{ needs.plan.outputs.dated }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published"
+            echo "| image | tags | digest | how |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          .github/scripts/publish.sh ghost  "$GHOST_KEY"  "$GHOST_BUILD"
+          .github/scripts/publish.sh oddjob "$ODDJOB_KEY" "$ODDJOB_BUILD"

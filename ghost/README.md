@@ -231,7 +231,7 @@ written out, `network_mode: host` included.
 restarts a Ghost when the tag it runs moves:
 
 ```bash
-GHOST_IMAGE=cr0n1c/ghost:nightly GHOST_SERVER=https://oddjob.internal \
+GHOST_IMAGE=cr0n1cx/ghost:nightly GHOST_SERVER=https://oddjob.internal \
   docker compose -f docker-compose.yml -f docker-compose.autoupdate.yaml up -d
 ```
 

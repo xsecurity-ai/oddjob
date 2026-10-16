@@ -1,0 +1,83 @@
+# Engagement data and secrets. This repository is PUBLIC; everything in
+# this first block would be a breach, not an inconvenience.
+#
+# The SQLite database holds real findings, credentials and captured
+# HTTP exchanges — session cookies included — for live engagements.
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# The JWT signing key. Anyone holding it can mint a session for any user.
+.secret
+
+# Connection strings, tokens, anything sourced into a shell.
+pg.env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!**/testdata/*.key
+id_rsa*
+
+# Scanner output and evidence. Not ours to publish.
+# These are deliberately unanchored: an engagement directory can turn up
+# anywhere under here and the cost of missing one is publishing a
+# client's data. The cost of a false positive is a build error, which is
+# the trade we want.
+*.nessus
+*.gnmap
+*.nmap
+evidence/
+loot/
+scans/
+recon/
+
+# ...which caught our own source. `recon/` above matches a directory of
+# that name at any depth, so the agent's recon package was silently left
+# out of a commit and only CI noticed, because a local build still had
+# the file on disk. Un-ignoring a path inside an ignored directory needs
+# the directory itself re-included, not just the files under it.
+#
+# These paths are the AGENT's, and the agent was renamed drone -> ghost.
+# The escape hatch kept pointing at the old name, which no longer exists,
+# so the bug above was live again and invisible: the tracked files stayed
+# tracked, and only a NEW file under ghost/internal/recon/ would have gone
+# missing. Rename both halves together or neither works.
+!ghost/internal/recon/
+!ghost/internal/recon/**
+
+# Reports, which are client deliverables.
+*.docx
+!docs/**/*.docx
+
+# ---------------------------------------------------------------- build
+node_modules/
+dist/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.tsbuildinfo
+
+# ------------------------------------------------------------- editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Agent worktrees. Checkouts of this same repo, created while work is
+# parallelised; committing them as gitlinks points at branches that do
+# not exist for anyone else.
+.claude/worktrees/
+
+# `make build` writes the host binary into the source tree. It is
+# 7 MB of build output and it got committed once by `git add -A`.
+# ghost/Makefile sets BINARY := ghost, so this is ghost/ghost now.
+/ghost/ghost
+/ghost/ghost.exe

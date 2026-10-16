@@ -192,7 +192,7 @@ because an unrelated `:latest` moved.
 
 ## Which image to run
 
-CI publishes to Docker Hub as `cr0n1c/oddjob` and `cr0n1c/ghost`, both
+CI publishes to Docker Hub as `cr0n1cx/oddjob` and `cr0n1cx/ghost`, both
 `linux/amd64` and `linux/arm64`:
 
 | tag | moves | what it is |
@@ -214,7 +214,7 @@ production to it:
 
 ```bash
 # what is :develop right now
-docker buildx imagetools inspect cr0n1c/oddjob:develop \
+docker buildx imagetools inspect cr0n1cx/oddjob:develop \
   --format '{{json .Manifest.Digest}}'
 ```
 
