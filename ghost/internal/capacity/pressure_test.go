@@ -36,7 +36,7 @@ func TestAssess(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			blocked, reason := assess(c.mem, c.cpu)
+			blocked, reason, key := assess(c.mem, c.cpu, false)
 			if blocked != c.blocked {
 				t.Fatalf("assess(%v, %v) blocked=%v, want %v (%q)",
 					c.mem, c.cpu, blocked, c.blocked, reason)
@@ -51,6 +51,11 @@ func TestAssess(t *testing.T) {
 			// which means it needs the numbers, not just a verdict.
 			if blocked && !strings.Contains(reason, "%") {
 				t.Errorf("reason %q carries no figure", reason)
+			}
+			// The key is what the log deduplicates on, so it must
+			// be set exactly when there is something to say.
+			if blocked == (key == "") {
+				t.Errorf("blocked=%v but key=%q", blocked, key)
 			}
 		})
 	}
@@ -77,7 +82,7 @@ func TestFractionGuards(t *testing.T) {
 // either real figures in range, or Unknown. What it must never do is
 // invent a reading, because a wrong one here stops a fleet.
 func TestCheckIsSaneOnThisHost(t *testing.T) {
-	p := Check(context.Background())
+	p := Check(context.Background(), false)
 	for _, f := range []struct {
 		name string
 		v    float64
@@ -173,7 +178,7 @@ MemAvailable:    100000 kB
 	if f >= reserveFraction {
 		t.Fatalf("10%% free read as %v, which would not block", f)
 	}
-	blocked, reason := assess(f, 0.9)
+	blocked, reason, _ := assess(f, 0.9, false)
 	if !blocked {
 		t.Errorf("a host with 10%% memory free was not held off (%q)", reason)
 	}
@@ -201,7 +206,89 @@ func TestFractionU(t *testing.T) {
 		t.Errorf("fractionU(8GiB, 32GiB) = %v, want 0.25", got)
 	}
 	// ...and that reading must not be mistaken for starvation.
-	if blocked, why := assess(fractionU(8*giB, 32*giB), 0.9); blocked {
+	if blocked, why, _ := assess(fractionU(8*giB, 32*giB), 0.9, false); blocked {
 		t.Errorf("a host with 8 GiB of 32 GiB free was held off: %q", why)
+	}
+}
+
+// Two thresholds, because one made the fleet flap.
+//
+// A host sitting near the line crossed it constantly: 171 hold/resume
+// transitions in 312 minutes on one agent, each one a log line and a
+// `ready` change on the next heartbeat. Blocking at 20% and resuming
+// at 25% means ordinary variation no longer crosses both.
+func TestHysteresis(t *testing.T) {
+	cases := []struct {
+		name    string
+		mem     float64
+		was     bool // what the last check concluded
+		blocked bool // what this one should
+	}{
+		// Working, and the figure has not fallen far enough to stop.
+		{"working, comfortably above", 0.30, false, false},
+		{"working, just above the stop line", 0.21, false, false},
+		{"working, below the stop line", 0.19, false, true},
+
+		// Held off. Climbing back over the STOP line is not enough:
+		// that is the band that produced the flapping.
+		{"held off, still starved", 0.10, true, true},
+		{"held off, back over the stop line but inside the band", 0.22, true, true},
+		{"held off, over the resume line", 0.26, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			blocked, reason, _ := assess(c.mem, 0.9, c.was)
+			if blocked != c.blocked {
+				t.Fatalf("assess(mem=%v, was-blocked=%v) = %v, want %v (%q)",
+					c.mem, c.was, blocked, c.blocked, reason)
+			}
+		})
+	}
+}
+
+// The band has to be a band. A gap of zero is the old behaviour
+// wearing two names, and this is what stops it being reintroduced by
+// somebody tidying the constants.
+func TestResumeIsAboveReserve(t *testing.T) {
+	if resumeFraction <= reserveFraction {
+		t.Fatalf("resume %v is not above reserve %v: there is no band, "+
+			"so a host on the line flaps exactly as before",
+			resumeFraction, reserveFraction)
+	}
+}
+
+// The sentence has to agree with the comparison that produced it.
+//
+// `%.0f` rounds to nearest, which printed "20% memory free, under the
+// 20% this host keeps spare" for a host at 19.96%. The rule was
+// right; the line said something false about it, and an operator
+// checking the one against the other concludes the rule is broken.
+func TestReportedFigureIsBelowTheLimit(t *testing.T) {
+	// Every figure that rounds UP to the limit but is genuinely under
+	// it -- the whole family the old formatting got wrong.
+	for _, mem := range []float64{0.1996, 0.19999, 0.1951, 0.1999999} {
+		blocked, reason, _ := assess(mem, 0.9, false)
+		if !blocked {
+			t.Fatalf("mem=%v did not block", mem)
+		}
+		if strings.Contains(reason, "20.0% memory free") {
+			t.Errorf("mem=%v reported as 20.0%%, which is not under the "+
+				"20.0%% limit the same line quotes: %q", mem, reason)
+		}
+	}
+}
+
+func TestPctTruncates(t *testing.T) {
+	cases := map[float64]string{
+		0.1996: "19.9%",
+		0.20:   "20.0%",
+		0.25:   "25.0%",
+		0.0:    "0.0%",
+		1.0:    "100.0%",
+	}
+	for in, want := range cases {
+		if got := pct(in); got != want {
+			t.Errorf("pct(%v) = %q, want %q", in, got, want)
+		}
 	}
 }
