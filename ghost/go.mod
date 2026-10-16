@@ -4,14 +4,14 @@ go 1.26.0
 
 require (
 	github.com/OJ/gobuster/v3 v3.8.2
-	github.com/PuerkitoBio/goquery v1.12.0
+	github.com/PuerkitoBio/goquery v1.13.0
 	github.com/owasp-amass/amass/v4 v4.2.0
 	github.com/owasp-amass/config v0.1.5
 	github.com/owasp-amass/open-asset-model v0.3.2
 	github.com/projectdiscovery/katana v1.8.0
 	github.com/weppos/publicsuffix-go v0.50.3-0.20260104170930-90713dec78f2
 	golang.org/x/crypto v0.57.0
-	golang.org/x/sys v0.48.0
+	golang.org/x/sys v0.49.0
 )
 
 require (
@@ -25,7 +25,7 @@ require (
 	github.com/VividCortex/gohistogram v1.0.0 // indirect
 	github.com/akrylysov/pogreb v0.10.1 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
-	github.com/andybalholm/cascadia v1.3.3 // indirect
+	github.com/andybalholm/cascadia v1.3.4 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.41.7 // indirect
 	github.com/aws/aws-sdk-go-v2/config v1.32.7 // indirect
