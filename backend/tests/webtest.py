@@ -799,6 +799,42 @@ check("dangling outranks a fingerprint when both could apply",
                   unresolved={"f.herokuapp.com"}) or _tk.Candidate(
                       "", "", [], "", True, "", None)).verdict == "dangling")
 
+print("\n== AWS puts the region where a suffix cannot see it ==")
+# Found by running the detector against a live engagement: the first
+# real CNAME chain collected ended at
+# `...elb.ap-southeast-1.amazonaws.com`, matched nothing, and the
+# table reported zero takeovers on an estate that had them. A suffix
+# match cannot see a region in the middle of a name.
+check("the ELB spelling that was actually observed matches",
+      (_tk.provider_for("zpath-prod-exporter-28195a8e3048929a"
+                        ".elb.ap-southeast-1.amazonaws.com")
+       or _tk.Provider("", ())).name == "AWS ELB")
+check("...as does the other spelling AWS uses",
+      (_tk.provider_for("x-123.eu-west-1.elb.amazonaws.com")
+       or _tk.Provider("", ())).name == "AWS ELB")
+check("...and the regionless one",
+      (_tk.provider_for("x-123.elb.amazonaws.com")
+       or _tk.Provider("", ())).name == "AWS ELB")
+check("an ELB name is NOT claimable — the suffix is AWS-assigned, so "
+      "nobody can re-register it",
+      (_tk.provider_for("x-123.elb.amazonaws.com")
+       or _tk.Provider("", ("",), claimable=True)).claimable is False)
+
+# The same infix problem for S3, which used to be three hardcoded
+# startswith checks inside the matcher.
+check("an S3 website endpoint with a region still matches",
+      (_tk.provider_for("b.s3-website-eu-west-1.amazonaws.com")
+       or _tk.Provider("", ())).name == "AWS S3")
+check("...and the dualstack spelling",
+      (_tk.provider_for("b.s3.dualstack.us-east-1.amazonaws.com")
+       or _tk.Provider("", ())).name == "AWS S3")
+check("...and the external-1 spelling",
+      (_tk.provider_for("b.s3-external-1.amazonaws.com")
+       or _tk.Provider("", ())).name == "AWS S3")
+check("...while a plain bucket is still claimable, unlike an ELB",
+      (_tk.provider_for("b.s3.amazonaws.com")
+       or _tk.Provider("", ())).claimable is True)
+
 print("\n== not every dangling record is an exploitable takeover ==")
 d = _tk.decide("g.corp.com", ["g.elasticbeanstalk.com"],
                unresolved={"g.elasticbeanstalk.com"})
