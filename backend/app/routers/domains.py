@@ -495,3 +495,101 @@ async def reject(body: PromoteRequest, project: str = Query(...),
         c.state, c.decided_by, c.decided_at = "rejected", user.id, now
     await session.commit()
     return {"rejected": [c.name for c in rows]}
+
+
+# ------------------------------------------- certificate transparency
+class CtRequest(BaseModel):
+    """Which roots to ask about."""
+    roots: list[str] = Field(default_factory=list, max_length=50)
+
+
+@router.post("/candidates/ct")
+async def from_ct(body: CtRequest, project: str = Query(...),
+                  pr: Project = Depends(require_project("user")),
+                  user: User = Depends(get_current_user),
+                  session: AsyncSession = Depends(get_session)):
+    """Propose hostnames from public certificate logs.
+
+    **This sends the named domains to a third party**, which is why
+    it is off until somebody turns it on and why it is a `user`
+    action rather than a readonly one. See `app/ctlogs.py` and the
+    `ct.enabled` setting, whose help text says what leaves and where
+    it goes.
+
+    Names come back as CANDIDATES, never as targets. A shared or
+    wildcard certificate names hosts belonging to other people, and a
+    name in a public log is not evidence that anybody agreed to be
+    scanned -- so every name is ruled on by `scopegate` here, the
+    refused ones are reported rather than written, and the rest wait
+    for a person on the same promote/reject flow every other
+    candidate uses.
+    """
+    from .. import ctlogs
+    from .settings import load_all
+
+    cfg = await load_all(session)
+    roots = [r.strip().lower().rstrip(".") for r in body.roots if r.strip()]
+    if not roots:
+        raise HTTPException(400, "name at least one root domain")
+
+    try:
+        found = [await ctlogs.lookup(cfg, r) for r in roots]
+    except ctlogs.Disabled as e:
+        # 409, not 403. The caller is allowed to do this; the
+        # installation has not agreed to it yet, and the fix is a
+        # decision in settings rather than a different account.
+        raise HTTPException(409, str(e)) from e
+
+    idx = await index_for(session, pr.id)
+    known = {h.lower() for h in await known_hosts(session, pr.id)}
+    existing = {n.lower() for n in (await session.execute(
+        select(DomainCandidate.name)
+        .where(DomainCandidate.project_id == pr.id))).scalars().all()}
+
+    proposed: list[str] = []
+    refused: dict[str, str] = {}
+    errors: list[str] = []
+    seen_already = 0
+
+    for f in found:
+        if f.error:
+            # Carried through rather than swallowed. "crt.sh could not
+            # be asked" and "this domain has no certificates" are
+            # different answers and only one of them is about the
+            # client.
+            errors.append(f.error)
+            continue
+        for n in f.names:
+            if n in known or n in existing:
+                seen_already += 1
+                continue
+            ruling = idx.check(n)
+            if not ruling.allowed:
+                refused[n] = ruling.why or "out of scope"
+                continue
+            existing.add(n)
+            proposed.append(n)
+            session.add(DomainCandidate(
+                project_id=pr.id, name=n, root_domain=f.domain,
+                source="ct", score=0,
+                reason=f"named by a certificate in a public log ({f.source})",
+                state="new"))
+
+    await session.commit()
+    if proposed:
+        await record(session, pr.id, "change", user,
+                     f"certificate transparency proposed {len(proposed)} "
+                     f"name(s) across {len(roots)} root(s)")
+    return {
+        "roots": roots,
+        "source": next((f.source for f in found if f.source), ""),
+        "proposed": sorted(proposed),
+        "already_known": seen_already,
+        # Reported, never written. The fix for one of these is a scope
+        # edit, not a retry.
+        "refused": refused,
+        # Said plainly, so an empty result cannot read as "this domain
+        # has no certificates" when the truth is nobody could ask.
+        "errors": errors,
+        "unusable_names": sum(f.unusable for f in found),
+    }
