@@ -500,5 +500,56 @@ check("...and that volume is declared",
 check("...and the image creates it owned by the uid that writes to it",
       f"--chown=10001:10001 /empty {DB_DIR}" in _dockerfile)
 
+
+# ================================================== netblock expansion
+# Both assertions below exist because the first version of this code
+# got them wrong against the real engagement, not in theory.
+from app.geoip import ENUMERABLE_V4_PREFIX, Netblock  # noqa: E402
+
+print("\n== IPv6 prefixes are never 'enumerable' ==")
+v6 = Netblock(network="2001:db8::/32", asn=64500, organisation="ACME",
+              known=3, size=2 ** 96, version=6)
+check("a v6 /32 is not enumerable", v6.enumerable is False)
+check("...and reports unseen as None, not as a count", v6.unseen is None, v6.unseen)
+# Sorting by raw `unseen` put v6 prefixes above every v4 one: a /32
+# holds 7.9e28 addresses, so "unseen opportunity" was true, useless
+# and misleading next to a /24 holding 256.
+v4 = Netblock(network="203.0.113.0/24", asn=64500, organisation="ACME",
+              known=10, size=256, version=4)
+check("a v4 /24 is enumerable", v4.enumerable is True)
+check("...and reports a real remainder", v4.unseen == 246, v4.unseen)
+
+print("\n== an allocation is not a client block ==")
+big = Netblock(network="10.0.0.0/8", asn=64500, organisation="ACME",
+               known=1, size=2 ** 24, version=4)
+check(f"a v4 prefix larger than /{ENUMERABLE_V4_PREFIX} is not enumerable",
+      big.enumerable is False)
+check("...so it offers no remainder to go and sweep", big.unseen is None)
+edge = Netblock(network="198.51.0.0/16", asn=64500, organisation="ACME",
+                known=4, size=65536, version=4)
+check(f"a /{ENUMERABLE_V4_PREFIX} itself is still enumerable",
+      edge.enumerable is True)
+
+print("\n== density decides the order, not the size of the remainder ==")
+# Measured against a real engagement: sorting by `unseen` put eight
+# provider /16s holding ONE address apiece at the top. "65,535
+# addresses you have not looked at" is true of every allocation we
+# ever touched once, and acting on it means scanning somebody else's
+# network.
+sparse = Netblock(network="192.0.0.0/16", asn=1, organisation="A provider",
+                  known=1, size=65536, version=4)
+dense = Netblock(network="203.0.113.0/24", asn=2, organisation="ACME",
+                 known=70, size=256, version=4)
+ordered = sorted([sparse, dense],
+                 key=lambda n: (0 if n.enumerable else 1,
+                                -n.known, -(n.unseen or 0), n.network))
+check("the prefix we hold 70 addresses in sorts above the one we hold 1 in",
+      ordered[0].network == dense.network,
+      [n.network for n in ordered])
+check("...even though the sparse one has far more unseen",
+      (sparse.unseen or 0) > (dense.unseen or 0),
+      (sparse.unseen, dense.unseen))
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

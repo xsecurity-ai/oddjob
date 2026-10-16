@@ -558,3 +558,148 @@ async def tag_addresses(session, project_id: int, values) -> Tagged:
 async def tag_missing(session, project_id: int, limit: int = 500) -> int:
     """`tag_all_missing`, as the count the standing-order log prints."""
     return len((await tag_all_missing(session, project_id, limit)).located)
+
+
+# ------------------------------------------------------------ netblocks
+# Turning "the twelve addresses we resolved" into "the /22 the client
+# actually announces". The forgotten assets live in the part of the
+# prefix nobody enumerated, and nothing else here can see it.
+#
+# Entirely local. The ASN database is already on disk -- `tag_missing`
+# reads it for every address -- and `get_with_prefix_len` returns the
+# network the lookup matched on alongside the record. No query naming
+# the client goes anywhere, which is the whole reason this is done
+# here rather than against asnmap or Team Cymru.
+
+#: Largest IPv4 prefix whose remainder is worth calling enumerable.
+#: A /16 is 65,536 addresses -- a long sweep but a real one. Anything
+#: bigger is a provider's allocation rather than a client's block, and
+#: offering to enumerate it is offering something nobody will do.
+ENUMERABLE_V4_PREFIX = 16
+
+
+@dataclass
+class Netblock:
+    """One announced prefix, and what we hold inside it."""
+    network: str
+    asn: int | None
+    organisation: str | None
+    #: Addresses this project already has in the prefix.
+    known: int = 0
+    #: How many addresses the prefix holds in total. A /22 is 1,024.
+    size: int = 0
+    #: 4 or 6.
+    version: int = 4
+
+    @property
+    def enumerable(self) -> bool:
+        """Whether "the rest of this prefix" is a real thing to go and look at.
+
+        **IPv6 is never enumerable and this is the point of the flag.**
+        A v6 /32 holds 7.9e28 addresses; reporting that as unseen
+        opportunity is a number that is true, useless, and actively
+        misleading next to an IPv4 /24 holding 256. The first version
+        of this sorted by raw `unseen` and every v6 prefix buried
+        every v4 one.
+
+        Large IPv4 blocks are excluded for the weaker reason that they
+        are an allocation rather than a client's own range.
+        """
+        if self.version != 4:
+            return False
+        try:
+            return ipaddress.ip_network(self.network).prefixlen >= ENUMERABLE_V4_PREFIX
+        except ValueError:
+            return False
+
+    @property
+    def unseen(self) -> int | None:
+        """Addresses in the prefix nobody has looked at, or None.
+
+        None when the prefix is not enumerable -- which is "this
+        question does not apply here", not zero and not unknown. A
+        caller must render it as such rather than as a count.
+        """
+        if not self.enumerable:
+            return None
+        return max(0, self.size - self.known)
+
+
+def network_for(address: str) -> tuple[str | None, int | None, str | None]:
+    """-> (CIDR, ASN, organisation) for one address, from the local db.
+
+    The CIDR is the prefix the ASN database matched on, which is the
+    routed block rather than a guess: MaxMind builds it from the
+    global routing table, so a /22 here is a /22 somebody announces.
+
+    All three are None when the database is absent or has nothing for
+    the address. That is "could not determine" and callers must not
+    render it as "this address is in no network".
+    """
+    dbs = _readers()
+    try:
+        asn = dbs.get("GeoLite2-ASN")
+        if asn is None:
+            return None, None, None
+        try:
+            rec, prefix_len = asn.get_with_prefix_len(address)
+        except (ValueError, TypeError):
+            return None, None, None
+        if not rec or prefix_len is None:
+            return None, None, None
+        try:
+            net = ipaddress.ip_network(f"{address}/{prefix_len}", strict=False)
+        except ValueError:
+            return None, None, None
+        return (str(net), rec.get("autonomous_system_number"),
+                rec.get("autonomous_system_organization"))
+    finally:
+        _close(dbs)
+
+
+def netblocks(addresses: list[str]) -> list[Netblock]:
+    """Group addresses into the prefixes that announce them.
+
+    Sorted by how much evidence there is that the prefix belongs to
+    the client -- see the note on the sort key. Density of addresses
+    we already hold, not size of the unexplored remainder: the
+    remainder is largest exactly where the prefix is somebody else's.
+
+    Addresses the database cannot place are simply absent from the
+    result rather than bucketed into a fake prefix. A made-up network
+    would be indistinguishable from a real one in the UI.
+    """
+    found: dict[str, Netblock] = {}
+    for a in addresses:
+        cidr, asn, org = network_for(a)
+        if cidr is None:
+            continue
+        nb = found.get(cidr)
+        if nb is None:
+            try:
+                net = ipaddress.ip_network(cidr)
+            except ValueError:
+                continue
+            nb = Netblock(network=cidr, asn=asn, organisation=org,
+                          size=net.num_addresses, version=net.version)
+            found[cidr] = nb
+        nb.known += 1
+    # Ordered by how much reason there is to think the prefix is the
+    # CLIENT'S, which is not the same as how much of it is unseen.
+    #
+    # Sorting by unseen alone put a /16 holding one address at the
+    # top -- measured against the real engagement, the first eight
+    # rows were /16s with a single known address apiece, belonging to
+    # Amazon and NTT. "65,535 addresses you have not looked at" is
+    # true of every provider allocation we ever touched once and is
+    # not an opportunity; it is an invitation to scan somebody else's
+    # network.
+    #
+    # Density is the signal instead. Holding several addresses in a
+    # prefix is evidence somebody allocated it to the client; holding
+    # one is evidence we resolved one name. So `known` leads, and
+    # `unseen` breaks ties among prefixes with equal standing.
+    return sorted(
+        found.values(),
+        key=lambda n: (0 if n.enumerable else 1,
+                       -n.known, -(n.unseen or 0), n.network))
