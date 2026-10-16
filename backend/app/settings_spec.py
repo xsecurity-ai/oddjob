@@ -75,6 +75,37 @@ SPEC = [
              "MaxMind's own GeoIP.conf. City answers country too and is "
              "27 MB against Country's 3 MB, so an installation that only "
              "wants a country code can drop it."},
+    # ----------------------------------------- certificate transparency
+    # The one source here that SENDS something. Everything else in
+    # this file either stays local (geoip looks up a database this
+    # host downloaded) or fetches a feed that carries no engagement
+    # data with it (NVD). A CT query names the client.
+    #
+    # So the help text says what leaves, where it goes, and who has
+    # to agree first -- in the place somebody turns it on, not in a
+    # module docstring they will never open.
+    {"key": "ct.enabled", "group": "Site",
+     "label": "Certificate Transparency lookups", "type": "bool",
+     "default": False,
+     "help": "Finds hostnames from public certificate logs — including "
+             "hosts that never resolved publicly and long-dead hosts whose "
+             "infrastructure is still up, which nothing else here can see. "
+             "READ THIS BEFORE ENABLING: unlike every other source in "
+             "Oddjob, a lookup SENDS THE CLIENT'S DOMAIN NAME to a third "
+             "party, which logs it. That is customer data leaving for an "
+             "external service, so it needs the same approval any other "
+             "vendor would — an engagement signoff covers testing the "
+             "client, not onboarding a supplier. Off until somebody "
+             "decides otherwise."},
+    {"key": "ct.source", "group": "Site",
+     "label": "Certificate Transparency source", "type": "text",
+     "default": "",
+     "help": "Which third party the domain is sent to. Deliberately has no "
+             "default: choosing it IS the decision. Currently supported: "
+             "crt.sh. Names found are reported for a person to rule on and "
+             "are never turned into targets on their own — a shared or "
+             "wildcard certificate names other people's hosts, and a name "
+             "in a log is not evidence anybody agreed to be scanned."},
     {"key": "audit.retain_days", "group": "Site",
      "label": "Audit retention (days)", "type": "number", "default": 7,
      "help": "How long /audit/<type>/<format> keeps entries, where type is "
