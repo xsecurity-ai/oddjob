@@ -1,9 +1,9 @@
 """projectdiscovery httpx `-json` / `-jsonl`, and naabu's JSONL.
 
 httpx: `{url, input, host, port, scheme, status_code, title, webserver,
-tech, content_length, a, cname, cdn_name, asn, tls}` — a live-web
-inventory, not a findings tool, so it produces targets and services
-and no vulns.
+tech, content_length, a, cname, cdn_name, asn, favicon, jarm_hash,
+tls}` — a live-web inventory, not a findings tool, so it produces
+targets and services and no vulns.
 
 **The `tls` block is read, and was not.** This parsed sixteen fields
 and the certificate was not among them, which threw away the richest
@@ -96,10 +96,37 @@ def parse(text: str) -> ParsedScan:
                 host.extra.setdefault("httpx", {})[k] = o[k]
         # Who owns the address, which is the question every ownership
         # ruling turns on and which nothing else here answers.
+        #
+        # Kept, but httpx is no longer the thing that fills it: v1.12
+        # resolves ASNs through ProjectDiscovery's hosted service, so
+        # `-asn` reports null without a PDCP key and sends every address
+        # we ask about to a third party with one. The agent does not pass
+        # the flag, and nothing is lost by that: `geoip.tag_missing`
+        # already writes `geo_asn` and `geo_org` onto every TargetAddress
+        # from the local GeoLite2-ASN database, which is the same answer
+        # without the egress. This branch stays so that a capture made
+        # elsewhere, or by a future httpx that answers offline, is still
+        # read rather than dropped.
         if isinstance(asn := o.get("asn"), dict):
             host.extra.setdefault("httpx", {})["asn"] = {
                 k: asn[k] for k in ("as_number", "as_name", "as_country")
                 if asn.get(k)}
+        # The two fingerprints that pivot. A favicon mmh3 hash is the
+        # same number on every host serving that icon, so one hit names
+        # the rest of an estate -- including addresses no name resolves
+        # to. JARM does the same for the TLS stack underneath.
+        #
+        # Recorded per host, not per URL, because there is nowhere on a
+        # web row to put them without a migration. A host serving two
+        # apps with two icons keeps whichever httpx reported last; the
+        # pivot still works, the completeness does not. Worth a column
+        # if that case ever turns up for real.
+        for src, dst in (("favicon", "favicon_mmh3"),
+                         ("favicon_md5", "favicon_md5"),
+                         ("favicon_path", "favicon_path"),
+                         ("jarm_hash", "jarm")):
+            if o.get(src):
+                host.extra.setdefault("httpx", {})[dst] = str(o[src])[:128]
         # Every A record, not just the one that became `ip_address`.
         # A name on four addresses is four hosts to account for.
         if isinstance(a := o.get("a"), list) and a:

@@ -113,6 +113,24 @@ func intOr(args map[string]any, key string, def int) int {
 	return def
 }
 
+// boolOr reads a switch a caller may have sent as a JSON bool, as a
+// string from a form field, or as a number. Anything unrecognised
+// leaves the default alone: a task that misspells a flag should run
+// the way it would have without it, not silently invert it.
+func boolOr(args map[string]any, key string, def bool) bool {
+	switch v := args[key].(type) {
+	case bool:
+		return v
+	case string:
+		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
+			return b
+		}
+	case float64:
+		return v != 0
+	}
+	return def
+}
+
 func str(args map[string]any, key string) string {
 	if v, ok := args[key]; ok {
 		if s, ok := v.(string); ok {
@@ -762,7 +780,34 @@ func runHTTPX(ctx context.Context, args map[string]any, workDir string) Result {
 	// `-irr` likewise. httpx knows exactly what it sent and what came
 	// back; reporting only that the address is alive throws away the
 	// part a tester reads.
-	argv := []string{"-json", "-o", path, "-silent", "-duc", "-irr"}
+	//
+	// `-cname` and `-tech-detect` are here because the importer has
+	// always parsed `cname` and `tech` and httpx has never been asked
+	// to emit them: both keys were simply absent from every line this
+	// agent has ever sent. They cost nothing extra on the wire -- the
+	// resolution and the response body have already happened by the
+	// time httpx decides whether to report them.
+	//
+	// `-asn` is deliberately NOT here, though the importer parses that
+	// too. httpx v1.12 resolves ASNs through ProjectDiscovery's hosted
+	// service, so without a PDCP key the field comes back null, and
+	// with one every address we look up is sent to a third party. The
+	// server already carries GeoLite2-ASN and reads it locally, so the
+	// answer is on our side of the wire already.
+	argv := []string{"-json", "-o", path, "-silent", "-duc", "-irr",
+		"-cname", "-tech-detect"}
+	// The favicon mmh3 hash and the JARM fingerprint are the two that
+	// pivot: they cluster hosts by what is running rather than by what
+	// it is called, which finds estate nobody has attributed. They are
+	// also the two that cost an extra round trip each -- a GET for the
+	// icon and a set of TLS handshakes -- and the smallest ghost in the
+	// fleet is a 458MB droplet that OOM-killed httpx during exactly
+	// this probe. On by default because the pivot is the point; the
+	// switch is here so a host that cannot afford them can say so
+	// rather than failing the whole task.
+	if boolOr(args, "fingerprint", true) {
+		argv = append(argv, "-favicon", "-jarm")
+	}
 	argv = append(argv, headerArgs(args)...)
 	for _, t := range tg {
 		argv = append(argv, "-u", t)

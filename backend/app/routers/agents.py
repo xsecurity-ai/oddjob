@@ -112,8 +112,11 @@ ABANDON_AFTER = timedelta(minutes=10)
 #: installing one would put a second, slower implementation on the
 #: host that nothing calls. The agent keeps its own copy of this
 #: list and refuses anything outside it; this is the first gate.
-INSTALLABLE = ("nmap", "masscan", "nuclei", "httpx", "subfinder",
-               "ffuf", "whatweb", "dnsx", "naabu")
+#: subfinder, ffuf, whatweb, dnsx and naabu were on this list and are
+#: gone: none of them had a runner on the agent, so authorising one
+#: installed a binary that nothing could then execute. See the note in
+#: the agent's `Known` map. dnsx returns when it has a runner.
+INSTALLABLE = ("nmap", "masscan", "nuclei", "httpx")
 
 #: How long an unused enrollment token stays good. Short, because a
 #: token sitting in a terminal history or a chat message is a way onto
