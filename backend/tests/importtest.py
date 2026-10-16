@@ -454,6 +454,53 @@ check("the JARM fingerprint is kept — it clusters by TLS stack",
 check("the CNAME is kept, which is what a takeover check reads",
       hx.get("cname") == ["edge.cdn.example"], hx)
 
+# ================================================================= vhost
+# The collision this is mostly about: vhost output carries `found`,
+# `wordlist` AND `hits`, exactly as content discovery does. Shown to
+# gobuster's sniffer first it imports as paths, and hostnames land in
+# the URL column.
+VHOST = json.dumps({
+    "url": "https://10.60.0.50", "domain": "corp.local",
+    "wordlist": "built-in (SecLists common.txt)",
+    "found": ["intranet.corp.local", "staging.corp.local"],
+    "hits": [{"vhost": "intranet.corp.local", "status": 200, "size": 4096},
+             {"vhost": "staging.corp.local", "status": 401, "size": 120}],
+})
+print("\n== vhost ==")
+st, r = imp("VH", VHOST)
+check("it is detected as vhost and not as content discovery",
+      st == 200 and r["format"] == "vhost", f"{st} {r.get('format')}")
+d = detail("VH", "10.60.0.50")
+names = d["target"].get("hostnames") or []
+check("a discovered vhost becomes an alternate name on the address",
+      "intranet.corp.local" in names, names)
+check("...including one that answered 401, which is still a vhost",
+      "staging.corp.local" in names, names)
+# The judgement call this importer makes, asserted so it is not
+# quietly reversed: a vhost-only name does not resolve, so a URL
+# built from it would be one nobody who clicks it can reach.
+check("no web address is invented for a name that may not resolve",
+      not any("intranet.corp.local" in (w.get("url") or "")
+              for w in (d.get("web") or [])), d.get("web"))
+
+# A wildcard makes every word a hit. The agent measures it and the
+# importer has to carry that through, because "found nothing" and
+# "could not tell" are different answers.
+VHOST_WILDCARD = json.dumps({
+    "url": "https://10.60.0.51", "domain": "corp.local",
+    "wordlist": "built-in", "found": [], "hits": [],
+    "wildcard": {"answers": True, "status": 200, "size": 1432,
+                 "probe": "oddjob-no-such-vhost-7f3a1c.corp.local"},
+})
+st, r = imp("VH", VHOST_WILDCARD)
+check("a wildcard run still imports", st == 200, f"{st} {r}")
+d2 = detail("VH", "10.60.0.51")
+note = (d2["target"].get("notes") or "")
+check("...and says the address answers any Host header",
+      "ANY Host header" in note, note[:120])
+check("...so an empty list does not read as a clean zero",
+      "not that nothing is there" in note, note[:200])
+
 # A build of httpx that reports no `tls` must not become an error or
 # a host with invented certificate facts.
 HTTPX_NOTLS = json.dumps(

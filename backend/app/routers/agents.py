@@ -210,6 +210,12 @@ TASK_KINDS: dict[str, str | None] = {
     #: produce nothing to file. For anything pointed at a client it
     #: is a bug that costs requests and reports nothing.
     "gobuster": "gobuster",
+    #: Content discovery's sibling, asking one address what SERVERS
+    #: it has rather than what paths. Its own importer because its
+    #: hits are hostnames, not paths: filing them through
+    #: `gobuster` would put `intranet.acme.example` in the URL
+    #: column as though it were a path on the host.
+    "vhost": "vhost",
     #: Crawling, likewise in-process. The `gospider` alias katana
     #: replaced is gone: it was kept so tasks queued under the old
     #: name would not be stranded mid-swap, and not one was ever

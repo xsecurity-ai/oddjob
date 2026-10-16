@@ -22,6 +22,7 @@ from . import (
     nessus,
     nmap,
     nuclei,
+    vhost,
 )
 from .model import (
     ImportError_,
@@ -68,6 +69,10 @@ REGISTRY = {
     "nuclei":      ("Nuclei JSONL (-jsonl)", nuclei.parse),
     "httpx":       ("httpx JSONL (-json)", httpx_json.parse),
     "crawl":       ("Ghost crawl (katana) JSON", crawl.parse),
+    #: Before gobuster, and that ordering is load-bearing: `ORDER` is
+    #: `list(REGISTRY)`, so this dict decides which sniffer is asked
+    #: first. Both tools write `found`, `wordlist` and `hits`.
+    "vhost":       ("Ghost virtual-host discovery JSON", vhost.parse),
     "gobuster":    ("Ghost content discovery JSON", gobuster.parse),
     "cobaltstrike": ("Cobalt Strike beacons", c2.parse_cobaltstrike),
     "mythic":      ("Mythic callbacks", c2.parse_mythic),
@@ -103,6 +108,10 @@ _DETECTORS = {
     "nuclei": nuclei.looks_like,
     "httpx": httpx_json.looks_like,
     "crawl": crawl.looks_like,
+    # Before gobuster deliberately. Both write `found` and
+    # `wordlist`, so a vhost result shown to gobuster's sniffer first
+    # would import as content discovery -- hostnames filed as paths.
+    "vhost": vhost.looks_like,
     "gobuster": gobuster.looks_like,
     "cobaltstrike": c2.looks_like_cobaltstrike,
     "mythic": c2.looks_like_mythic,
