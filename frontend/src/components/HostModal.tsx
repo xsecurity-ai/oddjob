@@ -49,7 +49,13 @@ const dash = <Box component="span" sx={{ color: alpha(neon.muted, 0.4) }}>—</B
 function Section({ title, count, children }: { title: string; count: number; children: ReactNode }) {
   return (
     <Box sx={{ mt: 3 }}>
-      <Stack direction="row" spacing={1} alignItems="baseline" sx={{ mb: 1 }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{
+          alignItems: "baseline",
+          mb: 1
+        }}>
         <Typography sx={{
           fontFamily: `'Orbitron', sans-serif`, fontSize: 11, letterSpacing: '0.16em',
           textTransform: 'uppercase', color: neon.pink, textShadow: glow(neon.pink, 0.5),
@@ -60,7 +66,7 @@ function Section({ title, count, children }: { title: string; count: number; chi
         ? <Typography sx={{ color: alpha(neon.muted, 0.6), fontSize: 12.5 }}>None recorded.</Typography>
         : children}
     </Box>
-  )
+  );
 }
 
 const headSx = {
@@ -124,7 +130,14 @@ function Body({ project, host }: { project: string; host: string }) {
         </Field>
         <Field label="Operating System">
           {t.os
-            ? <Stack direction="row" spacing={0.8} alignItems="baseline" flexWrap="wrap" useFlexGap>
+            ? <Stack
+            direction="row"
+            spacing={0.8}
+            useFlexGap
+            sx={{
+              alignItems: "baseline",
+              flexWrap: "wrap"
+            }}>
                 <span>{t.os}</span>
                 {/* A fingerprint is a guess; printing the name alone turns an
                     87% match into a statement of fact. */}
@@ -158,7 +171,9 @@ function Body({ project, host }: { project: string; host: string }) {
           <Box sx={{ color: neon.cyan, fontWeight: 700 }}>{t.total_ports}</Box>
         </Field>
         <Field label="Findings">
-          <Stack direction="row" spacing={0.8} flexWrap="wrap" useFlexGap>
+          <Stack direction="row" spacing={0.8} useFlexGap sx={{
+            flexWrap: "wrap"
+          }}>
             {(['critical', 'high'] as const).map((k) => {
               const n = k === 'critical' ? t.total_criticals : t.total_highs
               const c = SEV_COLOUR[k]
@@ -181,7 +196,14 @@ function Body({ project, host }: { project: string; host: string }) {
         </Field>
         {t.mac_address && (
           <Field label="MAC">
-            <Stack direction="row" spacing={0.8} alignItems="baseline" flexWrap="wrap" useFlexGap>
+            <Stack
+              direction="row"
+              spacing={0.8}
+              useFlexGap
+              sx={{
+                alignItems: "baseline",
+                flexWrap: "wrap"
+              }}>
               <span>{t.mac_address}</span>
               {t.mac_vendor && (
                 <Typography component="span" sx={{ fontSize: 10.5, color: neon.muted }}>
@@ -340,7 +362,7 @@ function Body({ project, host }: { project: string; host: string }) {
       {/* ---- timeline ---- */}
       <Timeline project={project} host={host} canWrite={canWrite(project)} />
     </>
-  )
+  );
 }
 
 export function HostModalProvider({ children }: { children: ReactNode }) {

@@ -72,8 +72,13 @@ export function ConfigSections({ id, sections }: {
 
   return (
     <Stack spacing={2}>
-      <Stack direction="row" spacing={1.5} alignItems="center"
-        sx={{ flexWrap: 'wrap' }}>
+      <Stack
+        direction="row"
+        spacing={1.5}
+        sx={{
+          alignItems: "center",
+          flexWrap: 'wrap'
+        }}>
         <TextField select size="small" label="Section" value={current}
           onChange={(e) => choose(e.target.value)}
           sx={{ minWidth: 240 }}>
@@ -104,5 +109,5 @@ export function ConfigSections({ id, sections }: {
         ))}
       </Box>
     </Stack>
-  )
+  );
 }

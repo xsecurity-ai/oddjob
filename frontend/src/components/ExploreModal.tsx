@@ -202,7 +202,9 @@ function ExploreBody({ subject }: { subject: Subject }) {
 
   return (
     <Stack spacing={2.5} sx={{ height: '100%' }}>
-      <Stack direction="row" spacing={1.2} flexWrap="wrap" useFlexGap>
+      <Stack direction="row" spacing={1.2} useFlexGap sx={{
+        flexWrap: "wrap"
+      }}>
         {stat('Hosts', data.total_hosts, neon.pink)}
         {stat('Records', data.total_services, neon.purple)}
         {stat('Open', data.by_state.open ?? 0, neon.green)}
@@ -213,7 +215,9 @@ function ExploreBody({ subject }: { subject: Subject }) {
 
       <Box>
         <Label>Findings on this {data.dimension}</Label>
-        <Stack direction="row" spacing={0.8} flexWrap="wrap" useFlexGap>
+        <Stack direction="row" spacing={0.8} useFlexGap sx={{
+          flexWrap: "wrap"
+        }}>
           {(['critical', 'high', 'medium', 'low', 'info'] as const).map((k) => {
             const n = data.vulns_by_severity[k] ?? 0
             const c = SEV_COLOUR[k]
@@ -226,7 +230,9 @@ function ExploreBody({ subject }: { subject: Subject }) {
         </Stack>
       </Box>
 
-      <Stack direction="row" spacing={2.5} flexWrap="wrap" useFlexGap>
+      <Stack direction="row" spacing={2.5} useFlexGap sx={{
+        flexWrap: "wrap"
+      }}>
         {data.dimension === 'port'
           ? <Distribution title="What is listening" rows={data.service_names} colour={neon.green} />
           : <Distribution title="Ports in use" rows={data.ports} colour={neon.cyan} />}
@@ -247,7 +253,7 @@ function ExploreBody({ subject }: { subject: Subject }) {
         />
       </Box>
     </Stack>
-  )
+  );
 }
 
 export function ExploreProvider({ children }: { children: ReactNode }) {
@@ -278,13 +284,17 @@ export function ExploreProvider({ children }: { children: ReactNode }) {
       >
         <MenuItem onClick={() => { setMode('hosts'); setAnchor(null) }} sx={{ fontSize: 12.5 }}>
           <ListItemIcon><DnsIcon fontSize="small" sx={{ color: neon.pink }} /></ListItemIcon>
-          <ListItemText primaryTypographyProps={{ fontSize: 12.5 }}>
+          <ListItemText slotProps={{
+            primary: { sx: { fontSize: 12.5 } }
+          }}>
             Show all hosts with {title}
           </ListItemText>
         </MenuItem>
         <MenuItem onClick={() => { setMode('explore'); setAnchor(null) }} sx={{ fontSize: 12.5 }}>
           <ListItemIcon><TravelExploreIcon fontSize="small" sx={{ color: neon.cyan }} /></ListItemIcon>
-          <ListItemText primaryTypographyProps={{ fontSize: 12.5 }}>
+          <ListItemText slotProps={{
+            primary: { sx: { fontSize: 12.5 } }
+          }}>
             Explore this {noun}
           </ListItemText>
         </MenuItem>
@@ -323,5 +333,5 @@ export function ExploreProvider({ children }: { children: ReactNode }) {
         </DialogContent>
       </Dialog>
     </ExploreCtx.Provider>
-  )
+  );
 }

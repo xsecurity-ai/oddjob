@@ -120,7 +120,9 @@ export function EntityDialog({
     }
 
     return (
-      <Stack key={f.name} direction="row" spacing={1} alignItems="flex-start">
+      <Stack key={f.name} direction="row" spacing={1} sx={{
+        alignItems: "flex-start"
+      }}>
         {mode === 'bulk' && (
           <Checkbox
             checked={!!touched[f.name]} size="small"
@@ -137,7 +139,7 @@ export function EntityDialog({
           )}
         </Box>
       </Stack>
-    )
+    );
   }
 
   return (

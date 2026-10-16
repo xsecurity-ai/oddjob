@@ -42,9 +42,17 @@ export function TableFooter({
   )
 
   return (
-    <Stack direction="row" alignItems="center" spacing={1.5}
-      sx={{ px: 1.5, py: 0.75, borderTop: `1px solid ${alpha(neon.cyan, 0.25)}`,
-            flexWrap: 'wrap', rowGap: 0.5 }}>
+    <Stack
+      direction="row"
+      spacing={1.5}
+      sx={{
+        alignItems: "center",
+        px: 1.5,
+        py: 0.75,
+        borderTop: `1px solid ${alpha(neon.cyan, 0.25)}`,
+        flexWrap: 'wrap',
+        rowGap: 0.5
+      }}>
       {note && (
         <Typography sx={{ fontSize: 11, color: neon.muted }}>{note}</Typography>
       )}
@@ -78,5 +86,5 @@ export function TableFooter({
       {nav('Next page', <ChevronRightIcon sx={{ fontSize: 18 }} />, here + 1, here >= pages - 1)}
       {nav('Last page', <LastPageIcon sx={{ fontSize: 18 }} />, pages - 1, here >= pages - 1)}
     </Stack>
-  )
+  );
 }

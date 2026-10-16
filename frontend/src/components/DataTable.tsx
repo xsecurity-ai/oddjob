@@ -4,7 +4,7 @@ import {
   DialogContent, DialogTitle, Paper, Stack, Tooltip, Typography, alpha,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
-import DeleteIcon from '@mui/icons-material/DeleteOutline'
+import DeleteIcon from '@mui/icons-material/DeleteOutlined'
 import EditIcon from '@mui/icons-material/EditOutlined'
 import RestartAltIcon from '@mui/icons-material/RestartAlt'
 import type { RowSelectionState } from '@tanstack/react-table'
@@ -37,7 +37,7 @@ const NO_IDS: number[] = []
 function csvCell(v: unknown): string {
   const s = v == null ? '' : String(v)
   const safe = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s
-  return `"${safe.replace(/"/g, '""')}"`
+  return `"${safe.replace(/"/g, '""')}"`;
 }
 
 export function DataTable({
@@ -371,7 +371,9 @@ export function DataTable({
           onWidth={view.setWidth}
           empty={filtering
             ? (
-              <Stack spacing={1} alignItems="center">
+              <Stack spacing={1} sx={{
+                alignItems: "center"
+              }}>
                 <Typography sx={{ fontSize: 12.5, color: neon.yellow }}>
                   No rows match the {armedItems(filterModel).length || 'current'} filter
                   {armedItems(filterModel).length === 1 ? '' : 's'} on this table.
@@ -427,5 +429,5 @@ export function DataTable({
         </DialogActions>
       </Dialog>
     </Paper>
-  )
+  );
 }

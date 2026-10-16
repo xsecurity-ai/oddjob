@@ -57,12 +57,16 @@ export function AssetModal({ id, onClose }: {
 
   return (
     <Dialog open onClose={onClose} maxWidth="lg" fullWidth
-      PaperProps={{ sx: {
-        backgroundColor: alpha(neon.paper, 0.98), border: `1px solid ${alpha(neon.cyan, 0.35)}`,
-        boxShadow: glow(neon.cyan), backgroundImage: 'none',
-      } }}>
+      slotProps={{
+        paper: { sx: {
+          backgroundColor: alpha(neon.paper, 0.98), border: `1px solid ${alpha(neon.cyan, 0.35)}`,
+          boxShadow: glow(neon.cyan), backgroundImage: 'none',
+        } }
+      }}>
       <DialogTitle sx={{ pb: 1 }}>
-        <Stack direction="row" alignItems="flex-start" spacing={1}>
+        <Stack direction="row" spacing={1} sx={{
+          alignItems: "flex-start"
+        }}>
           <Box sx={{ minWidth: 0, flex: 1 }}>
             <Typography sx={{
               fontFamily: `'Share Tech Mono', monospace`, fontSize: 13,
@@ -109,7 +113,11 @@ export function AssetModal({ id, onClose }: {
 
       <DialogContent sx={{ pt: 0 }}>
         {q.isLoading ? (
-          <Stack alignItems="center" sx={{ py: 4 }}>
+          <Stack
+            sx={{
+              alignItems: "center",
+              py: 4
+            }}>
             <CircularProgress size={22} sx={{ color: neon.cyan }} />
           </Stack>
         ) : q.error ? (
@@ -118,8 +126,14 @@ export function AssetModal({ id, onClose }: {
           </Alert>
         ) : !a ? null : (
           <>
-            <Stack direction="row" spacing={0.7} flexWrap="wrap" useFlexGap
-              sx={{ mb: 1.2 }}>
+            <Stack
+              direction="row"
+              spacing={0.7}
+              useFlexGap
+              sx={{
+                flexWrap: "wrap",
+                mb: 1.2
+              }}>
               <Chip size="small" label={a.kind} sx={chip(neon.purple)} />
               {a.third_party && (
                 <Chip size="small" label="third party" sx={chip(neon.yellow)} />
@@ -200,7 +214,7 @@ export function AssetModal({ id, onClose }: {
         )}
       </DialogContent>
     </Dialog>
-  )
+  );
 }
 
 const chip = (c: string) => ({

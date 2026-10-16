@@ -269,8 +269,14 @@ export function WebDiscoveryDialog({ project, onClose, onQueued }: {
             </Alert>
           ) : (
             <>
-              <Stack direction="row" spacing={1} alignItems="center"
-                flexWrap="wrap" useFlexGap>
+              <Stack
+                direction="row"
+                spacing={1}
+                useFlexGap
+                sx={{
+                  alignItems: "center",
+                  flexWrap: "wrap"
+                }}>
                 <Chip size="small" sx={chipSx(neon.pink)}
                   label={`${rows.length} URL${rows.length === 1 ? '' : 's'}`} />
                 {Object.entries(byKind).map(([k, n]) => (
@@ -333,5 +339,5 @@ export function WebDiscoveryDialog({ project, onClose, onQueued }: {
         </Button>
       </DialogActions>
     </EnumerateDialog>
-  )
+  );
 }

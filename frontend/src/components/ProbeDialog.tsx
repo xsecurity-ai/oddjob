@@ -148,8 +148,14 @@ export function ProbeDialog({ project, tool, onClose, onQueued }: {
           </Alert>
         ) : (
           <>
-            <Stack direction="row" spacing={1} alignItems="center"
-              flexWrap="wrap" useFlexGap>
+            <Stack
+              direction="row"
+              spacing={1}
+              useFlexGap
+              sx={{
+                alignItems: "center",
+                flexWrap: "wrap"
+              }}>
               <Chip size="small" sx={chipSx(neon.green)}
                 label={`${subjects.length} ${d?.takes ?? 'subject'}${
                   subjects.length === 1 ? '' : 's'}`} />
@@ -177,5 +183,5 @@ export function ProbeDialog({ project, tool, onClose, onQueued }: {
         </Button>
       </Stack>
     </EnumerateDialog>
-  )
+  );
 }

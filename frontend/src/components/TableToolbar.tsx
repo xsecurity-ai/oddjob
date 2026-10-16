@@ -91,10 +91,18 @@ export function TableToolbar({
 
   return (
     <>
-      <Stack direction="row" spacing={1} alignItems="center" sx={{
-        px: 1.5, py: 0.9, borderBottom: `1px solid ${alpha(neon.pink, 0.22)}`,
-        backgroundColor: alpha(neon.bgDeep, 0.45), flexWrap: 'wrap', rowGap: 0.8,
-      }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{
+          alignItems: "center",
+          px: 1.5,
+          py: 0.9,
+          borderBottom: `1px solid ${alpha(neon.pink, 0.22)}`,
+          backgroundColor: alpha(neon.bgDeep, 0.45),
+          flexWrap: 'wrap',
+          rowGap: 0.8
+        }}>
         {actions}
         <Box sx={{ flex: 1, minWidth: 8 }} />
         {status}
@@ -147,11 +155,18 @@ export function TableToolbar({
       </Stack>
 
       {armed.length > 0 && (
-        <Stack direction="row" spacing={0.7} alignItems="center" sx={{
-          px: 1.5, py: 0.6, flexWrap: 'wrap', rowGap: 0.6,
-          borderBottom: `1px solid ${alpha(neon.yellow, 0.25)}`,
-          backgroundColor: alpha(neon.yellow, 0.06),
-        }}>
+        <Stack
+          direction="row"
+          spacing={0.7}
+          sx={{
+            alignItems: "center",
+            px: 1.5,
+            py: 0.6,
+            flexWrap: 'wrap',
+            rowGap: 0.6,
+            borderBottom: `1px solid ${alpha(neon.yellow, 0.25)}`,
+            backgroundColor: alpha(neon.yellow, 0.06)
+          }}>
           <Typography sx={{ fontSize: 10, letterSpacing: '0.14em',
                             textTransform: 'uppercase', color: neon.yellow,
                             fontFamily: `'Orbitron', sans-serif` }}>
@@ -159,7 +174,9 @@ export function TableToolbar({
           </Typography>
           {armed.map((item, i) => (
             <Stack key={String(item.id ?? i)} direction="row" spacing={0.7}
-              alignItems="center">
+              sx={{
+                alignItems: "center"
+              }}>
               {i > 0 && (
                 <Typography sx={{ fontSize: 10, letterSpacing: '0.1em',
                                   textTransform: 'uppercase', color: alpha(neon.muted, 0.9) }}>
@@ -231,5 +248,5 @@ export function TableToolbar({
         ))}
       </Menu>
     </>
-  )
+  );
 }

@@ -6,7 +6,7 @@ import {
   Paper, Stack, Switch, Table, TableBody, TableCell, TableHead, TableRow,
   TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
-import DeleteIcon from '@mui/icons-material/DeleteOutline'
+import DeleteIcon from '@mui/icons-material/DeleteOutlined'
 import GppBadIcon from '@mui/icons-material/GppBadOutlined'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type ScopeApplyResult } from '../lib/api'
@@ -343,7 +343,9 @@ export function ProjectConfigView({ project }: { project: string | null }) {
                           mb: 1.5 }}>
           {data.project.code}
         </Typography>
-        <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap>
+        <Stack direction="row" spacing={1.5} useFlexGap sx={{
+          flexWrap: "wrap"
+        }}>
           <TextField size="small" label="Name" value={details.name}
             sx={{ minWidth: 240 }}
             onChange={(e) => setDetails((d) => ({ ...d, name: e.target.value }))} />
@@ -434,8 +436,14 @@ export function ProjectConfigView({ project }: { project: string | null }) {
       </Alert>
 
       <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
-        <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap
-               alignItems="flex-start">
+        <Stack
+          direction="row"
+          spacing={1.5}
+          useFlexGap
+          sx={{
+            flexWrap: "wrap",
+            alignItems: "flex-start"
+          }}>
           {/* The kind on each pill is derived by src/lib/scopeEntry.ts,
               which is a port of the server's `classify` kept honest by a
               shared fixture — so the chip says what the row below will
@@ -531,7 +539,14 @@ export function ProjectConfigView({ project }: { project: string | null }) {
         </Stack>
       </Paper>
 
-      <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap sx={{ mb: 2.5 }}>
+      <Stack
+        direction="row"
+        spacing={2}
+        useFlexGap
+        sx={{
+          flexWrap: "wrap",
+          mb: 2.5
+        }}>
         {list('In scope', inList, neon.green,
               'What the project may acquire. Empty means no allowlist.')}
         {list('Out of scope', outList, neon.red,
@@ -673,5 +688,5 @@ export function ProjectConfigView({ project }: { project: string | null }) {
       </Dialog>
 
     </Box>
-  )
+  );
 }
