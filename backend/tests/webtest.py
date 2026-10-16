@@ -750,4 +750,117 @@ check("an unknown found_by is refused, not silently ignored",
 check("omitting it shows everything",
       call("/api/web?project=WEB&q=by-", token=admin)[1]["total"] == 4)
 
+
+# ================================================= subdomain takeovers
+# The matching is a pure function, so most of this is about the three
+# verdicts being three different claims rather than degrees of one.
+from app import takeover as _tk  # noqa: E402
+
+print("\n== which provider a CNAME lands on ==")
+check("an S3 bucket is recognised",
+      (_tk.provider_for("x.s3.amazonaws.com") or _tk.Provider("", ())).name == "AWS S3")
+check("...including the region-infix website form, which is not a suffix match",
+      (_tk.provider_for("b.s3-website-eu-west-1.amazonaws.com")
+       or _tk.Provider("", ())).name == "AWS S3")
+check("a trailing dot is the same name, because resolvers disagree about it",
+      _tk.provider_for("page.github.io.") is not None)
+check("case is not a different provider",
+      _tk.provider_for("PAGE.GITHUB.IO") is not None)
+check("something nobody hands out is not a provider",
+      _tk.provider_for("www.corp.com") is None)
+check("an empty cname is not a provider", _tk.provider_for("") is None)
+
+print("\n== the three verdicts are three different claims ==")
+d = _tk.decide("a.corp.com", ["a.herokuapp.com"],
+               unresolved={"a.herokuapp.com"})
+check("a chain reaching a name that does not resolve is `dangling`",
+      d is not None and d.verdict == "dangling", d and d.verdict)
+check("...and says which name it was",
+      d is not None and "a.herokuapp.com" in (d.evidence or ""), d and d.evidence)
+
+d = _tk.decide("b.corp.com", ["b.herokuapp.com"], bodies=["<h1>No such app</h1>"])
+check("a provider's own unclaimed page is `fingerprint`",
+      d is not None and d.verdict == "fingerprint", d and d.verdict)
+check("...and quotes the marker, so nobody has to refetch the page to know why",
+      d is not None and d.evidence == "No such app", d and d.evidence)
+
+d = _tk.decide("c.corp.com", ["c.myshopify.com"], bodies=["a perfectly live store"])
+check("a provider with neither piece of evidence is `candidate`, not a finding",
+      d is not None and d.verdict == "candidate", d and d.verdict)
+check("...with no evidence, which is the point of the value",
+      d is not None and d.evidence is None, d and d.evidence)
+
+check("a host pointing nowhere interesting is not a row at all",
+      _tk.decide("d.corp.com", ["d.corp.com.cdn.internal"]) is None)
+check("no cname at all is not a row", _tk.decide("e.corp.com", []) is None)
+check("dangling outranks a fingerprint when both could apply",
+      (_tk.decide("f.corp.com", ["f.herokuapp.com"],
+                  bodies=["No such app"],
+                  unresolved={"f.herokuapp.com"}) or _tk.Candidate(
+                      "", "", [], "", True, "", None)).verdict == "dangling")
+
+print("\n== not every dangling record is an exploitable takeover ==")
+d = _tk.decide("g.corp.com", ["g.elasticbeanstalk.com"],
+               unresolved={"g.elasticbeanstalk.com"})
+check("beanstalk still dangles and is still reported",
+      d is not None and d.verdict == "dangling", d and d.verdict)
+check("...but is marked unclaimable, so a report does not overstate it",
+      d is not None and d.claimable is False, d and d.claimable)
+check("an S3 bucket by contrast is claimable",
+      (_tk.decide("h.corp.com", ["h.s3.amazonaws.com"]) or
+       _tk.Candidate("", "", [], "", False, "", None)).claimable is True)
+
+print("\n== the chain is kept, not just the hop that matched ==")
+d = _tk.decide("i.corp.com", ["edge.corp.com", "i.github.io"])
+check("an intermediate hop does not hide the provider behind it",
+      d is not None and d.provider == "GitHub Pages", d and d.provider)
+check("...and the cname recorded is the hop that landed on it",
+      d is not None and d.cname == "i.github.io", d and d.cname)
+check("...while the whole chain survives for a reader",
+      d is not None and d.chain == ["edge.corp.com", "i.github.io"], d and d.chain)
+
+print("\n== the endpoint ==")
+TAKEOVER_HTTPX = "\n".join(json.dumps(x) for x in [
+    {"url": "https://dead.corp.com", "input": "dead.corp.com",
+     "host": "10.0.0.77", "port": 443, "scheme": "https", "status_code": 404,
+     "cname": ["dead.herokuapp.com"]},
+    {"url": "https://live.corp.com", "input": "live.corp.com",
+     "host": "10.0.0.78", "port": 443, "scheme": "https", "status_code": 200,
+     "cname": ["live.corp.com.edge.internal"]},
+])
+imp(TAKEOVER_HTTPX)
+st, r = call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
+check("refresh runs and reports what it decided", st == 200, f"{st} {r}")
+st, r = call("/api/web/takeovers?project=WEB", token=admin)
+check("the endpoint answers", st == 200, st)
+hosts = {i["hostname"]: i for i in (r or {}).get("items", [])}
+check("the host pointing at heroku is listed",
+      "dead.corp.com" in hosts, list(hosts))
+check("...as a candidate, because nothing here proved it dangles",
+      hosts.get("dead.corp.com", {}).get("verdict") == "candidate",
+      hosts.get("dead.corp.com"))
+check("...naming the provider", hosts.get("dead.corp.com", {}).get("provider") == "Heroku",
+      hosts.get("dead.corp.com"))
+check("the host pointing at internal infrastructure is NOT listed",
+      "live.corp.com" not in hosts, list(hosts))
+
+tid = hosts.get("dead.corp.com", {}).get("id")
+st, r = call(f"/api/web/takeovers/{tid}?project=WEB", "PATCH",
+             {"state": "false_positive", "note": "client owns it"}, token=admin)
+check("an operator can triage a row", st == 200 and r["state"] == "false_positive",
+      f"{st} {r}")
+
+# The whole point of re-deriving rather than accumulating: DNS facts
+# are rebuilt, operator decisions are not thrown away with them.
+call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
+st, r = call("/api/web/takeovers?project=WEB", token=admin)
+again = {i["hostname"]: i for i in (r or {}).get("items", [])}
+check("a refresh keeps the triage an operator already did",
+      again.get("dead.corp.com", {}).get("state") == "false_positive",
+      again.get("dead.corp.com"))
+check("...and the note with it",
+      again.get("dead.corp.com", {}).get("note") == "client owns it",
+      again.get("dead.corp.com"))
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
