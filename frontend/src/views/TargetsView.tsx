@@ -49,7 +49,7 @@ function isAddress(v: string | null | undefined): boolean {
   // IPv6 is matched loosely on purpose: hex, colons and an optional
   // zone. Anything with a colon in it is not a hostname, so a loose
   // match here cannot mistake a name for an address.
-  return /^[0-9a-f:]+(%[0-9a-z]+)?$/i.test(s) && s.includes(':')
+  return /^[0-9a-f:]+(%[0-9a-z]+)?$/i.test(s) && s.includes(':');
 }
 
 /** The address to look a target up by, or '' when it has none. */
@@ -384,7 +384,13 @@ export function TargetsView({ project }: { project: string | null }) {
         }
         const extra = Math.max(0, c.all.length - 1)
         return (
-          <Stack direction="row" spacing={0.6} alignItems="center" sx={{ minWidth: 0 }}>
+          <Stack
+            direction="row"
+            spacing={0.6}
+            sx={{
+              alignItems: "center",
+              minWidth: 0
+            }}>
             <Tooltip title={c.name ?? c.code}>
               <Chip size="small" label={c.code} sx={{
                 height: 19, fontSize: 10, letterSpacing: '0.06em',
@@ -406,7 +412,7 @@ export function TargetsView({ project }: { project: string | null }) {
               </Tooltip>
             ) : null}
           </Stack>
-        )
+        );
       } },
     { field: 'ip_address', headerName: 'IP Addresses', width: widths.ip,
       // Sorted and filtered on the first address, which is what the cell
@@ -427,7 +433,13 @@ export function TargetsView({ project }: { project: string | null }) {
         const all = p.row.ip_addresses ?? []
         const extra = extraAddresses(all)
         return (
-          <Stack direction="row" spacing={0.6} alignItems="center" sx={{ minWidth: 0 }}>
+          <Stack
+            direction="row"
+            spacing={0.6}
+            sx={{
+              alignItems: "center",
+              minWidth: 0
+            }}>
             <Box sx={{ overflow: 'hidden', textOverflow: 'ellipsis',
                        whiteSpace: 'nowrap' }}>{p.value || ''}</Box>
             {extra > 0 ? (
@@ -442,7 +454,7 @@ export function TargetsView({ project }: { project: string | null }) {
               </Tooltip>
             ) : null}
           </Stack>
-        )
+        );
       } },
     {
       // Tri-state. "Not probed" is shown as a dash, deliberately distinct from

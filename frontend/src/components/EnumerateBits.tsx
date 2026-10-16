@@ -111,38 +111,38 @@ export function AgentChooser({ fleet, value, onChange, region, onRegion }: {
 }) {
   const mode = fleet.routing?.mode ?? 'mesh'
   return (
-    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems="flex-start">
+    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{
+      alignItems: "flex-start"
+    }}>
       <TextField
         select size="small" label="Run on" sx={{ minWidth: 300, flex: 1 }}
         value={value === null ? 'pool' : String(value)}
         onChange={(e) => onChange(e.target.value === 'pool' ? null : Number(e.target.value))}
-        // Without this the closed input renders the selected MenuItem's
-        // own children — which here is a Stack holding the name and two
-        // Chips — so choosing an agent crushed a row of pills into a
-        // one-line box and the text ran over itself. The menu keeps the
-        // chips; only the collapsed display is plain.
-        //
-        // It still says privileged or not, because that is the fact the
-        // dialogs block on: masscan cannot run without raw sockets and
-        // -sS silently becomes -sT. Dropping it to tidy the box would
-        // hide the reason the Queue button is disabled.
-        SelectProps={{
-          renderValue: (v: unknown) => {
-            const key = String(v)
-            if (key === 'pool') return 'Any available agent (project pool)'
-            const a = fleet.agents.find((x) => String(x.id) === key)
-            if (!a) return key
-            return `${a.name} — ${a.status}, `
-                   + `${a.privileged ? 'raw sockets' : 'no raw sockets'}`
-          },
-        }}
         helperText={value === null
           ? `Project pool — ${mode} routing decides which Ghost takes it.`
-          : 'Addressed to this agent. The routing policy does not override it.'}>
+          : 'Addressed to this agent. The routing policy does not override it.'}
+        slotProps={{
+          select: {
+            renderValue: (v: unknown) => {
+              const key = String(v)
+              if (key === 'pool') return 'Any available agent (project pool)'
+              const a = fleet.agents.find((x) => String(x.id) === key)
+              if (!a) return key
+              return `${a.name} — ${a.status}, `
+                     + `${a.privileged ? 'raw sockets' : 'no raw sockets'}`
+            },
+          }
+        }}>
         <MenuItem value="pool">Any available agent (project pool)</MenuItem>
         {fleet.agents.map((a) => (
           <MenuItem key={a.id} value={String(a.id)} disabled={a.status === 'disabled'}>
-            <Stack direction="row" spacing={1} alignItems="center" sx={{ width: '100%' }}>
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{
+                alignItems: "center",
+                width: '100%'
+              }}>
               {/* minWidth 0 so a long agent name truncates instead of
                   pushing the two chips out of the menu's width. */}
               <Box sx={{ flex: 1, minWidth: 0, overflow: 'hidden',
@@ -167,7 +167,7 @@ export function AgentChooser({ fleet, value, onChange, region, onRegion }: {
             : 'This project routes by region, so a pooled task needs one.'} />
       )}
     </Stack>
-  )
+  );
 }
 
 /** Small muted paragraph. Used for the "what this does not do" notes. */

@@ -34,7 +34,7 @@
  */
 export function asServerReadsIt(raw: string): string {
   const v = raw.trim().replace(/\.+$/, '').toLowerCase().replace(/^[*.]+/, '')
-  return v.replace(/^[a-z]+:\/\//, '').split('/')[0].split('?')[0]
+  return v.replace(/^[a-z]+:\/\//, '').split('/')[0].split('?')[0];
 }
 
 /** The whole box, split and de-duplicated exactly as `wanted` does it.

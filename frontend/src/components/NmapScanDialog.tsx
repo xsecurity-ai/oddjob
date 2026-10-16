@@ -27,12 +27,14 @@ import {
 /** Label plus its flag, so both readings are available at a glance. */
 function Flag({ text, flag }: { text: string; flag: string }) {
   return (
-    <Stack direction="row" spacing={1} alignItems="baseline">
+    <Stack direction="row" spacing={1} sx={{
+      alignItems: "baseline"
+    }}>
       <Box sx={{ fontSize: 13 }}>{text}</Box>
       <Box sx={{ fontFamily: `'Share Tech Mono', monospace`, fontSize: 11,
                  color: alpha(neon.cyan, 0.85) }}>{flag}</Box>
     </Stack>
-  )
+  );
 }
 
 export function NmapScanDialog({ project, targets, onClose, onQueued }: {

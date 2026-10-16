@@ -161,7 +161,9 @@ export function TableFilterPanel({
     }
 
     return (
-      <Stack key={String(item.id ?? i)} direction="row" spacing={0.8} alignItems="center">
+      <Stack key={String(item.id ?? i)} direction="row" spacing={0.8} sx={{
+        alignItems: "center"
+      }}>
         <Box sx={{ width: 42, flexShrink: 0, fontSize: 10.5, letterSpacing: '0.1em',
                    textTransform: 'uppercase', color: alpha(neon.muted, 0.85),
                    textAlign: 'right' }}>
@@ -193,7 +195,7 @@ export function TableFilterPanel({
           </IconButton>
         </Tooltip>
       </Stack>
-    )
+    );
   }
 
   return (
@@ -206,7 +208,9 @@ export function TableFilterPanel({
         p: 1.5, maxWidth: '96vw',
       } } }}>
       <Stack spacing={1}>
-        <Stack direction="row" spacing={1.5} alignItems="center">
+        <Stack direction="row" spacing={1.5} sx={{
+          alignItems: "center"
+        }}>
           <Typography sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 10.5,
                             letterSpacing: '0.16em', textTransform: 'uppercase',
                             color: neon.cyan }}>
@@ -229,7 +233,9 @@ export function TableFilterPanel({
         )}
         {items.map(row)}
 
-        <Stack direction="row" spacing={1} alignItems="center">
+        <Stack direction="row" spacing={1} sx={{
+          alignItems: "center"
+        }}>
           <Button size="small" startIcon={<AddIcon sx={{ fontSize: 15 }} />}
             onClick={() => put([...items, blankFilter(filterable)])}
             sx={{ color: neon.green, fontSize: 11 }}>
@@ -247,7 +253,9 @@ export function TableFilterPanel({
                           + 'the page on screen. Columns the API will not '
                           + 'filter on are left out of the list rather than '
                           + 'offered and then rejected.'}>
-              <Stack direction="row" spacing={0.5} alignItems="center">
+              <Stack direction="row" spacing={0.5} sx={{
+                alignItems: "center"
+              }}>
                 <StorageIcon sx={{ fontSize: 14, color: alpha(neon.muted, 0.8) }} />
                 <Typography sx={{ fontSize: 10.5, color: alpha(neon.muted, 0.8) }}>
                   filtered in the database
@@ -258,7 +266,7 @@ export function TableFilterPanel({
         </Stack>
       </Stack>
     </Popover>
-  )
+  );
 }
 
 const toggleSx = {

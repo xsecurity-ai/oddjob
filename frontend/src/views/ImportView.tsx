@@ -5,7 +5,7 @@ import {
 } from '@mui/material'
 import UploadIcon from '@mui/icons-material/UploadFile'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
-import ErrorIcon from '@mui/icons-material/ErrorOutline'
+import ErrorIcon from '@mui/icons-material/ErrorOutlined'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type HostDecision, type ImportResult } from '../lib/api'
 import { UnknownHostsDialog } from '../components/UnknownHostsDialog'
@@ -274,7 +274,9 @@ export function ImportView({ project }: { project: string | null }) {
       )}
 
       <Stack spacing={2.5} sx={{ maxWidth: 940, mx: 'auto' }}>
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems="flex-start">
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{
+          alignItems: "flex-start"
+        }}>
           <TextField select size="small" label="Format" value={format}
             sx={{ minWidth: 260 }} onChange={(e) => setFormat(e.target.value)}
             helperText={BLURB[format] ?? 'Pick the tool that produced the file.'}>
@@ -326,7 +328,9 @@ export function ImportView({ project }: { project: string | null }) {
               <Paper key={j.id} variant="outlined"
                 sx={{ p: 1.5, borderColor: alpha(neon.cyan, 0.4),
                       bgcolor: alpha(neon.cyan, 0.04) }}>
-                <Stack direction="row" alignItems="center" spacing={1}>
+                <Stack direction="row" spacing={1} sx={{
+                  alignItems: "center"
+                }}>
                   <CircularProgress size={13} thickness={6}
                     variant={j.rows_total ? 'determinate' : 'indeterminate'}
                     value={j.rows_total ? (j.rows_done / j.rows_total) * 100 : 0}
@@ -354,7 +358,13 @@ export function ImportView({ project }: { project: string | null }) {
 
         {busy && (
           <Box>
-            <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{
+                alignItems: "center",
+                mb: 0.5
+              }}>
               <CircularProgress
                 size={13} thickness={6}
                 variant={sent && sent.loaded < sent.total ? 'determinate' : 'indeterminate'}
@@ -409,7 +419,13 @@ export function ImportView({ project }: { project: string | null }) {
             p: 2, backgroundColor: alpha(neon.paper, 0.7),
             border: `1px solid ${alpha(d.error ? neon.red : neon.green, 0.35)}`,
           }}>
-            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: d.error ? 0.5 : 1 }}>
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{
+                alignItems: "center",
+                mb: d.error ? 0.5 : 1
+              }}>
               {d.error
                 ? <ErrorIcon sx={{ fontSize: 16, color: neon.red }} />
                 : <CheckCircleIcon sx={{ fontSize: 16, color: neon.green }} />}
@@ -433,7 +449,7 @@ export function ImportView({ project }: { project: string | null }) {
         ))}
       </Stack>
     </Box>
-  )
+  );
 }
 
 function Summary({ r }: { r: ImportResult }) {
@@ -457,7 +473,9 @@ function Summary({ r }: { r: ImportResult }) {
   const shown = bits.filter(([, n]) => n > 0)
   return (
     <>
-      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+      <Stack direction="row" spacing={1} useFlexGap sx={{
+        flexWrap: "wrap"
+      }}>
         {shown.length === 0 && (
           <Typography sx={{ fontSize: 11.5, color: neon.muted }}>
             Nothing new — everything in this file was already recorded.
@@ -485,5 +503,5 @@ function Summary({ r }: { r: ImportResult }) {
         </Alert>
       )}
     </>
-  )
+  );
 }

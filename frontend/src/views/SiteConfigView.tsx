@@ -169,7 +169,9 @@ export function SiteConfigView() {
       const edited = v !== data.values[f.key]
       return (
         <Box key={f.key}>
-          <Stack direction="row" spacing={1} alignItems="flex-start">
+          <Stack direction="row" spacing={1} sx={{
+            alignItems: "flex-start"
+          }}>
             <TextField
               size="small" fullWidth label={f.label}
               value={(v as string) ?? ''} onChange={(e) => set(f.key, e.target.value)}
@@ -201,13 +203,15 @@ export function SiteConfigView() {
           )}
           {f.help && <Help text={f.help} />}
         </Box>
-      )
+      );
     }
     if (f.type === 'secret') {
       const stored = data.secrets_set[f.key]
       return (
         <Box key={f.key}>
-          <Stack direction="row" spacing={1} alignItems="flex-start">
+          <Stack direction="row" spacing={1} sx={{
+            alignItems: "flex-start"
+          }}>
             <TextField
               size="small" fullWidth type="password" label={f.label}
               value={(v as string) ?? ''} onChange={(e) => set(f.key, e.target.value)}
@@ -229,7 +233,7 @@ export function SiteConfigView() {
           </Stack>
           {f.help && <Help text={f.help} />}
         </Box>
-      )
+      );
     }
     return (
       <Box key={f.key}>
@@ -257,7 +261,14 @@ export function SiteConfigView() {
         border: `1px solid ${alpha(ok ? neon.green : must ? neon.yellow : neon.muted, 0.4)}`,
         background: alpha(ok ? neon.green : must ? neon.yellow : neon.muted, 0.06),
       }}>
-        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{
+            alignItems: "center",
+            flexWrap: "wrap"
+          }}>
           {extra}
           <Button size="small" variant="outlined" disabled={busy || !configured(g)}
             startIcon={ok ? <CheckCircleIcon sx={{ fontSize: 15 }} /> : <ScienceIcon sx={{ fontSize: 15 }} />}
@@ -276,7 +287,7 @@ export function SiteConfigView() {
               : `No unsaved ${GATE_LABEL[g]} changes.`}
         </Typography>
       </Box>
-    )
+    );
   }
 
   return (
@@ -353,7 +364,14 @@ export function SiteConfigView() {
 
         <Box sx={{ position: 'sticky', bottom: 0, py: 1.5,
                    background: `linear-gradient(transparent, ${alpha(neon.bgDeep, 0.9)} 40%)` }}>
-          <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>
+          <Stack
+            direction="row"
+            spacing={1.5}
+            useFlexGap
+            sx={{
+              alignItems: "center",
+              flexWrap: "wrap"
+            }}>
             <Button variant="outlined" disabled={busy || blocked.length > 0} onClick={save}
               sx={{ color: neon.pink, borderColor: alpha(neon.pink, 0.6),
                     '&:hover': { borderColor: neon.pink } }}>
@@ -368,7 +386,7 @@ export function SiteConfigView() {
         </Box>
       </Stack>
     </Box>
-  )
+  );
 }
 
 /** Whether the Slack bot is listening.
@@ -396,7 +414,14 @@ function SlackBotPanel() {
       border: `1px solid ${alpha(colour, 0.4)}`,
       background: alpha(colour, 0.06),
     }}>
-      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        useFlexGap
+        sx={{
+          alignItems: "center",
+          flexWrap: "wrap"
+        }}>
         <Typography sx={{ fontSize: 11, color: colour, letterSpacing: '0.08em' }}>
           {!s.enabled ? 'ANSWERING IS OFF'
             : !s.configured ? 'NO APP-LEVEL TOKEN'
@@ -413,7 +438,7 @@ function SlackBotPanel() {
         channel's engagement, and never writes.
       </Typography>
     </Box>
-  )
+  );
 }
 
 /** What automatic remediation is actually doing, and how long it will
@@ -441,7 +466,14 @@ function RemediationPanel() {
       border: `1px solid ${alpha(colour, 0.4)}`,
       background: alpha(colour, 0.06),
     }}>
-      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        useFlexGap
+        sx={{
+          alignItems: "center",
+          flexWrap: "wrap"
+        }}>
         <Typography sx={{ fontSize: 11, color: colour, letterSpacing: '0.08em' }}>
           {!s.configured ? 'NO AGENT CONFIGURED'
             : !s.enabled ? 'AUTOMATIC REMEDIATION OFF'
@@ -458,7 +490,14 @@ function RemediationPanel() {
 
       {s.pending > 0 && (
         <>
-          <Stack direction="row" spacing={0.6} sx={{ mt: 1 }} flexWrap="wrap" useFlexGap>
+          <Stack
+            direction="row"
+            spacing={0.6}
+            useFlexGap
+            sx={{
+              flexWrap: "wrap",
+              mt: 1
+            }}>
             {order.filter((k) => s.by_severity[k]).map((k) => (
               <Chip key={k} size="small" label={`${s.by_severity[k]} ${k}`}
                 sx={{ height: 18, fontSize: 10, bgcolor: alpha(SEV[k], 0.15),
@@ -482,7 +521,7 @@ function RemediationPanel() {
         </Typography>
       )}
     </Box>
-  )
+  );
 }
 
 function Help({ text }: { text: string }) {

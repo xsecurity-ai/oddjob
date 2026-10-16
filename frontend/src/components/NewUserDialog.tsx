@@ -3,8 +3,8 @@ import {
   Alert, Box, Button, Dialog, DialogActions, DialogContent, DialogTitle,
   IconButton, MenuItem, Select, Stack, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
-import AddIcon from '@mui/icons-material/AddCircleOutline'
-import DeleteIcon from '@mui/icons-material/DeleteOutline'
+import AddIcon from '@mui/icons-material/AddCircleOutlined'
+import DeleteIcon from '@mui/icons-material/DeleteOutlined'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { neon } from '../theme'
@@ -166,7 +166,12 @@ export function NewUserDialog({ projects, requireGrant, onClose, onDone }: {
 
           {/* ------------------------------- project access --------------- */}
           <Box>
-            <Stack direction="row" alignItems="center" sx={{ mb: 0.5 }}>
+            <Stack
+              direction="row"
+              sx={{
+                alignItems: "center",
+                mb: 0.5
+              }}>
               <Typography sx={{ flex: 1, fontSize: 11, letterSpacing: '0.1em',
                                 textTransform: 'uppercase', color: neon.cyan }}>
                 Project access
@@ -196,7 +201,9 @@ export function NewUserDialog({ projects, requireGrant, onClose, onDone }: {
             ) : (
               <Stack spacing={0.8}>
                 {grants.map((g, i) => (
-                  <Stack key={g.project} direction="row" spacing={1} alignItems="center">
+                  <Stack key={g.project} direction="row" spacing={1} sx={{
+                    alignItems: "center"
+                  }}>
                     <Select size="small" value={g.project} sx={{ flex: 1, fontSize: 12.5 }}
                       onChange={(e) => setGrant(i, { project: e.target.value })}>
                       {sortedStrings([g.project, ...free]).map((p) => (
@@ -235,5 +242,5 @@ export function NewUserDialog({ projects, requireGrant, onClose, onDone }: {
         </Button>
       </DialogActions>
     </Dialog>
-  )
+  );
 }

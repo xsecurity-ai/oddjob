@@ -89,8 +89,15 @@ export function AgentPanel({ project, open, onClose }: {
         } } }}>
         <Stack sx={{ height: '100%' }}>
           {/* header */}
-          <Stack direction="row" spacing={1} alignItems="center" sx={{
-            px: 1.5, py: 1, borderBottom: `1px solid ${alpha(neon.cyan, 0.25)}` }}>
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{
+              alignItems: "center",
+              px: 1.5,
+              py: 1,
+              borderBottom: `1px solid ${alpha(neon.cyan, 0.25)}`
+            }}>
             <Typography sx={{
               fontFamily: `'Orbitron', sans-serif`, fontSize: 11.5,
               letterSpacing: '0.16em', color: neon.cyan, textShadow: glow(neon.cyan, 0.5),
@@ -114,9 +121,17 @@ export function AgentPanel({ project, open, onClose }: {
 
           {/* provider line */}
           {s && (
-            <Stack direction="row" spacing={0.8} alignItems="center" flexWrap="wrap"
-              useFlexGap sx={{ px: 1.5, py: 0.8,
-                               borderBottom: `1px solid ${alpha(neon.purple, 0.18)}` }}>
+            <Stack
+              direction="row"
+              spacing={0.8}
+              useFlexGap
+              sx={{
+                alignItems: "center",
+                flexWrap: "wrap",
+                px: 1.5,
+                py: 0.8,
+                borderBottom: `1px solid ${alpha(neon.purple, 0.18)}`
+              }}>
               <Chip size="small" label={s.provider} sx={tag(neon.cyan)} />
               <Chip size="small" label={s.model} sx={tag(neon.purple)} />
               {s.endpoint
@@ -171,7 +186,13 @@ export function AgentPanel({ project, open, onClose }: {
 
             {turns.map((t, i) => <TurnBlock key={i} t={t} />)}
             {busy && (
-              <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1.5 }}>
+              <Stack
+                direction="row"
+                spacing={1}
+                sx={{
+                  alignItems: "center",
+                  mt: 1.5
+                }}>
                 <CircularProgress size={13} sx={{ color: neon.cyan }} />
                 <Typography sx={{ fontSize: 11.5, color: neon.cyan }}>thinking…</Typography>
               </Stack>
@@ -181,7 +202,9 @@ export function AgentPanel({ project, open, onClose }: {
 
           {/* composer */}
           <Box sx={{ p: 1.2, borderTop: `1px solid ${alpha(neon.cyan, 0.25)}` }}>
-            <Stack direction="row" spacing={1} alignItems="flex-end">
+            <Stack direction="row" spacing={1} sx={{
+              alignItems: "flex-end"
+            }}>
               <TextField
                 fullWidth size="small" multiline maxRows={6} value={input}
                 disabled={!project || !s?.configured || busy}
@@ -205,7 +228,7 @@ export function AgentPanel({ project, open, onClose }: {
         </Stack>
       </Drawer>
     </>
-  )
+  );
 }
 
 function TurnBlock({ t }: { t: Turn }) {
@@ -241,10 +264,16 @@ function ToolCall({ step }: { step: AgentStep }) {
   const [open, setOpen] = useState(false)
   return (
     <Box sx={{ mb: 0.6 }}>
-      <Stack direction="row" spacing={0.6} alignItems="center"
+      <Stack
+        direction="row"
+        spacing={0.6}
         onClick={() => setOpen(!open)}
-        sx={{ cursor: 'pointer', color: alpha(neon.green, 0.9),
-              '&:hover': { color: neon.green } }}>
+        sx={{
+          alignItems: "center",
+          cursor: 'pointer',
+          color: alpha(neon.green, 0.9),
+          '&:hover': { color: neon.green }
+        }}>
         <BuildIcon sx={{ fontSize: 13 }} />
         <Typography sx={{ fontSize: 10.5, fontFamily: `'Share Tech Mono', monospace` }}>
           {step.tool}({Object.entries(step.args || {})
@@ -262,7 +291,7 @@ function ToolCall({ step }: { step: AgentStep }) {
         }}>{step.result}</Box>
       </Collapse>
     </Box>
-  )
+  );
 }
 
 const tag = (c: string) => ({

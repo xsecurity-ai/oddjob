@@ -4,7 +4,7 @@ import {
   DialogTitle, IconButton, Stack, Table, TableBody, TableCell, TableHead,
   TableRow, Tooltip, Typography, alpha,
 } from '@mui/material'
-import DeleteIcon from '@mui/icons-material/DeleteOutline'
+import DeleteIcon from '@mui/icons-material/DeleteOutlined'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { neon, glow } from '../theme'
@@ -153,8 +153,14 @@ export function GhostQueueDialog({ project, onClose }: {
         )}
       </DialogContent>
       <DialogActions>
-        <Stack direction="row" spacing={1} alignItems="center"
-               sx={{ mr: 'auto', pl: 2 }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{
+            alignItems: "center",
+            mr: 'auto',
+            pl: 2
+          }}>
           <Typography sx={{ fontSize: 11, color: neon.muted }}>
             {rows.length} waiting
           </Typography>
@@ -162,5 +168,5 @@ export function GhostQueueDialog({ project, onClose }: {
         <Button onClick={onClose} sx={{ color: neon.cyan }}>Close</Button>
       </DialogActions>
     </Dialog>
-  )
+  );
 }

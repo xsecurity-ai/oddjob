@@ -45,11 +45,13 @@ function Blocked({ label, why, icon }: {
       <Box>
         <MenuItem disabled>
           <ListItemIcon sx={{ minWidth: 30, color: neon.muted }}>{icon}</ListItemIcon>
-          <ListItemText primaryTypographyProps={{ fontSize: 13 }}>{label}</ListItemText>
+          <ListItemText slotProps={{
+            primary: { sx: { fontSize: 13 } }
+          }}>{label}</ListItemText>
         </MenuItem>
       </Box>
     </Tooltip>
-  )
+  );
 }
 
 /** Why nothing can be enumerated, or '' when something can.
@@ -128,9 +130,12 @@ export function EnumerateMenu({ onPick, selectedCount, unnamedCount,
     <MenuItem onClick={() => choose(a)}>
       <ListItemIcon sx={{ minWidth: 30, color: colour }}>{icon}</ListItemIcon>
       <ListItemText
-        primaryTypographyProps={{ fontSize: 13 }}
-        secondaryTypographyProps={{ fontSize: 10.5, color: neon.muted }}
-        primary={label} secondary={secondary} />
+        primary={label}
+        secondary={secondary}
+        slotProps={{
+          primary: { sx: { fontSize: 13 } },
+          secondary: { sx: { fontSize: 10.5, color: neon.muted } }
+        }} />
     </MenuItem>
   )
 
@@ -322,11 +327,14 @@ export function TargetRowActions({ kind, hasIp, hasName, allowed,
               <ListItemIcon sx={{ minWidth: 30, color: neon.green }}>
                 <DnsIcon fontSize="small" />
               </ListItemIcon>
-              <ListItemText primaryTypographyProps={{ fontSize: 13 }}
-                secondaryTypographyProps={{ fontSize: 10.5, color: neon.muted }}
+              <ListItemText
                 primary="Find hostname"
                 secondary={hasName ? 'Reverse lookup — it already has a name'
-                                   : 'Reverse lookup on its address'} />
+                                   : 'Reverse lookup on its address'}
+                slotProps={{
+                  primary: { sx: { fontSize: 13 } },
+                  secondary: { sx: { fontSize: 10.5, color: neon.muted } }
+                }} />
             </MenuItem>
           : <Blocked label="Find hostname" icon={<DnsIcon fontSize="small" />}
               why="No address recorded for this target, so there is nothing to look up." />}
@@ -341,11 +349,14 @@ export function TargetRowActions({ kind, hasIp, hasName, allowed,
               <ListItemIcon sx={{ minWidth: 30, color: neon.green }}>
                 <LanIcon fontSize="small" />
               </ListItemIcon>
-              <ListItemText primaryTypographyProps={{ fontSize: 13 }}
-                secondaryTypographyProps={{ fontSize: 10.5, color: neon.muted }}
+              <ListItemText
                 primary="Find IP"
                 secondary={hasIp ? 'Forward lookup — it already has an address'
-                                 : 'Forward lookup on its name'} />
+                                 : 'Forward lookup on its name'}
+                slotProps={{
+                  primary: { sx: { fontSize: 13 } },
+                  secondary: { sx: { fontSize: 10.5, color: neon.muted } }
+                }} />
             </MenuItem>}
 
         <Divider sx={{ borderColor: alpha(neon.purple, 0.2) }} />
@@ -356,8 +367,10 @@ export function TargetRowActions({ kind, hasIp, hasName, allowed,
               <ListItemIcon sx={{ minWidth: 30, color: neon.cyan }}>
                 <RadarIcon fontSize="small" />
               </ListItemIcon>
-              <ListItemText primaryTypographyProps={{ fontSize: 13 }}
-                primary="Enumerate with nmap" />
+              <ListItemText primary="Enumerate with nmap"
+                slotProps={{
+                  primary: { sx: { fontSize: 13 } }
+                }} />
             </MenuItem>}
 
         <Divider sx={{ borderColor: alpha(neon.purple, 0.2) }} />
@@ -365,12 +378,15 @@ export function TargetRowActions({ kind, hasIp, hasName, allowed,
           <ListItemIcon sx={{ minWidth: 30, color: neon.pink }}>
             <MergeIcon fontSize="small" />
           </ListItemIcon>
-          <ListItemText primaryTypographyProps={{ fontSize: 13 }}
+          <ListItemText
             primary="Combine with another target"
             secondary="When an address and a name turn out to be one host"
-            secondaryTypographyProps={{ fontSize: 11, color: neon.muted }} />
+            slotProps={{
+              primary: { sx: { fontSize: 13 } },
+              secondary: { sx: { fontSize: 11, color: neon.muted } }
+            }} />
         </MenuItem>
       </Menu>
     </>
-  )
+  );
 }

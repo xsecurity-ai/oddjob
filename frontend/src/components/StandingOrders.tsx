@@ -118,11 +118,20 @@ export function StandingOrders({ project }: { project: string }) {
     + (nuclei !== 'off' ? 1 : 0)
 
   return (
-    <Stack direction="row" spacing={1.4} alignItems="center" useFlexGap
-      sx={{ flexWrap: 'wrap', px: 1.2, py: 0.7, mb: 1,
-            border: `1px solid ${alpha(live ? neon.yellow : neon.muted, 0.28)}`,
-            borderRadius: 1,
-            bgcolor: alpha(live ? neon.yellow : neon.muted, 0.05) }}>
+    <Stack
+      direction="row"
+      spacing={1.4}
+      useFlexGap
+      sx={{
+        alignItems: "center",
+        flexWrap: 'wrap',
+        px: 1.2,
+        py: 0.7,
+        mb: 1,
+        border: `1px solid ${alpha(live ? neon.yellow : neon.muted, 0.28)}`,
+        borderRadius: 1,
+        bgcolor: alpha(live ? neon.yellow : neon.muted, 0.05)
+      }}>
       <Tooltip title={admin
         ? 'Work the project does on its own as hosts arrive. Every '
           + 'candidate is checked against the scope list before anything '
@@ -159,7 +168,9 @@ export function StandingOrders({ project }: { project: string }) {
           Wrapping the Select meant the balloon was still open when the
           menu dropped, and it covered the options you were trying to
           pick — the explanation obscuring the thing it explains. */}
-      <Stack direction="row" spacing={0.7} alignItems="center">
+      <Stack direction="row" spacing={0.7} sx={{
+        alignItems: "center"
+      }}>
         <Tooltip title={'Scans hosts that have never been scanned. Top 100 is '
           + "nmap's own fast list; Full TCP is all 65,535 ports and is hours "
           + 'of traffic at the far end.'}>
@@ -181,7 +192,9 @@ export function StandingOrders({ project }: { project: string }) {
 
       {/* Tooltip on the label, not around the control — see the note
           on the nmap select above. */}
-      <Stack direction="row" spacing={0.7} alignItems="center">
+      <Stack direction="row" spacing={0.7} sx={{
+        alignItems: "center"
+      }}>
         <Tooltip title={'Crawls each web address this project knows, asks for '
           + 'paths nothing links to, or both. A crawl follows the '
           + "application's own links; brute forcing asks for 4,751 paths "
@@ -204,7 +217,9 @@ export function StandingOrders({ project }: { project: string }) {
       </Stack>
 
       {/* Tooltip on the label — see the note on the nmap select. */}
-      <Stack direction="row" spacing={0.7} alignItems="center">
+      <Stack direction="row" spacing={0.7} sx={{
+        alignItems: "center"
+      }}>
         <Tooltip title={'Runs nuclei against every web address this project '
           + 'knows. CVE templates are critical and high only, and exclude '
           + 'anything needing a login. Fingerprinting records what the '
@@ -235,5 +250,5 @@ export function StandingOrders({ project }: { project: string }) {
         </Box>
       )}
     </Stack>
-  )
+  );
 }

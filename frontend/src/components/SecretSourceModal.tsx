@@ -158,7 +158,13 @@ export function SecretSourceModal({ vulnId, triage, onClose }: {
         height: '85vh',
       } } }}>
       <DialogTitle sx={{ pr: 6, pb: 1 }}>
-        <Stack direction="row" spacing={1.25} alignItems="center" flexWrap="wrap">
+        <Stack
+          direction="row"
+          spacing={1.25}
+          sx={{
+            alignItems: "center",
+            flexWrap: "wrap"
+          }}>
           <Typography sx={{
             fontFamily: `'Orbitron', sans-serif`, fontSize: 13, fontWeight: 700,
             letterSpacing: '0.06em', color: neon.text,
@@ -339,5 +345,5 @@ export function SecretSourceModal({ vulnId, triage, onClose }: {
         )}
       </DialogContent>
     </Dialog>
-  )
+  );
 }

@@ -185,48 +185,50 @@ export function VulnsView({ project }: { project: string | null }) {
 
   return (
     <>
-    {strip}
-    <DataTable
-      rows={data?.items ?? []}
-      columns={columns as ColumnDef[]}
-      loading={isLoading}
-      error={error as Error | null}
-      initialSort={{ field: 'severity', sort: 'asc' }}   // asc on rank = worst first
-      hiddenColumns={project ? { project_code: false } : undefined}
-      kind="vulns"
-      project={project}
-      canWrite={canWrite(project)}
-      note={canWrite(project) ? undefined : 'read-only'}
-      onSelectionChange={setSelected}
-      extraActions={canWrite(project) ? (
-        <Stack direction="row" spacing={1} alignItems="center">
-          {selected.length > 0 && (
-            <TextField select size="small" value=""
-              disabled={mark.isPending}
-              onChange={(e) => mark.mutate({
-                ids: selected, triage: e.target.value,
-              })}
-              sx={{ minWidth: 210 }}
-              slotProps={{ inputLabel: { shrink: true } }}
-              label={`Mark ${selected.length} selected`}>
-              {TRIAGE.map((t) => (
-                <MenuItem key={t.value} value={t.value}
-                  sx={{ fontSize: 12.5, color: t.colour }}>{t.label}</MenuItem>
-              ))}
-            </TextField>
-          )}
-          {refused > 0 && (
-            <Box sx={{ fontSize: 11.5, color: neon.red }}>
-              {refused} could not be changed — no write access on that
-              engagement.
-            </Box>
-          )}
-          <ImportReportButton project={project} />
-        </Stack>
-      ) : undefined}
-    />
-    <VulnModal id={detail} onClose={() => setDetail(null)}
-      onHost={(proj, h) => { setDetail(null); open(proj, h) }} />
+      {strip}
+      <DataTable
+        rows={data?.items ?? []}
+        columns={columns as ColumnDef[]}
+        loading={isLoading}
+        error={error as Error | null}
+        initialSort={{ field: 'severity', sort: 'asc' }}   // asc on rank = worst first
+        hiddenColumns={project ? { project_code: false } : undefined}
+        kind="vulns"
+        project={project}
+        canWrite={canWrite(project)}
+        note={canWrite(project) ? undefined : 'read-only'}
+        onSelectionChange={setSelected}
+        extraActions={canWrite(project) ? (
+          <Stack direction="row" spacing={1} sx={{
+            alignItems: "center"
+          }}>
+            {selected.length > 0 && (
+              <TextField select size="small" value=""
+                disabled={mark.isPending}
+                onChange={(e) => mark.mutate({
+                  ids: selected, triage: e.target.value,
+                })}
+                sx={{ minWidth: 210 }}
+                slotProps={{ inputLabel: { shrink: true } }}
+                label={`Mark ${selected.length} selected`}>
+                {TRIAGE.map((t) => (
+                  <MenuItem key={t.value} value={t.value}
+                    sx={{ fontSize: 12.5, color: t.colour }}>{t.label}</MenuItem>
+                ))}
+              </TextField>
+            )}
+            {refused > 0 && (
+              <Box sx={{ fontSize: 11.5, color: neon.red }}>
+                {refused} could not be changed — no write access on that
+                engagement.
+              </Box>
+            )}
+            <ImportReportButton project={project} />
+          </Stack>
+        ) : undefined}
+      />
+      <VulnModal id={detail} onClose={() => setDetail(null)}
+        onHost={(proj, h) => { setDetail(null); open(proj, h) }} />
     </>
-  )
+  );
 }

@@ -82,8 +82,14 @@ function SecretField({ vulnId }: { vulnId: number }) {
                         letterSpacing: '0.16em', color: neon.red, mb: 0.75 }}>
         CREDENTIAL
       </Typography>
-      <Stack direction="row" spacing={1} alignItems="center"
-        sx={{ flexWrap: 'wrap', gap: 1 }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{
+          alignItems: "center",
+          flexWrap: 'wrap',
+          gap: 1
+        }}>
         <Typography component="pre" sx={{
           fontFamily: `'Share Tech Mono', monospace`, fontSize: 12.5,
           color: shown ? neon.red : neon.muted, m: 0,
@@ -115,7 +121,7 @@ function SecretField({ vulnId }: { vulnId: number }) {
           : 'Hidden by default. Revealing is recorded in the audit log.')}
       </Typography>
     </Box>
-  )
+  );
 }
 
 export function VulnModal({ id, onClose, onHost }: {
@@ -151,7 +157,9 @@ export function VulnModal({ id, onClose, onHost }: {
         border: `1px solid ${alpha(neon.cyan, 0.45)}`,
       } } }}>
       <DialogTitle sx={{ pr: 6 }}>
-        <Stack direction="row" spacing={1.25} alignItems="flex-start">
+        <Stack direction="row" spacing={1.25} sx={{
+          alignItems: "flex-start"
+        }}>
           {data && (
             <Chip size="small" label={data.severity.toUpperCase()} sx={{
               height: 20, fontSize: 10, fontWeight: 700, mt: 0.25,
@@ -187,7 +195,13 @@ export function VulnModal({ id, onClose, onHost }: {
 
         {data && (
           <Stack spacing={2.5}>
-            <Stack direction="row" spacing={2} flexWrap="wrap" rowGap={1}>
+            <Stack
+              direction="row"
+              spacing={2}
+              sx={{
+                flexWrap: "wrap",
+                rowGap: 1
+              }}>
               {([
                 ['status', data.status],
                 ['first seen on', data.host],
@@ -261,7 +275,13 @@ export function VulnModal({ id, onClose, onHost }: {
             <Divider sx={{ borderColor: alpha(neon.purple, 0.25) }} />
 
             <Box>
-              <Stack direction="row" alignItems="baseline" spacing={1} sx={{ mb: 1 }}>
+              <Stack
+                direction="row"
+                spacing={1}
+                sx={{
+                  alignItems: "baseline",
+                  mb: 1
+                }}>
                 <Typography sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 10.5,
                                   letterSpacing: '0.16em', color: neon.pink }}>
                   AFFECTED SYSTEMS
@@ -337,5 +357,5 @@ export function VulnModal({ id, onClose, onHost }: {
         )}
       </DialogContent>
     </Dialog>
-  )
+  );
 }

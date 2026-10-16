@@ -227,8 +227,14 @@ export function WebView({ project }: { project: string | null }) {
         const open = expanded.has(key)
         const many = !r.__child && (r.hits ?? 1) > 1
         return (
-          <Stack direction="row" alignItems="center" spacing={0.5}
-            sx={{ pl: r.__child ? 3 : 0, minWidth: 0 }}>
+          <Stack
+            direction="row"
+            spacing={0.5}
+            sx={{
+              alignItems: "center",
+              pl: r.__child ? 3 : 0,
+              minWidth: 0
+            }}>
             {many ? (
               <IconButton size="small" onClick={(e) => { e.stopPropagation(); toggle(r as WebGroup) }}
                 sx={{ p: 0.1, color: neon.pink }}>
@@ -260,7 +266,7 @@ export function WebView({ project }: { project: string | null }) {
                 border: `1px solid ${alpha(neon.pink, 0.45)}` }} />
             )}
           </Stack>
-        )
+        );
       },
     },
     {
@@ -347,7 +353,9 @@ export function WebView({ project }: { project: string | null }) {
     {
       field: 'sources', headerName: 'Found by', flex: 1, minWidth: 130,
       renderCell: (p) => (
-        <Stack direction="row" spacing={0.4} flexWrap="wrap" useFlexGap>
+        <Stack direction="row" spacing={0.4} useFlexGap sx={{
+          flexWrap: "wrap"
+        }}>
           {String(p.value || '').split(',').filter(Boolean).map((s) => (
             <Chip key={s} size="small" label={s} sx={{
               height: 17, fontSize: 9.5, bgcolor: alpha(neon.purple, 0.16),
@@ -388,123 +396,125 @@ export function WebView({ project }: { project: string | null }) {
 
   return (
     <>
-    {/* Two readings of the same estate: what addresses exist, and
-        what those pages pull in to render themselves. They are
-        different questions with different answers, which is why
-        they are tabs rather than one table with more columns. */}
-    <Tabs value={tab} onChange={(_, v) => setTab(v)}
-      sx={{ minHeight: 34, px: 2, pt: 1,
-            borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
-      <Tab value="urls" label="URLs" sx={TAB_SX} />
-      <Tab value="assets" label="Assets" sx={TAB_SX} />
-    </Tabs>
-    {/* The packet view hands straight to the editor. It closes as the
-        editor opens, so the two are never stacked: they show the same
-        exchange, and two dialogs of one exchange is a guess about
-        which is live. */}
-    {packet !== null && (
-      <PacketModal id={packet} onClose={() => setPacket(null)}
-        onReplay={(pid) => { setPacket(null); setReplay(pid) }} />
-    )}
-    <Menu open={!!menu} onClose={() => setMenu(null)}
-      anchorReference="anchorPosition"
-      anchorPosition={menu ? { top: menu.y, left: menu.x } : undefined}
-      slotProps={{ paper: { sx: {
-        backgroundColor: alpha(neon.paper, 0.98), backgroundImage: 'none',
-        border: `1px solid ${alpha(neon.cyan, 0.4)}`,
-      } } }}>
-      <MenuItem
-        onClick={() => { setPacket(menu!.row.id); setMenu(null) }}
-        sx={{ fontSize: 12.5, color: neon.cyan }}>
-        <ArticleIcon sx={{ fontSize: 16, mr: 1 }} />
-        View packet
-      </MenuItem>
-      <MenuItem
-        onClick={() => { setReplay(menu!.row.id); setMenu(null) }}
-        sx={{ fontSize: 12.5, color: neon.orange }}>
-        <ReplayIcon sx={{ fontSize: 16, mr: 1 }} />
-        Edit and resend
-      </MenuItem>
-      {/* `href` is kept so middle-click and "copy link address" still
-          work, but the navigation is done explicitly rather than left
-          to the anchor's default. Closing the menu in the same handler
-          unmounts that anchor, and an <a> removed during its own click
-          never navigates — which is why this did nothing at all. */}
-      <MenuItem
-        component="a" href={menu?.row.url ?? '#'}
-        target="_blank" rel="noopener noreferrer"
-        onClick={(e) => {
-          e.preventDefault()
-          const u = menu?.row.url
-          setMenu(null)
-          if (u) window.open(u, '_blank', 'noopener,noreferrer')
+      {/* Two readings of the same estate: what addresses exist, and
+          what those pages pull in to render themselves. They are
+          different questions with different answers, which is why
+          they are tabs rather than one table with more columns. */}
+      <Tabs value={tab} onChange={(_, v) => setTab(v)}
+        sx={{ minHeight: 34, px: 2, pt: 1,
+              borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
+        <Tab value="urls" label="URLs" sx={TAB_SX} />
+        <Tab value="assets" label="Assets" sx={TAB_SX} />
+      </Tabs>
+      {/* The packet view hands straight to the editor. It closes as the
+          editor opens, so the two are never stacked: they show the same
+          exchange, and two dialogs of one exchange is a guess about
+          which is live. */}
+      {packet !== null && (
+        <PacketModal id={packet} onClose={() => setPacket(null)}
+          onReplay={(pid) => { setPacket(null); setReplay(pid) }} />
+      )}
+      <Menu open={!!menu} onClose={() => setMenu(null)}
+        anchorReference="anchorPosition"
+        anchorPosition={menu ? { top: menu.y, left: menu.x } : undefined}
+        slotProps={{ paper: { sx: {
+          backgroundColor: alpha(neon.paper, 0.98), backgroundImage: 'none',
+          border: `1px solid ${alpha(neon.cyan, 0.4)}`,
+        } } }}>
+        <MenuItem
+          onClick={() => { setPacket(menu!.row.id); setMenu(null) }}
+          sx={{ fontSize: 12.5, color: neon.cyan }}>
+          <ArticleIcon sx={{ fontSize: 16, mr: 1 }} />
+          View packet
+        </MenuItem>
+        <MenuItem
+          onClick={() => { setReplay(menu!.row.id); setMenu(null) }}
+          sx={{ fontSize: 12.5, color: neon.orange }}>
+          <ReplayIcon sx={{ fontSize: 16, mr: 1 }} />
+          Edit and resend
+        </MenuItem>
+        {/* `href` is kept so middle-click and "copy link address" still
+            work, but the navigation is done explicitly rather than left
+            to the anchor's default. Closing the menu in the same handler
+            unmounts that anchor, and an <a> removed during its own click
+            never navigates — which is why this did nothing at all. */}
+        <MenuItem
+          component="a" href={menu?.row.url ?? '#'}
+          target="_blank" rel="noopener noreferrer"
+          onClick={(e) => {
+            e.preventDefault()
+            const u = menu?.row.url
+            setMenu(null)
+            if (u) window.open(u, '_blank', 'noopener,noreferrer')
+          }}
+          sx={{ fontSize: 12.5, color: neon.text }}>
+          <LaunchIcon sx={{ fontSize: 16, mr: 1 }} />
+          Open in browser
+        </MenuItem>
+        <MenuItem
+          onClick={() => { navigator.clipboard?.writeText(menu!.row.url); setMenu(null) }}
+          sx={{ fontSize: 12.5, color: neon.muted }}>
+          <ContentCopyIcon sx={{ fontSize: 16, mr: 1 }} />
+          Copy URL
+        </MenuItem>
+      </Menu>
+
+      <ReplayModal
+        id={replay} onClose={() => setReplay(null)}
+        onCreated={() => {
+          // The new exchange belongs under the same URL, so drop the
+          // cached children: leaving them would show a group whose hit
+          // count and contents disagree.
+          setChildren({})
+        }} />
+      <DataTable
+        tableId="web"
+        rows={rows}
+        columns={columns as ColumnDef[]}
+        loading={isLoading}
+        error={error as Error | null}
+        initialSort={{ field: 'url', sort: 'asc' }}
+        hiddenColumns={{
+          path: false, content_type: false, notes: false,
+          ...(project ? { project_code: false } : {}),
         }}
-        sx={{ fontSize: 12.5, color: neon.text }}>
-        <LaunchIcon sx={{ fontSize: 16, mr: 1 }} />
-        Open in browser
-      </MenuItem>
-      <MenuItem
-        onClick={() => { navigator.clipboard?.writeText(menu!.row.url); setMenu(null) }}
-        sx={{ fontSize: 12.5, color: neon.muted }}>
-        <ContentCopyIcon sx={{ fontSize: 16, mr: 1 }} />
-        Copy URL
-      </MenuItem>
-    </Menu>
+        server={table}
+        // A group row and the exchange it stands for share an id — the
+        // group IS that exchange. The grid keys rows by id, so without a
+        // distinct key the parent vanishes the moment it is expanded.
+        // Verified: expanding produced three indented rows and no parent,
+        // with a duplicate key in the DOM.
+        getRowId={(r) => {
+          const w = r as unknown as WebRow
+          return w.__child ? `c${w.id}` : `g${rowKey(w)}`
+        }}
+        extraActions={
+          <Stack direction="row" spacing={1} sx={{
+            alignItems: "center"
+          }}>
+            <ToggleButtonGroup size="small" exclusive value={filter}
+              onChange={(_, v) => v && setFilter(v)}>
+              <ToggleButton value="all" sx={tbSx}>All</ToggleButton>
+              <ToggleButton value="crawled" sx={tbSx}>Fetched</ToggleButton>
+              <ToggleButton value="interesting" sx={tbSx}>200/401/403/500</ToggleButton>
+            </ToggleButtonGroup>
 
-    <ReplayModal
-      id={replay} onClose={() => setReplay(null)}
-      onCreated={() => {
-        // The new exchange belongs under the same URL, so drop the
-        // cached children: leaving them would show a group whose hit
-        // count and contents disagree.
-        setChildren({})
-      }} />
-    <DataTable
-      tableId="web"
-      rows={rows}
-      columns={columns as ColumnDef[]}
-      loading={isLoading}
-      error={error as Error | null}
-      initialSort={{ field: 'url', sort: 'asc' }}
-      hiddenColumns={{
-        path: false, content_type: false, notes: false,
-        ...(project ? { project_code: false } : {}),
-      }}
-      server={table}
-      // A group row and the exchange it stands for share an id — the
-      // group IS that exchange. The grid keys rows by id, so without a
-      // distinct key the parent vanishes the moment it is expanded.
-      // Verified: expanding produced three indented rows and no parent,
-      // with a duplicate key in the DOM.
-      getRowId={(r) => {
-        const w = r as unknown as WebRow
-        return w.__child ? `c${w.id}` : `g${rowKey(w)}`
-      }}
-      extraActions={
-        <Stack direction="row" spacing={1} alignItems="center">
-          <ToggleButtonGroup size="small" exclusive value={filter}
-            onChange={(_, v) => v && setFilter(v)}>
-            <ToggleButton value="all" sx={tbSx}>All</ToggleButton>
-            <ToggleButton value="crawled" sx={tbSx}>Fetched</ToggleButton>
-            <ToggleButton value="interesting" sx={tbSx}>200/401/403/500</ToggleButton>
-          </ToggleButtonGroup>
+            {/* A SECOND, independent filter, and the wording works hard
+                to keep it apart from "Fetched" above. "Fetched" is
+                whether we retrieved the URL; this is who found it in
+                the first place. A path gobuster guessed and we then
+                retrieved is Fetched AND Discovery-only. */}
+            <SourceFilter value={foundBy} onChange={setFoundBy}
+              counts={counts.data} />
 
-          {/* A SECOND, independent filter, and the wording works hard
-              to keep it apart from "Fetched" above. "Fetched" is
-              whether we retrieved the URL; this is who found it in
-              the first place. A path gobuster guessed and we then
-              retrieved is Fetched AND Discovery-only. */}
-          <SourceFilter value={foundBy} onChange={setFoundBy}
-            counts={counts.data} />
-
-          <Typography sx={{ fontSize: 11, color: neon.muted, whiteSpace: 'nowrap' }}>
-            {rows.length} of {data?.total ?? 0}
-          </Typography>
-        </Stack>
-      }
-    />
+            <Typography sx={{ fontSize: 11, color: neon.muted, whiteSpace: 'nowrap' }}>
+              {rows.length} of {data?.total ?? 0}
+            </Typography>
+          </Stack>
+        }
+      />
     </>
-  )
+  );
 }
 
 const tbSx = {
@@ -570,7 +580,9 @@ function SourceFilter({ value, onChange, counts }: {
             onClick={() => { onChange(o.value); setAt(null) }}
             sx={{ fontSize: 12, alignItems: 'flex-start', maxWidth: 330 }}>
             <Box>
-              <Stack direction="row" spacing={1} alignItems="baseline">
+              <Stack direction="row" spacing={1} sx={{
+                alignItems: "baseline"
+              }}>
                 <Box sx={{ color: neon.cyan }}>{o.label}</Box>
                 {countOf(o.value) !== undefined && (
                   <Box sx={{ fontSize: 10.5, color: neon.muted }}>
@@ -586,5 +598,5 @@ function SourceFilter({ value, onChange, counts }: {
         ))}
       </Menu>
     </>
-  )
+  );
 }

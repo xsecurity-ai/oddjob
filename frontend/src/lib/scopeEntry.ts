@@ -308,12 +308,12 @@ export function entryLabel(kind: string, value: string,
 export function isIpLiteral(raw: string): boolean {
   // Python's `.strip("[]")` takes either bracket off either end, so this
   // does too rather than assuming they come as a matched pair.
-  return parseAddress((raw || '').trim().replace(/^[[\]]+|[[\]]+$/g, '')) !== null
+  return parseAddress((raw || '').trim().replace(/^[[\]]+|[[\]]+$/g, '')) !== null;
 }
 
 /** `normalise_host`: lowercase, trim, drop the trailing root dot. */
 export function normaliseHost(raw: string): string {
-  return (raw || '').trim().replace(/\.+$/, '').toLowerCase()
+  return (raw || '').trim().replace(/\.+$/, '').toLowerCase();
 }
 
 /** `validate_host` — the normalised host, or null if it is not one. */
@@ -341,7 +341,7 @@ function looksLikeCidr(s: string): boolean {
   const head = s.slice(0, i)
   const tail = s.slice(i + 1)
   if (!UNICODE_DIGITS.test(tail)) return false
-  return head.includes(':') || UNICODE_DIGITS.test(head.replace(/\./g, ''))
+  return head.includes(':') || UNICODE_DIGITS.test(head.replace(/\./g, ''));
 }
 
 /**

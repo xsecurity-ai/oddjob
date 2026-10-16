@@ -159,8 +159,12 @@ function Sparkline({ points, mode, colour, label }: {
 
   return (
     <Box sx={{ mt: 1.2 }}>
-      <Stack direction="row" justifyContent="space-between"
-        alignItems="baseline">
+      <Stack
+        direction="row"
+        sx={{
+          justifyContent: "space-between",
+          alignItems: "baseline"
+        }}>
         <Typography sx={{ fontSize: 10, opacity: 0.55,
                           letterSpacing: '0.08em',
                           textTransform: 'uppercase' }}>
@@ -201,7 +205,7 @@ function Sparkline({ points, mode, colour, label }: {
             ))}
       </Box>
     </Box>
-  )
+  );
 }
 
 function Card({ title, state, lines, error, children }: {
@@ -221,7 +225,13 @@ function Card({ title, state, lines, error, children }: {
       backgroundColor: alpha(neon.paper, 0.75), backdropFilter: 'blur(6px)',
       border: `1px solid ${alpha(STATE[state]?.colour ?? neon.purple, 0.35)}`,
     }}>
-      <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1.2 }}>
+      <Stack
+        direction="row"
+        sx={{
+          alignItems: "center",
+          justifyContent: "space-between",
+          mb: 1.2
+        }}>
         <Typography sx={{
           fontFamily: `'Orbitron', sans-serif`, fontSize: 11, letterSpacing: '0.14em',
           textTransform: 'uppercase', color: neon.cyan, textShadow: glow(neon.cyan, 0.4),
@@ -230,7 +240,9 @@ function Card({ title, state, lines, error, children }: {
       </Stack>
       <Stack spacing={0.4}>
         {lines.map(([k, v]) => (
-          <Stack key={k} direction="row" justifyContent="space-between" spacing={2}>
+          <Stack key={k} direction="row" spacing={2} sx={{
+            justifyContent: "space-between"
+          }}>
             <Typography sx={{ fontSize: 12, opacity: 0.65 }}>{k}</Typography>
             <Typography sx={{ fontSize: 12, textAlign: 'right', wordBreak: 'break-word' }}>
               {v}
@@ -245,7 +257,7 @@ function Card({ title, state, lines, error, children }: {
       ) : null}
       {children}
     </Paper>
-  )
+  );
 }
 
 /** A subsystem's three counters, rendered the same way everywhere. */
@@ -319,12 +331,20 @@ export function HealthView() {
     // scroll: a flex child's default `min-height: auto` refuses to
     // shrink below its contents, so the overflow never triggers.
     <Box sx={{ p: 2, flex: 1, minHeight: 0, overflowY: 'auto' }}>
-      <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1.5 }}>
+      <Stack
+        direction="row"
+        sx={{
+          alignItems: "center",
+          justifyContent: "space-between",
+          mb: 1.5
+        }}>
         <Typography sx={{
           fontFamily: `'Orbitron', sans-serif`, fontSize: 13, letterSpacing: '0.18em',
           textTransform: 'uppercase', color: neon.cyan, textShadow: glow(neon.cyan, 0.5),
         }}>Site health</Typography>
-        <Stack direction="row" spacing={1} alignItems="center">
+        <Stack direction="row" spacing={1} sx={{
+          alignItems: "center"
+        }}>
           <Typography sx={{ fontSize: 11, opacity: 0.55 }}>
             checked {when(h.generated_at)}
           </Typography>
@@ -337,7 +357,12 @@ export function HealthView() {
       </Stack>
       {health.isFetching ? <LinearProgress sx={{ mb: 1, height: 2 }} /> : null}
 
-      <Stack direction="row" flexWrap="wrap" gap={1.5}>
+      <Stack
+        direction="row"
+        sx={{
+          flexWrap: "wrap",
+          gap: 1.5
+        }}>
         <Card title="Database" state={db.state}
           error={db.last_error as string | null}
           lines={[
@@ -489,8 +514,14 @@ export function HealthView() {
             // somebody who has not read scripts/version.sh, and
             // "unreleased build" means the same thing to everybody.
             ['version', (
-              <Stack direction="row" spacing={0.6} alignItems="center"
-                justifyContent="flex-end" sx={{ flexWrap: 'wrap' }}>
+              <Stack
+                direction="row"
+                spacing={0.6}
+                sx={{
+                  alignItems: "center",
+                  justifyContent: "flex-end",
+                  flexWrap: 'wrap'
+                }}>
                 <Box component="span" sx={{ fontFamily: 'monospace', fontSize: 12 }}>
                   {h.server.version || 'unknown'}
                 </Box>
@@ -520,7 +551,7 @@ export function HealthView() {
         <AuditTable />
       </Collapse>
     </Box>
-  )
+  );
 }
 
 /** Which versions the fleet is actually running, and how many on each.
@@ -556,10 +587,22 @@ function GhostVersionsCard({ fleet }: { fleet: GhostFleetVersions }) {
       ]}>
       <Stack spacing={0.4} sx={{ mt: 1.2 }}>
         {rows.map((r) => (
-          <Stack key={r.version} direction="row" alignItems="center"
-            justifyContent="space-between" spacing={1}>
-            <Stack direction="row" alignItems="center" spacing={0.6}
-              sx={{ minWidth: 0, flexWrap: 'wrap' }}>
+          <Stack
+            key={r.version}
+            direction="row"
+            spacing={1}
+            sx={{
+              alignItems: "center",
+              justifyContent: "space-between"
+            }}>
+            <Stack
+              direction="row"
+              spacing={0.6}
+              sx={{
+                alignItems: "center",
+                minWidth: 0,
+                flexWrap: 'wrap'
+              }}>
               <Box component="span" sx={{
                 fontFamily: 'monospace', fontSize: 12,
                 // Greyed, not hidden. A version we cannot order is
@@ -585,8 +628,13 @@ function GhostVersionsCard({ fleet }: { fleet: GhostFleetVersions }) {
           </Stack>
         ))}
         {fleet.unreported > 0 ? (
-          <Stack direction="row" alignItems="center"
-            justifyContent="space-between" spacing={1}>
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{
+              alignItems: "center",
+              justifyContent: "space-between"
+            }}>
             <Typography sx={{ fontSize: 12, opacity: 0.6, fontStyle: 'italic' }}>
               no version reported
             </Typography>
@@ -606,7 +654,7 @@ function GhostVersionsCard({ fleet }: { fleet: GhostFleetVersions }) {
         <Typography sx={{ fontSize: 11, opacity: 0.7, mt: 1 }}>{fleet.note}</Typography>
       ) : null}
     </Card>
-  )
+  );
 }
 
 /** The log, searchable. Server-side: the table is capped by retention,
@@ -639,12 +687,21 @@ function AuditTable() {
 
   return (
     <Box sx={{ mt: 1.5 }}>
-      <Stack direction="row" flexWrap="wrap" gap={1} alignItems="center" sx={{ mb: 1 }}>
+      <Stack
+        direction="row"
+        sx={{
+          flexWrap: "wrap",
+          gap: 1,
+          alignItems: "center",
+          mb: 1
+        }}>
         <TextField
           size="small" placeholder="search action, user, detail, path, ip…"
           value={q} onChange={(e) => setQ(e.target.value)}
-          InputProps={{ startAdornment: <SearchIcon fontSize="small" sx={{ mr: 0.8, opacity: 0.5 }} /> }}
           sx={{ minWidth: 300, flex: '1 1 300px' }}
+          slotProps={{
+            input: { startAdornment: <SearchIcon fontSize="small" sx={{ mr: 0.8, opacity: 0.5 }} /> }
+          }}
         />
         <TextField select size="small" label="source" value={source}
           onChange={(e) => setSource(e.target.value)} sx={{ minWidth: 130 }}>
@@ -734,5 +791,5 @@ function AuditTable() {
         </Table>
       </TableContainer>
     </Box>
-  )
+  );
 }

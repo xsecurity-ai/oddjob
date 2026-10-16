@@ -192,8 +192,15 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
   const d = q.data
   return (
     <Box sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}
-        flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        useFlexGap
+        sx={{
+          alignItems: "center",
+          flexWrap: "wrap",
+          mb: 1.5
+        }}>
         <ToggleButtonGroup exclusive size="small" value={filter}
           onChange={(_, v) => v && setFilter(v)}>
           <ToggleButton value="all" sx={{ fontSize: 11, py: 0.2 }}>
@@ -245,23 +252,25 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
             onChange={(e) => setContains(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') setTerm(contains) }}
             onBlur={() => setTerm(contains)}
-            InputProps={{
-              startAdornment: (
-                <InputAdornment position="start">
-                  <SearchIcon sx={{ fontSize: 15, color: neon.muted }} />
-                </InputAdornment>
-              ),
-              endAdornment: term ? (
-                <InputAdornment position="end">
-                  <IconButton size="small" title="Clear"
-                    onClick={() => { setContains(''); setTerm('') }}>
-                    <CloseIcon sx={{ fontSize: 14, color: neon.muted }} />
-                  </IconButton>
-                </InputAdornment>
-              ) : undefined,
-            }}
             sx={{ minWidth: 230,
-                  '& .MuiInputBase-input': { fontSize: 11.5, py: 0.5 } }} />
+                  '& .MuiInputBase-input': { fontSize: 11.5, py: 0.5 } }}
+            slotProps={{
+              input: {
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon sx={{ fontSize: 15, color: neon.muted }} />
+                  </InputAdornment>
+                ),
+                endAdornment: term ? (
+                  <InputAdornment position="end">
+                    <IconButton size="small" title="Clear"
+                      onClick={() => { setContains(''); setTerm('') }}>
+                      <CloseIcon sx={{ fontSize: 14, color: neon.muted }} />
+                    </IconButton>
+                  </InputAdornment>
+                ) : undefined,
+              }
+            }} />
         )}
         {!!term && (
           <Box sx={{ fontSize: 11, color: neon.cyan }}>
@@ -302,7 +311,7 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
         <AssetModal id={open} onClose={() => setOpen(null)} />
       )}
     </Box>
-  )
+  );
 }
 
 /**
@@ -344,8 +353,15 @@ function AssetSearch({ project }: { project: string | null }) {
 
   return (
     <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}
-        flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        useFlexGap
+        sx={{
+          alignItems: "center",
+          flexWrap: "wrap",
+          mb: 1.5
+        }}>
         <ToggleButtonGroup exclusive size="small" value={mode}
           onChange={(_, v) => v && setMode(v)}>
           <ToggleButton value="secrets" sx={{ fontSize: 11, py: 0.2 }}>
@@ -407,8 +423,15 @@ function AssetSearch({ project }: { project: string | null }) {
               border: `1px solid ${alpha(neon.purple, 0.3)}`,
               borderRadius: 1, p: 1.2,
             }}>
-              <Stack direction="row" spacing={1} alignItems="center"
-                flexWrap="wrap" useFlexGap sx={{ mb: 0.8 }}>
+              <Stack
+                direction="row"
+                spacing={1}
+                useFlexGap
+                sx={{
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  mb: 0.8
+                }}>
                 <Box sx={{ fontFamily: `'Share Tech Mono', monospace`,
                            fontSize: 12, color: neon.cyan, wordBreak: 'break-all' }}>
                   {a.url}
@@ -425,7 +448,9 @@ function AssetSearch({ project }: { project: string | null }) {
               <Stack spacing={0.6}>
                 {a.hits.map((h, i) => (
                   <Box key={`${h.offset}-${i}`}>
-                    <Stack direction="row" spacing={1} alignItems="baseline">
+                    <Stack direction="row" spacing={1} sx={{
+                      alignItems: "baseline"
+                    }}>
                       {h.rule && (
                         <Box sx={{ fontSize: 10, letterSpacing: '0.06em',
                           textTransform: 'uppercase',
@@ -456,5 +481,5 @@ function AssetSearch({ project }: { project: string | null }) {
         </Stack>
       )}
     </Box>
-  )
+  );
 }

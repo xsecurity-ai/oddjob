@@ -61,7 +61,7 @@ const NAME = new Map(COUNTRIES.map((c) => [c.code, c.name]))
  *  silently drops it loses a country they meant to add. */
 export function normaliseCode(raw: string): string | null {
   const s = (raw || '').trim().toUpperCase()
-  return /^[A-Z]{2}$/.test(s) ? s : null
+  return /^[A-Z]{2}$/.test(s) ? s : null;
 }
 
 export function CountryPicker({
@@ -102,7 +102,7 @@ export function CountryPicker({
           }
           onChange(out.sort())
         }}
-        renderTags={(vals, getProps) =>
+        renderValue={(vals, getProps) =>
           vals.map((v, i) => {
             const { key, ...rest } = getProps({ index: i })
             return <Chip key={key} {...rest} size="small" label={v}
@@ -128,5 +128,5 @@ export function CountryPicker({
             : help}
       </Typography>
     </Box>
-  )
+  );
 }

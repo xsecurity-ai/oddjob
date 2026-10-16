@@ -53,10 +53,16 @@ function Pane({ title, colour, raw, wrap }: {
       border: `1px solid ${alpha(colour, 0.35)}`, borderRadius: 1,
       background: alpha(neon.bgDeep, 0.55), overflow: 'hidden',
     }}>
-      <Stack direction="row" spacing={1} alignItems="center" sx={{
-        px: 1.2, py: 0.6, borderBottom: `1px solid ${alpha(colour, 0.3)}`,
-        background: alpha(colour, 0.08),
-      }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{
+          alignItems: "center",
+          px: 1.2,
+          py: 0.6,
+          borderBottom: `1px solid ${alpha(colour, 0.3)}`,
+          background: alpha(colour, 0.08)
+        }}>
         <Typography sx={{
           fontFamily: `'Orbitron', sans-serif`, fontSize: 10,
           letterSpacing: '0.16em', color: colour, textShadow: glow(colour, 0.4),
@@ -117,7 +123,7 @@ function Pane({ title, colour, raw, wrap }: {
         )}
       </Box>
     </Box>
-  )
+  );
 }
 
 export function PacketModal({ id, onClose, onReplay }: {
@@ -146,7 +152,14 @@ export function PacketModal({ id, onClose, onReplay }: {
       <DialogTitle sx={{
         py: 1.2, borderBottom: `1px solid ${alpha(neon.cyan, 0.28)}`,
       }}>
-        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{
+            alignItems: "center",
+            flexWrap: "wrap"
+          }}>
           {data?.method && (
             <Chip size="small" label={data.method} sx={{
               height: 21, fontSize: 11, fontWeight: 700, letterSpacing: '0.06em',
@@ -233,7 +246,9 @@ export function PacketModal({ id, onClose, onReplay }: {
               <Pane title="RESPONSE" colour={neon.green} raw={data.response} wrap={wrap} />
             </Stack>
             {(data.sources || data.notes) && (
-              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              <Stack direction="row" spacing={1} useFlexGap sx={{
+                flexWrap: "wrap"
+              }}>
                 {data.sources && (
                   <Typography sx={{ fontSize: 10.5, color: alpha(neon.muted, 0.9) }}>
                     found by {data.sources}
@@ -250,5 +265,5 @@ export function PacketModal({ id, onClose, onReplay }: {
         )}
       </DialogContent>
     </Dialog>
-  )
+  );
 }

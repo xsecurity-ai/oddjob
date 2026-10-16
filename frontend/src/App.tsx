@@ -15,7 +15,7 @@ import DescriptionIcon from '@mui/icons-material/DescriptionOutlined'
 import MemoryIcon from '@mui/icons-material/MemoryOutlined'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import SmartToyIcon from '@mui/icons-material/SmartToyOutlined'
-import PersonIcon from '@mui/icons-material/PersonOutline'
+import PersonIcon from '@mui/icons-material/PersonOutlined'
 import SettingsIcon from '@mui/icons-material/SettingsOutlined'
 import MonitorHeartIcon from '@mui/icons-material/MonitorHeartOutlined'
 import GroupIcon from '@mui/icons-material/GroupOutlined'
@@ -68,7 +68,9 @@ function LiveDot({ state }: { state: LiveState }) {
     : 'Offline — no change stream'
   return (
     <Tooltip title={label}>
-      <Stack direction="row" spacing={0.9} alignItems="center">
+      <Stack direction="row" spacing={0.9} sx={{
+        alignItems: "center"
+      }}>
         <Box sx={{ width: 9, height: 9, borderRadius: '50%', bgcolor: c,
                    boxShadow: `0 0 8px ${c}`,
                    animation: state === 'live' ? 'neonPulse 2.4s ease-out infinite' : 'none' }} />
@@ -78,7 +80,7 @@ function LiveDot({ state }: { state: LiveState }) {
         </Typography>
       </Stack>
     </Tooltip>
-  )
+  );
 }
 
 function StatChip({ label, value, colour }: { label: string; value: number; colour: string }) {
@@ -584,7 +586,9 @@ export default function App() {
             <Box sx={{ flex: 1 }} />
 
             {wide && stats && (
-              <Stack direction="row" spacing={1} alignItems="center">
+              <Stack direction="row" spacing={1} sx={{
+                alignItems: "center"
+              }}>
                 <StatChip label="TARGETS" value={stats.targets} colour={neon.pink} />
                 <StatChip label="PWNED" value={stats.hacked} colour={neon.red} />
                 <StatChip label="OPEN" value={stats.open_ports} colour={neon.cyan} />
@@ -623,5 +627,5 @@ export default function App() {
       <AgentPanel project={project === ALL ? null : project}
         open={agentOpen} onClose={() => setAgentOpen(false)} />
     </Box>
-  )
+  );
 }

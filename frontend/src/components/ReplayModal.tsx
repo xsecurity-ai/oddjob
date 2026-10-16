@@ -113,7 +113,9 @@ export function ReplayModal({ id, onClose, onCreated }: {
               </Alert>
             )}
 
-            <Stack direction="row" alignItems="center" spacing={1}>
+            <Stack direction="row" spacing={1} sx={{
+              alignItems: "center"
+            }}>
               <Typography sx={{ fontSize: 10.5, letterSpacing: '0.14em',
                                 color: neon.cyan }}>
                 REQUEST
@@ -142,7 +144,13 @@ export function ReplayModal({ id, onClose, onCreated }: {
               slotProps={{ htmlInput: { style: { ...mono, lineHeight: 1.5 },
                                         spellCheck: false } }} />
 
-            <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap">
+            <Stack
+              direction="row"
+              spacing={2}
+              sx={{
+                alignItems: "center",
+                flexWrap: "wrap"
+              }}>
               <FormControlLabel
                 control={<Switch size="small" checked={follow}
                   onChange={(e) => setFollow(e.target.checked)} />}
@@ -167,7 +175,13 @@ export function ReplayModal({ id, onClose, onCreated }: {
 
             {result && (
               <Box>
-                <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.75 }}>
+                <Stack
+                  direction="row"
+                  spacing={1}
+                  sx={{
+                    alignItems: "center",
+                    mb: 0.75
+                  }}>
                   <Typography sx={{ fontSize: 10.5, letterSpacing: '0.14em',
                                     color: neon.cyan }}>
                     RESPONSE
@@ -215,7 +229,7 @@ export function ReplayModal({ id, onClose, onCreated }: {
         </Button>
       </DialogActions>
     </Dialog>
-  )
+  );
 }
 
 /** The new row's response, fetched once it exists. */

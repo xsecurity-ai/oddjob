@@ -127,10 +127,16 @@ export function GhostDebugView({ project }: { project: string | null }) {
       {/* The switches. One per live agent, because this is a property
           of a single ghost and a fleet-wide toggle would collect far
           more than any one question needs. */}
-      <Stack direction="row" spacing={1.4} flexWrap="wrap" useFlexGap
+      <Stack
+        direction="row"
+        spacing={1.4}
+        useFlexGap
         sx={{
-          p: 1.2, border: `1px solid ${alpha(neon.cyan, 0.2)}`,
-          borderRadius: 0.5, bgcolor: alpha(neon.cyan, 0.03),
+          flexWrap: "wrap",
+          p: 1.2,
+          border: `1px solid ${alpha(neon.cyan, 0.2)}`,
+          borderRadius: 0.5,
+          bgcolor: alpha(neon.cyan, 0.03)
         }}>
         {fleet.isLoading ? (
           <CircularProgress size={18} sx={{ color: neon.cyan }} />
@@ -147,7 +153,9 @@ export function GhostDebugView({ project }: { project: string | null }) {
                   toggle.mutate({ id: a.id, on: e.target.checked })} />
             }
             label={
-              <Stack direction="row" spacing={0.6} alignItems="center">
+              <Stack direction="row" spacing={0.6} sx={{
+                alignItems: "center"
+              }}>
                 <Typography sx={{ fontSize: 12, color: neon.text }}>
                   {a.name}
                 </Typography>
@@ -173,13 +181,21 @@ export function GhostDebugView({ project }: { project: string | null }) {
         </Alert>
       )}
 
-      <Stack direction="row" spacing={1} alignItems="center">
-        <TextField select size="small" label="Ghost" value={pick}
+      <Stack direction="row" spacing={1} sx={{
+        alignItems: "center"
+      }}>
+        <TextField
+          select
+          size="small"
+          label="Ghost"
+          value={pick}
           onChange={(e) => setPick(
             e.target.value === 'all' ? 'all' : Number(e.target.value))}
-          SelectProps={{ native: true }}
           sx={{ minWidth: 150 }}
-          InputLabelProps={{ shrink: true }}>
+          slotProps={{
+            select: { native: true },
+            inputLabel: { shrink: true }
+          }}>
           <option value="all">All</option>
           {agents.map((a) => (
             <option key={a.id} value={a.id}>{a.name}</option>
@@ -189,12 +205,14 @@ export function GhostDebugView({ project }: { project: string | null }) {
           onChange={(e) => setFind(e.target.value)}
           placeholder="text in the line"
           sx={{ minWidth: 220 }}
-          InputProps={{
-            endAdornment: find ? (
-              <IconButton size="small" onClick={() => setFind('')}>
-                <ClearIcon sx={{ fontSize: 15 }} />
-              </IconButton>
-            ) : undefined,
+          slotProps={{
+            input: {
+              endAdornment: find ? (
+                <IconButton size="small" onClick={() => setFind('')}>
+                  <ClearIcon sx={{ fontSize: 15 }} />
+                </IconButton>
+              ) : undefined,
+            }
           }} />
         <Tooltip title="Fetch now">
           <IconButton size="small" onClick={() => void logs.refetch()}
@@ -216,7 +234,11 @@ export function GhostDebugView({ project }: { project: string | null }) {
           {(logs.error as Error).message}
         </Alert>
       ) : logs.isLoading ? (
-        <Stack alignItems="center" sx={{ py: 3 }}>
+        <Stack
+          sx={{
+            alignItems: "center",
+            py: 3
+          }}>
           <CircularProgress size={20} sx={{ color: neon.cyan }} />
         </Stack>
       ) : (logs.data?.lines.length ?? 0) === 0 ? (
@@ -259,5 +281,5 @@ export function GhostDebugView({ project }: { project: string | null }) {
         </Box>
       )}
     </Stack>
-  )
+  );
 }
