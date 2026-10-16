@@ -15,8 +15,16 @@ import json
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
+from . import cloudnames
 from .hosts import InvalidHost, validate_cloud_id, validate_host
 from .models import (
     NMAP_CHOICES,
@@ -471,6 +479,37 @@ class TargetOut(_TargetFields):
         default=0, description="Addresses never looked up. Non-zero with a "
                                "null country means not asked, which is not "
                                "the same as asked and not known.")
+
+    # Whether this row's NAME is a cloud provider's own template
+    # rather than something somebody chose. Derived, not stored: it
+    # is a pure function of `host`, so a column would mean a
+    # migration, a backfill and a second copy that goes stale the
+    # day a provider adds a suffix. See app/cloudnames.py.
+    #
+    # This says nothing about whether the host matters. A
+    # `*.bc.googleusercontent.com` with an open port is a finding and
+    # the UI shows it as one; the PTR simply is not its name.
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Provider naming template this host's name matches, "
+                    "e.g. 'gcp-compute'. Null for a name somebody chose.")
+    @property
+    def cloud_family(self) -> str | None:
+        return cloudnames.classify(self.host)[0]
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Which cloud the name belongs to, when it is a "
+                    "provider template.")
+    def cloud_provider(self) -> str | None:
+        return cloudnames.classify(self.host)[1]
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="True when the provider assigns this name per address, "
+                    "so it carries no information about who is using it. "
+                    "These are the rows worth condensing; a name chosen "
+                    "inside a cloud is not.")
+    def cloud_ephemeral(self) -> bool:
+        return cloudnames.classify(self.host)[2]
 
     # Both are stored as JSON strings. A column that failed to parse must not
     # sink the whole row — the rest of the target is still worth returning —

@@ -597,4 +597,57 @@ st, _ = call("/api/projects/CLOUDS", token=admin)
 check("a project whose code resembles the static path still resolves",
       st == 200, st)
 
+
+# ========================================== cloud-provider naming
+# A reverse lookup across a provider's ranges finds the provider's PTR
+# template, once per address -- not the client's assets. On the
+# engagement this was written for that is 7,344 of 8,578 targets.
+from app import cloudnames as _cn  # noqa: E402
+
+print("\n== telling a provider's naming from a chosen name ==")
+check("a GCP ephemeral PTR is recognised",
+      _cn.classify("5.113.0.203.bc.googleusercontent.com")[0] == "gcp-compute",
+      _cn.classify("5.113.0.203.bc.googleusercontent.com"))
+check("an EC2 public DNS name is recognised, regional form",
+      _cn.classify("ec2-203-0-113-5.eu-west-1.compute.amazonaws.com")[0] == "aws-ec2")
+check("...and the older us-east-1 compute-1 form, which is not the same suffix",
+      _cn.classify("ec2-203-0-113-5.compute-1.amazonaws.com")[0] == "aws-ec2")
+check("an Azure VM name is recognised on both of its domains",
+      _cn.classify("vm.cloudapp.azure.com")[0] == "azure-vm"
+      and _cn.classify("vm.cloudapp.net")[0] == "azure-vm")
+
+check("a name somebody chose is not a provider template",
+      _cn.classify("payments.acme.example") == (None, None, False))
+check("a bare address is not a provider template",
+      _cn.classify("10.0.0.1") == (None, None, False))
+check("an empty host is not a provider template",
+      _cn.classify("") == (None, None, False) and _cn.classify(None) == (None, None, False))
+check("a trailing dot is the same name",
+      _cn.classify("x.bc.googleusercontent.com.")[0] == "gcp-compute")
+check("case is not a different answer",
+      _cn.classify("X.BC.GOOGLEUSERCONTENT.COM")[0] == "gcp-compute")
+
+# The distinction the whole feature turns on: a name the provider
+# assigns per address carries no information and is worth condensing.
+# A name somebody CHOSE inside a cloud is estate and is not.
+print("\n== assigned names condense, chosen names do not ==")
+check("an ephemeral compute PTR is condensable",
+      _cn.classify("1.2.3.4.bc.googleusercontent.com")[2] is True)
+check("an App Service somebody named is NOT condensable, though it is Azure",
+      _cn.classify("payments-api.azurewebsites.net")[1] == "Azure"
+      and _cn.classify("payments-api.azurewebsites.net")[2] is False)
+check("an S3 bucket somebody named is likewise not condensable",
+      _cn.classify("acme-backups.s3.amazonaws.com")[2] is False)
+
+# The ordering trap: the generic googleusercontent rule would swallow
+# the two specific ones if it came first.
+print("\n== the specific template wins over the general one ==")
+check("App Engine is not reported as generic user content",
+      _cn.classify("x.gae.googleusercontent.com")[0] == "gcp-appengine")
+check("ephemeral compute is not reported as generic user content",
+      _cn.classify("x.bc.googleusercontent.com")[0] == "gcp-compute")
+check("...and something else under the domain still falls through to generic",
+      _cn.classify("x.other.googleusercontent.com")[0] == "gcp-other")
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
