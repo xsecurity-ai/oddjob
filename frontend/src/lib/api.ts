@@ -336,6 +336,30 @@ export interface SettingsBundle {
   /** Secrets are never sent back — only whether one is stored. */
   secrets_set: Record<string, boolean>
 }
+/** A name pointing at a service that hands out subdomains to whoever
+ *  asks first.
+ *
+ *  `verdict` is not a severity. `dangling` and `fingerprint` are two
+ *  kinds of evidence; `candidate` is the absence of either, kept
+ *  visible because "points at Heroku, could not check" is a real
+ *  state and not a finding. See backend/app/takeover.py. */
+export interface Takeover {
+  id: number
+  hostname: string
+  cname: string
+  cname_chain: string[]
+  provider: string
+  /** False when the name is not freely re-registerable — the record
+   *  still dangles, but it is hygiene rather than a hostile takeover. */
+  claimable: boolean
+  verdict: 'dangling' | 'fingerprint' | 'candidate'
+  evidence: string | null
+  state: string
+  note: string | null
+  target_id: number | null
+  seen_at: string | null
+}
+
 export interface WebAddress {
   id: number; target_id: number; service_id: number | null
   host: string; project_code: string
@@ -994,6 +1018,24 @@ export const api = {
   /** Every exchange recorded for one URL. Drives the expanded row. */
   webByUrl: (target_id: number, url: string) =>
     req<Page<WebAddress>>('/api/web/by-url' + qs({ target_id, url, limit: 500 })),
+
+  /** Names in this engagement pointing at something unclaimed.
+   *  Reads rows already decided; it resolves nothing itself. */
+  takeovers: (p: { project?: string; verdict?: string; state?: string
+                   q?: string; sort?: string; order?: string } = {}) =>
+    req<Page<Takeover>>('/api/web/takeovers' + qs({ limit: 1000, ...p })),
+
+  /** Re-derive the table from the CNAMEs currently on record. Sends
+   *  nothing anywhere — the chains are already here. */
+  refreshTakeovers: (project: string) =>
+    req<{ counts: Record<string, number>; total: number }>(
+      '/api/web/takeovers/refresh' + qs({ project }), { method: 'POST' }),
+
+  /** Triage one row. Only state and note — the rest is DNS. */
+  updateTakeover: (id: number, project: string,
+                   body: { state?: string; note?: string }) =>
+    req<Takeover>(`/api/web/takeovers/${id}` + qs({ project }),
+                  { method: 'PATCH', body: JSON.stringify(body) }),
 
   /** Send an edited request again. The result is a NEW row, so the
    *  original and the edit sit side by side under the same URL. */

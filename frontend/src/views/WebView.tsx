@@ -17,6 +17,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useServerTable } from '../lib/useServerTable'
 import { api, type WebAddress, type WebGroup } from '../lib/api'
 import { DataTable } from '../components/DataTable'
+import { TakeoversPanel } from '../components/TakeoversPanel'
 import { useHostModal } from '../components/HostModal'
 import { PacketModal } from '../components/PacketModal'
 import { ReplayModal } from '../components/ReplayModal'
@@ -77,7 +78,7 @@ export function WebView({ project }: { project: string | null }) {
   // with 200/401/403/500, and folding them into one control would
   // make that combination unaskable.
   const [foundBy, setFoundBy] = useState<'any' | 'crawl' | 'discovery'>('any')
-  const [tab, setTab] = useState<'urls' | 'assets'>('urls')
+  const [tab, setTab] = useState<'urls' | 'assets' | 'takeovers'>('urls')
   // Which URLs are open, and what their exchanges are once fetched.
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [children, setChildren] = useState<Record<string, WebAddress[]>>({})
@@ -378,7 +379,12 @@ export function WebView({ project }: { project: string | null }) {
     { field: 'project_code', headerName: 'Project', width: 120 },
   ]
 
-  if (tab === 'assets') {
+  // Both of the non-URL tabs are a whole panel that owns its own
+  // fetching, so they share one shell rather than each repeating the
+  // Tabs block. Everything above this line is a hook or a plain
+  // value; the early return stays below all of them, which is the
+  // rule test/hooks.check.mjs exists to enforce.
+  if (tab === 'assets' || tab === 'takeovers') {
     return (
       <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
         <Tabs value={tab} onChange={(_, v) => setTab(v)}
@@ -386,9 +392,12 @@ export function WebView({ project }: { project: string | null }) {
                 borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
           <Tab value="urls" label="URLs" sx={TAB_SX} />
           <Tab value="assets" label="Assets" sx={TAB_SX} />
+          <Tab value="takeovers" label="Subdomain Takeovers" sx={TAB_SX} />
         </Tabs>
         <Box sx={{ flex: 1, minHeight: 0 }}>
-          <WebAssetsPanel project={project} />
+          {tab === 'assets'
+            ? <WebAssetsPanel project={project} />
+            : <TakeoversPanel project={project} />}
         </Box>
       </Box>
     )
@@ -405,6 +414,7 @@ export function WebView({ project }: { project: string | null }) {
               borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
         <Tab value="urls" label="URLs" sx={TAB_SX} />
         <Tab value="assets" label="Assets" sx={TAB_SX} />
+        <Tab value="takeovers" label="Subdomain Takeovers" sx={TAB_SX} />
       </Tabs>
       {/* The packet view hands straight to the editor. It closes as the
           editor opens, so the two are never stacked: they show the same

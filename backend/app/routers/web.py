@@ -16,10 +16,10 @@ import re
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select, tuple_
+from sqlalchemy import case, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import assetscan, assetsearch, assetwork
+from .. import assetscan, assetsearch, assetwork, takeover
 from ..db import get_session
 from ..events import broker
 from ..filtering import apply_filters
@@ -31,6 +31,7 @@ from ..importers.burphistory import REQ_CAP, RESP_CAP
 from ..models import (
     Project,
     Service,
+    Takeover,
     Target,
     User,
     WebAddress,
@@ -1149,3 +1150,126 @@ async def packet(wid: int, user: User = Depends(get_current_user),
         id=row.id, url=row.url, method=row.method, status_code=row.status_code,
         host=t.host, request=row.request, response=row.response,
         truncated=bool(row.truncated), sources=row.sources, notes=row.notes)
+
+
+# ------------------------------------------------------------ takeovers
+# Under /web rather than in a router of its own because this is the
+# same question the Web view already answers -- what is reachable on
+# this engagement's names -- seen from the DNS side. The UI shows it
+# as a third tab beside URLs and Assets.
+
+class TakeoverOut(BaseModel):
+    id: int
+    hostname: str
+    cname: str
+    cname_chain: list[str] = Field(default_factory=list)
+    provider: str
+    claimable: bool
+    verdict: str
+    evidence: str | None = None
+    state: str
+    note: str | None = None
+    target_id: int | None = None
+    seen_at: str | None = None
+
+
+class TakeoverUpdate(BaseModel):
+    """What an operator may change. Everything else is re-derived."""
+    state: str | None = Field(None, pattern="^(needs_investigating|true_positive|false_positive)$")
+    note: str | None = None
+
+
+def _takeover_out(t) -> TakeoverOut:
+    return TakeoverOut(
+        id=t.id, hostname=t.hostname, cname=t.cname,
+        cname_chain=[x for x in (t.cname_chain or "").split("\n") if x],
+        provider=t.provider, claimable=bool(t.claimable),
+        verdict=t.verdict, evidence=t.evidence, state=t.state,
+        note=t.note, target_id=t.target_id,
+        seen_at=t.seen_at.isoformat() if t.seen_at else None)
+
+
+@router.get("/takeovers", response_model=Page[TakeoverOut])
+async def list_takeovers(
+    verdict: str | None = Query(None, pattern="^(dangling|fingerprint|candidate)$"),
+    state: str | None = Query(None),
+    q: str | None = Query(None, description="search hostname, cname, provider"),
+    sort: str = Query("verdict"), order: str = Query("asc"),
+    limit: int = Query(1000, le=10000), offset: int = 0,
+    pr: Project = Depends(require_project("readonly")),
+    _: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Names in this engagement pointing at something unclaimed.
+
+    Read-only and resolves nothing: these rows were decided by
+    `app/takeover.py` from CNAMEs the agent already collected. Refresh
+    is a separate, explicit call.
+    """
+    stmt = select(Takeover).where(Takeover.project_id == pr.id)
+    if verdict:
+        stmt = stmt.where(Takeover.verdict == verdict)
+    if state:
+        stmt = stmt.where(Takeover.state == state)
+    if q:
+        like = f"%{q.strip()}%"
+        stmt = stmt.where(or_(Takeover.hostname.ilike(like),
+                              Takeover.cname.ilike(like),
+                              Takeover.provider.ilike(like)))
+    total = int((await session.execute(
+        select(func.count()).select_from(stmt.subquery()))).scalar_one())
+
+    # `verdict` sorts by strength, not alphabetically. "candidate"
+    # sorting above "dangling" would put the rows that prove nothing
+    # at the top of a findings table.
+    if sort == "verdict":
+        col = case({"dangling": 0, "fingerprint": 1, "candidate": 2},
+                   value=Takeover.verdict, else_=3)
+    else:
+        col = {"hostname": Takeover.hostname, "provider": Takeover.provider,
+               "state": Takeover.state,
+               "cname": Takeover.cname}.get(sort, Takeover.hostname)
+    stmt = stmt.order_by(col.desc() if order == "desc" else col.asc(),
+                         Takeover.hostname.asc())
+    rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
+    return Page[TakeoverOut](items=[_takeover_out(t) for t in rows],
+                             total=total, limit=limit, offset=offset)
+
+
+@router.post("/takeovers/refresh", response_model=dict)
+async def refresh_takeovers(
+    pr: Project = Depends(require_project("user")),
+    _: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Re-derive the table from the CNAMEs currently on record.
+
+    Sends nothing anywhere -- it reads chains the agent already
+    brought back and response bodies already captured. A `user`
+    action rather than readonly because it rewrites rows.
+    """
+    counts = await takeover.refresh(session, pr.id)
+    await session.commit()
+    return {"counts": counts, "total": sum(counts.values())}
+
+
+@router.patch("/takeovers/{takeover_id}", response_model=TakeoverOut)
+async def update_takeover(
+    takeover_id: int, body: TakeoverUpdate,
+    pr: Project = Depends(require_project("user")),
+    _: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Triage one row. Only `state` and `note` -- the rest is DNS."""
+    t = (await session.execute(
+        select(Takeover).where(Takeover.id == takeover_id,
+                               Takeover.project_id == pr.id))).scalar_one_or_none()
+    if t is None:
+        raise HTTPException(404, "no such takeover")
+    if body.state is not None:
+        t.state = body.state
+    if body.note is not None:
+        t.note = body.note or None
+    await session.commit()
+    await session.refresh(t)
+    return _takeover_out(t)

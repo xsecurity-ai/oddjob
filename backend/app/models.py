@@ -765,6 +765,76 @@ class FindingSecret(Base, TimestampMixin):
     line: Mapped[int | None] = mapped_column(Integer)
 
 
+class Takeover(Base, TimestampMixin):
+    """A hostname whose CNAME points at something unclaimed.
+
+    Its own table rather than a `Vuln`, because the lifecycle is
+    different: this is re-derived from DNS every time the detector
+    runs, and a vuln row is written once and triaged forever. Folding
+    them together would mean either re-raising a finding an operator
+    has already dismissed, or never noticing that a dangling record
+    was finally cleaned up.
+
+    `verdict` carries how it was decided, and the three values are not
+    degrees of the same thing -- see `app/takeover.py`. `dangling` and
+    `fingerprint` are evidence. `candidate` is the absence of evidence
+    either way, and it is kept visible rather than dropped because
+    "this points at Heroku and we could not check" is a real state an
+    operator should see, not a finding to assert.
+    """
+    __tablename__ = "takeovers"
+    __table_args__ = (
+        UniqueConstraint("project_id", "hostname",
+                         name="uq_takeover_project_hostname"),
+        Index("ix_takeovers_project_verdict", "project_id", "verdict"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    #: Indexed because the detector deletes through it on every pass.
+    #: `web_addresses.service_id` had no index and deleting 46,811
+    #: services sequentially scanned 294,251 rows per delete; this is
+    #: the same shape and gets the index up front.
+    target_id: Mapped[int | None] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), index=True)
+
+    hostname: Mapped[str] = mapped_column(String(253))
+    #: The hop that landed on the provider, which is not always the
+    #: last one in the chain.
+    cname: Mapped[str] = mapped_column(String(253))
+    #: The whole chain as observed, newline separated, so a reader can
+    #: see what pointed at what without re-resolving.
+    cname_chain: Mapped[str | None] = mapped_column(Text)
+    provider: Mapped[str] = mapped_column(String(64))
+    #: False when the name is not freely re-registerable -- the record
+    #: still dangles and should still go, but it is hygiene rather
+    #: than an exploitable takeover, and conflating the two is how a
+    #: report overstates its own findings.
+    claimable: Mapped[bool] = mapped_column(Boolean, nullable=False,
+                                            server_default="true", default=True)
+
+    #: One of `takeover.VERDICTS`.
+    verdict: Mapped[str] = mapped_column(String(16), nullable=False,
+                                         server_default="candidate",
+                                         default="candidate")
+    #: What convicted it: the marker string that matched, or the name
+    #: in the chain that failed to resolve. Null for `candidate`,
+    #: which is the point of `candidate`.
+    evidence: Mapped[str | None] = mapped_column(Text)
+
+    #: One of `TRIAGE_STATES`. Same vocabulary as a vuln so an
+    #: operator triages one thing one way.
+    state: Mapped[str] = mapped_column(String(32), nullable=False,
+                                       server_default="needs_investigating",
+                                       default="needs_investigating")
+    note: Mapped[str | None] = mapped_column(Text)
+
+    #: When the detector last saw it. Distinguishes "checked today and
+    #: still dangling" from a row nothing has confirmed in a month.
+    seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Poc(Base, TimestampMixin):
     __tablename__ = "pocs"
 
