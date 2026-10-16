@@ -382,6 +382,10 @@ HTTPX_TLS = "\n".join(json.dumps(x) for x in [
      "status_code": 200,
      "cdn": True, "cdn_name": "cloudfront", "cdn_type": "waf",
      "a": ["10.60.0.9", "10.60.0.10"],
+     "cname": ["edge.cdn.example"],
+     "favicon": "857403617", "favicon_md5": "9" * 32,
+     "favicon_path": "/static/favicon.ico",
+     "jarm_hash": "27d40d40d00040d1dc42d43d00041d6183ff1bfae51ebd88d70384363d525c",
      "asn": {"as_number": "AS64500", "as_name": "EXAMPLE-AS",
              "as_country": "GB", "as_range": ["10.60.0.0/16"]},
      "tls": {"tls_version": "tls13", "cipher": "TLS_AES_256_GCM_SHA384",
@@ -433,6 +437,22 @@ check("...without the range, which nothing reads",
       "as_range" not in (hx.get("asn") or {}), hx)
 check("every A record is kept, not just the one that became ip_address",
       hx.get("a") == ["10.60.0.9", "10.60.0.10"], hx)
+
+# The pivot fingerprints. These are the whole reason the agent now
+# passes `-favicon` and `-jarm`: the importer parsed `tech` and
+# `cname` for its whole life against an agent that never asked httpx
+# to emit either, so the keys were absent from every line and the
+# branches never fired once. A fixture that does not carry them
+# cannot tell that apart from a parser that drops them.
+check("the favicon hash is kept — it is what pivots to the rest of an estate",
+      hx.get("favicon_mmh3") == "857403617", hx)
+check("...with the path it came from, so the hash can be re-derived",
+      hx.get("favicon_path") == "/static/favicon.ico", hx)
+check("...and the md5 beside it", hx.get("favicon_md5") == "9" * 32, hx)
+check("the JARM fingerprint is kept — it clusters by TLS stack",
+      (hx.get("jarm") or "").startswith("27d40d40d00040d1"), hx)
+check("the CNAME is kept, which is what a takeover check reads",
+      hx.get("cname") == ["edge.cdn.example"], hx)
 
 # A build of httpx that reports no `tls` must not become an error or
 # a host with invented certificate facts.
