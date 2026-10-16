@@ -7,9 +7,9 @@
 # `oddjob:local` this does nothing at all — which is the state most
 # hosts are in without realising it.
 #
-#   ODDJOB_IMAGE=cr0n1c/oddjob:develop    every merge to main
-#   ODDJOB_IMAGE=cr0n1c/oddjob:nightly    one build, soaked overnight
-#   ODDJOB_IMAGE=cr0n1c/oddjob:v1.4.0     deliberate releases only
+#   ODDJOB_IMAGE=cr0n1cx/oddjob:develop    every merge to main
+#   ODDJOB_IMAGE=cr0n1cx/oddjob:nightly    one build, soaked overnight
+#   ODDJOB_IMAGE=cr0n1cx/oddjob:v1.4.0     deliberate releases only
 #
 # ----------------------------------------------------------- read this
 #

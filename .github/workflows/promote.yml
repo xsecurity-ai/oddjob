@@ -10,7 +10,7 @@
 # Versions live in git tags, not in Docker Hub tag listings. Hub tags
 # get deleted, retention-pruned and hand-edited; a git tag is signed
 # history and is also what somebody checks out to reproduce a release.
-# Both are published — `cr0n1c/oddjob:v0.0.2` and `cr0n1c/ghost:v0.0.2`
+# Both are published — `cr0n1cx/oddjob:v0.0.2` and `cr0n1cx/ghost:v0.0.2`
 # exist so a deployment can pin to a version — but the git tag is the
 # record and the Hub tags are a convenience over it.
 #
@@ -160,7 +160,7 @@ jobs:
 
           version=""
           for img in "${images[@]}"; do
-            repo="docker.io/cr0n1c/$img"
+            repo="docker.io/cr0n1cx/$img"
             ref="$repo:$FROM"
             if ! docker manifest inspect "$ref" >/dev/null 2>&1; then
               echo "::error::$ref does not exist — has the images workflow run?" >&2
@@ -269,7 +269,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           for img in $IMAGES; do
-            repo="cr0n1c/$img"
+            repo="cr0n1cx/$img"
             # By digest, never by name. Resolving the name a second
             # time could pick up a different image if the pointer moved
             # between the check above and this step, and the whole
@@ -333,9 +333,9 @@ jobs:
             echo ""
             echo '```'
             for img in $IMAGES; do
-              echo "docker buildx imagetools inspect cr0n1c/$img:v$VER \\"
+              echo "docker buildx imagetools inspect cr0n1cx/$img:v$VER \\"
               echo "  --format '{{json .Manifest.Digest}}'"
-              echo "docker buildx imagetools inspect cr0n1c/$img:$FROM \\"
+              echo "docker buildx imagetools inspect cr0n1cx/$img:$FROM \\"
               echo "  --format '{{json .Manifest.Digest}}'"
             done
             echo '```'

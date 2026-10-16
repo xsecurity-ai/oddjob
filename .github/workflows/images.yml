@@ -163,7 +163,7 @@ jobs:
           # inspect` needs no login for a public repo and no pull.
           need() {
             if [ "$FORCE" = "true" ]; then echo true; return; fi
-            if docker manifest inspect "docker.io/cr0n1c/$1:src-$2" >/dev/null 2>&1
+            if docker manifest inspect "docker.io/cr0n1cx/$1:src-$2" >/dev/null 2>&1
             then echo false; else echo true; fi
           }
           echo "ghost_build=$(need ghost "$ghost_key")"   >> "$GITHUB_OUTPUT"
@@ -248,7 +248,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             ai.xsecurity.source-key=${{ needs.plan.outputs.ghost_key }}
-          outputs: type=image,name=docker.io/cr0n1c/ghost,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=docker.io/cr0n1cx/ghost,push-by-digest=true,name-canonical=true,push=true
           # Registry, not type=gha. GitHub's Actions cache is 10 GB for
           # the whole repository with LRU eviction, and `mode=max` on
           # four scopes here plus two in CI does not fit — they evict
@@ -256,8 +256,8 @@ jobs:
           # looks exactly like having no cache at all. A cache ref in
           # the registry has no such cap, and is shared across
           # branches and runners rather than per-repo-per-key.
-          cache-from: type=registry,ref=docker.io/cr0n1c/ghost:buildcache-${{ matrix.arch }}
-          cache-to: type=registry,ref=docker.io/cr0n1c/ghost:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
+          cache-from: type=registry,ref=docker.io/cr0n1cx/ghost:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=docker.io/cr0n1cx/ghost:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
 
       - name: oddjob
         id: oddjob
@@ -275,12 +275,12 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             ai.xsecurity.source-key=${{ needs.plan.outputs.oddjob_key }}
-          outputs: type=image,name=docker.io/cr0n1c/oddjob,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=docker.io/cr0n1cx/oddjob,push-by-digest=true,name-canonical=true,push=true
           # Registry for the same reason as ghost above. `image-manifest`
           # so Docker Hub accepts it as an ordinary tag rather than
           # rejecting the OCI index form.
-          cache-from: type=registry,ref=docker.io/cr0n1c/oddjob:buildcache-${{ matrix.arch }}
-          cache-to: type=registry,ref=docker.io/cr0n1c/oddjob:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
+          cache-from: type=registry,ref=docker.io/cr0n1cx/oddjob:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=docker.io/cr0n1cx/oddjob:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
 
       # A file per digest rather than one file both legs write: two
       # runners uploading the same artifact name is a race, and the

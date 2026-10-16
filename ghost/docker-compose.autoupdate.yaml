@@ -1,6 +1,6 @@
 # Optional: pull and restart a Ghost when a new image is published.
 #
-#   GHOST_IMAGE=cr0n1c/ghost:nightly GHOST_SERVER=https://oddjob.internal \
+#   GHOST_IMAGE=cr0n1cx/ghost:nightly GHOST_SERVER=https://oddjob.internal \
 #     docker compose -f docker-compose.yml -f docker-compose.autoupdate.yaml up -d
 #
 # Requires GHOST_IMAGE to name a published tag. A locally built image
@@ -8,9 +8,9 @@
 # `ghost-agent` this does nothing at all — and says nothing about it
 # either, which is the state most hosts are in without realising.
 #
-#   GHOST_IMAGE=cr0n1c/ghost:develop    every merge to main
-#   GHOST_IMAGE=cr0n1c/ghost:nightly    one build, soaked overnight
-#   GHOST_IMAGE=cr0n1c/ghost:v1.4.0     deliberate releases only
+#   GHOST_IMAGE=cr0n1cx/ghost:develop    every merge to main
+#   GHOST_IMAGE=cr0n1cx/ghost:nightly    one build, soaked overnight
+#   GHOST_IMAGE=cr0n1cx/ghost:v1.4.0     deliberate releases only
 #
 # ----------------------------------------------------------- read this
 #

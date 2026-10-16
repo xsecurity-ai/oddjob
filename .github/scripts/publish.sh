@@ -26,11 +26,11 @@ key=${2:?missing source key}
 built=${3:?missing built flag}
 : "${POINTER:?POINTER not set}" "${DATED:?DATED not set}"
 
-repo="docker.io/cr0n1c/$img"
+repo="docker.io/cr0n1cx/$img"
 src="$repo:src-$key"
 
 note() {
-    echo "| \`cr0n1c/$img\` | \`src-$key\`, \`$POINTER\`, \`$DATED\` | \`${1:0:19}…\` | $2 |" \
+    echo "| \`cr0n1cx/$img\` | \`src-$key\`, \`$POINTER\`, \`$DATED\` | \`${1:0:19}…\` | $2 |" \
         >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 }
 
@@ -78,5 +78,5 @@ fi
 
 digest=$(docker buildx imagetools inspect "$repo:$POINTER" \
             --format '{{json .Manifest.Digest}}' | tr -d '"')
-echo "cr0n1c/$img:$POINTER is $digest ($how)"
+echo "cr0n1cx/$img:$POINTER is $digest ($how)"
 note "$digest" "$how"

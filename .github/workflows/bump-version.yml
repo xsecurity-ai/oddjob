@@ -166,6 +166,6 @@ jobs:
             echo "— VERSION is part of the content key — and stamps it into the"
             echo "binaries and the \`org.opencontainers.image.version\` label."
             echo "Run \`promote\` once \`:develop\` or \`:nightly\` has moved to"
-            echo "publish \`cr0n1c/oddjob:v$NEXT\` and \`cr0n1c/ghost:v$NEXT\`"
+            echo "publish \`cr0n1cx/oddjob:v$NEXT\` and \`cr0n1cx/ghost:v$NEXT\`"
             echo "and the matching git tag."
           } >> "$GITHUB_STEP_SUMMARY"

@@ -56,7 +56,7 @@ services:
     # `docker buildx build -t` and starts it instead of rebuilding
     # with the legacy builder, which has no layer cache; and setting
     # ODDJOB_IMAGE to a published tag runs that instead of building at
-    # all — `ODDJOB_IMAGE=cr0n1c/oddjob:v1.2.0 docker compose up -d`.
+    # all — `ODDJOB_IMAGE=cr0n1cx/oddjob:v1.2.0 docker compose up -d`.
     image: ${ODDJOB_IMAGE:-oddjob:local}
     build:
       context: .
