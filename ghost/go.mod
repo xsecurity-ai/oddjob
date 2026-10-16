@@ -9,7 +9,7 @@ require (
 	github.com/owasp-amass/config v0.1.5
 	github.com/owasp-amass/open-asset-model v0.3.2
 	github.com/projectdiscovery/katana v1.8.0
-	github.com/weppos/publicsuffix-go v0.50.3-0.20260104170930-90713dec78f2
+	github.com/weppos/publicsuffix-go v0.50.3
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.49.0
 )
