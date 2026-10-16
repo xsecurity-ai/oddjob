@@ -206,6 +206,10 @@ func TestNmapTechnique(t *testing.T) {
 		{"connect on a root agent is still -sT", "connect", true, "-sT", "-sS"},
 		{"version asks for -sV", "version", false, "-sV", ""},
 		{"version on a root agent is still -sV", "version", true, "-sV", ""},
+		// UDP is a different protocol, not a weaker TCP scan, so it
+		// must never pick up a TCP technique on the way through.
+		{"udp asks for -sU", "udp", true, "-sU", "-sS"},
+		{"udp does not become a connect scan unprivileged", "udp", false, "-sU", "-sT"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -526,5 +530,41 @@ func TestHasFlagMatchesEverySpelling(t *testing.T) {
 	}
 	if !hasFlag([]string{"-c=40"}, "-c", "-concurrency") {
 		t.Error("`-c=40` form not matched")
+	}
+}
+
+func TestNmapUDPTopPortsOnlyWithoutExplicitPorts(t *testing.T) {
+	// --top-ports and -p are mutually exclusive the same way -F and
+	// -p are: nmap refuses the pair, exits non-zero, and still writes
+	// an XML file that imports as a finished scan over nothing. That
+	// bug has shipped here once already with -F.
+	argv := nmapArgv(map[string]any{"technique": "udp"},
+		"/tmp/o.xml", []string{"h"}, true)
+	if !has(argv, "--top-ports") {
+		t.Errorf("a udp scan with no ports should sweep the top list: %v", argv)
+	}
+	if !has(argv, "-sV") {
+		t.Errorf("a udp scan should still ask what answered: %v", argv)
+	}
+
+	argv = nmapArgv(map[string]any{"technique": "udp", "ports": "161,500"},
+		"/tmp/o.xml", []string{"h"}, true)
+	if has(argv, "--top-ports") {
+		t.Errorf("explicit ports must suppress --top-ports: %v", argv)
+	}
+	if !has(argv, "-p") {
+		t.Errorf("explicit ports should still be passed: %v", argv)
+	}
+}
+
+func TestUDPNeedsRawSockets(t *testing.T) {
+	// nmap does not fall back to anything for -sU; it fails. Saying so
+	// up front lets the server hand the task to an agent that can run
+	// it rather than spending three attempts on one that cannot.
+	if !needsRawSockets(map[string]any{"technique": "udp"}) {
+		t.Error("a udp scan should be refused on an unprivileged agent")
+	}
+	if needsRawSockets(map[string]any{"technique": "connect"}) {
+		t.Error("a connect scan needs no raw sockets")
 	}
 }

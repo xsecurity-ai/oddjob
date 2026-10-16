@@ -55,6 +55,19 @@ def looks_like(text: str) -> bool:
     # `"found"` alone is not enough to be sure, and `"urls"` would
     # collide with a crawl result. The wordlist name is the thing only
     # content discovery reports.
+    #
+    # Except that vhost discovery now writes `found`, `wordlist` AND
+    # `hits` too -- same library, same wordlist, different question.
+    # Its hits carry `vhost` where these carry `path`, so that is the
+    # discriminator. Without this a vhost sweep imports as content
+    # discovery and files hostnames as URL paths.
+    # `domain` as well as `vhost`: a vhost run that found nothing
+    # carries neither hits nor names, so the hit key alone does not
+    # identify it -- and a sweep defeated by a wildcard is exactly
+    # the run that produces an empty list. Content discovery never
+    # writes `domain`.
+    if '"vhost"' in head or '"domain"' in head:
+        return False
     return '"found"' in head and ('"wordlist"' in head or '"hits"' in head)
 
 

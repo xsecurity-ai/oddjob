@@ -174,7 +174,7 @@ export async function queueEach(
 export interface NmapOptions {
   /** What the operator is asking for. Whether they get it is another
    *  question — see `nmapPlan`. */
-  scan: 'syn' | 'connect'
+  scan: 'syn' | 'connect' | 'udp'
   versionDetect: boolean
   skipHostDiscovery: boolean
   ports: string
@@ -258,6 +258,39 @@ export function nmapPlan(o: NmapOptions, targets: string[],
   // The agent ignores args it does not know.
   args.scan_requested = o.scan
 
+  // UDP is the one choice the agent cannot make for us. -sS and -sT
+  // are two ways of asking the same question and the agent picks by
+  // what it can do; -sU asks a different question about a different
+  // protocol, so it has to be named. This is the only branch that
+  // sends `technique`.
+  if (o.scan === 'udp') {
+    args.technique = 'udp'
+    if (!ports) {
+      warnings.push(
+        'The twenty commonest UDP ports only. A full -sU sweep is both '
+        + 'ruinously slow — nmap rate-limits itself against ICMP '
+        + 'unreachables — and mostly noise: one sweep produced 42,890 '
+        + 'open|filtered rows against 13 genuinely open ports.')
+    }
+    warnings.push(
+      'A UDP probe that gets no reply is indistinguishable from one a '
+      + 'firewall dropped. Only ports nmap can call open are recorded, '
+      + 'so "nothing found" here means "nothing answered", not "nothing '
+      + 'is listening".')
+  }
+
+  if (o.scan === 'udp' && privileged === false) {
+    blockers.push(
+      'A UDP scan needs raw sockets and this agent has none. Unlike -sS, '
+      + 'nmap does not fall back to anything for -sU — it simply fails. '
+      + 'Queue this on a privileged agent.')
+  }
+  if (o.scan === 'udp' && privileged === null) {
+    warnings.push(
+      'Which agent takes a pooled task is decided when one polls. An '
+      + 'agent without raw sockets will fail this outright rather than '
+      + 'running something weaker. Name a privileged agent to be sure.')
+  }
   if (o.scan === 'syn' && privileged === false) {
     warnings.push(
       'This agent has no raw sockets, so nmap will fall back to a TCP '
@@ -294,14 +327,22 @@ export function nmapPlan(o: NmapOptions, targets: string[],
   // is what it is.
   const argv = ['nmap', '-oX', '<task output>']
   if (ports) argv.push('-p', ports)
-  if (quick) {
+  if (o.scan === 'udp') {
+    // Mirrors the `udp` branch of nmapArgv: -sU, the top list only
+    // when no ports were named, then -sV on whatever answered.
+    argv.push('-sU')
+    if (!ports) argv.push('--top-ports', '20')
+    argv.push('-sV')
+  } else if (quick) {
     argv.push('-T4')
     if (!ports) argv.push('-F')
   } else {
     argv.push('-sV')
   }
-  if (privileged === true) argv.push('-sS')
-  else if (privileged === null) argv.push('[-sS if the agent has raw sockets]')
+  if (o.scan !== 'udp') {
+    if (privileged === true) argv.push('-sS')
+    else if (privileged === null) argv.push('[-sS if the agent has raw sockets]')
+  }
   argv.push(...extra)
   // One target, because one task per target is what gets queued. The
   // preview used to list them all on one command line, which is no

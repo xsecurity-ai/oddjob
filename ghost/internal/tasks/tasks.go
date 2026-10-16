@@ -49,6 +49,12 @@ var Runners = map[string]Runner{
 	"portscan": runPortscan,
 	"amass":    runAmass,
 	"gobuster": runGobuster,
+	// Content discovery's sibling: gobuster asks one server what
+	// paths it has, this asks one address what SERVERS it has. Same
+	// library, same wordlist, different question -- and on a shared
+	// address or behind a CDN the default vhost is often a holding
+	// page with an entire application hidden behind a Host header.
+	"vhost": runVhost,
 	// katana, in process. The `gospider` alias it replaced is gone:
 	// it was kept so that tasks queued under the old name would not
 	// be stranded mid-swap, and not one was ever queued. Keeping a
@@ -374,6 +380,29 @@ func nmapArgv(args map[string]any, outPath string, tg []string, rawSockets bool)
 		// Either is fine because -sV is the strongest level either
 		// way, and letting it pick keeps the privileged case fast.
 		argv = append(argv, "-sV")
+	case "udp":
+		// The ground nobody covers. Everything else this agent runs
+		// is TCP, so SNMP, IPMI, NTP, mDNS and the rest are simply
+		// not looked at -- which is exactly why they stay unclaimed.
+		//
+		// The commonest ports ONLY, and not negotiable upward by
+		// accident. A full -sU sweep is both ruinously slow (nmap
+		// rate-limits itself against ICMP unreachables) and mostly
+		// noise: one 2,051-host sweep produced 42,890 open|filtered
+		// rows against 13 genuinely open ports. The importer drops
+		// non-open states, so that noise never reaches the database,
+		// but the scan still has to be waited for.
+		//
+		// `--top-ports` and `-p` are mutually exclusive the way -F
+		// and -p are, so the top list is only asked for when the
+		// caller named no ports of their own.
+		argv = append(argv, "-sU")
+		if ports == "" {
+			argv = append(argv, "--top-ports", UDPTopPorts)
+		}
+		// -sV on the few that answer. A UDP port with no service
+		// behind the number is the same dead end as a TCP one.
+		argv = append(argv, "-sV")
 	default:
 		// No technique named: the behaviour from before this existed.
 		if str(args, "profile") == "quick" {
@@ -480,6 +509,18 @@ func nmapArgv(args map[string]any, outPath string, tg []string, rawSockets bool)
 // roughly seven nmap tasks an hour.
 const NSEScripts = "default,safe,vuln,ssl-cert"
 
+// UDPTopPorts is how many of nmap's commonest UDP ports a `udp` task
+// sweeps when the caller names none.
+//
+// Twenty, which is DNS, DHCP, TFTP, NTP, NetBIOS, SNMP, SMB, IKE,
+// syslog, RIP, IPP, SSDP and SQL Server browse -- the services that
+// are actually found on an external estate and the ones nobody
+// scans for. Past about this many the yield falls off a cliff while
+// the runtime does not: nmap rate-limits itself against ICMP
+// unreachables, so each extra port costs the same second whether or
+// not anything is listening.
+const UDPTopPorts = "20"
+
 // nseEnabled reports whether these arguments turn the script engine
 // on. `-A` implies `-sC`, which is why it counts.
 func nseEnabled(extra []string) bool {
@@ -516,7 +557,14 @@ func hasFlag(extra []string, flags ...string) bool {
 // therefore produces STRONGER coverage than a privileged one running
 // the default -sS.
 func needsRawSockets(args map[string]any) bool {
-	return str(args, "technique") == "syn"
+	// -sU is as privileged as -sS: nmap has to build the datagrams
+	// and read the ICMP unreachables that are the whole signal. An
+	// unprivileged -sU does not quietly downgrade to something
+	// weaker, it fails -- so refusing here gives the server a chance
+	// to hand the task to an agent that can run it, instead of
+	// burning three attempts on one that cannot.
+	t := str(args, "technique")
+	return t == "syn" || t == "udp"
 }
 
 // --------------------------------------------------------------- nmap
