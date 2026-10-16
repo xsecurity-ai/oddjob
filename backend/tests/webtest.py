@@ -855,6 +855,29 @@ check("...and the cname recorded is the hop that landed on it",
 check("...while the whole chain survives for a reader",
       d is not None and d.chain == ["edge.corp.com", "i.github.io"], d and d.chain)
 
+print("\n== a takeover becomes a finding ==")
+check("a record nobody can re-register is Low",
+      _tk.SEVERITY_BY_CLAIMABLE[False] == "low")
+check("...and one anybody can is not",
+      _tk.SEVERITY_BY_CLAIMABLE[True] == "high")
+_c = _tk.Candidate("x.corp.com", "y.elb.eu-west-1.amazonaws.com",
+                   ["y.elb.eu-west-1.amazonaws.com"], "AWS ELB",
+                   False, "candidate", None)
+_d = _tk.vuln_description(_c)
+check("the description says the verdict could not be determined, rather "
+      "than asserting the record dangles",
+      "Neither check could be run" in _d, _d[:80])
+check("...and says plainly that it is not an exploitable takeover",
+      "not an exploitable takeover" in _d, _d[:80])
+_c2 = _tk.Candidate("y.corp.com", "b.s3.amazonaws.com",
+                    ["b.s3.amazonaws.com"], "AWS S3", True,
+                    "fingerprint", "NoSuchBucket")
+_d2 = _tk.vuln_description(_c2)
+check("a claimable one says somebody else can serve content on the name",
+      "somebody else can serve content" in _d2, _d2[:80])
+check("...and quotes the evidence that convicted it",
+      "NoSuchBucket" in _d2, _d2[:120])
+
 print("\n== the endpoint ==")
 TAKEOVER_HTTPX = "\n".join(json.dumps(x) for x in [
     {"url": "https://dead.corp.com", "input": "dead.corp.com",
@@ -894,6 +917,47 @@ again = {i["hostname"]: i for i in (r or {}).get("items", [])}
 check("a refresh keeps the triage an operator already did",
       again.get("dead.corp.com", {}).get("state") == "false_positive",
       again.get("dead.corp.com"))
+
+# The finding side of the same pass.
+print("\n== the finding is raised, once, and tracks the record ==")
+st, vs = call("/api/vulns?project=WEB&limit=500", token=admin)
+tv = [v for v in (vs or {}).get("items", [])
+      if (v.get("external_id") or "").startswith("takeover:")]
+check("a finding was raised for the takeover", len(tv) >= 1, len(tv))
+# dead.corp.com points at Heroku, which IS first-come, so this one is
+# the HIGH case. The Low case is the ELB below -- and getting these
+# the wrong way round in a report is exactly what `claimable` exists
+# to prevent, so both are asserted rather than one.
+check("...at High, because a Heroku name is first-come",
+      all(v["severity"] == "high" for v in tv), [v["severity"] for v in tv])
+check("...keyed on external_id so it can be found again",
+      all(v["external_id"].startswith("takeover:") for v in tv), tv[:1])
+
+# Run the detector twice more. A detector that re-derives on every
+# pass and forks a finding each time produces a pile, not a list.
+call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
+call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
+st, vs2 = call("/api/vulns?project=WEB&limit=500", token=admin)
+tv2 = [v for v in (vs2 or {}).get("items", [])
+       if (v.get("external_id") or "").startswith("takeover:")]
+check("three refreshes do not make three findings",
+      len(tv2) == len(tv), f"{len(tv)} then {len(tv2)}")
+
+# The Low half of the pair: a provider surface nobody can re-register.
+ELB_HTTPX = json.dumps(
+    {"url": "https://lb.corp.com", "input": "lb.corp.com",
+     "host": "10.0.0.90", "port": 443, "scheme": "https",
+     "status_code": 200,
+     "cname": ["lb-9f2.elb.ap-southeast-1.amazonaws.com"]})
+imp(ELB_HTTPX)
+call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
+st, vs3 = call("/api/vulns?project=WEB&limit=500", token=admin)
+elb = [v for v in (vs3 or {}).get("items", [])
+       if (v.get("external_id") or "") == "takeover:lb.corp.com"]
+check("an ELB-backed record is raised too", len(elb) == 1, len(elb))
+check("...at Low, because the name is AWS-assigned and not re-registerable",
+      elb and elb[0]["severity"] == "low", elb and elb[0]["severity"])
+
 check("...and the note with it",
       again.get("dead.corp.com", {}).get("note") == "client owns it",
       again.get("dead.corp.com"))

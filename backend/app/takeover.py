@@ -270,6 +270,136 @@ def decide(hostname: str, cnames, bodies: list[str] | None = None,
     return None
 
 
+#: Which rows become a finding, and at what severity.
+#:
+#: Keyed on `claimable`, because that is the question a reader of the
+#: report is actually asking. A record pointing at a provider surface
+#: nobody can re-register is a cleanup job; one pointing at a surface
+#: anyone can claim is somebody else's foothold on the client's
+#: domain, and the two must not arrive in a report wearing the same
+#: colour.
+SEVERITY_BY_CLAIMABLE: dict[bool, str] = {
+    False: "low",
+    True: "high",
+}
+
+#: Which verdicts are worth raising at all.
+#:
+#: **This is the dial.** Set to `VERDICTS` and every row becomes a
+#: finding, including `candidate` -- which on a real estate means a
+#: Low for every host whose CNAME points at a load balancer, i.e. for
+#: normal, healthy infrastructure. Narrowed to the two evidenced
+#: verdicts it raises only records something actually showed to be
+#: dangling or unclaimed.
+#:
+#: Currently all three, because the operator asked for the rows they
+#: were looking at -- which were `candidate` -- to be raised. The
+#: noise that implies is the reason this is one named constant and
+#: not a condition buried in the loop below.
+RAISE_VERDICTS: tuple[str, ...] = VERDICTS
+
+#: `external_id` prefix. Vulns are matched on this, so a refresh
+#: updates a finding in place instead of forking a duplicate every
+#: time it runs -- which, for something that re-derives on every
+#: pass, is the difference between a findings list and a pile.
+VULN_PREFIX = "takeover:"
+
+
+def vuln_title(c: Candidate) -> str:
+    return f"Dangling DNS record pointing at {c.provider}: {c.hostname}"
+
+
+def vuln_description(c: Candidate) -> str:
+    """What the row claims, in the words the verdict actually supports."""
+    chain = " -> ".join(c.chain) if c.chain else c.cname
+    why = {
+        "dangling": f"The chain reached a name that does not resolve "
+                    f"({c.evidence}). The record points at nothing.",
+        "fingerprint": f"{c.provider} served its own unclaimed-resource page "
+                       f"(matched: {c.evidence!r}).",
+        "candidate": "Neither check could be run against this host, so this "
+                     "is a record to go and look at rather than a confirmed "
+                     "dangling one. It is reported because the name it "
+                     "points at is a provider surface, not because anything "
+                     "showed it to be unclaimed.",
+    }[c.verdict]
+    claim = (
+        "The name this points at is assigned by the provider and cannot be "
+        "re-registered by anyone else, so this is a hygiene finding: the "
+        "record should be removed, but it is not an exploitable takeover."
+        if not c.claimable else
+        "The name this points at can be registered by whoever asks for it "
+        "first. If it is unclaimed, somebody else can serve content on this "
+        "hostname, with this domain's TLS story and its cookies."
+    )
+    return (f"{c.hostname} resolves through {chain}.\n\n{why}\n\n{claim}\n\n"
+            f"Verdict: {c.verdict}. Provider: {c.provider}. "
+            f"Claimable: {c.claimable}.")
+
+
+REMEDIATION = (
+    "Remove the DNS record if the resource behind it is gone. If it is still "
+    "wanted, re-create the resource at the provider and confirm it answers "
+    "before leaving the record in place."
+)
+
+
+async def _sync_vulns(session, project_id: int,
+                      decided: dict[str, tuple[int, Candidate]]) -> int:
+    """Raise a finding for each takeover worth one. -> how many are open.
+
+    Idempotent on `external_id`, so running the detector hourly does
+    not produce a finding per hour. An operator's `triage` and
+    `status` are never overwritten: the detector reports what DNS
+    says, and what a person concluded about it is theirs.
+
+    A record that has since been cleaned up has its finding CLOSED
+    rather than deleted. Deleting it would erase the evidence that it
+    was ever there, and "we found this and it was fixed" is a thing a
+    report should be able to say.
+    """
+    from sqlalchemy import select as _select
+
+    from .models import Vuln
+
+    wanted = {h: c for h, (_, c) in decided.items()
+              if c.verdict in RAISE_VERDICTS}
+
+    existing = {v.external_id: v for v in (await session.execute(
+        _select(Vuln).join(Vuln.target)
+        .where(Vuln.external_id.like(f"{VULN_PREFIX}%"))
+        .where(Vuln.target.has(project_id=project_id)))).scalars().all()}
+
+    open_now = 0
+    for host, c in wanted.items():
+        tid = decided[host][0]
+        key = f"{VULN_PREFIX}{host}"
+        sev = SEVERITY_BY_CLAIMABLE[bool(c.claimable)]
+        v = existing.get(key)
+        if v is None:
+            session.add(Vuln(
+                target_id=tid, title=vuln_title(c), severity=sev,
+                status="open", description=vuln_description(c),
+                remediation=REMEDIATION, remediation_source="scanner",
+                external_id=key))
+        else:
+            # Facts about DNS are refreshed. `triage` and `status` are
+            # not: those are the operator's.
+            v.target_id = tid
+            v.title = vuln_title(c)
+            v.severity = sev
+            v.description = vuln_description(c)
+            v.remediation = REMEDIATION
+        open_now += 1
+
+    # Gone from DNS: close, do not delete.
+    for key, v in existing.items():
+        if key[len(VULN_PREFIX):] not in wanted and v.status == "open":
+            v.status = "closed"
+    await session.flush()
+    return open_now
+
+
 async def refresh(session, project_id: int) -> dict[str, int]:
     """Re-derive this project's takeover rows. -> {verdict: count}.
 
@@ -355,4 +485,8 @@ async def refresh(session, project_id: int) -> dict[str, int]:
             state=state, note=note, seen_at=now))
         counts[c.verdict] = counts.get(c.verdict, 0) + 1
     await session.flush()
+    # Findings are part of the same pass deliberately. A detector that
+    # writes its own table and leaves raising the finding to somebody
+    # else is a detector whose output nobody reads.
+    counts["_vulns"] = await _sync_vulns(session, project_id, decided)
     return counts
