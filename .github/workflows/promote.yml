@@ -35,7 +35,7 @@
 #   images.yml         rebuilds — VERSION is part of the content key —
 #        |             stamps 0.0.2 into the Go binaries and into the
 #        |             org.opencontainers.image.version LABEL, and
-#        |             publishes src-<key>, :develop / :nightly
+#        |             publishes :develop / :nightly
 #        v
 #   promote.yml        reads the label off the digest it is promoting
 #   (this file)        and makes THAT the release tag. It computes
@@ -60,11 +60,17 @@
 #     (scripts/check-version.sh, the same script ci.yml and the
 #     pre-commit hook run). A dev build must never become a Docker Hub
 #     tag any more than it may reach main.
-#   * `src-<key>` resolves to the same digest as the tag being
-#     promoted. This is what keeps the version tag coherent with
-#     images.yml: `v0.0.2` is provably the same bytes as the
-#     `src-<key>` they were published under, and anyone can check it
-#     afterwards with the two commands printed in the summary.
+#   * the image's architectures agree about which source they came
+#     from. They each carry `ai.xsecurity.source-key`, and more than
+#     one distinct value means a manifest list assembled from two
+#     different trees -- which has happened here.
+#
+#     This used to be a stronger check: `src-<key>` was a second name
+#     for exactly these bytes, so the two failing to resolve to the
+#     same digest meant the moving tag had been repointed by hand.
+#     That name is gone -- one moving name per build -- and with it
+#     that guard. Nothing in the registry can detect it now, because
+#     the key lives only on the image it describes.
 #   * the git tag does not already exist.
 #
 # `latest` only moves forward. Promoting an older image — which is
@@ -84,9 +90,13 @@ on:
         # `nightly` rather than `develop`: a nightly has had a night of
         # being the thing people ran. `develop` is whatever landed
         # minutes ago, which is a fine thing to deploy and a poor thing
-        # to put a version number on. Either is accepted, and so is a
-        # `src-<key>` for promoting one exact source by hand.
-        description: 'Tag to promote — nightly, develop, or src-<key>'
+        # to put a version number on. Either is accepted.
+        #
+        # A `src-<key>` used to be accepted too, for promoting one
+        # exact source by hand. That name is no longer written -- one
+        # moving name per build now -- so promote what the pointers
+        # point at, or pass a digest.
+        description: 'Tag to promote — nightly or develop'
         type: string
         default: nightly
       expect:
@@ -186,25 +196,34 @@ jobs:
             fi
             version="$v"
 
-            # Coherence with images.yml. `src-<key>` is the durable
-            # name for exactly these bytes; if it does not resolve to
-            # the same digest then the moving tag has been hand-edited
-            # and `v$version` would be a name for something nobody can
-            # trace back.
+            # Coherence with images.yml.
+            #
+            # This used to compare the moving tag's digest against
+            # `src-<key>`, which was a second name for exactly these
+            # bytes -- so the two coming apart meant the moving tag
+            # had been hand-edited. That tag is gone (one name per
+            # build), and with it that comparison: there is no second
+            # copy left to disagree with the first.
+            #
+            # What survives is weaker and worth being honest about. A
+            # single-valued key says the halves of a multi-architecture
+            # image were built from the same source, which is the
+            # failure that actually occurred here before -- an arm64
+            # leg from a different tree. It does NOT detect a moving
+            # tag repointed by hand at bytes this workflow built
+            # earlier; nothing in the registry can, now that the key
+            # lives only on the image it describes.
             key=$(label_of "$ref" ai.xsecurity.source-key)
             digest=$(docker buildx imagetools inspect "$ref" \
                       --format '{{json .Manifest.Digest}}' | tr -d '"')
-            if [ -n "$key" ] && [ "$(printf '%s\n' "$key" | wc -l | tr -d '[:space:]')" -eq 1 ]; then
-              srcd=$(docker buildx imagetools inspect "$repo:src-$key" \
-                      --format '{{json .Manifest.Digest}}' | tr -d '"' || true)
-              if [ "$srcd" != "$digest" ]; then
-                echo "::error::$ref is $digest but $repo:src-$key is ${srcd:-missing}." >&2
-                echo "::error::The moving tag and its source tag have come apart." >&2
-                exit 1
-              fi
-              echo "$img: $FROM == src-$key == $digest"
-              echo "${img}_key=$key" >> "$GITHUB_OUTPUT"
+            if [ -n "$key" ] \
+               && [ "$(printf '%s\n' "$key" | grep -c .)" -ne 1 ]; then
+              echo "::error::$ref carries more than one source key:" >&2
+              printf '%s\n' "$key" | sed 's/^/::error::  /' >&2
+              echo "::error::Its architectures were built from different trees." >&2
+              exit 1
             fi
+            echo "$img: $FROM == $digest (source ${key:-unknown})"
             echo "${img}_digest=$digest" >> "$GITHUB_OUTPUT"
             echo "${img}_revision=$(label_of "$ref" org.opencontainers.image.revision | head -1)" \
               >> "$GITHUB_OUTPUT"

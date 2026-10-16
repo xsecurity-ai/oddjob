@@ -197,12 +197,24 @@ CI publishes to Docker Hub as `cr0n1cx/oddjob` and `cr0n1cx/ghost`, both
 
 | tag | moves | what it is |
 |---|---|---|
-| `src-<key>` | never | one exact source tree. The durable name. |
-| `develop-<sha>` | never | the `develop` build for one commit |
-| `nightly-<date>` | never | the `nightly` build for one date |
 | `develop` | every merge to main | what main currently is |
 | `nightly` | 03:17 UTC | what a promotion draws from |
 | `vX.Y.Z`, `latest` | on promotion | a release, by hand |
+| `buildcache-<arch>` | every build | the layer cache. Not a runnable image |
+
+To pin to one exact build, use the digest rather than a name:
+
+```bash
+docker buildx imagetools inspect cr0n1cx/oddjob:develop \
+  --format '{{json .Manifest.Digest}}'
+```
+
+`develop-<sha>`, `nightly-<date>` and `src-<key>` were written on
+every run until 0.1.43. Nothing resolved them — not the workflows,
+not this deployment — so they were a row in the registry listing
+rather than a pin, and a digest is a better one anyway. The fact
+`src-<key>` recorded, which source a given image was built from, is
+stamped on the image itself as `ai.xsecurity.source-key`.
 
 `develop` and `nightly` are the same bytes whenever the source has not
 changed between them — the scheduled run retags rather than rebuilds,
