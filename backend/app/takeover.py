@@ -35,12 +35,19 @@ VERDICTS = ("dangling", "fingerprint", "candidate")
 class Provider:
     """One service that hands out subdomains to whoever asks first."""
     name: str
-    #: CNAME suffixes that put a name on this provider.
+    #: CNAME suffixes that put a name on this provider. Plain
+    #: `endswith` matching.
     suffixes: tuple[str, ...]
     #: What the provider serves when the name is NOT claimed. Matched
     #: against a response body. Empty means the provider has no stable
     #: unclaimed page, so only a dangling chain can convict it.
     fingerprints: tuple[str, ...] = ()
+    #: For the names a suffix cannot express, because the provider
+    #: puts the region in the MIDDLE. Matched against the whole
+    #: normalised name. This started as three hardcoded `startswith`
+    #: checks against S3 spellings inside the matcher, which worked
+    #: and could not be extended without adding a fourth.
+    patterns: tuple[re.Pattern[str], ...] = ()
     #: False when registering the name again is not actually open to
     #: anyone -- the record still dangles and is still worth removing,
     #: but it is a hygiene finding and not a hostile-takeover one.
@@ -53,9 +60,15 @@ class Provider:
 #: years ago, and a false positive on this check costs an operator a
 #: morning proving a live site belongs to the client.
 PROVIDERS: tuple[Provider, ...] = (
-    Provider("AWS S3", (".s3.amazonaws.com", ".s3-website",
-                        ".s3.dualstack.", ".s3-external-"),
-             ("NoSuchBucket", "The specified bucket does not exist")),
+    Provider("AWS S3", (".s3.amazonaws.com",),
+             ("NoSuchBucket", "The specified bucket does not exist"),
+             patterns=(
+                 # The region sits between the marker and the domain:
+                 # `.s3-website-eu-west-1.amazonaws.com`.
+                 re.compile(r"\.s3-website[.-]"),
+                 re.compile(r"\.s3\.dualstack\."),
+                 re.compile(r"\.s3-external-"),
+             )),
     Provider("GitHub Pages", (".github.io",),
              ("There isn't a GitHub Pages site here",
               "For root URLs (like http://example.com/) you must provide an index.html file")),
@@ -109,6 +122,24 @@ PROVIDERS: tuple[Provider, ...] = (
     # to win a region-wide race or control the distribution. Recorded
     # so the record gets cleaned up, flagged so nobody writes it up as
     # an exploitable takeover without checking.
+    # Added after a live sweep: the first real CNAME chain collected
+    # on an engagement ended at
+    # `...elb.ap-southeast-1.amazonaws.com` and matched nothing,
+    # because AWS spells load balancers two ways and BOTH put the
+    # region where a suffix cannot see it:
+    #
+    #   name-123.eu-west-1.elb.amazonaws.com   (current)
+    #   name-123.elb.eu-west-1.amazonaws.com   (also in the wild)
+    #
+    # Not claimable. An ELB name carries an AWS-assigned random
+    # suffix, so nobody can re-register that exact name -- the record
+    # still dangles and should still go, but calling it an
+    # exploitable takeover would overstate it.
+    Provider("AWS ELB", (),
+             patterns=(re.compile(r"\.elb\.[a-z0-9-]+\.amazonaws\.com$"),
+                       re.compile(r"\.[a-z0-9-]+\.elb\.amazonaws\.com$"),
+                       re.compile(r"\.elb\.amazonaws\.com$")),
+             claimable=False),
     Provider("AWS Elastic Beanstalk",
              (".elasticbeanstalk.com",), (), claimable=False),
     Provider("AWS CloudFront", (".cloudfront.net",),
@@ -128,16 +159,10 @@ def provider_for(cname: str) -> Provider | None:
     if not c:
         return None
     for p in PROVIDERS:
-        for suf in p.suffixes:
-            # `in` rather than `endswith` for the infix forms: S3
-            # website endpoints carry the region between the marker
-            # and the domain (`.s3-website-eu-west-1.amazonaws.com`).
-            if suf.startswith(".s3-website") or suf.startswith(".s3.dualstack") \
-                    or suf.startswith(".s3-external"):
-                if suf in c:
-                    return p
-            elif c.endswith(suf):
-                return p
+        if any(c.endswith(suf) for suf in p.suffixes):
+            return p
+        if any(rx.search(c) for rx in p.patterns):
+            return p
     return None
 
 
