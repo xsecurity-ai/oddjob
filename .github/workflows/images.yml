@@ -7,8 +7,15 @@
 #   schedule       -> :nightly     what promote.yml draws from
 #   workflow_dispatch              either, for a rebuild by hand
 #
-# and under all of them `:src-<key>`, which is the durable one. The
-# moving names are conveniences; `src-<key>` is the fact.
+# and nothing else. One moving name per run.
+#
+# There used to be two more: a dated `develop-<sha>` and a
+# `src-<key>` per distinct source tree, so a repository merged to a
+# dozen times carried a dozen names nobody would ever type. The
+# durable fact they existed for -- which source these bytes were
+# built from -- is stamped on the image itself as
+# `ai.xsecurity.source-key`, and is read back off the pointers below.
+# A fact on the bytes beats a second name beside them.
 #
 # ---------------------------------------------------------------- keys
 #
@@ -34,11 +41,11 @@
 # ------------------------------------------------- why a retag branch
 #
 # "Already built" cannot mean "do nothing", now that there is more than
-# one pointer. A merge builds `src-X` and moves `:develop` to it; the
-# 03:17 run that night finds `src-X` already published and, if it
-# simply skipped, would leave `:nightly` on whatever it pointed at
-# before — and promote.yml draws from `:nightly`, so the version number
-# would go on stale bytes.
+# one pointer. A merge builds the image and moves `:develop` to it; the
+# 03:17 run that night finds the same source already built — it reads
+# the source key off `:develop` — and, if it simply skipped, would
+# leave `:nightly` on whatever it pointed at before. promote.yml draws
+# from `:nightly`, so the version number would go on stale bytes.
 #
 # So a skipped build still moves its pointer, with `imagetools create`
 # against the existing digest. Seconds rather than twenty minutes, and
@@ -83,10 +90,12 @@ concurrency:
   group: images-${{ (github.event_name == 'workflow_dispatch' && inputs.pointer) || (github.event_name == 'schedule' && 'nightly') || 'develop' }}
   # Safe to cancel mid-build because of the retag branch below. buildx
   # pushes blobs before manifests, so a tag that resolves at all is
-  # complete; the worst a cancellation leaves is `src-<key>` published
-  # with its pointer not yet moved, and the next run finds that key,
-  # takes the retag path and moves the pointer onto it. The failure
-  # mode repairs itself on the next run rather than needing a human.
+  # complete; the worst a cancellation leaves is layers pushed under
+  # no name at all, which nothing resolves and the registry collects.
+  # The next run finds no pointer carrying this source key and simply
+  # builds again. It repairs itself rather than needing a human --
+  # by rebuilding rather than by retagging, now that a half-finished
+  # run leaves no name behind to be found.
   cancel-in-progress: true
 
 jobs:
@@ -97,11 +106,18 @@ jobs:
       oddjob_key: ${{ steps.k.outputs.oddjob_key }}
       ghost_build: ${{ steps.k.outputs.ghost_build }}
       oddjob_build: ${{ steps.k.outputs.oddjob_build }}
+      # The digest an image for this exact source ALREADY has, when
+      # one does. Resolved here because this is where the key is
+      # computed, so the lookup and the comparison stay in one place.
+      ghost_have: ${{ steps.k.outputs.ghost_have }}
+      oddjob_have: ${{ steps.k.outputs.oddjob_have }}
       pointer: ${{ steps.k.outputs.pointer }}
-      dated: ${{ steps.k.outputs.dated }}
       version: ${{ steps.k.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `docker buildx imagetools` reads the labels below. promote.yml
+      # sets it up for the same reason.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v3
 
       - name: Work out what changed, and which pointer this run owns
         id: k
@@ -143,31 +159,76 @@ jobs:
             workflow_dispatch) pointer="${WANT:-develop}" ;;
             *)                 pointer=develop ;;
           esac
-          # A second, immutable name alongside the moving one, so a
-          # deployment can pin to the exact thing it was given rather
-          # than to a label that moves under it.
-          if [ "$pointer" = "nightly" ]; then
-            dated="nightly-$(date -u +%Y%m%d)"
-          else
-            dated="develop-$(git rev-parse --short HEAD)"
-          fi
+          # No second, dated name. `develop-<sha>` and
+          # `nightly-<date>` were written on every run and nothing
+          # ever read them: not this workflow, not promote.yml, not
+          # the deploy. A name nobody resolves is not a pin, it is a
+          # row in the registry listing. Pin by digest -- which is
+          # what `imagetools inspect` prints and what the deploy
+          # records -- and it cannot move under you at all.
           {
             echo "ghost_key=$ghost_key"
             echo "oddjob_key=$odd_tree"
             echo "pointer=$pointer"
-            echo "dated=$dated"
           } >> "$GITHUB_OUTPUT"
 
-          # Does an image already exist for that exact source? If so
-          # this run retags rather than rebuilds. `docker manifest
-          # inspect` needs no login for a public repo and no pull.
-          need() {
-            if [ "$FORCE" = "true" ]; then echo true; return; fi
-            if docker manifest inspect "docker.io/cr0n1cx/$1:src-$2" >/dev/null 2>&1
-            then echo false; else echo true; fi
+          # Does an image already exist for that exact source?
+          #
+          # Read off the LABEL the images already carry rather than
+          # from a `src-<key>` tag per build. Every image this
+          # workflow pushes is stamped `ai.xsecurity.source-key`, so
+          # the key is recorded on the bytes themselves; a tag per key
+          # was a second copy of that fact, published for ever, and
+          # the registry listing was most of what it produced.
+          #
+          # Only the names this workflow moves are consulted, which is
+          # a real narrowing: `src-<key>` persisted for every key ever
+          # built, so reverting to an older tree reused its image.
+          # Now that is a rebuild. Correct, slower, and worth saying
+          # out loud -- the common path (a merge, then that night's
+          # scheduled run finding the same source) is unchanged, and
+          # it is the one the retag exists for.
+          label_of() {       # <ref> <label> -> value(s), one per line
+            docker buildx imagetools inspect "$1" --format '{{json .Image}}' \
+              2>/dev/null \
+              | jq -r '(if has("config") then [.] else [.[]] end)
+                       | map(.config.Labels["'"$2"'"] // "") | unique | .[]' \
+              2>/dev/null || true
           }
-          echo "ghost_build=$(need ghost "$ghost_key")"   >> "$GITHUB_OUTPUT"
-          echo "oddjob_build=$(need oddjob "$odd_tree")"  >> "$GITHUB_OUTPUT"
+          # -> the digest of an image already built from this source,
+          #    or empty. Empty means build.
+          have() {
+            local repo="docker.io/cr0n1cx/$1" key=$2 ref k
+            # Spelled out rather than `[ ... ] && return`: under
+            # `set -e` a bare AND-list whose test fails is a trap
+            # people re-introduce, and this costs one line.
+            if [ "$FORCE" = "true" ]; then return 0; fi
+            for ref in develop nightly; do
+              k=$(label_of "$repo:$ref" ai.xsecurity.source-key)
+              # One line exactly: a multi-architecture image whose
+              # halves disagree about their source is not a match for
+              # either, and `unique` above collapses the agreeing case
+              # to one line.
+              [ "$(printf '%s\n' "$k" | grep -c .)" = "1" ] || continue
+              if [ "$k" = "$key" ]; then
+                docker buildx imagetools inspect "$repo:$ref" \
+                  --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"'
+                return 0
+              fi
+            done
+          }
+          # A lookup that fails reports nothing, and nothing means
+          # build. That is the safe direction: an unnecessary rebuild
+          # costs minutes, while skipping a needed one publishes the
+          # wrong bytes under a name people deploy.
+          ghost_have=$(have ghost "$ghost_key" || true)
+          oddjob_have=$(have oddjob "$odd_tree" || true)
+          {
+            echo "ghost_have=$ghost_have"
+            echo "oddjob_have=$oddjob_have"
+            echo "ghost_build=$([ -n "$ghost_have" ] && echo false || echo true)"
+            echo "oddjob_build=$([ -n "$oddjob_have" ] && echo false || echo true)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Say what will happen
         run: |
@@ -240,9 +301,13 @@ jobs:
           # button. "Check out the tag to reproduce the release" is
           # only true if the tag is on that commit.
           #
-          # `source-key` is this repository's content key, so the
-          # release tag can be checked against the `src-<key>` tag it
-          # came from: the two must resolve to the same digest.
+          # `source-key` is this repository's content key, and it is
+          # load-bearing rather than informational: the plan job above
+          # reads it back off `:develop` and `:nightly` to decide
+          # whether this source has already been built. It is the only
+          # record of that now -- there is no `src-<key>` tag beside
+          # the image any more -- so an image pushed without it is one
+          # that will always be rebuilt.
           labels: |
             org.opencontainers.image.version=${{ needs.plan.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -335,18 +400,20 @@ jobs:
 
       - name: Name the images
         env:
-          GHOST_KEY: ${{ needs.plan.outputs.ghost_key }}
-          ODDJOB_KEY: ${{ needs.plan.outputs.oddjob_key }}
           GHOST_BUILD: ${{ needs.plan.outputs.ghost_build }}
           ODDJOB_BUILD: ${{ needs.plan.outputs.oddjob_build }}
+          # The digest an image for this source already has, when the
+          # plan found one. Resolved there, not here: that is where
+          # the key was computed and where the comparison was made.
+          GHOST_HAVE: ${{ needs.plan.outputs.ghost_have }}
+          ODDJOB_HAVE: ${{ needs.plan.outputs.oddjob_have }}
           POINTER: ${{ needs.plan.outputs.pointer }}
-          DATED: ${{ needs.plan.outputs.dated }}
         run: |
           set -euo pipefail
           {
             echo "### Published"
-            echo "| image | tags | digest | how |"
+            echo "| image | tag | digest | how |"
             echo "|---|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
-          .github/scripts/publish.sh ghost  "$GHOST_KEY"  "$GHOST_BUILD"
-          .github/scripts/publish.sh oddjob "$ODDJOB_KEY" "$ODDJOB_BUILD"
+          .github/scripts/publish.sh ghost  "$GHOST_BUILD"  "$GHOST_HAVE"
+          .github/scripts/publish.sh oddjob "$ODDJOB_BUILD" "$ODDJOB_HAVE"
