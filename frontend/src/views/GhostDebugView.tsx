@@ -46,7 +46,7 @@ function stamp(at: string | null): string {
 
 export function GhostDebugView({ project }: { project: string | null }) {
   const qc = useQueryClient()
-  const { canWrite } = useAuth()
+  const { canWrite, isAdmin } = useAuth()
   const [pick, setPick] = useState<number | 'all'>('all')
   const [find, setFind] = useState('')
 
@@ -90,6 +90,22 @@ export function GhostDebugView({ project }: { project: string | null }) {
       <Alert severity="info" variant="outlined" sx={{ fontSize: 12.5 }}>
         Pick an engagement to see what its ghosts are logging. Debug is a
         per-agent switch, so there is nothing to show across all of them.
+      </Alert>
+    )
+  }
+
+  // The sidebar already leaves this out for anyone who is not an
+  // administrator of the engagement, and that is a convenience, not
+  // the control: the route still resolves from a typed URL or an old
+  // bookmark. The server refuses the read regardless -- this exists so
+  // the refusal reads as a rule rather than as the page being broken.
+  if (!isAdmin(project)) {
+    return (
+      <Alert severity="warning" variant="outlined" sx={{ fontSize: 12.5 }}>
+        Ghost debug is limited to administrators of this engagement. The
+        log is an agent's unedited running commentary — which hosts it is
+        probing right now, in what order, and what came back — so it is
+        read by the same people who can switch it on.
       </Alert>
     )
   }
