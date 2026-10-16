@@ -23,6 +23,8 @@ from ..models import (
     Target,
     User,
     Vuln,
+    WebAsset,
+    WebAssetFile,
 )
 from ..query import apply_search, apply_sort, paginate
 from ..schemas import Page, PocCreate, PocOut, VulnCreate, VulnOut
@@ -333,6 +335,172 @@ async def reveal_secret(vuln_id: int,
                 f"({sec.detector or 'unknown detector'}) on "
                 f"{target.host or target.id}"))
     return SecretOut(secret=sec.secret, detector=sec.detector)
+
+
+#: How much of a file the modal is given at once.
+#:
+#: A recovered original is a few hundred lines; a `raw` bundle is
+#: routinely megabytes on ONE line. Sending the whole of the second
+#: to a browser to highlight forty characters in the middle of it is
+#: the case this cap exists for, and a window around the match is
+#: strictly more useful than the first 120 kB of a minified file.
+SOURCE_WINDOW = 120_000
+
+
+class SecretSourceOut(BaseModel):
+    """The file a credential was found in, and where in it.
+
+    `body` may be a WINDOW rather than the whole file -- see
+    `SOURCE_WINDOW`. `offset` is where that window starts in the
+    file, so the caller can number lines and resolve the match
+    without having been sent the rest.
+    """
+    path: str
+    #: raw | beautified | source. Not decoration: a line number from
+    #: `beautified` names a line in a file WE produced, and saying so
+    #: is the difference between sending somebody to their own source
+    #: and sending them to our reformatting of it.
+    origin: str
+    asset_url: str | None = None
+    line: int | None = None
+    body: str
+    #: Characters of the whole file, before any windowing.
+    total: int
+    #: Where `body` starts within the file, in characters, and which
+    #: line that is. Both zero/one for an unwindowed file.
+    offset: int = 0
+    first_line: int = 1
+    truncated: bool = False
+    #: Where the credential sits INSIDE `body`, in characters, so the
+    #: UI can highlight the value itself rather than a whole line.
+    #: A minified bundle is one line of two megabytes; "line 1" names
+    #: the entire file and is no help at all.
+    match_start: int | None = None
+    match_end: int | None = None
+    #: Three answers, not two. `confirmed` -- the value is at the
+    #: recorded line. `moved` -- it is in this file at a different
+    #: line, so the file was re-fetched and shifted since the scan.
+    #: `absent` -- it is not in this file at all, which means the
+    #: stored body is not the one that was scanned. Collapsing the
+    #: last two into "here it is" would scroll somebody confidently
+    #: to the wrong place.
+    located: str
+
+
+@router.get("/vulns/{vuln_id}/secret/source", response_model=SecretSourceOut)
+async def secret_source(vuln_id: int,
+                        user: User = Depends(get_current_user),
+                        session: AsyncSession = Depends(get_session)):
+    """The source this credential was found in, positioned on it.
+
+    Same guards as `reveal_secret`, and for the same reason rather
+    than for symmetry: this returns a file that CONTAINS the
+    credential, so it discloses everything that endpoint does and
+    some of the surrounding code besides. A weaker check here would
+    make the stricter one next door decorative.
+
+    The file is located the way it was scanned. `assetwork` hands
+    the scanners `(file.id, file.path, file.body)` one
+    `WebAssetFile` at a time, so the `path` and `line` stored on the
+    finding name that row exactly -- the asset by URL, then the file
+    by path within it.
+    """
+    row = (await session.execute(
+        select(Vuln).where(Vuln.id == vuln_id))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, "no such vulnerability")
+    target = await session.get(Target, row.target_id)
+    if target is None:
+        raise HTTPException(404, "no such vulnerability")
+    vis = await visible_project_ids(session, user)
+    if vis is not None and target.project_id not in vis:
+        raise HTTPException(404, "no such vulnerability")
+    await assert_role_for_target(session, user, target.id, "user")
+
+    sec = (await session.execute(select(FindingSecret).where(
+        FindingSecret.vuln_id == vuln_id))).scalar_one_or_none()
+    if sec is None:
+        raise HTTPException(404, "this finding has no stored credential")
+    if not sec.asset_url or not sec.path:
+        raise HTTPException(
+            404, "this finding predates the origin being stored as columns, "
+                 "so the file it came from cannot be identified")
+
+    asset = (await session.execute(select(WebAsset).where(
+        WebAsset.project_id == target.project_id,
+        WebAsset.url == sec.asset_url))).scalar_one_or_none()
+    if asset is None:
+        raise HTTPException(
+            404, "the asset this came from is no longer recorded: it was "
+                 "removed, or the project was re-imported since the scan")
+
+    # Path identifies the file within the asset. The three origins do
+    # not collide in practice -- `raw` is the URL's basename,
+    # `beautified` is that plus `.pretty`, and `source` paths come out
+    # of a source map -- so this is a lookup and not a guess. Ordered
+    # so that, if one ever did collide, the scanned row wins: that is
+    # the one the line number came from.
+    files = (await session.execute(
+        select(WebAssetFile)
+        .where(WebAssetFile.asset_id == asset.id,
+               WebAssetFile.path == sec.path)
+        .order_by(WebAssetFile.scanned_at.is_(None),
+                  WebAssetFile.id))).scalars().all()
+    f = next((x for x in files if x.body), None)
+    if f is None:
+        raise HTTPException(
+            404, "the file is recorded but its contents are not: the asset "
+                 "was known by reference and never pulled back, or the "
+                 "fetch failed")
+
+    body: str = f.body or ""
+    total = len(body)
+
+    # Where the value actually is, rather than where it was recorded.
+    # The recorded line is checked FIRST so an unchanged file reports
+    # `confirmed` even when the same value appears more than once --
+    # a key repeated in a bundle would otherwise resolve to whichever
+    # copy came first and call a correct record "moved".
+    lines = body.split("\n")
+    start = end = None
+    located = "absent"
+    if sec.line and 1 <= sec.line <= len(lines):
+        at = lines[sec.line - 1].find(sec.secret)
+        if at >= 0:
+            start = sum(len(x) + 1 for x in lines[:sec.line - 1]) + at
+            end = start + len(sec.secret)
+            located = "confirmed"
+    if start is None:
+        at = body.find(sec.secret)
+        if at >= 0:
+            start, end, located = at, at + len(sec.secret), "moved"
+
+    # Window around the match when the file is too big to send. An
+    # unlocated secret in a huge file windows from the top: there is
+    # nothing better to centre on, and `located` already says so.
+    offset, truncated, first_line = 0, False, 1
+    if total > SOURCE_WINDOW:
+        truncated = True
+        centre = start if start is not None else 0
+        offset = max(0, centre - SOURCE_WINDOW // 2)
+        body = body[offset:offset + SOURCE_WINDOW]
+        if start is not None:
+            start, end = start - offset, (end or 0) - offset
+        # Which line the window opens on, so the gutter counts from
+        # the file's numbering and not from the window's.
+        first_line = (f.body or "")[:offset].count("\n") + 1
+
+    await audit.record(
+        session, "ui", "finding.secret.source", user=user, commit=True,
+        project_code=None,
+        detail=(f"read the source around the credential on finding {vuln_id} "
+                f"({sec.path}) on {target.host or target.id}"))
+
+    return SecretSourceOut(
+        path=sec.path, origin=f.origin, asset_url=sec.asset_url,
+        line=sec.line, body=body, total=total, offset=offset,
+        first_line=first_line, truncated=truncated,
+        match_start=start, match_end=end, located=located)
 
 
 class SecretRow(BaseModel):

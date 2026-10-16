@@ -799,6 +799,106 @@ st, msg = call(f"/api/vulns/{_bare_id}/secret", token=admin)
 check("a finding with no stored credential says so", st == 404,
       f"{st} {str(msg)[:70]}")
 
+# ------------------------------------------------------ the source
+# Clicking a secret shows the file it was found in, positioned on
+# the value. Three outcomes are asserted and not two: a stored body
+# can have moved on since the scan, and scrolling somebody
+# confidently to a line the value is no longer on would be the tool
+# asserting something it has not checked.
+SRC_URL = "https://app.acme.example/static/bundle.abc123.js"
+SRC_PATH = "src/config/keys.ts"
+SRC_LINES = ["export const config = {",
+             "  region: 'us-east-1',",
+             f"  key: '{PLANTED}',",
+             "  retries: 3,",
+             "}"]
+SRC_BODY = "\n".join(SRC_LINES)
+#: The value sits on line 3, counting from 1.
+SRC_LINE = 3
+
+
+async def _plant_source(tag, line, body=SRC_BODY, path=SRC_PATH,
+                        with_asset=True):
+    """A finding whose origin columns point at a stored file.
+
+    One asset per call, named by `tag`: `web_assets` is unique on
+    (project, url), so reusing one URL across these fixtures fails
+    the second insert rather than the assertion it was written for.
+    """
+    url = SRC_URL.replace("abc123", f"abc123-{tag}")
+    async with SessionLocal() as s:
+        pr = (await s.execute(select(Project).where(
+            Project.code == "ASSET"))).scalar_one()
+        t = (await s.execute(select(Target).where(
+            Target.project_id == pr.id))).scalars().first()
+        v = Vuln(target_id=t.id, title="credential in a bundle",
+                 severity="high", status="open",
+                 external_id=f"detect-secrets:src-{line}-{with_asset}-{len(body)}")
+        s.add(v)
+        await s.flush()
+        s.add(_FS(vuln_id=v.id, secret=PLANTED, detector="AWS Access Key",
+                  asset_url=url, path=path, line=line))
+        if with_asset:
+            a = WebAsset(project_id=pr.id, target_id=t.id, url=url,
+                         kind="script", host="app.acme.example")
+            s.add(a)
+            await s.flush()
+            s.add(WebAssetFile(asset_id=a.id, project_id=pr.id,
+                               origin="source", path=path, body=body,
+                               bytes=len(body)))
+        await s.commit()
+        return v.id
+
+
+_src_id = asyncio.run(_plant_source("hit", SRC_LINE))
+st, src = call(f"/api/vulns/{_src_id}/secret/source", token=admin)
+src = src or {}
+check("the source endpoint returns the file", st == 200
+      and src.get("body") == SRC_BODY, f"{st} {str(src)[:80]}")
+check("...and says which origin it is, so a beautified line number "
+      "is not read as the developer's own source",
+      src.get("origin") == "source", src.get("origin"))
+check("...and confirms the value is where the finding said",
+      src.get("located") == "confirmed", src.get("located"))
+# The offsets are the whole point: a minified bundle is one line, so
+# the line number names the entire file and only these name the value.
+_ms, _me = src.get("match_start"), src.get("match_end")
+check("...and the match offsets select exactly the credential",
+      _ms is not None and src.get("body", "")[_ms:_me] == PLANTED,
+      f"{_ms}:{_me}")
+
+# The file moved on after the scan. Still findable, and said so.
+_moved_id = asyncio.run(_plant_source("moved", 1))
+st, mv = call(f"/api/vulns/{_moved_id}/secret/source", token=admin)
+mv = mv or {}
+check("a value no longer at the recorded line reads as moved",
+      st == 200 and mv.get("located") == "moved", f"{st} {mv.get('located')}")
+_ms2, _me2 = mv.get("match_start"), mv.get("match_end")
+check("...and is still highlighted where it actually is",
+      _ms2 is not None and mv.get("body", "")[_ms2:_me2] == PLANTED,
+      f"{_ms2}:{_me2}")
+
+# The stored body is not the one that was scanned at all.
+_gone_id = asyncio.run(_plant_source(
+    "gone", 2, body="export const config = { region: 'us-east-1' }\n"))
+st, gone = call(f"/api/vulns/{_gone_id}/secret/source", token=admin)
+gone = gone or {}
+check("a body that no longer holds the value reads as absent",
+      st == 200 and gone.get("located") == "absent", f"{st} {gone.get('located')}")
+check("...and highlights nothing rather than guessing",
+      gone.get("match_start") is None, gone.get("match_start"))
+
+# Nothing to show, which is not the same as an error in the page.
+_noasset_id = asyncio.run(_plant_source(
+    "never-fetched", SRC_LINE, with_asset=False))
+st, _ = call(f"/api/vulns/{_noasset_id}/secret/source", token=admin)
+check("a finding whose asset is not recorded is a 404, not a 500",
+      st == 404, st)
+
+st, _ = call(f"/api/vulns/{_bare_id}/secret/source", token=admin)
+check("a finding with no stored credential has no source either",
+      st == 404, st)
+
 # And the page must not OFFER the reveal in the first place.
 #
 # The UI used to decide from the external_id prefix, which is true
@@ -919,6 +1019,12 @@ st, seen = call("/api/vulns?project=ASSET", token=_viewer)
 check("readonly can see the findings themselves",
       st == 200 and (seen or {}).get("total", 0) > 0,
       f"{st} {(seen or {}).get('total')}")
+
+# Same guard as the reveal: the source endpoint returns a file
+# CONTAINING the credential, so a weaker check there would make the
+# stricter one next door decorative.
+st, _ = call(f"/api/vulns/{_src_id}/secret/source", token=_viewer)
+check("a readonly account is refused the source", st == 403, st)
 
 st, ro = call("/api/secrets?project=ASSET", token=_viewer)
 check("readonly gets NO credentials from the list",
