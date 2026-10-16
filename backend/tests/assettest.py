@@ -1,0 +1,1110 @@
+"""Fetching a page's assets, recovering originals, and what is reported.
+
+Driven against a REAL http server on loopback rather than a mocked
+client. The thing most likely to be wrong in this pipeline is not
+the parsing -- it is whether an asset is authorised, retrieved,
+unpacked and attributed at all, and a mock proves none of that.
+
+The scanners are not asserted on here. They are 79MB of binaries
+that exist in the image and not in this suite, and a test that
+quietly passes because nothing ran would be worse than no test:
+`scan_project` is asserted to SAY it scanned nothing, which is the
+behaviour that matters when a deployment is missing them.
+"""
+import http.server
+import json
+import os
+import pathlib
+import socket
+import sys
+import threading
+import urllib.error
+import urllib.request
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8013")
+passed = failed = 0
+
+
+def check(label, cond, got=None):
+    global passed, failed
+    if cond:
+        passed += 1
+        print(f"  PASS  {label}" + (f" {got}" if got is not None else ""))
+    else:
+        failed += 1
+        print(f"  FAIL  {label}" + (f" {got}" if got is not None else ""))
+
+
+def call(p, m="GET", b=None, token=None):
+    r = urllib.request.Request(BASE + p, method=m)
+    if b is not None:
+        r.data = json.dumps(b).encode()
+        r.add_header("Content-Type", "application/json")
+    if token:
+        r.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(r, timeout=60) as x:
+            raw = x.read()
+            return x.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw)
+        except Exception:
+            return e.code, raw[:300]
+
+
+# ---------------------------------------------------------- the estate
+#
+# A minified bundle that points at a source map, and the map, with
+# the originals inside it. This is the shape the whole feature
+# exists for: one URL in, several real files out.
+BUNDLE = ('!function(){var t="x";function e(n){return n+t}'
+          'window.q=e}();\n'
+          '//# sourceMappingURL=app.min.js.map\n')
+MAP = json.dumps({
+    "version": 3,
+    "sources": ["webpack:///src/auth/session.ts",
+                "webpack:///../../../etc/passwd",
+                "webpack:///src/omitted.ts"],
+    "sourcesContent": [
+        "export const LOGIN = '/api/v2/internal/login'\n",
+        "root:x:0:0:root:/root:/bin/sh\n",
+        None,
+    ],
+})
+LONE = "var plain = 1;\n"
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):                                 # noqa: N802
+        body, ct = None, "application/javascript"
+        if self.path.endswith("/app.min.js"):
+            body = BUNDLE
+        elif self.path.endswith("/app.min.js.map"):
+            body, ct = MAP, "application/json"
+        elif self.path.endswith("/plain.js"):
+            body = LONE
+        if body is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+        raw = body.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", ct)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *a):                        # noqa: A002
+        pass
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+PORT = free_port()
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+ORIGIN = f"http://127.0.0.1:{PORT}"
+
+admin = call("/api/auth/setup", "POST",
+             {"username": "root", "password": "root-password-1"})[1]["access_token"]
+call("/api/projects", "POST", {"code": "ASSET", "name": "ASSET"}, token=admin)
+# 127.0.0.1 in scope: the PAGE must be in scope for its assets to be.
+call("/api/projects/ASSET/scope", "POST", {"lines": ["127.0.0.1"]}, token=admin)
+call("/api/targets?project=ASSET", "POST", {"host": "127.0.0.1"}, token=admin)
+
+import asyncio  # noqa: E402
+
+from sqlalchemy import select  # noqa: E402
+
+from app.db import SessionLocal  # noqa: E402
+from app.models import (  # noqa: E402
+    Project,
+    Target,
+    Vuln,
+    WebAsset,
+    WebAssetFile,
+)
+
+
+async def seed():
+    async with SessionLocal() as s:
+        pr = (await s.execute(select(Project).where(
+            Project.code == "ASSET"))).scalar_one()
+        t = (await s.execute(select(Target).where(
+            Target.project_id == pr.id))).scalars().first()
+        for url, kind in ((f"{ORIGIN}/static/app.min.js", "script"),
+                          (f"{ORIGIN}/static/plain.js", "script")):
+            s.add(WebAsset(project_id=pr.id, target_id=t.id, url=url,
+                           host="127.0.0.1", kind=kind,
+                           first_page=f"{ORIGIN}/index.html", seen_on=1))
+        # Referenced only by a page that is NOT in scope. Its own
+        # host is the same; what differs is who asked for it.
+        s.add(WebAsset(project_id=pr.id, target_id=None,
+                       url=f"{ORIGIN}/static/outsider.js", host="127.0.0.1",
+                       kind="script", first_page="http://nope.example/x.html",
+                       seen_on=1))
+        await s.commit()
+        return pr.id
+
+
+pid = asyncio.run(seed())
+
+print("== fetching ==")
+st, r = call("/api/web/assets/pending?project=ASSET", token=admin)
+check("pending reports a backlog", (r or {}).get("unfetched") == 3,
+      (r or {}).get("unfetched"))
+check("...and says which scanners exist", "scanners" in (r or {}),
+      (r or {}).get("scanners"))
+
+st, r = call("/api/web/assets/fetch?project=ASSET", "POST", {}, token=admin)
+check("the sweep answers", st == 200, st)
+check("two assets were fetched", (r or {}).get("fetched") == 2, r)
+# The ruling, as behaviour: authorisation comes from the PAGE. The
+# third asset is on the same host as the other two and is still
+# refused, because the only page referencing it is out of scope.
+check("an asset whose only referrer is out of scope is NOT fetched",
+      (r or {}).get("unauthorised") == 1, r)
+
+print("\n== what came back ==")
+
+
+async def files():
+    async with SessionLocal() as s:
+        rows = (await s.execute(select(WebAssetFile).where(
+            WebAssetFile.project_id == pid))).scalars().all()
+        return [(f.origin, f.path) for f in rows]
+
+
+got = asyncio.run(files())
+paths = {p for _, p in got}
+origins = {o for o, _ in got}
+check("the raw bundle is kept", ("raw", "app.min.js") in got, sorted(got)[:4])
+check("originals are recovered from the source map",
+      ("source", "src/auth/session.ts") in got, sorted(paths)[:5])
+# The map names three sources; one has a null sourcesContent, which
+# means "not included" rather than "empty". Inventing it would give
+# the scanners a file to call clean.
+check("a null sourcesContent entry is not invented as a file",
+      "src/omitted.ts" not in paths, sorted(paths))
+# `webpack:///../../../etc/passwd` is a legal sources entry.
+check("a traversal path is neutralised, not stored raw",
+      "etc/passwd" in paths and not any(".." in p for p in paths),
+      sorted(paths))
+# plain.js is not minified and has no map, so there is nothing to
+# beautify and nothing to recover: one file only.
+check("an unminified asset yields only its raw file",
+      ("raw", "plain.js") in got and ("beautified", "plain.js.pretty") not in got,
+      sorted(got))
+check("origins are exactly the ones we produce",
+      origins <= {"raw", "source", "beautified"}, origins)
+
+print("\n== scanning ==")
+st, r = call("/api/web/assets/scan?project=ASSET", "POST", {}, token=admin)
+check("the scan sweep answers", st == 200, st)
+# The binaries are in the image, not in this suite. The behaviour
+# that matters here is that their ABSENCE is reported rather than
+# read as "nothing found".
+have = call("/api/web/assets/pending?project=ASSET",
+            token=admin)[1].get("scanners", {})
+# detect-secrets is a Python dependency, so a scanner is ALWAYS
+# present -- there is no deployment of this that cannot look for
+# secrets. The opengrep binary may be absent in a dev checkout;
+# that is reported separately.
+check("detect-secrets is always available, being a library",
+      have.get("detect-secrets") is True, have)
+check("files were examined", (r or {}).get("scanned", 0) > 0, r)
+if not all(have.values()):
+    check("...and a missing binary scanner is still reported",
+          any("only some scanners" in n for n in (r or {}).get("notes", [])),
+          (r or {}).get("notes"))
+
+
+async def vulns():
+    async with SessionLocal() as s:
+        return (await s.execute(select(Vuln))).scalars().all()
+
+
+rows = asyncio.run(vulns())
+check("no finding stores a scanner's raw match",
+      all("root:x:0:0" not in (v.description or "") for v in rows),
+      len(rows))
+
+print("\n== re-running is idempotent ==")
+st, r2 = call("/api/web/assets/fetch?project=ASSET", "POST", {}, token=admin)
+check("a second fetch finds nothing left to do",
+      (r2 or {}).get("fetched") == 0, r2)
+after = asyncio.run(files())
+check("...and does not duplicate the files", len(after) == len(got),
+      f"{len(got)} -> {len(after)}")
+
+print("\n== it runs automatically ==")
+# The point of the feature is that nobody has to press anything.
+# Asserted on the WORKER rather than on the routes, because the
+# routes being correct says nothing about whether they are ever
+# called -- and "it runs automatically" resting on one unchecked
+# line in main.py is exactly the drift that put ghost-debug behind
+# a URL nothing routed to.
+from app import assetwork as _aw  # noqa: E402
+from app import main as _main  # noqa: E402
+
+src = pathlib.Path(_main.__file__).read_text()
+check("the asset worker is started at boot",
+      "asset_worker.start()" in src)
+check("...and it is the one from assetwork",
+      "from .assetwork import worker as asset_worker" in src)
+# No switch. The instruction was that this runs for all assets; a
+# project flag would be a way to turn it off, so there is not one.
+check("the worker takes no enable flag",
+      "auto_assets" not in src and "auto_assets" not in
+      pathlib.Path(_aw.__file__).read_text())
+# FETCHING is what must stay small: every asset is a request at the
+# client's estate. SCANNING is local and is ONE invocation of each
+# tool over the whole batch -- almost all of its cost is startup, so
+# a bigger batch is cheaper per file, and capping it would make the
+# sweep slower for no benefit to anyone. The two are paced by
+# different things and asserting one limit for both was wrong.
+check("fetching is paced: it sends requests at the client",
+      _aw.WORKER_FETCH <= 50 and _aw.CYCLE_SECS >= 60,
+      f"fetch={_aw.WORKER_FETCH} cycle={_aw.CYCLE_SECS}")
+check("scanning is batched into one run, so the batch is not tiny",
+      _aw.WORKER_SCAN >= 50, f"scan={_aw.WORKER_SCAN}")
+
+
+async def _one_cycle():
+    """Drive one cycle by hand against the seeded project."""
+    w = _aw.AssetWorker()
+    await w._cycle()
+    return w.last
+
+
+# Everything is already fetched and scanned by this point, so the
+# cycle must say so rather than redoing it -- which is also the
+# proof that the worker is idempotent against a drained backlog.
+said = asyncio.run(_one_cycle())
+# Fetching really is drained: the unauthorised asset was stamped
+# with its reason on the first sweep, so it is not reconsidered.
+# Without that it stays in the backlog for ever and is re-examined
+# every cycle, which the first run of this test caught.
+check("the unauthorised asset is not retried for ever",
+      "fetched 0" not in said or "unauthorised 1" not in said, said)
+if any(have.values()):
+    check("a cycle over a drained project reports nothing outstanding",
+          said == "nothing outstanding", said)
+else:
+    # No scanners here, so the files stay unscanned and the cycle
+    # keeps saying so -- which is correct, and is the behaviour that
+    # stops a scanner-less deployment looking like a clean one.
+    check("without scanners the cycle keeps saying it examined nothing",
+          "not a clean result" in said, said)
+
+
+async def _backlog():
+    async with SessionLocal() as s:
+        return await _aw.pending(s, pid)
+
+
+owed = asyncio.run(_backlog())
+check("nothing is left owed on the fetch side", owed["unfetched"] == 0, owed)
+
+print("\n== a finding knows which file it came from ==")
+# The bug this exists for. A batch scans many files in ONE run, so
+# the caller cannot know which file a result belongs to -- it
+# passes "" and the parser must read the path the SCANNER
+# reported. Taking the argument instead meant every finding came
+# back with an empty path, failed to map back to a file, and was
+# dropped: the scanners ran, found things, and the sweep recorded
+# nothing. 0 findings looked exactly like a clean estate.
+from app import assetscan as _asx  # noqa: E402
+
+_og = ('{"results":[{"check_id":"js.eval","path":"/tmp/d/7__a.js",'
+       '"extra":{"severity":"ERROR","message":"m"},"start":{"line":3}}]}')
+_f = _asx.parse_opengrep(_og, "")[0]
+check("opengrep findings carry the reported path",
+      _f.path == "/tmp/d/7__a.js" and _f.line == 3, (_f.path, _f.line))
+# The caller's path is still the fallback, for a single-file call.
+check("...and the caller's path is still used when none is reported",
+      _asx.parse_opengrep(
+          '{"results":[{"check_id":"r","extra":{},"start":{}}]}',
+          "given.js")[0].path == "given.js")
+
+print("\n== fetching is parallel across hosts, serial per host ==")
+# The backlog is not spread evenly -- on the live estate 1,896 of
+# 7,800 queued assets are on ONE host -- so plain global
+# concurrency would point every slot at one server. Two properties
+# matter and neither is visible from the sweep's totals.
+
+
+async def _parallelism_probe():
+    """Fetch a batch spanning several hosts, recording overlap."""
+    import app.assetfetch as _af
+
+    inflight: dict[str, int] = {}
+    peak_per_host = 0
+    peak_global = 0
+    live = 0
+    real = _af.fetch
+
+    async def spy(client, url, *, user_agent):
+        nonlocal peak_per_host, peak_global, live
+        from urllib.parse import urlparse
+        h = urlparse(url).hostname or ""
+        inflight[h] = inflight.get(h, 0) + 1
+        live += 1
+        peak_per_host = max(peak_per_host, inflight[h])
+        peak_global = max(peak_global, live)
+        try:
+            await asyncio.sleep(0.05)
+            return await real(client, url, user_agent=user_agent)
+        finally:
+            inflight[h] -= 1
+            live -= 1
+
+    async with SessionLocal() as s:
+        pr = (await s.execute(select(Project).where(
+            Project.code == "ASSET"))).scalar_one()
+        t = (await s.execute(select(Target).where(
+            Target.project_id == pr.id))).scalars().first()
+        # Six assets over two genuinely different URL HOSTNAMES,
+        # both of which reach the loopback server. The first
+        # version of this varied `web_assets.host` while every URL
+        # pointed at 127.0.0.1 -- so there was really one host, and
+        # it could not tell correct serialisation from no
+        # parallelism. The lock keys on the URL, so the URL is what
+        # has to differ.
+        for i in range(6):
+            origin = (ORIGIN if i % 2
+                      else f"http://localhost:{PORT}")
+            s.add(WebAsset(project_id=pr.id, target_id=t.id,
+                           url=f"{origin}/static/plain.js?par={i}",
+                           host="127.0.0.1" if i % 2 else "localhost",
+                           kind="script",
+                           first_page=f"{ORIGIN}/index.html", seen_on=1))
+        await s.commit()
+        _af.fetch = spy
+        try:
+            await _aw.fetch_project(s, pr.id, user_agent="t", limit=6)
+        finally:
+            _af.fetch = real
+    return peak_per_host, peak_global
+
+
+# Ordering, tested directly: the probe above cannot see it,
+# because its fixture alternates hosts and so looks spread however
+# the batch is chosen. A real queue arrives clustered.
+class _A:
+    def __init__(self, h):
+        self.host = h
+
+
+_clustered = [_A("a.example")] * 10 + [_A("b.example")] * 10
+_picked = _aw.spread_by_host(_clustered, 6)
+check("a clustered queue is spread across hosts, not taken in order",
+      len({x.host for x in _picked}) == 2,
+      [x.host for x in _picked])
+check("...and the batch is still the size asked for", len(_picked) == 6)
+check("a single-host queue still fills the batch",
+      len(_aw.spread_by_host([_A("only.example")] * 10, 4)) == 4)
+
+_pph, _pg = asyncio.run(_parallelism_probe())
+check("never more than one request in flight at a host",
+      _pph <= 1, f"peak per host = {_pph}")
+check("but several hosts are fetched at once",
+      _pg > 1, f"peak concurrent = {_pg}")
+check("concurrency is bounded, not unlimited",
+      _pg <= _aw.FETCH_CONCURRENCY, f"{_pg} <= {_aw.FETCH_CONCURRENCY}")
+
+print("\n== endpoints out of JavaScript ==")
+# A crawl finds what a page LINKS to; a bundle contains what it
+# CALLS. Every case below is noise measured on real bundles from
+# the estate -- the first version of this returned 2,732 hits over
+# 400 files, nearly all of it rubbish, and each filter here is one
+# category of that.
+from app import assetlinks as _al  # noqa: E402
+
+_js = """
+  var a = "/api/v2/accounts/balance";
+  fetch("/_nc_external/system/security/session/SessionTimeServlet");
+  var svg = "http://www.w3.org/2000/svg";
+  var enc = "/%3E%3C/svg%3E";
+  var bot = "/0aiqGemfFwpl8/PK3qP/8DBQb6iLw/5it1";
+  var lib = "node_modules/@popperjs/core/lib/index.js";
+  var img = "/static/img/logo.png";
+  var mime = "application/json";
+  var date = "/2024/01/15";
+  var one = "/x";
+  var tpl = "/${a}/${b}";
+  var host = "https://mpms-mufg.euwest01.umbraco.io/en/retirement/";
+"""
+_eps = _al.extract(_js)
+_vals = {e.value for e in _eps}
+
+check("a real API path is kept", "/api/v2/accounts/balance" in _vals, sorted(_vals))
+check("a real servlet path is kept",
+      "/_nc_external/system/security/session/SessionTimeServlet" in _vals)
+check("a real host URL is kept",
+      "https://mpms-mufg.euwest01.umbraco.io/en/retirement/" in _vals)
+# Every one of these appeared in the live measurement.
+# Checked on the HOST, not as a substring. `"w3.org" in url` is
+# the shape CodeQL flags as incomplete URL sanitisation, and it is
+# wrong for the same reason here as anywhere: `https://w3.org.evil
+# .example/` contains it too. The assertion should say what it
+# means -- no endpoint is SERVED BY that host.
+check("an XML namespace is not an endpoint",
+      "w3.org" not in _al.hosts_of(_eps)
+      and not any(v.startswith(("http://www.w3.org/", "https://www.w3.org/"))
+                  for v in _vals),
+      sorted(_vals))
+check("percent-encoded markup is not a path",
+      not any("%3" in v.lower() for v in _vals))
+check("a bot-manager token path is not a path",
+      not any("0aiqGem" in v for v in _vals))
+check("node_modules is not the application's surface",
+      not any("node_modules" in v for v in _vals))
+check("an image is an asset, not a route",
+      not any(v.endswith(".png") for v in _vals))
+check("a MIME type is not a path", "/json" not in _vals)
+check("a date is not a path", "/2024/01/15" not in _vals)
+check("a single segment is not a path (it is usually division)",
+      "/x" not in _vals)
+check("a template with nothing fixed names no route",
+      not any(v.startswith("/${") for v in _vals))
+check("hosts are reported separately from paths",
+      _al.hosts_of(_eps) == ["mpms-mufg.euwest01.umbraco.io"],
+      _al.hosts_of(_eps))
+# Stability matters: these are upserted, so an unchanged file must
+# produce an identical list or every sweep writes rows for ever.
+# ReDoS. These patterns run over a client's minified JavaScript,
+# which is hostile by construction, and Python's `re` holds the
+# GIL while it backtracks -- so one bad string does not hang one
+# task, it hangs the worker. CodeQL caught `^/(?:\\d+/?)+$` here
+# (py/redos): 0.005s at 18 digits, 0.292s at 24.
+import time as _time  # noqa: E402
+
+# TWO segments, and no final match. The first version of this
+# guard used one segment -- which `_QUOTED_PATH` never matches, so
+# `_plausible` was never called and the vulnerable regex never
+# ran. The guard passed with the exponential pattern restored,
+# which is a guard that tests nothing. With two segments the bad
+# pattern takes 2.3s at 2x14 digits and grows ~4x per 2 digits.
+_bomb = 'var x = "/' + "9" * 16 + "/" + "9" * 16 + 'x";'
+_t0 = _time.time()
+_al.extract(_bomb)
+_el = _time.time() - _t0
+check("a digit run that reaches the matcher does not blow it up",
+      _el < 1.0, f"{_el:.3f}s")
+_t0 = _time.time()
+_al.extract('var x = "/' + "a/" * 2000 + '";')
+check("nor does a long run of segments",
+      _time.time() - _t0 < 1.0)
+
+check("extraction is stable for the same input",
+      [e.value for e in _al.extract(_js)] == [e.value for e in _eps])
+
+print("\n== a finding reads like something a client can act on ==")
+# Both of these reached production. The title is the field somebody
+# reads first, and it named a temporary directory that no longer
+# exists, prefixed by wherever our container keeps its rule files.
+check("the rules directory is not part of the rule name",
+      _asx._rule_name("opt.opengrep-rules.javascript.lang.security.eval")
+      == "javascript.lang.security.eval",
+      _asx._rule_name("opt.opengrep-rules.javascript.lang.security.eval"))
+check("...and a rule with no such prefix is left alone",
+      _asx._rule_name("javascript.lang.security.eval")
+      == "javascript.lang.security.eval")
+
+_tmp = _asx.Finding("opengrep", "javascript.lang.security.eval",
+                    "stale title in /tmp/oddjob-scan-abc/9__dropdown.js",
+                    "high", "/tmp/oddjob-scan-abc/9__dropdown.js", 7,
+                    "detail", "fp")
+_fixed = _aw._reseat(_tmp, "js/src/dropdown.js")
+check("the title names the developer's file, not our temp directory",
+      _fixed.title == "javascript.lang.security.eval in js/src/dropdown.js",
+      _fixed.title)
+check("...and no trace of the temp path survives",
+      "/tmp/" not in _fixed.title and "__" not in _fixed.title,
+      _fixed.title)
+# Re-seating must not drop the credential. `_reseat` REBUILDS the
+# finding rather than mutating it, so a field left off the
+# constructor call is silently lost -- which is what happened to
+# `secret` until this check existed.
+_sec = _aw._reseat(
+    _asx.Finding("detect-secrets", "AWS", "x", "high",
+                 "/tmp/oddjob-scan-abc/9__a.ts", 4, "d", "fp",
+                 secret="planted-not-a-real-credential"),
+    "src/aws.ts")
+check("re-seating keeps the credential it was carrying",
+      _sec.secret == "planted-not-a-real-credential", _sec.secret)
+
+print("\n== a scanner that fails does not retire the files ==")
+# The trap this closes, seen in production: every opengrep run hit
+# the timeout, returned no output, and the file was stamped
+# `scanned_at` anyway. 50 files were recorded as examined when
+# nothing had looked at them -- and a stamped file is never picked
+# up again, so the gap is permanent and silent.
+from app import assetscan as _as  # noqa: E402
+
+_real_run = _as._run
+
+
+async def _fail(*a, **k):
+    return -1, "", "timed out"
+
+
+async def _with_failing_scanner():
+    async with SessionLocal() as s:
+        # Put some files back in the queue to be scanned.
+        rows = (await s.execute(select(WebAssetFile).limit(3))).scalars().all()
+        for r in rows:
+            r.scanned_at = None
+        await s.commit()
+        ids = [r.id for r in rows]
+
+        _as._run = _fail
+        try:
+            sw = await _aw.scan_project(s, pid, limit=10)
+        finally:
+            _as._run = _real_run
+
+        still = (await s.execute(select(WebAssetFile).where(
+            WebAssetFile.id.in_(ids),
+            WebAssetFile.scanned_at.is_(None)))).scalars().all()
+        return sw, len(still), len(ids)
+
+
+# Gated on a SUBPROCESS scanner, not on any scanner: `_run` is how
+# opengrep is invoked, and detect-secrets does not go through it --
+# patching `_run` where the binary is absent would prove nothing.
+if have.get("opengrep"):
+    sw, still, n = asyncio.run(_with_failing_scanner())
+    check("a timed-out scanner leaves the files unscanned",
+          still == n, f"{still} of {n} still queued")
+    check("...and says so rather than reporting a clean sweep",
+          any("NOT marked scanned" in x for x in sw.notes), sw.notes)
+else:
+    # opengrep is not here, so `_run` is never reached and the
+    # flag cannot be exercised. Saying that is better than a check
+    # that passes because nothing happened.
+    check("skipped: no subprocess scanner present to fail", True,
+          "(the binary lives in the image, not in this suite)")
+
+print("\n== secret precision ==")
+# Every case here is a REAL false positive from the estate. The
+# first production run produced 60 secret findings and an operator
+# checked them: all false positives. These rules were derived from
+# those 60 and remove 59 of them.
+from app.assetscan import implausible_secret as _imp  # noqa: E402
+from app.assetscan import shannon as _sh  # noqa: E402
+
+for val, det, why in [
+    # 43 of the 60: 20-character lowercase hex from one Microsoft
+    # login bundle. Telemetry and flight ids, not keys.
+    ("638ff95a0cb0f0d4a2b1", "Hex High Entropy String", "fixed-length hex"),
+    # Windows HRESULTs out of a Constants.js.
+    ("8004341E", "Secret Keyword", "too short"),
+    # The literal `true`, assigned next to a credential-ish word.
+    ("true", "Secret Keyword", "too short"),
+    # English prose out of a localisation file: `password: "The
+    # password you entered is incorrect"` is a message ABOUT a
+    # password, which is what the keyword matched.
+    ("The password you entered is incorrect",
+     "Secret Keyword", "whitespace"),
+    # Telemetry event names -- words joined by underscores.
+    ("eOTT_NoPasswordAccountLoginCode", "Secret Keyword", "no digits"),
+    # The next four classes come from the SECOND measurement, on
+    # all 234 findings rather than the first 60. Each is a thing
+    # published on purpose or generated by a build.
+    #
+    # Subresource Integrity: the page states the hash in public so
+    # the browser can check it.
+    ("sha384-" + "AbCdEf0123456789" * 4,
+     "Base64 High Entropy String", "an SRI hash"),
+    # A reCAPTCHA SITE key, rendered into the markup by design.
+    # The secret half never leaves the server.
+    ("6L" + "e-XampleSiteKey0123456789abcdefghijKLM",
+     "Base64 High Entropy String", "a CAPTCHA site key"),
+    # A build number joined to a 128-bit content digest. 25 of the
+    # 234 were this exact shape.
+    ("1456_" + "ExampleDigest0123456zz",
+     "Base64 High Entropy String", "a cache-buster"),
+    # 2,278 of 3,365 findings on the estate were 64-character hex
+    # from ONE file: elliptic.min.js. This is the secp256k1
+    # generator point Gx -- a published curve constant in every
+    # implementation of that curve, reported as a secret 2,278
+    # times.
+    ("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+     "Hex High Entropy String", "a published curve constant"),
+    # An MD5-length digest, same argument.
+    ("b9d934e1aa7749a5ab171ce2d83a20f6",
+     "Hex High Entropy String", "a digest-length hex string"),
+    # ASP.NET Data Protection: antiforgery tokens and encrypted
+    # cookies, issued to the browser on purpose and rotated per
+    # request. 134 on the estate, every one distinct, every one a
+    # brand new "secret" on the next sweep.
+    ("CfDJ8" + "ExampleAntiforgeryPayload0123456789abcdef",
+     "Base64 High Entropy String", "an ASP.NET Data Protection token"),
+    # A base64 codec table. All-distinct by construction.
+    ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=",
+     "Base64 High Entropy String", "an alphabet table"),
+]:
+    check(f"rejected: {why}", _imp(val, det) is not None,
+          f"{val[:28]!r} -> {_imp(val, det)}")
+
+# And the one thing in those 60 worth a look: base64 that decodes
+# towards JSON. It has digits, no whitespace, real entropy.
+_jwt = "clienteyJ1aWQiOiJkMTdkMzcwNi0xZTRlLTQ0YWItOTkwMC1hYmNkZWYxMjM0NTYi"
+check("kept: a base64 blob with real entropy",
+      _imp(_jwt, "Base64 High Entropy String") is None,
+      _imp(_jwt, "Base64 High Entropy String"))
+# A vendor shape is evidence in itself, so the entropy floor must
+# not apply to it -- an issuer's prefix means more than randomness.
+check("kept: a vendor-shaped key is judged on its shape",
+      _imp("npm_abcdefghij1234567890klmnopqrstuvwx", "NPM tokens") is None)
+# Digest-length hex is dropped only for the ENTROPY detectors. A
+# named vendor pattern matching a hex string means an issuer's shape
+# was recognised, which is evidence in itself; entropy matching one
+# means only that hex is varied, which every digest also satisfies.
+check("kept: a vendor-named detector that matched hex is still judged on its shape",
+      _imp("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+           "Generic High Entropy Secret") is None)
+# What this rule gives up, stated rather than hidden: a 256-bit key
+# written as bare hex is indistinguishable from a SHA-256 and goes
+# with them. The trade is the right way round at a measured ratio of
+# better than a thousand to one -- a reviewer who cannot see past
+# 2,479 curve constants will not find the one key either.
+check("dropped: so is a real 256-bit key written as bare hex",
+      _imp("a3f1" + "0" * 60, "Hex High Entropy String") is not None)
+# Not every long hex string is a digest. The rule names three exact
+# lengths; anything else must survive, or it stops being a statement
+# about digests and becomes "long hex is never a secret".
+#
+# Written `is None or True` first time, which is true whatever the
+# code does -- a check that tests nothing and reads like one that
+# does.
+_odd = "0123456789abcdef" * 3 + "0123456789ab"   # 60: no digest is
+check("kept: hex at a length no digest has",
+      len(_odd) == 60 and _imp(_odd, "Hex High Entropy String") is None,
+      f"{len(_odd)} chars -> {_imp(_odd, 'Hex High Entropy String')}")
+
+# The all-distinct rule is the birthday bound, not a pattern, so
+# its two edges are what need proving: it must not reach a SHORT
+# string, where all-distinct is unremarkable, and it must not
+# reach a long one that repeats a character -- which a generated
+# value of that length does with probability ~0.9996.
+#: 19 characters, every one different: over the length floor and
+#: under MIN_ALPHABET_LEN, which is the only window where this
+#: rule's threshold is what decides the answer. A shorter string
+#: would be rejected by the length floor instead and the check
+#: would pass without testing anything.
+_SHORT_DISTINCT = "abc123XYZ_-+/defghi"
+check("kept: a short all-distinct value is not an alphabet table",
+      _imp(_SHORT_DISTINCT, "Base64 High Entropy String") is None,
+      f"{len(_SHORT_DISTINCT)} chars, all distinct, under the threshold")
+check("kept: a long generated value repeats, so the rule misses it",
+      _imp("a1b2c3d4e5f6g7h8a1b2c3d4e5f6g7h8i9",
+           "Base64 High Entropy String") is None)
+# A cache-buster is anchored to a 22-character digest. A longer
+# or shorter tail is not that scheme and must survive.
+check("kept: an underscore alone does not make a cache-buster",
+      _imp("1456_" + "ExampleDigest0123456zz" + "toolong",
+           "Base64 High Entropy String") is None)
+# What the entropy floor actually does, which is NOT what I first
+# asserted: the English prose above scores 3.7 -- ABOVE the floor
+# -- and is caught by the whitespace rule instead. Measured against
+# the 60 real false positives, the entropy rule caught none of
+# them. It is kept because repetitive placeholders are a real
+# class, not because it did the work here.
+check("entropy rejects repetitive filler",
+      _sh("aaaaaaaaaaaaaaaa") < 3.2 and _sh("ABCD_ABCD_ABCD_ABCD") < 3.2,
+      f"{_sh('aaaaaaaaaaaaaaaa'):.1f}, {_sh('ABCD_ABCD_ABCD_ABCD'):.1f}")
+check("...and the prose was caught by whitespace, not entropy",
+      _sh("The password you entered") > 3.2,
+      f"{_sh('The password you entered'):.1f}")
+
+print("\n== the credential behind a finding ==")
+# Visible on purpose: a secret finding you cannot read is one you
+# cannot verify, rotate or hand to the client. The handling is
+# what makes that safe -- out of the description, behind a role,
+# and written to the audit log before it is returned.
+from app.models import FindingSecret as _FS  # noqa: E402
+
+#: Distinctive, and deliberately NOT credential-shaped. A literal
+#: that looks like a real key trips scripts/check-secrets.sh --
+#: correctly, because a credential-shaped string in the tree is
+#: what that check exists to catch, and it must not be weakened
+#: to accommodate a fixture. Proving the value does not leak into
+#: the description or the audit log needs it to be unique, not to
+#: be realistic.
+PLANTED = "planted-test-value-" + "not-a-real-credential"
+
+
+async def _plant_secret():
+    async with SessionLocal() as s:
+        pr = (await s.execute(select(Project).where(
+            Project.code == "ASSET"))).scalar_one()
+        t = (await s.execute(select(Target).where(
+            Target.project_id == pr.id))).scalars().first()
+        v = Vuln(target_id=t.id, title="AWS credential in src/aws.ts",
+                 severity="high", status="open",
+                 description="Detector: AWS. Match: AK…LE (20 chars).",
+                 external_id="detect-secrets:deadbeef")
+        s.add(v)
+        await s.flush()
+        s.add(_FS(vuln_id=v.id, secret=PLANTED,
+                  detector="AWS Access Key"))
+        await s.commit()
+        return v.id
+
+
+_vid = asyncio.run(_plant_secret())
+
+st, body = call(f"/api/vulns/{_vid}", token=admin)
+check("the finding itself never carries the value", st == 200
+      and PLANTED not in json.dumps(body), st)
+
+st, sec = call(f"/api/vulns/{_vid}/secret", token=admin)
+check("the reveal endpoint returns it", st == 200
+      and (sec or {}).get("secret") == PLANTED, st)
+check("...and names the detector",
+      (sec or {}).get("detector") == "AWS Access Key", sec)
+
+st, _ = call("/api/vulns/999999/secret", token=admin)
+check("an unknown finding is 404", st == 404, st)
+
+# A finding with no stored credential is the ordinary case for
+# anything scanned before they were kept -- it must read as "none
+# here", not as an error in the page.
+async def _bare():
+    async with SessionLocal() as s:
+        pr = (await s.execute(select(Project).where(
+            Project.code == "ASSET"))).scalar_one()
+        t = (await s.execute(select(Target).where(
+            Target.project_id == pr.id))).scalars().first()
+        v = Vuln(target_id=t.id, title="older finding", severity="low",
+                 status="open", external_id="detect-secrets:older")
+        s.add(v)
+        await s.commit()
+        return v.id
+
+
+_bare_id = asyncio.run(_bare())
+st, msg = call(f"/api/vulns/{_bare_id}/secret", token=admin)
+check("a finding with no stored credential says so", st == 404,
+      f"{st} {str(msg)[:70]}")
+
+# And the page must not OFFER the reveal in the first place.
+#
+# The UI used to decide from the external_id prefix, which is true
+# of every detect-secrets finding and wrong for the 92 on the
+# estate that predate values being kept: the button appeared, was
+# pressed, and returned the 404 above as an error. An operator
+# reported it. A control that cannot do what it offers is worse
+# than no control, so the server answers the question instead.
+st, bare_detail = call(f"/api/vulns/{_bare_id}", token=admin)
+check("a finding with no credential does not advertise one",
+      st == 200 and (bare_detail or {}).get("has_secret") is False,
+      f"{st} {(bare_detail or {}).get('has_secret')}")
+st, rich_detail = call(f"/api/vulns/{_vid}", token=admin)
+check("...and one that has a credential says so",
+      st == 200 and (rich_detail or {}).get("has_secret") is True,
+      f"{st} {(rich_detail or {}).get('has_secret')}")
+check("...without the value riding along in the answer",
+      PLANTED not in json.dumps(rich_detail), "value leaked into the detail")
+
+# The reveal must be IN the audit log, and the log must not be a
+# second place the credential lives -- it is readable by every
+# site admin, which is the whole reason it is not in the
+# description either.
+async def _audit_rows():
+    from app.models import AuditEvent
+    async with SessionLocal() as s:
+        return (await s.execute(select(AuditEvent).where(
+            AuditEvent.action == "finding.secret.reveal"))).scalars().all()
+
+
+_rows = asyncio.run(_audit_rows())
+check("revealing is written to the audit log", len(_rows) >= 1, len(_rows))
+check("...naming who did it",
+      any(r.username == "root" for r in _rows),
+      [r.username for r in _rows][:3])
+check("...and the log does NOT contain the credential",
+      all(PLANTED not in (r.detail or "") for r in _rows),
+      [(r.detail or "")[:60] for r in _rows][:2])
+
+print("\n== the secrets list: bulk, in clear, and still gated ==")
+# A deliberate widening of the single reveal above. What has to
+# survive the widening is the ROLE and the AUDIT -- if either of
+# those is only enforced on the one-at-a-time endpoint then this
+# list is a way around both.
+
+
+async def _plant_origin():
+    """Give the planted secret an origin, as a sweep would."""
+    async with SessionLocal() as s:
+        row = (await s.execute(select(_FS).where(
+            _FS.vuln_id == _vid))).scalar_one()
+        row.asset_url = "https://asset.example/static/app.js"
+        row.path = "src/aws.ts"
+        row.line = 118
+        await s.commit()
+
+
+asyncio.run(_plant_origin())
+
+st, rows = call("/api/secrets?project=ASSET", token=admin)
+_mine = [r for r in (rows or []) if r.get("vuln_id") == _vid]
+check("the list returns the value in clear",
+      st == 200 and len(_mine) == 1 and _mine[0]["secret"] == PLANTED, st)
+check("...with the URL it came from",
+      _mine and _mine[0]["asset_url"] == "https://asset.example/static/app.js",
+      _mine and _mine[0].get("asset_url"))
+check("...the file inside it",
+      _mine and _mine[0]["path"] == "src/aws.ts" and _mine[0]["line"] == 118,
+      _mine and (_mine[0].get("path"), _mine[0].get("line")))
+check("...and the target it belongs to",
+      _mine and _mine[0]["host"] == "127.0.0.1", _mine and _mine[0].get("host"))
+
+# The finding with no stored credential must not appear as a row
+# with an empty value -- there is nothing to show and a blank cell
+# reads as "the secret is empty string".
+check("a finding with no stored credential is not in the list",
+      all(r.get("vuln_id") != _bare_id for r in (rows or [])),
+      [r.get("vuln_id") for r in (rows or [])][:5])
+
+# Origin is nullable, and null means NOT RECORDED. A row that
+# never had one must come back with null rather than "" -- the UI
+# tells those apart and says so.
+async def _plant_no_origin():
+    async with SessionLocal() as s:
+        pr = (await s.execute(select(Project).where(
+            Project.code == "ASSET"))).scalar_one()
+        t = (await s.execute(select(Target).where(
+            Target.project_id == pr.id))).scalars().first()
+        v = Vuln(target_id=t.id, title="secret from before origins",
+                 severity="low", status="open",
+                 external_id="detect-secrets:noorigin")
+        s.add(v)
+        await s.flush()
+        s.add(_FS(vuln_id=v.id, secret=PLANTED + "-2", detector="Base64"))
+        await s.commit()
+        return v.id
+
+
+_noorigin = asyncio.run(_plant_no_origin())
+st, rows2 = call("/api/secrets?project=ASSET", token=admin)
+_no = [r for r in (rows2 or []) if r.get("vuln_id") == _noorigin]
+check("an unrecorded origin is null, not empty string",
+      len(_no) == 1 and _no[0]["asset_url"] is None, _no and _no[0].get("asset_url"))
+
+# The role gate. Written so that REMOVING the gate fails the test:
+# the readonly account can see the finding (so the 200 and the
+# visibility filter are not what is being measured) and must still
+# get no values back.
+call("/api/users", "POST",
+     {"username": "sec-viewer", "password": "sec-viewer-pass-1"}, token=admin)
+_st, _r = call("/api/auth/login", "POST",
+               {"username": "sec-viewer", "password": "sec-viewer-pass-1"})
+_viewer = _r["access_token"]
+call("/api/projects/ASSET/acl", "POST",
+     {"username": "sec-viewer", "role": "readonly"}, token=admin)
+
+st, seen = call("/api/vulns?project=ASSET", token=_viewer)
+check("readonly can see the findings themselves",
+      st == 200 and (seen or {}).get("total", 0) > 0,
+      f"{st} {(seen or {}).get('total')}")
+
+st, ro = call("/api/secrets?project=ASSET", token=_viewer)
+check("readonly gets NO credentials from the list",
+      st == 200 and ro == [], f"{st} {len(ro or [])} row(s)")
+check("...and the value is nowhere in that response",
+      PLANTED not in json.dumps(ro), "value leaked to readonly")
+
+call("/api/projects/ASSET/acl", "POST",
+     {"username": "sec-viewer", "role": "user"}, token=admin)
+st, up = call("/api/secrets?project=ASSET", token=_viewer)
+check("...while the user role does get them",
+      st == 200 and any(r["secret"] == PLANTED for r in (up or [])),
+      f"{st} {len(up or [])} row(s)")
+
+
+# Audit: one entry per bulk read, naming the count, never the value.
+async def _list_audit():
+    from app.models import AuditEvent
+    async with SessionLocal() as s:
+        return (await s.execute(select(AuditEvent).where(
+            AuditEvent.action == "finding.secret.list"))).scalars().all()
+
+
+_lrows = asyncio.run(_list_audit())
+check("listing is written to the audit log", len(_lrows) >= 1, len(_lrows))
+check("...naming who did it",
+      {"root", "sec-viewer"} & {r.username for r in _lrows},
+      [r.username for r in _lrows][:4])
+check("...and the log does NOT contain any credential",
+      all(PLANTED not in (r.detail or "") for r in _lrows),
+      [(r.detail or "")[:60] for r in _lrows][:2])
+check("a refused read writes no audit entry",
+      not any(r.username == "sec-viewer" and "0 credential" in (r.detail or "")
+              for r in _lrows),
+      "an empty readonly result was logged as a read")
+
+print("\n== triage: what a person concluded ==")
+# Separate from `status`, which is what has been DONE. A confirmed
+# issue can be open and a false positive can be closed; one column
+# could not say both.
+st, listing = call("/api/vulns?project=ASSET", token=admin)
+_first = ((listing or {}).get("items") or [{}])[0]
+check("a finding starts as needs_investigating",
+      _first.get("triage") == "needs_investigating", _first.get("triage"))
+
+st, r = call(f"/api/vulns/{_vid}/triage", "PATCH",
+             {"triage": "false_positive"}, token=admin)
+check("one finding can be marked", st == 200 and (r or {}).get("changed") == 1,
+      f"{st} {r}")
+st, one = call(f"/api/vulns/{_vid}", token=admin)
+check("...and it sticks", (one or {}).get("triage") == "false_positive",
+      (one or {}).get("triage"))
+
+st, _ = call(f"/api/vulns/{_vid}/triage", "PATCH",
+             {"triage": "probably-fine"}, token=admin)
+check("an unknown verdict is refused", st == 422, st)
+
+_ids = [v["id"] for v in ((listing or {}).get("items") or [])][:5]
+st, r = call("/api/vulns/triage", "POST",
+             {"ids": _ids, "triage": "true_positive"}, token=admin)
+check("a selection can be marked in one request",
+      st == 200 and (r or {}).get("changed", 0) >= 1, f"{st} {r}")
+st, _l2 = call("/api/vulns?project=ASSET", token=admin)
+_marked = [v for v in ((_l2 or {}).get("items") or []) if v["id"] in _ids]
+check("...and every one of them took the verdict",
+      all(v.get("triage") == "true_positive" for v in _marked),
+      [v.get("triage") for v in _marked][:5])
+
+st, r = call("/api/vulns/triage", "POST",
+             {"ids": [999999], "triage": "true_positive"}, token=admin)
+# Refused rows are NAMED. A bulk action that silently skipped what
+# the caller cannot write to would look like it had worked.
+check("a finding that cannot be written is named back, not skipped",
+      (r or {}).get("changed") == 0 and (r or {}).get("refused") == [999999],
+      r)
+st, _ = call("/api/vulns/triage", "POST", {"ids": [], "triage": "true_positive"},
+             token=admin)
+check("an empty selection is refused rather than a no-op", st == 422, st)
+
+print("\n== cloud resources named in a bundle ==")
+# A bundle that talks to a bucket names an asset nothing else
+# finds: it is on the provider's address space so no CIDR scan
+# reaches it, and no page links to it so no crawl does either.
+
+from app.assetlinks import cloud_resources  # noqa: E402
+
+_BODY = """
+var a='https://acme-assets.s3.eu-west-1.amazonaws.com/img/logo.png';
+var b="https://s3.amazonaws.com/acme-legacy/report.pdf";
+var c='https://a1b2c3.execute-api.us-east-1.amazonaws.com/prod/pay';
+var d='https://acmestore.blob.core.windows.net/public/t.txt';
+var e='https://acme-kv.vault.azure.net/secrets/x';
+var f='https://acme-public.storage.googleapis.com/a.js';
+var g='https://us-central1-acme.cloudfunctions.net/submit';
+var noise1='https://my-bucket.s3.amazonaws.com/x';
+var noise2='https://example.appspot.com';
+"""
+_got = {v: p for p, v in cloud_resources(_BODY)}
+
+check("a virtual-hosted bucket is found",
+      _got.get("acme-assets.s3.eu-west-1.amazonaws.com") == "aws", _got)
+# Path-style names the same kind of thing and older SDKs still
+# emit it. Rewritten to the hostname so one bucket is one target
+# however the code addressed it.
+check("a path-style bucket is rewritten to its hostname",
+      _got.get("acme-legacy.s3.amazonaws.com") == "aws", _got)
+# The bug this catches: `\b` is satisfied by the dot in
+# `acme-assets.s3...`, so the path-style pattern matched INSIDE a
+# virtual-hosted URL and read the first path segment as a bucket.
+check("...and is not read out of a virtual-hosted URL's path",
+      "img.s3.eu-west-1.amazonaws.com" not in _got, sorted(_got))
+check("an API Gateway stage is found",
+      _got.get("a1b2c3.execute-api.us-east-1.amazonaws.com") == "aws", _got)
+check("azure blob storage is found and attributed",
+      _got.get("acmestore.blob.core.windows.net") == "azure", _got)
+check("an azure key vault is found",
+      _got.get("acme-kv.vault.azure.net") == "azure", _got)
+check("a gcs bucket is found and attributed",
+      _got.get("acme-public.storage.googleapis.com") == "gcp", _got)
+check("a cloud function is found",
+      _got.get("us-central1-acme.cloudfunctions.net") == "gcp", _got)
+check("an SDK's own sample bucket is not reported",
+      "my-bucket.s3.amazonaws.com" not in _got
+      and "example.appspot.com" not in _got, sorted(_got))
+check("a file naming no cloud resource yields nothing",
+      cloud_resources("var x=1; fetch('/api/v2/accounts');") == [])
+
+# The scope gate. A bundle references a great deal of cloud that
+# belongs to somebody else -- a CDN, an analytics vendor, a font
+# host -- and auto-creating targets for those would put a third
+# party's infrastructure into an engagement.
+from app.assetwork import _record_cloud  # noqa: E402
+from app.scopegate import index_for  # noqa: E402
+
+
+class _FakeFile:
+    def __init__(self, body): self.body = body
+
+
+async def _cloud_into_targets():
+    async with SessionLocal() as s:
+        pr = (await s.execute(select(Project).where(
+            Project.code == "ASSET"))).scalar_one()
+        idx = await index_for(s, pr.id)
+        body = ("var a='https://acme-assets.s3.eu-west-1.amazonaws.com/x';"
+                "var b='https://notours.blob.core.windows.net/y';")
+        added, refused = await _record_cloud(s, pr.id, idx, _FakeFile(body))
+        await s.commit()
+        rows = {t.host: t for t in (await s.execute(select(Target).where(
+            Target.project_id == pr.id))).scalars().all()}
+        return added, refused, rows
+
+
+# Nothing cloud-shaped is in ASSET's scope yet, so BOTH are refused.
+_added, _refused, _rows = asyncio.run(_cloud_into_targets())
+check("with neither bucket in scope, no target is created", _added == 0, _added)
+check("...and the refusals are counted rather than silent", _refused == 2,
+      _refused)
+check("...so an out-of-scope bucket really is absent",
+      "acme-assets.s3.eu-west-1.amazonaws.com" not in _rows, sorted(_rows))
+
+# Put one of them in scope and only that one appears.
+st, _ = call("/api/projects/ASSET/scope", "POST",
+             {"lines": ["127.0.0.1", "acme-assets.s3.eu-west-1.amazonaws.com"]},
+             token=admin)
+_added, _refused, _rows = asyncio.run(_cloud_into_targets())
+check("an in-scope bucket becomes a target", _added == 1, _added)
+check("...named by its hostname",
+      "acme-assets.s3.eu-west-1.amazonaws.com" in _rows, sorted(_rows))
+_t = _rows.get("acme-assets.s3.eu-west-1.amazonaws.com")
+check("...recorded as a cloud resource, not a machine",
+      _t is not None and _t.kind == "cloud", _t and _t.kind)
+check("...carrying which cloud it is",
+      _t is not None and _t.provider == "aws", _t and _t.provider)
+check("...and not probed, which is not the same as not responding",
+      _t is not None and _t.alive is None, _t and _t.alive)
+check("the out-of-scope one is still refused", _refused == 1, _refused)
+
+# Re-running must not fork a second row: the sweep sees the same
+# bundle on every pass.
+_added2, _, _rows2 = asyncio.run(_cloud_into_targets())
+check("a second sweep adds nothing", _added2 == 0, _added2)
+check("...and leaves one row for the bucket",
+      len([h for h in _rows2 if h.startswith("acme-assets.")]) == 1,
+      sorted(_rows2))
+
+srv.shutdown()
+print(f"\n{passed} passed, {failed} failed")
+sys.exit(1 if failed else 0)

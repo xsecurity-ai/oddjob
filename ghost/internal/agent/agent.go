@@ -1,0 +1,1170 @@
+// Package agent is the loop: register, heartbeat, run, report.
+package agent
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/xsecurity-ai/oddjob/ghost/internal/capacity"
+	"github.com/xsecurity-ai/oddjob/ghost/internal/client"
+	"github.com/xsecurity-ai/oddjob/ghost/internal/config"
+	"github.com/xsecurity-ai/oddjob/ghost/internal/debuglog"
+	"github.com/xsecurity-ai/oddjob/ghost/internal/identity"
+	"github.com/xsecurity-ai/oddjob/ghost/internal/recon"
+	"github.com/xsecurity-ai/oddjob/ghost/internal/retire"
+	"github.com/xsecurity-ai/oddjob/ghost/internal/spool"
+	"github.com/xsecurity-ai/oddjob/ghost/internal/tasks"
+	"github.com/xsecurity-ai/oddjob/ghost/internal/tools"
+)
+
+type Agent struct {
+	cfg *config.Config
+	// capFromServer: cap_ came from Oddjob rather than from measuring
+	// the host. A bool rather than sniffing capWhy for a phrase --
+	// that string is for an operator to read, and making control flow
+	// depend on its wording means rewording it silently changes
+	// behaviour.
+	capFromServer bool
+	// capServerWant is the number Oddjob last asked for, 0 for no
+	// opinion. Kept separately from cap_ so that a host which had to
+	// be held below it can go back up on its own once the memory
+	// frees, without waiting for the server to repeat itself.
+	capServerWant int
+	// capMeasured is the last answer from measuring this host, and
+	// why. Kept even while Oddjob's number is in force, because it is
+	// the input to the clamp -- see clampCapacity.
+	capMeasured    int
+	capMeasuredWhy string
+	cli            *client.Client
+	sp             *spool.Spool
+	id             *identity.Identity
+	// When this process came up. The dead-man switch falls back to it
+	// when there has never been a successful contact to measure from,
+	// so a Ghost that enrolled and immediately lost the server still
+	// cleans itself up instead of sitting on the host forever.
+	started time.Time
+
+	mu      sync.Mutex
+	busy    bool
+	current int
+	// running is every task in flight, not just one. `busy` and
+	// `current` are kept alongside it so the status endpoint and any
+	// server predating concurrency still read something true.
+	running map[int]bool
+	// cap_ is what this host was assessed able to run at once, and the
+	// reasoning. Re-derived as load changes, which is what makes the
+	// tuning live rather than a decision taken once at install.
+	cap_   int
+	capWhy string
+	//: Why the host is refusing new work, "" when it is not. Held so
+	//: the log records the transition rather than every heartbeat.
+	pressure string
+	// missing is {tool: why} for everything this host could not get.
+	// The server reads it to avoid sending work that needs them.
+	missing map[string]string
+	wake    chan struct{}
+
+	// dbg holds this agent's own recent log so the server can be
+	// told what it has been doing. Enabled from Oddjob, per agent,
+	// and off until it is -- see internal/debuglog.
+	dbg *debuglog.Buffer
+	//: What the process logger's output should be. Kept so it can be
+	//: compared against the live one and put back -- see
+	//: `reclaimLogger`, and the library that makes that necessary.
+	logw io.Writer
+}
+
+func New(cfg *config.Config) *Agent {
+	// A spool that cannot be opened is not fatal: an agent that still
+	// runs scans and reports them live is far better than one that
+	// refuses to start. What is lost is the crash-safety, so it is
+	// said out loud rather than discovered later.
+	sp, err := spool.Open(cfg.SpoolDir())
+	if err != nil {
+		log.Printf("WARNING: no spool at %s (%v) — results will not survive "+
+			"a crash between finishing a scan and reporting it",
+			cfg.SpoolDir(), err)
+	}
+	return &Agent{
+		started: time.Now(),
+		cfg:     cfg,
+		sp:      sp,
+		running: map[int]bool{},
+		// Created disabled. Nothing is kept until Oddjob says so on
+		// a heartbeat, so the ordinary case costs an atomic load.
+		dbg: debuglog.New(),
+		// One until the host has been looked at, which happens in
+		// Run. Starting at anything higher would have the first
+		// heartbeat claim slots nothing has checked for.
+		cap_:   1,
+		capWhy: "not assessed yet",
+		cli:    client.New(cfg.Server, cfg.CallbackKey, cfg.Insecure),
+		// Buffered depth 1: a wake that arrives while one is already
+		// pending is the same wake. Blocking the caller — which is an
+		// inbound HTTP handler — would be worse.
+		wake: make(chan struct{}, 1),
+	}
+}
+
+// VerifyServer checks an inbound call against the server this agent
+// pinned at enrollment.
+//
+// Lives on the Agent rather than being satisfied by *Identity
+// directly, for two reasons that both bit:
+//
+// A typed nil wrapped in an interface is not nil. Handing callin an
+// `*Identity` that happened to be nil produced a non-nil Verifier
+// whose nil check passed and which then panicked on the first inbound
+// request — a crash reachable by anyone who could open the port.
+//
+// And the identity does not exist when the listener is built: it is
+// created during enrollment, which happens later. Capturing it at
+// construction meant capturing nothing, permanently. Read here, under
+// the lock, it is whatever the agent currently has.
+func (a *Agent) VerifyServer(method, path string, body []byte,
+	ts, nonce, sig string) bool {
+	a.mu.Lock()
+	id := a.id
+	a.mu.Unlock()
+	if id == nil {
+		return false
+	}
+	return id.VerifyServer(method, path, body, ts, nonce, sig)
+}
+
+// Wake asks the loop to poll now instead of at the next heartbeat.
+// Safe to call from the inbound API.
+func (a *Agent) Wake() {
+	select {
+	case a.wake <- struct{}{}:
+	default:
+	}
+}
+
+// Status is what the inbound API reports.
+func (a *Agent) Status() map[string]any {
+	// Outside the lock: these are local file reads, and there is no
+	// reason to hold up a task-completion callback for them. No public
+	// address lookup here — status is polled, and that request belongs
+	// to registration.
+	hp := recon.DetectHostPlatform()
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	priv, advice := tools.RawSocketCapable()
+	return map[string]any{
+		"name":    a.cfg.Name,
+		"version": config.Version,
+		// The binary's OS, then the machine's. Both, because the
+		// interesting case is when they disagree.
+		"platform":            runtime.GOOS,
+		"host_platform":       hp.Host,
+		"host_platform_label": hp.String(),
+		"container":           hp.Container,
+		"arch":                runtime.GOARCH,
+		"privileged":          priv,
+		"privilege":           advice,
+		"busy":                a.busy,
+		"current_task":        a.current,
+		"owed_results":        a.owed(),
+		"server":              a.cfg.Server,
+	}
+}
+
+// Register announces the agent, installing the baseline tools first so
+// the inventory it reports is the one it will actually have.
+func (a *Agent) Register(ctx context.Context) error {
+	priv, advice := tools.RawSocketCapable()
+	log.Printf("privilege: %s", advice)
+
+	host, _ := hostname()
+
+	// Worked out once, not per announce. announce() runs twice — before
+	// and after tool install — and the address lookup is a request to a
+	// third party: repeating it would double the exposure for an answer
+	// that cannot have changed in the meantime.
+	hp := recon.DetectHostPlatform()
+	log.Printf("host: %s — %s", hp, hp.HostWhy)
+	addr := recon.OutboundAddress(ctx, a.cfg.PublicIPURL)
+	log.Printf("address: %s", addr)
+
+	announce := func(note string) error {
+		a.mu.Lock()
+		missing := make(map[string]string, len(a.missing))
+		for k, v := range a.missing {
+			missing[k] = v
+		}
+		a.mu.Unlock()
+		resp, err := a.cli.Register(ctx, client.RegisterReq{
+			Platform:     runtime.GOOS,
+			Arch:         runtime.GOARCH,
+			Version:      config.Version,
+			Hostname:     host,
+			Privileged:   priv,
+			Tools:        tools.Installed(ctx),
+			MissingTools: missing,
+			CallInURL:    a.cfg.Advertise,
+			// Platform above stays runtime.GOOS — a server picking a
+			// binary or an install snippet needs the binary's OS, not
+			// the machine's. HostPlatform is the field that answers
+			// "which of these is the Windows box", and the two are
+			// sent side by side rather than one overwriting the other.
+			OutboundIP:         addr.IP,
+			OutboundIPSource:   addr.Source,
+			OutboundIPNote:     addr.Note,
+			Interfaces:         recon.InterfaceIPs(),
+			HostPlatform:       hp.Host,
+			HostPlatformSource: hp.HostWhy,
+			Container:          hp.Container,
+		})
+		if err != nil {
+			return err
+		}
+		if note != "" {
+			log.Printf("registered as agent %d on project %s (%s)",
+				resp.AgentID, resp.Project, note)
+		}
+		return nil
+	}
+
+	// Announce before installing anything. Provisioning a bare Windows
+	// box through chocolatey takes minutes, and registering only at
+	// the end meant the server knew nothing about the agent for all of
+	// it -- the UI showed "awaiting first contact" for a host that was
+	// in fact working. Registration is idempotent, so saying it twice
+	// costs nothing and the second one carries the real inventory.
+	if err := announce(""); err != nil {
+		log.Printf("initial announce failed (%v) — continuing; the "+
+			"registration after tool install is the one that matters", err)
+	}
+
+	log.Printf("ensuring baseline tools: %v", tools.Baseline)
+	// What could not be had, and why. Reported to the server so it can
+	// stop handing this agent work it cannot do: a task that fails for
+	// a missing tool costs three dispatches and tells the operator
+	// nothing they could act on.
+	missing := map[string]string{}
+	// Everything we install goes in the ledger, so retirement can undo
+	// exactly what this Ghost did and leave alone what it found.
+	var added []retire.Entry
+	for _, r := range tools.Ensure(ctx, tools.Baseline, tools.Privileged()) {
+		switch r.Action {
+		case "installed":
+			log.Printf("  installed %s %s", r.Tool, r.Version)
+			added = append(added, retire.Entry{
+				Tool: r.Tool, Action: r.Action, Version: r.Version,
+				Via: r.Via, Pkg: r.Pkg, Path: r.Path})
+		case "present":
+			log.Printf("  %s already present (%s)", r.Tool, r.Version)
+		default:
+			// Not fatal. An agent with six of seven tools can still do
+			// six of seven jobs, and the server is told which.
+			log.Printf("  %s: %s — %s", r.Tool, r.Action, r.Detail)
+			why := r.Detail
+			if why == "" {
+				why = r.Action
+			}
+			missing[r.Tool] = why
+		}
+	}
+	a.mu.Lock()
+	a.missing = missing
+	a.mu.Unlock()
+	if err := retire.RecordInstalls(a.cfg.WorkDir, added); err != nil {
+		// Not fatal, but say it loudly: an unrecorded install is a tool
+		// left on somebody's host after the engagement ends, and the
+		// Ghost will no longer know it put it there.
+		log.Printf("WARNING: could not record installed tools (%v) — these "+
+			"will NOT be cleaned up automatically on retirement", err)
+	}
+
+	// Again, now that the inventory is true.
+	return announce("ready")
+}
+
+// ensureIdentity loads this agent's keypair, or trades an enrollment
+// token for one.
+//
+// Done before anything else talks to the server, because from here on
+// every request is signed with it.
+func (a *Agent) ensureIdentity(ctx context.Context) error {
+	path := a.cfg.IdentityPath()
+	id, err := identity.Load(path)
+	if err != nil {
+		// A corrupt identity is not something to paper over by
+		// generating a new one: the server knows the old public key,
+		// so a silent replacement would just fail to authenticate
+		// with a confusing message.
+		return fmt.Errorf("%s exists but cannot be read (%w) — move it "+
+			"aside and enroll this agent again", path, err)
+	}
+	if id != nil {
+		a.id = id
+		a.cli.UseIdentity(id)
+		if id.CanSeal() {
+			log.Printf("identity: agent %d on %s, pinned, channel sealed",
+				id.AgentID, id.Project)
+		} else {
+			// Said every time rather than once: an agent reporting a
+			// client's findings in the clear should be noisy about it.
+			log.Printf("WARNING: agent %d on %s has no key-agreement key — "+
+				"results travel unsealed, protected only by whatever TLS "+
+				"is between here and the server. Re-enroll to fix.",
+				id.AgentID, id.Project)
+		}
+		return nil
+	}
+
+	if a.cfg.EnrollToken == "" {
+		if a.cfg.CallbackKey != "" {
+			// An older agent, or one deliberately run on a key. It
+			// still works; it is simply not the stronger scheme.
+			log.Printf("no identity — authenticating with the callback key")
+			return nil
+		}
+		return fmt.Errorf("nothing to authenticate with: pass --enroll with " +
+			"the token Oddjob showed when this agent was created")
+	}
+
+	priv, pub, err := identity.Generate()
+	if err != nil {
+		return fmt.Errorf("generating a keypair: %w", err)
+	}
+	kexPriv, kexPub, err := identity.GenerateKex()
+	if err != nil {
+		return fmt.Errorf("generating a key-agreement pair: %w", err)
+	}
+	log.Printf("enrolling with a one-time token")
+	resp, err := a.cli.Enroll(ctx, a.cfg.EnrollToken, pub, kexPub)
+	if err != nil {
+		return fmt.Errorf("enrolling: %w", err)
+	}
+	if !resp.Sealing || resp.ServerKexPublicKey == "" {
+		// The token is spent either way, so this cannot be retried —
+		// but running on would mean sending a client's scan results
+		// over a channel this agent was built to encrypt. Stopping
+		// with the reason is the better failure.
+		return fmt.Errorf(
+			"enrolled as agent %d, but the server did not establish an "+
+				"encrypted channel (sealing=%v). Refusing to run: results "+
+				"would travel unsealed. The server is likely older than "+
+				"this agent", resp.AgentID, resp.Sealing)
+	}
+	id, err = identity.New(path, identity.File{
+		AgentID: resp.AgentID, Project: resp.Project, Server: a.cfg.Server,
+		PrivateKey: priv, PublicKey: pub,
+		ServerPublicKey:    resp.ServerPublicKey,
+		KexPrivateKey:      kexPriv,
+		KexPublicKey:       kexPub,
+		ServerKexPublicKey: resp.ServerKexPublicKey,
+		ConnectionMode:     resp.ConnectionMode,
+		EnrolledAt:         time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		// The exchange succeeded and the token is now burned, so a
+		// failure to persist means this agent cannot be recovered
+		// without enrolling again. Say exactly that.
+		return fmt.Errorf("enrolled as agent %d but could not save the "+
+			"identity to %s (%w) — the token is spent, so enroll again "+
+			"once the path is writable", resp.AgentID, path, err)
+	}
+	a.id = id
+	a.cli.UseIdentity(id)
+	log.Printf("enrolled as agent %d on %s; this agent now only accepts "+
+		"tasking from this Oddjob", resp.AgentID, resp.Project)
+	return nil
+}
+
+// Run is the main loop. It returns only when ctx is cancelled.
+func (a *Agent) Run(ctx context.Context) error {
+	// Everything logged from here on is also kept in memory, but only
+	// while Oddjob has debug on for this agent -- until then the
+	// buffer discards. Teed, never redirected: a ghost that stopped
+	// printing to its own stderr while being debugged would make the
+	// one case you are investigating the one case you cannot watch
+	// from the host.
+	//
+	// Set here rather than in New so that constructing an Agent has
+	// no effect on the process's global logger.
+	if a.dbg != nil {
+		a.logw = a.dbg.Tee(os.Stderr)
+		log.SetOutput(a.logw)
+	}
+	if err := a.ensureIdentity(ctx); err != nil {
+		return err
+	}
+	if err := a.registerWithRetry(ctx); err != nil {
+		return err
+	}
+
+	// Before taking anything new: whatever is owed from last time.
+	a.drain(ctx)
+
+	// What this host can stand. The masscan probe runs ONCE, here,
+	// because it is the only part that puts packets on the wire and
+	// the answer does not change with load; cores and memory are
+	// re-read on a timer below, which is what makes the tuning live.
+	first := capacity.Measure(ctx, true, a.cfg.Parallel)
+	a.mu.Lock()
+	// Seeded, not just reported: this is the other half of the clamp,
+	// and without it the first heartbeat's number from Oddjob would be
+	// taken unclamped -- which is exactly the window in which a host
+	// picks up six tasks it cannot hold.
+	a.capMeasured, a.capMeasuredWhy = first.Parallel, first.Reason
+	a.cap_, a.capWhy = first.Parallel, first.Reason
+	a.mu.Unlock()
+	log.Printf("capacity: %d simultaneous task(s) — %s",
+		first.Parallel, first.Reason)
+	if first.MasscanRate > 0 {
+		log.Printf("masscan sustained %d pps to a discard range locally. "+
+			"That is this host's send path, NOT the path to any target.",
+			first.MasscanRate)
+	}
+
+	retune := time.NewTicker(60 * time.Second)
+	defer retune.Stop()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-retune.C:
+				a.retune(ctx)
+			}
+		}
+	}()
+
+	tick := time.NewTicker(a.cfg.Heartbeat)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("shutting down")
+			return nil
+		case <-tick.C:
+		case <-a.wake:
+		}
+
+		a.drain(ctx)
+
+		resp, err := a.beat(ctx)
+		if err != nil {
+			// Keep beating. A server restart or a brief network outage
+			// must not end the agent — it is typically on a host nobody
+			// will log back into for days.
+			log.Printf("heartbeat: %v", err)
+			// ...but not forever. "Nobody will log back into it for
+			// days" is the same sentence as "nobody will remove it
+			// when the engagement ends".
+			if silent, over := a.tooLongSilent(); over {
+				a.retire(ctx, fmt.Sprintf(
+					"no contact with Oddjob for %s (limit %s)",
+					silent.Round(time.Minute), a.cfg.MaxSilence), false)
+				return nil
+			}
+			continue
+		}
+		// Reached the server. The clock is on disk, not in memory: a
+		// Ghost crash-looping on a stranded host would otherwise reset
+		// it on every start and never time out.
+		retire.TouchContact(a.cfg.WorkDir)
+		if resp.Shutdown {
+			// Killed from Oddjob.
+			reason := resp.Reason
+			if reason == "" {
+				reason = "killed from Oddjob"
+			}
+			a.retire(ctx, reason, true)
+			return nil
+		}
+		a.onHeartbeat(ctx, resp)
+		// `tasks` when the server sends it, falling back to the
+		// single `task` so this still works against one that predates
+		// handing out more than one.
+		batch := resp.Tasks
+		if len(batch) == 0 && resp.Task != nil {
+			batch = []client.Task{*resp.Task}
+		}
+		for i := range batch {
+			t := batch[i]
+			a.mu.Lock()
+			a.running[t.ID] = true
+			a.busy, a.current = true, t.ID
+			a.mu.Unlock()
+			go func() {
+				defer func() {
+					a.mu.Lock()
+					delete(a.running, t.ID)
+					a.busy = len(a.running) > 0
+					if !a.busy {
+						a.current = 0
+					} else {
+						for id := range a.running {
+							a.current = id
+							break
+						}
+					}
+					a.mu.Unlock()
+					// Ask for the next one straight away rather than
+					// waiting out a heartbeat interval: a queue of
+					// four hundred lookups should not take an extra
+					// eight seconds per task to get through.
+					a.Wake()
+				}()
+				a.execute(ctx, &t)
+			}()
+		}
+	}
+}
+
+// beat checks in and reports what this agent is doing.
+//
+// State is read from the agent rather than passed in, so the beats
+// sent while working and the one sent from the idle loop cannot
+// disagree about what this agent is doing.
+// notePressure logs when the host starts or stops holding off, and
+// not on every beat between. A 15-second heartbeat on a host that
+// stays starved for an hour is otherwise 240 identical lines, which
+// buries the one that said when it began.
+func (a *Agent) notePressure(reason string) {
+	a.mu.Lock()
+	changed := a.pressure != reason
+	a.pressure = reason
+	a.mu.Unlock()
+	if !changed {
+		return
+	}
+	if reason == "" {
+		log.Printf("capacity: pressure cleared, taking work again")
+	} else {
+		log.Printf("capacity: %s", reason)
+	}
+}
+
+func (a *Agent) beat(ctx context.Context) (*client.HeartbeatResp, error) {
+	a.mu.Lock()
+	ids := make([]int, 0, len(a.running))
+	for id := range a.running {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	// Named `allowed`, not `capacity`: the package of that name is
+	// called just below, and a local would shadow it.
+	first, allowed, why := a.current, a.cap_, a.capWhy
+	a.mu.Unlock()
+
+	free := allowed - len(ids)
+	if free < 0 {
+		free = 0
+	}
+
+	// A slot is not the only thing that can run out. `capacity` is
+	// re-derived on a timer and floors at one, so a host down to its
+	// last few megabytes still reports a slot free and still takes
+	// work -- which is how three hosts in this fleet were driven to
+	// the point of not completing an SSH banner exchange while their
+	// agent cheerfully asked for more.
+	//
+	// Asked here, on the beat, because this is the moment the server
+	// decides what to hand over. `ready: false` is honoured whether
+	// or not an operator has set a per-ghost override, while
+	// `slots_free` is skipped when one is set -- so the veto has to
+	// travel on `ready` to be a veto at all.
+	if p := capacity.Check(ctx); p.Blocked {
+		free = 0
+		why = p.Reason
+		a.notePressure(p.Reason)
+	} else {
+		a.notePressure("")
+	}
+
+	return a.cli.Heartbeat(ctx, client.HeartbeatReq{
+		Ready:          free > 0,
+		RunningTask:    first,
+		RunningTasks:   ids,
+		SlotsFree:      free,
+		Capacity:       allowed,
+		CapacityReason: why,
+		CannotRun:      capacity.CannotRun(),
+	})
+}
+
+// onHeartbeat applies everything the server said, before any work
+// from the same response is dispatched.
+//
+// One method rather than three calls in the loop so that "is this
+// wired in" is a single question with a single answer. Three calls
+// inline were three chances for one of them to be dropped in a merge
+// and for no test to notice, which is how `reclaimLogger` could have
+// been written, tested and still never run.
+//
+// Order matters: the logger is taken back FIRST. A katana task
+// started on an earlier beat may have pointed the process logger at
+// io.Discard, and everything after this -- the lines adoptDebug
+// writes, the drain it ships, every line any of it logs -- is
+// writing into a hole until it is put back.
+func (a *Agent) onHeartbeat(ctx context.Context, resp *client.HeartbeatResp) {
+	a.reclaimLogger()
+	a.adoptServerParallel(resp.MaxParallel)
+	a.adoptDebug(ctx, resp.Debug)
+}
+
+// reclaimLogger puts our writer back when a library has taken the
+// process-wide logger away from us.
+//
+// katana runs IN PROCESS, and `types.NewCrawlerOptions` reaches
+// `logutil.DisableDefaultLogger()`, which is
+//
+//	log.SetFlags(0); log.SetOutput(io.Discard)
+//
+// on the standard logger this whole agent writes to. So the first
+// katana task of a ghost's life silently sent every subsequent log
+// line to io.Discard -- the agent's own local logging, and with it
+// anything the debug buffer would ever have had to send.
+//
+// It is exactly what it looks like in the fleet: on both ghosts that
+// were not shipping, the last line in the container log is the one
+// announcing a katana task, minutes or hours before they went on
+// quietly claiming work. It also means no ghost running katana has
+// had working local logs since katana was added, which is its own
+// reason to fix this and not only the debug feature's.
+//
+// Checked rather than set unconditionally so that the theft can be
+// reported once per occurrence instead of every beat, and so this
+// costs a pointer comparison on the ordinary path. Called from the
+// heartbeat, so recovery is one beat -- no library can take the log
+// for longer than that, whichever library it turns out to be next.
+func (a *Agent) reclaimLogger() {
+	if a.logw == nil || log.Writer() == a.logw {
+		return
+	}
+	log.SetOutput(a.logw)
+	log.SetFlags(log.Ltime) // DisableDefaultLogger clears these too
+	log.Printf("logging: the process logger had been redirected by a " +
+		"scanner library; taken back")
+}
+
+// adoptDebug turns the agent's own log collection on or off to match
+// Oddjob, and ships whatever has accumulated.
+//
+// Driven from the heartbeat response rather than from a command,
+// because the heartbeat is the one thing a ghost does reliably even
+// when everything else about it is wrong -- which is exactly the
+// state this is for.
+func (a *Agent) adoptDebug(ctx context.Context, on bool) {
+	if a.dbg == nil {
+		return
+	}
+	was := a.dbg.Enabled()
+	if was != on {
+		// Said out loud, and said BEFORE the switch when turning off,
+		// so the line that explains why the log stops is the last
+		// line in the log rather than the first one discarded.
+		if on {
+			a.dbg.SetEnabled(true)
+			// Added to the buffer directly as well as logged. The
+			// log line is for somebody on the host; this one is the
+			// operator's proof the switch did something, and it has
+			// to survive whatever is wrong with this host's logging
+			// -- which is the usual reason for switching debug on.
+			// Without it, "nothing has arrived" cannot be told from
+			// "nothing has happened".
+			a.dbg.Add("debug: logging to Oddjob is on; " +
+				"this agent will send its log from here")
+			log.Printf("debug: logging to Oddjob is on")
+			return
+		}
+		log.Printf("debug: logging to Oddjob is off")
+		a.dbg.SetEnabled(false)
+		return
+	}
+	if !on {
+		return
+	}
+	lines, lost := a.dbg.Drain()
+	if lost > 0 {
+		// Reported in the batch itself rather than only locally: an
+		// operator reading the log in Oddjob needs to know it has a
+		// hole in it, and that is not visible from the lines that
+		// did arrive.
+		lines = append(lines, debuglog.Line{
+			At: time.Now().UTC(),
+			Line: fmt.Sprintf("debug: %d earlier line(s) dropped, "+
+				"this agent logged faster than it could send", lost),
+		})
+	}
+	if len(lines) == 0 {
+		return
+	}
+	out := make([]client.DebugLine, 0, len(lines))
+	for _, l := range lines {
+		out = append(out, client.DebugLine{At: l.At, Line: l.Line})
+	}
+	// A failed send is dropped, not retried. These are diagnostics
+	// from a host that is usually already in trouble, and a growing
+	// retry queue would be a second way for it to run out of memory.
+	// Not logged on failure either: the send happens on every beat,
+	// and a line about a failed send would itself be collected and
+	// resent, which is a loop that fills the buffer with itself.
+	_ = a.cli.ShipDebug(ctx, out)
+}
+
+// adoptServerParallel takes the number Oddjob sends on each heartbeat.
+//
+// **A local `--parallel` wins.** The precedence is deliberate and is
+// not "most recent" or "most specific": the flag is set by whoever
+// deployed the agent onto that machine, and it is the only way to say
+// "this box must not be pushed harder than this" in a way a remote
+// operator cannot undo. A server-side number is the live control for
+// an engagement; a host-level limit is a property of somebody's
+// hardware. Letting the first override the second would mean a
+// compromised or merely mistaken server could drive a machine into
+// swap, so it does not.
+//
+// Everything else: the server's number replaces what `capacity`
+// measured, for the same reason `--parallel` does -- an operator who
+// sets 8 and sees 2 with no explanation concludes the control does
+// nothing. `retune` will keep measuring the host underneath, and the
+// reason records that this is not the host's own answer.
+//
+// Zero means the server has no opinion, which is also what an older
+// server sends by not sending the field at all. Neither is "run
+// nothing", and reading it that way would idle the fleet against any
+// server that had not been upgraded yet.
+// clampCapacity decides how many tasks to run, given what Oddjob asked
+// for and what the host was last measured able to stand.
+//
+// Oddjob's number wins, downwards. The engagement operator knows things
+// the agent cannot -- how much of the client's network will tolerate
+// being scanned at once, what else is pointed at the same estate -- and
+// a server asking for less than the host could manage is an instruction,
+// not a mistake to correct.
+//
+// What it cannot do is raise the number past what the memory will take.
+// That is not a second opinion about appetite, it is the host saying it
+// will fall over, and it has twice: a Ghost on a 5GB WSL2 VM ran six
+// tasks down to 101MB free until the VM stopped answering, and a 1GB
+// droplet asked for six against its own answer of three until it could
+// no longer fork sshd. Both were set from Oddjob, and in both cases the
+// agent had measured correctly and been overruled.
+//
+// `capacity.go` says the retune loop is what makes its deliberately low
+// per-task estimate safe -- "a ghost that starts an amass watches its
+// own headroom fall and stops taking new work". That was true only
+// while nobody had set a number from the server, because doing so used
+// to switch the loop off entirely. This is what reconnects them.
+//
+// want <= 0 is "no opinion", which is also what a server too old to
+// send the field looks like. measured <= 0 is "not assessed yet".
+func clampCapacity(want, measured int, measuredWhy string) (int, string) {
+	switch {
+	case want <= 0:
+		return measured, measuredWhy
+	case measured <= 0:
+		return want, fmt.Sprintf("set to %d from Oddjob", want)
+	case want <= measured:
+		return want, fmt.Sprintf("set to %d from Oddjob", want)
+	default:
+		// The interesting case, and the one that must be loud: the
+		// operator is not getting what they asked for, and an operator
+		// who cannot see that just sees an agent running slowly.
+		return measured, fmt.Sprintf(
+			"%d from Oddjob, held to %d by this host: %s",
+			want, measured, measuredWhy)
+	}
+}
+
+// applyCapacity recomputes cap_ from the two inputs and logs a change.
+// a.mu must NOT be held.
+func (a *Agent) applyCapacity() {
+	a.mu.Lock()
+	eff, why := clampCapacity(a.capServerWant, a.capMeasured, a.capMeasuredWhy)
+	changed := a.cap_ != eff
+	a.cap_, a.capWhy = eff, why
+	a.mu.Unlock()
+	// A scanner sizing itself has to know how many of it may run at
+	// once, because they share one host. Set from the EFFECTIVE
+	// figure, so an operator raising the parallelism also makes each
+	// run gentler rather than multiplying the load by their number.
+	tasks.Parallelism = func() int { return eff }
+	if changed {
+		log.Printf("capacity now %d (%s)", eff, why)
+	}
+}
+
+func (a *Agent) adoptServerParallel(n int) {
+	if n <= 0 || a.cfg.Parallel > 0 {
+		return
+	}
+	a.mu.Lock()
+	a.capServerWant, a.capFromServer = n, true
+	a.mu.Unlock()
+	a.applyCapacity()
+}
+
+// retune re-measures the host and adopts the new number.
+//
+// Called periodically rather than once at startup: an agent shares its
+// machine with whatever else runs there, and a capacity decided while
+// the box was idle is wrong by the time somebody starts a build on it.
+// The masscan probe is NOT repeated — it puts packets on the wire, and
+// doing that every minute to re-learn a number that does not change is
+// not a trade worth making. Cores and memory are free to read.
+func (a *Agent) retune(ctx context.Context) {
+	// This used to return early whenever Oddjob had set a number, on
+	// the grounds that the two would otherwise fight on a sixty-second
+	// cycle -- Oddjob says 8, the retune measures the box and says 2,
+	// the next heartbeat says 8 again, and the fleet table flickers.
+	//
+	// That flicker was real, but it was caused by the two paths
+	// DISAGREEING: one wrote the server's number and the other wrote
+	// the measurement. Both now go through clampCapacity and compute
+	// the same answer from the same two inputs, so there is nothing
+	// left to flicker between -- and switching the measurement off was
+	// what let a server number drive two hosts into the ground.
+	as := capacity.Measure(ctx, false, a.cfg.Parallel)
+	a.mu.Lock()
+	a.capMeasured, a.capMeasuredWhy = as.Parallel, as.Reason
+	a.mu.Unlock()
+	a.applyCapacity()
+}
+
+func (a *Agent) registerWithRetry(ctx context.Context) error {
+	delay := 2 * time.Second
+	for {
+		err := a.Register(ctx)
+		if err == nil {
+			return nil
+		}
+		log.Printf("register: %v (retrying in %s)", err, delay)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		if delay < 2*time.Minute {
+			delay *= 2
+		}
+	}
+}
+
+// execute runs one task to completion. Several may be in flight at
+// once, so it does NOT touch `busy`, `current` or `running`: the loop
+// that started it owns those. It used to set them itself, which was
+// correct while exactly one task could exist and became a bug the
+// moment two could — whichever finished first cleared `busy` while the
+// other was still going, and the server was told there was a free slot
+// that did not exist.
+func (a *Agent) execute(ctx context.Context, t *client.Task) {
+	log.Printf("task %d: %s", t.ID, t.Kind)
+	if a.sp != nil {
+		if err := a.sp.Begin(t.ID, t.Kind); err != nil {
+			log.Printf("task %d: spool: %v", t.ID, err)
+		}
+	}
+	if err := a.cli.StartTask(ctx, t.ID); err != nil {
+		log.Printf("task %d: could not mark running: %v", t.ID, err)
+	}
+
+	runner, ok := tasks.Runners[t.Kind]
+	if !ok {
+		a.report(ctx, t.ID, client.Result{Status: "failed", ExitCode: -1,
+			Error: "this agent has no runner for kind " + t.Kind +
+				" — it may be older than the server"})
+		return
+	}
+
+	start := time.Now()
+	// Recovered rather than allowed to crash: one malformed task must
+	// not take down an agent that is the only way onto that network.
+	res := func() (r tasks.Result) {
+		defer func() {
+			if p := recover(); p != nil {
+				r = tasks.Result{Status: "failed", ExitCode: -1,
+					Error: "panic in runner: " + toString(p)}
+			}
+		}()
+		return runner(ctx, tasks.Decode(t.Args), a.cfg.WorkDir)
+	}()
+
+	log.Printf("task %d: %s in %s — %s", t.ID, res.Status,
+		time.Since(start).Round(time.Second), res.Summary+res.Error)
+
+	// On disk before it goes on the wire. From here the result is
+	// owed to the server and will be re-sent until acknowledged,
+	// including across a restart.
+	if a.sp != nil {
+		if err := a.sp.Finish(t.ID, res.Status, res.Output, res.Stderr,
+			res.Summary, res.ExitCode, res.Error); err != nil {
+			log.Printf("task %d: spool: %v", t.ID, err)
+		}
+	}
+
+	a.report(ctx, t.ID, client.Result{
+		Status: res.Status, Output: res.Output, Stderr: res.Stderr,
+		Summary: res.Summary, ExitCode: res.ExitCode, Error: res.Error,
+	})
+}
+
+// undeliverable reports whether the server will NEVER accept this
+// result, as opposed to not having accepted it yet.
+//
+// The distinction is narrow on purpose, and the reason is recent: for
+// about an hour this agent's routes did not match the server's, and
+// every single call came back 404. An agent that treated "404" as
+// "give up" would have discarded real scan output from a client's
+// estate because of a deployment mistake.
+//
+// So the code alone is not enough. It has to be a 404 whose body says
+// the SERVER looked for this task and does not have it — which is a
+// fact about the task, not about the route. A 404 from a path that
+// does not exist says something quite different and is retried.
+//
+// Matching on a message is brittle, and the brittleness is in the
+// safe direction: if the wording changes, this stops recognising
+// anything and the old retry-forever behaviour comes back. That is a
+// bug to notice, not data to lose.
+func undeliverable(err error) (string, bool) {
+	var he *client.HTTPError
+	if !errors.As(err, &he) || he.Code != http.StatusNotFound {
+		return "", false
+	}
+	if strings.Contains(strings.ToLower(he.Body), "no such task") {
+		return he.Body, true
+	}
+	return "", false
+}
+
+func (a *Agent) report(ctx context.Context, id int, r client.Result) {
+	if err := a.cli.SubmitResult(ctx, id, r); err != nil {
+		if a.sp != nil {
+			if why, dead := undeliverable(err); dead {
+				// Kept on disk, not deleted: the scan ran, and the
+				// output is the only record that it did.
+				if derr := a.sp.Dropped(id, why); derr != nil {
+					log.Printf("task %d: spool: %v", id, derr)
+				}
+				log.Printf("task %d: the server does not know this task (%v) "+
+					"— it will NOT be retried. The result is kept in the "+
+					"spool; %d undeliverable result(s) are now held there",
+					id, err, a.sp.DeadCount())
+				return
+			}
+			a.sp.Attempted(id)
+			// Not lost any more: it is on disk and the next drain will
+			// try again. Worth saying at all because a result that is
+			// hours late is still a surprise to whoever is watching.
+			log.Printf("task %d: not delivered (%v) — held in the spool "+
+				"and will be retried", id, err)
+			return
+		}
+		log.Printf("task %d: RESULT LOST: %v", id, err)
+		return
+	}
+	if a.sp != nil {
+		if err := a.sp.Delivered(id); err != nil {
+			log.Printf("task %d: spool: %v", id, err)
+		}
+	}
+}
+
+// drain re-sends anything the spool still owes the server, and closes
+// out work that was interrupted.
+//
+// Run at startup and on every heartbeat. The startup case is the one
+// that matters: it is how a result that finished moments before a
+// reboot still reaches the engagement.
+func (a *Agent) drain(ctx context.Context) {
+	if a.sp == nil {
+		return
+	}
+
+	// Tasks that were mid-flight when the process stopped. The tool is
+	// gone with it, so they cannot be finished -- but the server is
+	// still waiting, and a task stuck in `running` forever is worse
+	// than a task that says plainly it was interrupted.
+	//
+	// Anything THIS process is running right now is not an orphan.
+	// drain runs on every heartbeat, and tasks now execute
+	// concurrently rather than blocking the loop, so a scan that takes
+	// longer than one heartbeat interval is still open in the spool
+	// when drain next looks at it. Without this check every such task
+	// was reported interrupted eight seconds after it started, while
+	// it was still running — and then retried, and reported again.
+	a.mu.Lock()
+	live := make(map[int]bool, len(a.running))
+	for id := range a.running {
+		live[id] = true
+	}
+	a.mu.Unlock()
+
+	orphans, _ := a.sp.Orphaned()
+	for _, e := range orphans {
+		if live[e.TaskID] {
+			continue
+		}
+		log.Printf("task %d: was running when this agent stopped — "+
+			"reporting it as interrupted", e.TaskID)
+		_ = a.sp.Finish(e.TaskID, "failed", "", "", "", -1,
+			"the agent stopped while this task was running; "+
+				"it did not complete and produced no output")
+	}
+
+	pending, _ := a.sp.Pending()
+	for _, e := range pending {
+		if ctx.Err() != nil {
+			return
+		}
+		log.Printf("task %d: delivering a result held since %s (attempt %d)",
+			e.TaskID, e.EndedAt, e.Attempts+1)
+		a.report(ctx, e.TaskID, client.Result{
+			Status: e.Status, Output: e.Output, Stderr: e.Stderr,
+			Summary: e.Summary, ExitCode: e.ExitCode, Error: e.Error,
+		})
+	}
+}
+
+// owed is how many results are waiting to be delivered, for the
+// call-in API. An operator asking "is this agent stuck?" wants this
+// number, not a boolean.
+func (a *Agent) owed() int {
+	if a.sp == nil {
+		return 0
+	}
+	_, pending := a.sp.Count()
+	return pending
+}
+
+func toString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	if e, ok := v.(error); ok {
+		return e.Error()
+	}
+	return "unknown"
+}
+
+// tooLongSilent reports how long Oddjob has been unreachable, and
+// whether that is past the limit.
+//
+// The clock starts at the last SUCCESSFUL contact on disk. If there
+// has never been one — a Ghost that enrolled and immediately lost the
+// server — the process start is used instead, so a host that was never
+// reachable still cleans itself up rather than sitting there forever.
+func (a *Agent) tooLongSilent() (time.Duration, bool) {
+	if a.cfg.MaxSilence <= 0 {
+		return 0, false
+	}
+	since := retire.LastContact(a.cfg.WorkDir)
+	if since.IsZero() {
+		since = a.started
+	}
+	d := time.Since(since)
+	return d, d > a.cfg.MaxSilence
+}
+
+// retire takes this Ghost off the host for good.
+//
+// Order matters, and it is: deliver, then tell, then uninstall, then
+// mark.
+//
+//   - deliver first, because a result still in the spool is the last
+//     useful thing this Ghost will ever do and nothing below can be
+//     undone afterwards;
+//   - tell the server before uninstalling, while the tools are still
+//     there to be named, and because the report is best-effort — on
+//     the dead-man path the server is unreachable by definition;
+//   - uninstall only what the ledger says we installed;
+//   - mark last, so a crash anywhere above leaves a Ghost that will
+//     try again rather than one that is silently half-retired.
+//
+// `reachable` says whether the server is believed to be listening. It
+// is false on the dead-man path, where skipping the report saves a
+// pointless timeout on a host that is already stranded.
+func (a *Agent) retire(ctx context.Context, reason string, reachable bool) {
+	log.Printf("retiring: %s", reason)
+
+	// Deliver whatever is owed. Bounded: a stranded Ghost must not
+	// spend an hour retrying a server that is not there.
+	dctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	a.drain(dctx)
+	cancel()
+
+	entries, lerr := retire.Ledger(a.cfg.WorkDir)
+	if lerr != nil {
+		log.Printf("WARNING: %v — tools this ghost installed may be left "+
+			"behind on this host", lerr)
+	}
+
+	// Uninstall exactly what we put here. Given its own context: the
+	// caller's may already be cancelled by the signal that is stopping
+	// us, and a cancelled context would skip the cleanup entirely.
+	rctx, rcancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	removals := tools.Remove(rctx, toInstallReports(entries), tools.Privileged())
+	rcancel()
+
+	var removed, kept, failed []string
+	for _, r := range removals {
+		switch r.Action {
+		case "removed":
+			removed = append(removed, r.Tool)
+			log.Printf("  removed %s (%s)", r.Tool, r.Via)
+		case "kept":
+			kept = append(kept, r.Tool)
+		default:
+			failed = append(failed, r.Tool+": "+r.Detail)
+			log.Printf("  could NOT remove %s: %s", r.Tool, r.Detail)
+		}
+	}
+	if len(entries) == 0 {
+		log.Printf("  nothing to uninstall: this ghost installed no tools here")
+	}
+
+	reported := false
+	if reachable {
+		rep, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := a.cli.Retired(rep, reason, removed, kept, failed); err != nil {
+			log.Printf("  could not tell Oddjob it has retired: %v", err)
+		} else {
+			reported = true
+		}
+		cancel2()
+	}
+
+	// The tombstone goes last and is what makes this stick. Exiting is
+	// not enough: `--restart unless-stopped` and `Restart=always` both
+	// bring a Ghost back within seconds, and both are what the
+	// documentation tells people to use.
+	if err := retire.Mark(a.cfg.WorkDir, retire.Tombstone{
+		Reason: reason, Removed: removed, Kept: kept, Failed: failed,
+		Reported: reported,
+	}); err != nil {
+		log.Printf("WARNING: could not write the retirement marker (%v) — "+
+			"a supervisor WILL restart this ghost", err)
+		return
+	}
+	log.Printf("retired. This ghost will not start again from %s until the "+
+		"marker is removed.", a.cfg.WorkDir)
+}
+
+func toInstallReports(in []retire.Entry) []tools.InstallReport {
+	out := make([]tools.InstallReport, 0, len(in))
+	for _, e := range in {
+		out = append(out, tools.InstallReport{
+			Tool: e.Tool, Action: e.Action, Version: e.Version,
+			Via: e.Via, Pkg: e.Pkg, Path: e.Path})
+	}
+	return out
+}

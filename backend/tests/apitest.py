@@ -1,0 +1,257 @@
+"""End-to-end API check for Oddjob."""
+
+# Run from anywhere: the suites import `app`, which lives one level up.
+import pathlib as _pathlib
+import sys as _sys
+
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import json
+import os
+import threading
+import time
+import urllib.error
+import urllib.request
+
+BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8000")
+ok = fail = 0
+
+def check(label, cond, extra=""):
+    global ok, fail
+    if cond: ok += 1; print(f"  PASS  {label} {extra}")
+    else:    fail += 1; print(f"  FAIL  {label} {extra}")
+
+# Filled in by the setup call below. Every request carries it: the API has
+# no anonymous surface left apart from signing in.
+TOKEN = None
+
+def call(path, method="GET", body=None):
+    req = urllib.request.Request(BASE + path, method=method)
+    if body is not None:
+        req.data = json.dumps(body).encode()
+        req.add_header("Content-Type", "application/json")
+    if TOKEN:
+        req.add_header("Authorization", f"Bearer {TOKEN}")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"null")
+
+TOKEN = call("/api/auth/setup", "POST",
+             {"username": "root", "password": "root-password-1"})[1]["access_token"]
+
+# --- SSE listener running in the background --------------------------------
+events = []
+def listen():
+    try:
+        ereq = urllib.request.Request(BASE + "/api/events")
+        ereq.add_header("Authorization", f"Bearer {TOKEN}")
+        with urllib.request.urlopen(ereq, timeout=25) as r:
+            for line in r:
+                s = line.decode(errors="replace").strip()
+                if s.startswith("data:"):
+                    events.append(s[5:].strip())
+    except Exception:
+        pass
+t = threading.Thread(target=listen, daemon=True); t.start()
+time.sleep(1.0)
+
+print("\n== bulk import ==")
+payload = {
+  "project": "APITEST", "project_name": "API test",
+  "targets": [
+    {"host": "web01.example.com", "ip_address": "10.0.0.5", "hacked": True, "os": "Ubuntu 24.04"},
+    {"host": "db01.example.com",  "ip_address": "10.0.0.6"},
+    {"host": "10.0.0.7",          "ip_address": "10.0.0.7", "notes": "bare IP asset"},
+  ],
+  "services": [
+    {"host": "web01.example.com", "port": 443, "protocol": "tcp", "state": "open",
+     "name": "https", "banner": "nginx/1.27.1"},
+    {"host": "web01.example.com", "port": 22, "protocol": "tcp", "state": "open",
+     "name": "ssh", "banner": "OpenSSH_9.6p1"},
+    {"host": "web01.example.com", "port": 3306, "protocol": "tcp", "state": "closed",
+     "name": "mysql"},
+    {"host": "db01.example.com",  "port": 5432, "protocol": "tcp", "state": "open",
+     "name": "postgresql", "banner": "PostgreSQL 16.4"},
+    {"host": "10.0.0.7",          "port": 161, "protocol": "udp", "state": "open",
+     "name": "snmp", "banner": "public"},
+  ],
+  "vulns": [
+    {"host": "web01.example.com", "title": "RCE in upload handler", "severity": "critical",
+     "external_id": "X-1"},
+    {"host": "web01.example.com", "title": "Outdated TLS", "severity": "high", "external_id": "X-2"},
+    {"host": "web01.example.com", "title": "Verbose banner", "severity": "low", "external_id": "X-3"},
+    {"host": "db01.example.com",  "title": "Default creds", "severity": "critical", "external_id": "X-4"},
+    {"host": "orphan.example.com","title": "found via autocreate", "severity": "info"},
+  ],
+  "pocs": [
+    {"host": "web01.example.com", "title": "poc-rce", "status": "confirmed", "exit_code": 0},
+    {"host": "db01.example.com",  "title": "poc-creds", "status": "unconfirmed", "exit_code": 2},
+  ],
+}
+st, r1 = call("/api/bulk", "POST", payload)
+check("bulk returns 200", st == 200, f"status={st}")
+print("   created:", r1["created"], "\n   updated:", r1["updated"],
+      "\n   skipped:", r1["skipped"], "\n   errors:", r1["errors"], f"({r1['elapsed_ms']}ms)")
+check("4 targets created (3 declared + 1 autocreated orphan)", r1["created"]["targets"] == 4)
+check("5 services created", r1["created"]["services"] == 5)
+check("5 vulns created", r1["created"]["vulns"] == 5)
+check("2 pocs created", r1["created"]["pocs"] == 2)
+
+print("\n== idempotency: same payload again ==")
+st, r2 = call("/api/bulk", "POST", payload)
+check("nothing created on re-run", sum(r2["created"].values()) == 0, str(r2["created"]))
+check("rows accounted as updated/skipped (15 declared)",
+      sum(r2["updated"].values()) + sum(r2["skipped"].values()) == 15,
+      f"updated={r2['updated']} skipped={r2['skipped']}")
+
+print("\n== targets + derived counts ==")
+st, tg = call("/api/targets")
+check("targets total == 4", tg["total"] == 4, f"got {tg['total']}")
+web = next(t for t in tg["items"] if t["host"] == "web01.example.com")
+check("web01 total_vulns == 3", web["total_vulns"] == 3, f"got {web['total_vulns']}")
+check("web01 criticals == 1", web["total_criticals"] == 1, f"got {web['total_criticals']}")
+check("web01 highs == 1", web["total_highs"] == 1, f"got {web['total_highs']}")
+check("web01 pocs == 1", web["total_pocs"] == 1, f"got {web['total_pocs']}")
+check("web01 open ports == 2 (3306 closed excluded)", web["total_ports"] == 2, f"got {web['total_ports']}")
+check("web01 hacked flag true", web["hacked"] is True)
+
+print("\n== ports view is open-only ==")
+st, pt = call("/api/ports")
+check("4 open ports (closed 3306 excluded)", pt["total"] == 4, f"got {pt['total']}")
+check("no closed row present", all(p["state"] == "open" for p in pt["items"]))
+st, sv = call("/api/services")
+check("services view shows all 5 incl. closed", sv["total"] == 5, f"got {sv['total']}")
+
+print("\n== search / sort ==")
+st, s1 = call("/api/services?q=openssh")
+check("full search finds banner text", s1["total"] == 1 and s1["items"][0]["port"] == 22)
+st, s2 = call("/api/services?q=5432")
+check("search matches numeric port as text", s2["total"] == 1)
+st, s3 = call("/api/targets?sort=total_vulns&order=desc")
+check("sort by derived count works", s3["items"][0]["host"] == "web01.example.com",
+      f"first={s3['items'][0]['host']}")
+st, s4 = call("/api/targets?q=bare+IP")
+check("search hits notes column", s4["total"] == 1)
+st, s5 = call("/api/targets?sort=nope")
+check("bad sort field -> 422", s5 is not None and st == 422, f"status={st}")
+
+print("\n== single mutation fires SSE ==")
+before = len(events)
+st, _ = call("/api/targets/APITEST/db01.example.com", "PATCH", {"hacked": True})
+check("patch ok", st == 200)
+time.sleep(1.2)
+check("SSE event received", len(events) > before, f"{len(events)-before} new event(s)")
+if len(events) > before:
+    print("   last event:", events[-1][:120])
+
+print("\n== health reports connection-pool state ==")
+# Not an assertion about SSE: FastAPI has released dependencies before
+# sending the response since 0.106, so a stream does not hold its
+# session. This is here because the number is the only way to see a
+# process hoarding connections — a stale server left running after a
+# restart, or a transaction nobody closed — which otherwise presents as
+# the database being slow.
+st, h = call("/api/health")
+check("health is served", st == 200 and h.get("ok") is True, str(h)[:80])
+check("and reports the pool", isinstance(h.get("db_pool"), dict)
+      and "checked_out" in h["db_pool"], str(h.get("db_pool")))
+
+print("\n== cascade delete ==")
+st, _ = call("/api/targets/APITEST/web01.example.com", "DELETE")
+check("delete 204", st == 204, f"status={st}")
+st, sv2 = call("/api/services?host=web01.example.com")
+check("services cascaded away", sv2["total"] == 0, f"got {sv2['total']}")
+st, st2 = call("/api/stats")
+check("stats reflect delete", st2["targets"] == 3, f"targets={st2['targets']}")
+
+print("\n== unknown api path 404s as JSON ==")
+st, body = call("/api/definitely-not-a-thing")
+check("404 not HTML", st == 404, f"status={st}")
+
+print("\n== a trailing slash on an api path is SERVED, not redirected ==")
+# `/api/ghosts/?project=X` read as "no such endpoint" while
+# `/api/ghosts` worked: the SPA catch-all matched first and swallowed
+# the redirect FastAPI would otherwise have issued.
+#
+# Redirecting was the obvious fix and it was wrong. What produced the
+# slashed URL was a proxy emitting a 301 -- and a 301 is PERMANENT, so
+# browsers cache it and keep replaying it after the proxy is fixed.
+# Answering with a redirect back gives the browser two redirects
+# pointing at each other, which is ERR_TOO_MANY_REDIRECTS and reaches
+# a fetch() as "Failed to fetch". Serving the path leaves nothing to
+# loop against.
+import urllib.request as _ur  # noqa: E402
+
+_noredir = _ur.build_opener(type("NoRedirect", (_ur.HTTPRedirectHandler,), {
+    "redirect_request": lambda *a, **k: None})())
+
+
+def _raw_status(path):
+    rq = urllib.request.Request(BASE + path)
+    rq.add_header("Authorization", f"Bearer {TOKEN}")
+    try:
+        with _noredir.open(rq, timeout=20) as r:
+            return r.status, r.headers.get("Location")
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers.get("Location")
+
+
+_st, _loc = _raw_status("/api/stats/")
+check("a slashed api path is served directly", _st == 200, f"status={_st}")
+check("and does NOT redirect — a cached 301 pointing the other way "
+      "would make that an infinite loop", _loc is None, str(_loc))
+
+_st, _ = _raw_status("/api/stats/?project=APITEST")
+check("the query string survives the rewrite", _st == 200, f"status={_st}")
+
+# Still 404 when there is genuinely nothing there.
+st, _ = call("/api/definitely-not-a-thing/")
+check("a slashed path that does not exist still 404s", st == 404,
+      f"status={st}")
+# The gate matches exact paths, so normalising has to happen OUTSIDE it
+# or a slashed public path is refused before it is ever routed.
+st, _ = call("/api/auth/setup-required/")
+check("and the gatekeeper sees the normalised path too", st == 200,
+      f"status={st}")
+
+print("\n== the frontend calls routes the server actually serves ==")
+# Written after the same bug escaped three times in one rename.
+#
+# `drone` became `ghost` across 118 files, but every API path reads
+# `/api/agents/...` — neither word appears in it, so the sweep had
+# nothing to match. The server's routes moved and three callers did
+# not: the Go client, the frontend, and (nearly) the MCP server. Each
+# side's own tests passed, because each side was internally consistent.
+#
+# Nothing short of comparing the two could have caught it, so this
+# compares them: every `/api/<thing>` the frontend calls must be a
+# prefix the server really serves.
+import pathlib as _pl  # noqa: E402
+import re as _re  # noqa: E402
+
+_api_ts = (_pl.Path(__file__).resolve().parents[2]
+           / "frontend" / "src" / "lib" / "api.ts")
+if not _api_ts.exists():
+    check("the frontend api client is where this expects", False, str(_api_ts))
+else:
+    _used = sorted({m.group(1) for m in
+                    _re.finditer(r"[`'\"](/api/[a-z0-9_-]+)", _api_ts.read_text())})
+    check("the frontend's API prefixes were found", len(_used) >= 8,
+          f"{len(_used)}: {_used[:6]}")
+
+    _st, _spec = call("/openapi.json")
+    _served = sorted({"/" + "/".join(p.split("/")[1:3])
+                      for p in (_spec or {}).get("paths", {})
+                      if p.startswith("/api/")})
+    check("the server's route list was read", _st == 200 and len(_served) >= 8,
+          f"status={_st}, {len(_served)} prefixes")
+
+    _missing = [p for p in _used if p not in _served]
+    check("every prefix the frontend calls is one the server serves",
+          not _missing,
+          f"not served: {_missing}; server has {_served}" if _missing else
+          f"{len(_used)} prefixes all served")
+
+print(f"\n{'='*52}\n  {ok} passed, {fail} failed\n{'='*52}")

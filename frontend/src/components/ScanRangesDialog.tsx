@@ -1,0 +1,609 @@
+/**
+ * Discovery over ranges, selected targets, or anything typed in.
+ *
+ * Three sources, because "scan new ranges" turned out to be one of
+ * three things an operator means by it. The uncovered-scope list is
+ * the one this started as. But a selection already made in the grid is
+ * the commonest intent — you tick six hosts and want those scanned,
+ * and being shown a list of scope ranges instead is the dialog
+ * ignoring what you just told it. And neither covers "scan this one
+ * CIDR I was handed in an email", which is why there is a box.
+ *
+ * They combine. What runs is the union of everything ticked, and the
+ * count says so before anything is queued.
+ *
+ * "Not covered" here means the project holds no target with an address
+ * inside the range. That is a statement about our coverage and not
+ * about the client's network: a range with no targets has not been
+ * looked at, which is a different claim from a range that is empty.
+ * The column is labelled accordingly.
+ *
+ * Only included scope entries are offered. A scope document is almost
+ * always "this /16 except these hosts", and putting the exclusions on a
+ * list of things to scan is how the exclusions get scanned.
+ */
+import { useMemo, useState } from 'react'
+import {
+  Alert, Box, Button, Checkbox, Chip, DialogActions, DialogContent,
+  LinearProgress, Stack, Table, TableBody, TableCell,
+  TableHead, TableRow, TextField, Typography, alpha,
+} from '@mui/material'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { api } from '../lib/api'
+import { classifyScopeEntry } from '../lib/scopeEntry'
+import { neon } from '../theme'
+import {
+  AgentChooser, Argv, Caveat, EnumerateDialog, FleetNotice, chipSx,
+} from './EnumerateBits'
+import { BY_ANY, PillInput, type Analyse } from './PillInput'
+import {
+  detach, needsRegion, queueEach, rawSockets, useFleet,
+  type AgentChoice, type Report,
+} from './ghostTasking'
+
+/** Above this, a discovery sweep is a decision rather than a click. */
+const LARGE = 4096
+
+/**
+ * Pills for the "or scan these" box.
+ *
+ * Nothing in here is ever a `problem`, and that is deliberate rather than
+ * lazy. `_queue_bulk` in backend/app/routers/agents.py validates exactly
+ * one thing about a subject — whether the project's scope allows it —
+ * and queues anything that passes. It does not ask whether the text is a
+ * host, a range or a sentence. So a red pill on this box would be the
+ * browser inventing a refusal the endpoint behind it does not make, and
+ * the operator would retype a perfectly queueable subject to satisfy it.
+ *
+ * What is genuinely useful here is the kind, because "I meant a /24 and
+ * it read a hostname" is a real mistake with a 16-million-address
+ * consequence. Where the shape is recognised the pill says so; where it
+ * is not, it says only that, in muted text, and the subject still goes.
+ */
+const subjectPills: Analyse = (lines) => {
+  const seen = new Set<string>()
+  return lines.map((raw) => {
+    // Keyed the way `parseSubjects` dedupes, because that list is what
+    // becomes one task per entry.
+    const key = raw.trim().toLowerCase().replace(/\.$/, '')
+    if (seen.has(key)) return { raw, duplicate: true }
+    seen.add(key)
+    const r = classifyScopeEntry(raw)
+    if (!r.ok) {
+      return { raw, note: 'not recognised as an address, a range or a '
+                          + 'name. It is still submitted — the scope '
+                          + 'check is what decides.' }
+    }
+    return { raw, kind: r.kind }
+  })
+}
+
+/** Mirrors the server's own parsing: one per line, or comma separated. */
+export function parseSubjects(raw: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const piece of (raw || '').split(/[\s,;]+/)) {
+    const v = piece.trim().toLowerCase().replace(/\.$/, '')
+    if (v && !seen.has(v)) { seen.add(v); out.push(v) }
+  }
+  return out
+}
+
+export function ScanRangesDialog({ project, selected = [], onClose,
+                                  onQueued, onRefusedScope,
+                                  refusedScope = [] }: {
+  project: string
+  /** Rows ticked in the grid behind this. When there are any, they are
+   *  what the operator meant, so they lead and start checked. */
+  selected?: Array<{ host: string; ip_address?: string | null }>
+  onClose: () => void
+  /** Reports on the work once it finishes; this has already closed. */
+  onQueued?: Report
+  /** Ranges the queue refused for scope. The parent re-opens this
+   *  with them, because "out of scope" is the one refusal with
+   *  something to DO about it: typing a range the scope does not
+   *  cover is the normal way an engagement grows, and closing on it
+   *  would send the operator elsewhere to retype what they just
+   *  typed here. */
+  onRefusedScope?: (ranges: string[]) => void
+  /** Seeded by that re-open. */
+  refusedScope?: string[]
+}) {
+  const qc = useQueryClient()
+  const fleet = useFleet(project)
+  const [agent, setAgent] = useState<AgentChoice>(null)
+  const [region, setRegion] = useState('')
+  const [tool, setTool] = useState<'masscan' | 'nmap'>('masscan')
+  const [ports, setPorts] = useState('80,443,8080,8443')
+  /** Which nmap scan to run, or '' to let the agent decide as before.
+   *
+   *  Naming one makes "everything unscanned" a sharper question: not
+   *  "has anything ever run here" but "has THIS run, on these ports".
+   *  A host swept with -sS still owes a -sT, because the two learn
+   *  different things. */
+  const [technique, setTechnique] = useState<'' | 'syn' | 'connect' | 'version'>('')
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  // Pre-checked: the selection is a statement of intent already made,
+  // and making it again in here would be asking twice.
+  const [useSelected, setUseSelected] = useState(selected.length > 0)
+  // The fourth source: everything this project has never pointed nmap
+  // or masscan at. Off by default — the other three are a choice the
+  // operator has already made, and this one can be hundreds of hosts.
+  const [useUnscanned, setUseUnscanned] = useState(false)
+  // The fifth: every host the project knows, scanned or not. A
+  // superset of the fourth, so the two are mutually exclusive rather
+  // than additive — ticking both would otherwise read as "more" while
+  // meaning exactly the same set.
+  const [useAll, setUseAll] = useState(false)
+  const [manual, setManual] = useState('')
+  /** Ranges the queue refused because the scope does not cover them.
+   *  Held so they can be offered, rather than reported and lost. */
+  // Seeded by the parent's re-open; the dialog no longer sets it
+  // itself, because it has closed by the time the answer lands.
+  const outOfScope = refusedScope
+
+  const q = useQuery({
+    queryKey: ['enumerate-ranges', project],
+    queryFn: () => api.enumerateRanges(project),
+  })
+  // Fetched whether or not the box is ticked, so the count is on the
+  // label before you decide. "Scan everything unscanned" is not a
+  // choice anybody should make without knowing how many that is.
+  // nmap only: masscan has no technique, so asking a coverage
+  // question on its behalf would answer about a scan it cannot run.
+  const covTech = tool === 'nmap' ? technique : ''
+  const unscanned = useQuery({
+    queryKey: ['targets-unscanned', project, covTech, covTech ? ports : ''],
+    queryFn: () => api.unscannedTargets(project, covTech || undefined,
+                                        covTech ? ports : undefined),
+    enabled: !!project,
+  })
+  // Fetched alongside, and for the same reason: the count belongs on
+  // the label before the box is ticked. Taken from the server rather
+  // than from the grid behind this dialog — a page of the table is
+  // not the estate, and queueing the thirty rows that happen to be
+  // rendered while the label said "every target" would be the client
+  // inventing a scope.
+  const allKnown = useQuery({
+    queryKey: ['targets-all', project],
+    queryFn: () => api.unscannedTargets(project, undefined, undefined, true),
+    enabled: !!project,
+  })
+  const uncovered = useMemo(
+    () => (q.data ?? []).filter((r) => r.targets === 0), [q.data])
+  const covered = useMemo(
+    () => (q.data ?? []).filter((r) => r.targets > 0), [q.data])
+
+  const chosen = useMemo(
+    () => uncovered.filter((r) => picked.has(r.value)), [uncovered, picked])
+
+  // An address where there is one: a scan wants the host it can reach,
+  // and a name that has already been resolved resolves again for
+  // nothing. Where there is no address the name is used and the agent
+  // resolves it.
+  const fromSelected = useMemo(
+    () => (useSelected ? selected.map((t) => t.ip_address || t.host) : []),
+    [useSelected, selected])
+  const fromManual = useMemo(() => parseSubjects(manual), [manual])
+  const fromUnscanned = useMemo(
+    () => (useUnscanned ? (unscanned.data?.hosts ?? []) : []),
+    [useUnscanned, unscanned.data])
+  const fromAll = useMemo(
+    () => (useAll ? (allKnown.data?.hosts ?? []) : []),
+    [useAll, allKnown.data])
+
+  const subjects = useMemo(() => {
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const v of [...fromSelected, ...fromManual, ...fromUnscanned,
+                     ...fromAll, ...chosen.map((r) => r.value)]) {
+      if (v && !seen.has(v)) { seen.add(v); out.push(v) }
+    }
+    return out
+  }, [fromSelected, fromManual, fromUnscanned, fromAll, chosen])
+
+  // Only the scope ranges carry a known address count; a typed CIDR is
+  // not expanded here. Reported as "at least", because claiming an
+  // exact figure that excludes two of the three sources would be worse
+  // than admitting the number is a floor.
+  const addresses = chosen.reduce((n, r) => n + r.addresses, 0)
+
+  const priv = rawSockets(fleet, agent)
+  // masscan does not degrade. Without raw sockets it refuses outright
+  // rather than falling back, so offering it against an unprivileged
+  // agent queues a task that can only fail.
+  const masscanImpossible = tool === 'masscan' && priv === false
+  // -sS is the only technique that needs the privilege. -sT is an
+  // ordinary connect() and -sV probes over normal connections, so an
+  // unprivileged agent runs both — and, by the coverage ordering,
+  // then produces stronger results than -sS would.
+  const synImpossible = tool === 'nmap' && technique === 'syn' && priv === false
+  const regionMissing = needsRegion(fleet, agent) && !region.trim()
+  const stop = !subjects.length || !!fleet.blocked || regionMissing
+               || masscanImpossible || synImpossible
+
+  const toggle = (v: string) => setPicked((p) => {
+    const n = new Set(p)
+    if (n.has(v)) n.delete(v); else n.add(v)
+    return n
+  })
+
+  // One target, because one task per target is what gets queued; the
+  // count is said separately rather than crammed onto a command line
+  // that will never be run in that form.
+  const head = subjects[0] ?? '<nothing selected>'
+  const more = ''
+  const argv = tool === 'masscan'
+    ? `masscan -oX <task output> -p ${ports || '80,443,8080,8443'} --rate 1000 `
+      + head + more
+    : `nmap -oX <task output>${ports ? ` -p ${ports}` : ''}`
+      + (technique === 'syn' ? ' -sS'
+         : technique === 'connect' ? ' -sT'
+         : technique === 'version' ? ' -sV'
+         // No technique named: what the agent does on its own, which
+         // depends on whether it has raw sockets.
+         : ' -sV' + (priv === true ? ' -sS' : priv === null
+             ? ' [-sS if the agent has raw sockets]' : ''))
+      + ` ${head}${more}`
+
+  const run = () => {
+    // Snapshotted before closing: these derive from queries and from
+    // state this dialog owns, and the work must run against what was
+    // on screen when Queue was pressed rather than whatever exists
+    // afterwards.
+    const subs = [...subjects]
+    const extra: Record<string, unknown> = {}
+    if (ports.trim()) extra.ports = ports.trim()
+    if (tool === 'nmap' && technique) extra.technique = technique
+    const parts = [
+      fromSelected.length && `${fromSelected.length} selected target(s)`,
+      fromManual.length && `${fromManual.length} typed in`,
+      fromUnscanned.length && `${fromUnscanned.length} never scanned`,
+      fromAll.length && `${fromAll.length} from Kitchen Sink`,
+      chosen.length && `${chosen.length} scope range(s), `
+                       + `${addresses.toLocaleString()} addresses`,
+    ].filter(Boolean)
+
+    detach(async () => {
+      // One task per range, not one task holding all of them: forty
+      // ranges in a single task is forty ranges on one agent while the
+      // rest of the fleet is idle, and one failure takes the lot.
+      const { ids, failed } = await queueEach(project, agent, tool, subs,
+                                              extra, region)
+      await qc.invalidateQueries({ queryKey: ['agents'] })
+
+      // Offered rather than merely reported — see `onRefusedScope`.
+      const oos = failed.filter((f) => /scope/i.test(f.why))
+      if (oos.length) onRefusedScope?.(oos.map((f) => f.subject))
+
+      if (!ids.length) {
+        throw new Error(`Nothing was queued. ${failed[0]?.why ?? ''}`)
+      }
+      return `Queued ${ids.length} task${ids.length === 1 ? '' : 's'}, one `
+           + `per target, over ${parts.join(' + ')}`
+           + (failed.length
+              ? `. ${failed.length} refused: ${failed[0].subject} — `
+                + `${failed[0].why}`
+              : `. Results import into ${project} as each reports back.`)
+    }, onQueued, onClose,
+       `Queueing ${subs.length} ${tool} task${subs.length === 1 ? '' : 's'}…`)
+  }
+
+  /** Add the refused ranges to the scope, then queue them.
+   *
+   *  Deliberately two steps the operator asked for rather than one
+   *  they did not: widening a client's scope is a decision, so it is
+   *  a button and not something the queue does on their behalf. */
+  const addScopeAndQueue = () => {
+    if (!outOfScope.length) return
+    const ranges = [...outOfScope]
+    const extra: Record<string, unknown> = {}
+    if (ports.trim()) extra.ports = ports.trim()
+    detach(async () => {
+      await api.addProjectScope(project, { lines: ranges, included: true })
+      const { ids, failed } = await queueEach(project, agent, tool, ranges,
+                                              extra, region)
+      await qc.invalidateQueries()
+      return `Added ${ranges.length} range`
+           + `${ranges.length === 1 ? '' : 's'} to scope and queued `
+           + `${ids.length} task${ids.length === 1 ? '' : 's'}`
+           + (failed.length ? `; ${failed.length} still refused` : '')
+    }, onQueued, onClose,
+       `Adding ${ranges.length} range${ranges.length === 1 ? '' : 's'} to `
+       + `scope and queueing…`)
+  }
+
+  return (
+    <EnumerateDialog accent={neon.purple} onClose={onClose}
+      title={`SCAN NEW RANGES → ${project}`}>
+      <DialogContent>
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          <FleetNotice fleet={fleet} />
+          {q.isLoading && (
+            <LinearProgress sx={{ height: 2, bgcolor: alpha(neon.purple, 0.2),
+                                  '& .MuiLinearProgress-bar': { bgcolor: neon.purple } }} />
+          )}
+          {q.error && (
+            <Alert severity="error" variant="outlined" sx={{ fontSize: 12.5 }}>
+              {(q.error as Error).message}
+            </Alert>
+          )}
+
+          {/* The selection leads when there is one. Being shown a list
+              of scope ranges after ticking six hosts is the dialog
+              ignoring what was just said to it. */}
+          {selected.length > 0 && (
+            <Box sx={{ border: `1px solid ${alpha(neon.cyan, 0.4)}`,
+                       borderRadius: 1, p: 1.2 }}>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Checkbox size="small" checked={useSelected}
+                  onChange={(e) => setUseSelected(e.target.checked)} />
+                <Box sx={{ flex: 1 }}>
+                  <Typography sx={{ fontSize: 12.5, color: neon.cyan }}>
+                    Scan the {selected.length} target
+                    {selected.length === 1 ? '' : 's'} selected behind this
+                  </Typography>
+                  <Typography sx={{ fontSize: 11, color: neon.muted,
+                                    fontFamily: `'Share Tech Mono', monospace`,
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap' }}>
+                    {selected.slice(0, 6).map((t) => t.ip_address || t.host)
+                            .join(', ')}
+                    {selected.length > 6 ? ` …+${selected.length - 6}` : ''}
+                  </Typography>
+                </Box>
+              </Stack>
+            </Box>
+          )}
+
+          {/* Everything nmap and masscan have never been pointed at.
+              "Never tasked", not "has no open ports": a host that was
+              scanned and answered on nothing has no ports, and
+              offering it again on every pass would re-scan a client
+              for a question already answered. The server decides
+              this — see /api/targets/unscanned. */}
+          {(unscanned.data?.count ?? 0) > 0 && (
+            <Box sx={{ border: `1px solid ${alpha(neon.yellow, 0.4)}`,
+                       borderRadius: 1, p: 1.2 }}>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Checkbox size="small" checked={useUnscanned}
+                  disabled={useAll}
+                  onChange={(e) => setUseUnscanned(e.target.checked)} />
+                <Box sx={{ flex: 1 }}>
+                  <Typography sx={{ fontSize: 12.5, color: neon.yellow }}>
+                    Scan the {unscanned.data?.count} target
+                    {unscanned.data?.count === 1 ? '' : 's'} nothing has
+                    scanned yet
+                  </Typography>
+                  <Typography sx={{ fontSize: 11, color: neon.muted }}>
+                    Never handed to nmap or masscan on this engagement —
+                    not merely "no ports recorded", so a host that was
+                    scanned and answered on nothing stays out.
+                    {(unscanned.data?.out_of_scope ?? 0) > 0 && (
+                      <> {unscanned.data?.out_of_scope} more are outside
+                      the scope list and are not offered.</>
+                    )}
+                    {useAll && <> Covered by Kitchen Sink below.</>}
+                  </Typography>
+                </Box>
+              </Stack>
+            </Box>
+          )}
+
+          {/* Kitchen Sink: the whole estate, scanned or not. Named to
+              match the same idea on the subdomain dialog, and taken
+              from the server for the same reason — the rows loaded in
+              the grid behind this are a page, not the estate.
+
+              A superset of the box above, so that one is disabled
+              rather than left to be ticked alongside: two boxes that
+              add up to the same set read as "more" and are not. */}
+          {(allKnown.data?.count ?? 0) > 0 && (
+            <Box sx={{ border: `1px solid ${alpha(neon.pink, 0.45)}`,
+                       borderRadius: 1, p: 1.2 }}>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Checkbox size="small" checked={useAll}
+                  onChange={(e) => {
+                    setUseAll(e.target.checked)
+                    // Folding it in rather than leaving it ticked and
+                    // ignored: the count under the button must match
+                    // what the boxes say.
+                    if (e.target.checked) setUseUnscanned(false)
+                  }} />
+                <Box sx={{ flex: 1 }}>
+                  <Typography sx={{ fontSize: 12.5, color: neon.pink }}>
+                    Kitchen Sink — every one of the {allKnown.data?.count}
+                    {' '}target{allKnown.data?.count === 1 ? '' : 's'} this
+                    project knows
+                  </Typography>
+                  <Typography sx={{ fontSize: 11, color: neon.muted }}>
+                    Scanned or not. This re-scans hosts that have already
+                    been done, which is the point when ports have been
+                    opened since — and is wasted traffic at a client when
+                    they have not.
+                    {(allKnown.data?.out_of_scope ?? 0) > 0 && (
+                      <> {allKnown.data?.out_of_scope} out-of-scope
+                      target(s) are excluded.</>
+                    )}
+                  </Typography>
+                </Box>
+              </Stack>
+            </Box>
+          )}
+
+          <PillInput
+            label="Or scan these" value={manual} onChange={setManual}
+            analyse={subjectPills} separator={BY_ANY} accent={neon.purple}
+            placeholder="198.51.100.0/24, 203.0.113.10, portal.acme.example"
+            helperText={'Addresses, CIDRs or names. One per line or comma '
+                        + 'separated. Anything out of scope is refused when '
+                        + 'it is queued.'} />
+
+          <Alert severity="info" variant="outlined" sx={{ fontSize: 11.5 }}>
+            A range is listed as uncovered when this project holds no target
+            with an address inside it. That says nothing has been scanned
+            there — not that there is nothing there.
+          </Alert>
+
+          {!q.isLoading && !uncovered.length && (
+            <Typography sx={{ fontSize: 12.5, color: neon.muted }}>
+              Every included range in this project's scope already has at least
+              one target in it. {covered.length
+                ? `${covered.length} range(s) checked.`
+                : 'There are no CIDR entries in the scope to check.'}
+            </Typography>
+          )}
+
+          {uncovered.length > 0 && (
+            <Box sx={{ maxHeight: '34vh', overflow: 'auto',
+                       border: `1px solid ${alpha(neon.purple, 0.25)}`,
+                       borderRadius: 1 }}>
+              <Table size="small" stickyHeader>
+                <TableHead>
+                  <TableRow>
+                    <TableCell sx={{ ...headSx, width: 44 }} />
+                    <TableCell sx={headSx}>Range</TableCell>
+                    <TableCell sx={headSx}>Addresses</TableCell>
+                    <TableCell sx={headSx}>Coverage</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {uncovered.map((r) => (
+                    <TableRow key={r.value} hover selected={picked.has(r.value)}
+                      onClick={() => toggle(r.value)} sx={{ cursor: 'pointer' }}>
+                      <TableCell sx={cellSx}>
+                        <Checkbox size="small" checked={picked.has(r.value)}
+                          sx={{ p: 0.4, color: neon.muted,
+                                '&.Mui-checked': { color: neon.purple } }} />
+                      </TableCell>
+                      <TableCell sx={{ ...cellSx, color: neon.cyan }}>{r.value}</TableCell>
+                      <TableCell sx={cellSx}>
+                        {r.addresses.toLocaleString()}
+                        {r.addresses > LARGE && (
+                          <Chip size="small" label="large" sx={{ ...chipSx(neon.yellow), ml: 1 }} />
+                        )}
+                      </TableCell>
+                      <TableCell sx={{ ...cellSx, color: neon.muted }}>
+                        not scanned
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </Box>
+          )}
+
+          {addresses > LARGE && (
+            <Alert severity="warning" variant="outlined" sx={{ fontSize: 11.5 }}>
+              {addresses.toLocaleString()} addresses selected. That is a lot of
+              packets into someone else's network — check it is what the rules
+              of engagement allow before queueing it.
+            </Alert>
+          )}
+
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+            <TextField select size="small" label="Tool" value={tool}
+              sx={{ minWidth: 200 }}
+              slotProps={{ select: { native: true } }}
+              onChange={(e) => setTool(e.target.value as 'masscan' | 'nmap')}>
+              <option value="masscan">masscan — fast sweep</option>
+              <option value="nmap">nmap — slower, identifies services</option>
+            </TextField>
+            <TextField size="small" label="Ports" value={ports} sx={{ flex: 1 }}
+              onChange={(e) => setPorts(e.target.value)}
+              helperText={tool === 'masscan'
+                ? 'masscan needs ports; the agent defaults to 80,443,8080,8443.'
+                : 'Empty lets the agent choose. Naming ports also stops it adding -F.'} />
+          </Stack>
+
+          {tool === 'nmap' && (
+            <TextField select size="small" label="Scan type" value={technique}
+              slotProps={{ select: { native: true } }}
+              onChange={(e) => setTechnique(
+                e.target.value as '' | 'syn' | 'connect' | 'version')}
+              helperText={technique
+                ? 'Hosts already covered by this or a stronger scan are left out.'
+                : 'Let the agent decide: -sV, plus -sS where it has raw sockets.'}>
+              <option value="">agent decides</option>
+              <option value="syn">-sS half-open — needs raw sockets</option>
+              <option value="connect">-sT full handshake</option>
+              <option value="version">-sV identify the service</option>
+            </TextField>
+          )}
+
+          {synImpossible && (
+            <Alert severity="error" variant="outlined" sx={{ fontSize: 11.5 }}>
+              A -sS needs raw sockets and this agent has none. It is refused
+              rather than quietly run as a -sT, because that is a different
+              scan and recording it as a -sS would stop the real one ever
+              being offered again. Pick -sT, or an agent with raw sockets.
+            </Alert>
+          )}
+
+          {masscanImpossible && (
+            <Alert severity="error" variant="outlined" sx={{ fontSize: 11.5 }}>
+              masscan builds its own packets and refuses to run without raw
+              sockets — it does not fall back the way nmap does. This agent has
+              none, so the task would fail rather than scan. Use nmap, or pick
+              an agent with raw sockets.
+            </Alert>
+          )}
+
+          <AgentChooser fleet={fleet} value={agent} onChange={setAgent}
+            region={region} onRegion={setRegion} />
+
+          <Box>
+            <Typography sx={{ fontSize: 10.5, color: neon.muted, mb: 0.5 }}>
+              What the agent will run
+            </Typography>
+            <Argv text={argv} repeat={subjects.length} />
+          </Box>
+
+          <Caveat>
+            Results import in strict mode, as every agent result does: hosts
+            this project has never seen are surveyed and nothing is written
+            until someone answers for them.
+          </Caveat>
+        </Stack>
+      </DialogContent>
+      {outOfScope.length > 0 && (
+        <Alert severity="warning" variant="outlined"
+               sx={{ mx: 3, mb: 1, fontSize: 12 }}
+               action={
+                 <Button size="small" onClick={addScopeAndQueue}
+                   sx={{ color: neon.green, whiteSpace: 'nowrap' }}>
+                   Add to scope &amp; queue
+                 </Button>
+               }>
+          {outOfScope.length} range{outOfScope.length === 1 ? ' is' : 's are'} not
+          in {project}&apos;s scope and {outOfScope.length === 1 ? 'was' : 'were'}
+          {' '}refused: {outOfScope.slice(0, 4).join(', ')}
+          {outOfScope.length > 4 ? ` and ${outOfScope.length - 4} more` : ''}.
+        </Alert>
+      )}
+
+      <DialogActions sx={{ px: 3, pb: 2 }}>
+        <Typography sx={{ fontSize: 11, color: neon.muted, mr: 'auto' }}>
+          {chosen.length ? `${chosen.length} range(s), ${addresses.toLocaleString()} addresses` : ''}
+        </Typography>
+        <Button onClick={onClose} sx={{ color: neon.muted }}>Close</Button>
+        <Button variant="outlined" disabled={stop} onClick={run}
+          sx={{ color: neon.purple, borderColor: alpha(neon.purple, 0.6) }}>
+          Queue discovery scan
+        </Button>
+      </DialogActions>
+    </EnumerateDialog>
+  )
+}
+
+const headSx = {
+  fontFamily: `'Orbitron', sans-serif`, fontSize: 9.5, letterSpacing: '0.12em',
+  textTransform: 'uppercase', color: alpha(neon.purple, 0.85),
+  backgroundColor: alpha(neon.bgDeep, 0.95),
+  borderBottom: `1px solid ${alpha(neon.purple, 0.3)}`, py: 0.6,
+} as const
+const cellSx = {
+  fontFamily: `'Share Tech Mono', monospace`, fontSize: 12, color: neon.text,
+  borderBottom: `1px solid ${alpha(neon.purple, 0.12)}`, py: 0.5,
+} as const

@@ -1,0 +1,669 @@
+"""Standing orders: the follow-up work a project does without being asked.
+
+Four policies, set per engagement, each of which answers one obvious
+"and now do the next thing" that an operator otherwise has to remember:
+
+    auto_amass        hand every in-scope zone to amass, once
+    auto_resolve_ips  resolve any hostname with no address recorded
+    auto_reverse_dns  find names for every address the estate answers on
+    auto_nmap         scan hosts that have never been scanned
+                      ("off" | "top100" | "full")
+
+All four are off by default and each one puts packets on a client's
+estate, so three things are true of everything in this file.
+
+**Every candidate goes through the scope gate on its own.** Not the
+project, not the batch -- each name, every cycle. An automation that
+could queue one out-of-scope host is worse than no automation, because
+by definition nobody is watching it go out.
+
+**One attempt per subject, ever.** A lookup that comes back empty leaves
+the host exactly as it was -- still no address, still no name -- so a
+policy phrased as "anything missing X" would re-queue it on the next
+cycle and every cycle after that, forever, against a client. Having
+been *tried* is what counts here, not having succeeded. Re-running a
+failed lookup is a deliberate act and stays a manual one.
+
+**A cycle queues the whole backlog.** It used to take PER_CYCLE
+candidates per policy per cycle, on the reasoning that queueing four
+thousand scans at once was something "the client's network would not
+survive". That reasoning was wrong, and worth spelling out so it is
+not reinstated by someone reading the old comment:
+
+* Queueing is not scanning. Tasks sit in the database until a Ghost
+  asks for work, and a Ghost only ever takes what `max_parallel`
+  allows -- which is itself clamped by the host's free memory, and
+  clamped again for heavy kinds like amass by `heavy_allowance`. The
+  client-facing rate is set there, at dispatch, and is identical
+  whether the queue holds 25 items or four thousand.
+* So the cap paced the *queue*, not the network, and the only thing it
+  actually achieved was leaving work undone -- a backlog that needed
+  N more cycles, where the operator had already said to do all of it.
+
+What the cap did protect against is a single enormous transaction, and
+that is handled where it belongs: the candidates are gated and inserted
+in batches, so one cycle drains everything without one giant write.
+
+Scope is re-checked when a task is handed out, not only when it is
+queued (`scope_refusal` in routers/agents.py), so a deep queue cannot
+outlive a scope change.
+
+They are standing orders rather than triggers on insert, which is a
+deliberate difference. A trigger only ever covers what arrives after it
+is switched on, so turning one on would appear to do nothing and the
+operator would conclude it was broken. These are evaluated against
+whatever is outstanding, including the backlog.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from dataclasses import dataclass, field
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from . import domains as gen
+from . import geoip
+from .db import SessionLocal
+from .events import broker
+from .lookups import is_ip
+from .models import (
+    NMAP_CHOICES,
+    NUCLEI_CHOICES,
+    WEB_CHOICES,
+    Agent,
+    AgentTask,
+    DomainSearch,
+    Project,
+    Target,
+    TargetAddress,
+)
+from .roots import enumerable_roots
+from .scopegate import as_host, index_for
+from .tasking import outstanding_subjects, tasked_subjects
+from .webtargets import WEB_KINDS, crawl_seeds, discoverable
+
+log = logging.getLogger(__name__)
+
+#: How many candidates to gate and insert in one database round trip.
+#:
+#: NOT a cap on how much a cycle does -- a cycle does all of it. This
+#: only stops a backlog of thousands becoming one enormous statement,
+#: which is the single real cost the old per-cycle cap was covering
+#: for. See the module docstring.
+BATCH = 250
+
+#: How many web-discovery candidates one cycle may queue, per kind.
+#:
+#: The other policies are bounded by the estate: a project has the
+#: targets it has. The web estate is bounded by what has been FOUND,
+#: and finding more is what the policy does, so it is the one policy
+#: whose input grows as it runs. That is survivable with a correct
+#: "already done" check and catastrophic without one -- 1,109 queued
+#: tasks became 97,959 in under an hour when the check missed.
+#:
+#: This does not withhold work; the next cycle takes the next batch.
+#: It bounds how wrong a single cycle can be.
+WEB_PER_CYCLE = 250
+
+#: How often to look. Long enough that a quiet installation costs
+#: nothing, short enough that adding a host and seeing it resolve feels
+#: like the feature working rather than a cron job.
+CYCLE_SECS = 60
+
+#: Backoff after an iteration raises, so a broken database does not
+#: become a tight loop.
+ERROR_SLEEP = 60
+
+#: The nmap profiles the toggle offers, as task args.
+#:
+#: `top100` is nmap's own `-F`, which is exactly the hundred commonest
+#: ports -- not a list maintained here that would drift from nmap's.
+#: `full` names the range explicitly, because `-p-` and `-F` are
+#: mutually exclusive and nmap exits 1 on the pair while still writing
+#: a successful-looking XML file of zero hosts.
+#:
+#: `full` also asks for `ssl-cert`, and only `full` does. A scan of
+#: all 65,535 ports is already the expensive, thorough option, and the
+#: certificate is the single highest-value thing to collect while we
+#: are there: it names every host it is valid for, which is the
+#: richest source of names on an estate and frequently the only
+#: evidence that an address serves something we have no name for.
+#:
+#: It costs one extra handshake per port that negotiates TLS -- the
+#: script's own portrule decides, so a port with no TLS is not probed
+#: -- against a scan that has already touched every port on the host.
+#:
+#: Named explicitly rather than taken via `-sC`, which would turn on
+#: the whole `default` category: dozens of scripts, several of which
+#: write to the target. This asks for one read-only script by name.
+NMAP_PROFILES: dict[str, dict] = {
+    "top100": {"profile": "quick"},
+    # No `extra`. It used to carry `--script ssl-cert`, and that is
+    # now actively harmful: the ghost adds `--script` itself with
+    # every -sV, and nmap honours only the LAST --script on the line,
+    # so a profile naming its own set SUPPRESSES the rest. This is
+    # the profile FALCON runs, so the scripts added in #115 reached
+    # nothing at all until this line went. ssl-cert is still run --
+    # it is named in the ghost's own set.
+    "full": {"ports": "1-65535"},
+}
+
+assert set(WEB_CHOICES) == {"off", *WEB_KINDS}
+
+#: The two nuclei runs, as the extra arguments each one adds.
+#:
+#: Separate tasks rather than one, because the filters are mutually
+#: exclusive: every technology-detection template is `info` severity,
+#: so `-severity critical,high` discards all 1,228 of them. One task
+#: carrying both sets of flags would run the CVE half and silently
+#: skip the other.
+#:
+#: `-etags authenticated` on the vulnerability run. This is a
+#: black-box engagement with no credentials, so a template that needs
+#: a login cannot do anything except send requests that are certain
+#: to fail -- traffic at a client, in their logs, for no possible
+#: result.
+#:
+#: `-tags tech` is what `-tech-detect` became. That flag does not
+#: exist in nuclei v3: asking v3.11.1 for its own help shows `-td` is
+#: now `-template-display`, and technology detection moved to the
+#: `tech`-tagged templates.
+#: A STRING, not a list. The agent reads this with its `str()`
+#: helper and splits on whitespace; handed a list, that helper
+#: returns "" and every flag here would be dropped without an error
+#: anywhere -- the run would go out unfiltered, which for the
+#: vulnerability profile means every template nuclei has rather than
+#: the CVE ones. No value may contain a space.
+NUCLEI_PROFILES: dict[str, str] = {
+    "nuclei": "-severity critical,high -tags cve -etags authenticated",
+    "nuclei_tech": "-tags tech",
+}
+assert not any(" " in v for p in NUCLEI_PROFILES.values()
+               for v in p.split()[1::2]), "no argument value may contain a space"
+
+#: Which task kinds each choice runs.
+NUCLEI_KINDS: dict[str, tuple[str, ...]] = {
+    "vuln": ("nuclei",),
+    "tech": ("nuclei_tech",),
+    "both": ("nuclei", "nuclei_tech"),
+}
+
+assert set(NUCLEI_CHOICES) == {"off", *NUCLEI_KINDS}
+assert set(NUCLEI_PROFILES) == {k for ks in NUCLEI_KINDS.values() for k in ks}
+
+#: `NMAP_CHOICES` lives in models.py, where schemas.py can validate
+#: against it without importing this module. They have to agree, and
+#: the test asserts that they do rather than trusting two lists.
+assert set(NMAP_CHOICES) == {"off", *NMAP_PROFILES}
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """One task a policy would like to queue, before the gate sees it."""
+    kind: str
+    subject: str
+    args: dict = field(default_factory=dict)
+    policy: str = ""
+
+
+@dataclass
+class Snapshot:
+    """Everything `plan` needs, read once per project per cycle.
+
+    A plain-data argument rather than a session, so the decision can be
+    tested against a described estate instead of a database -- which is
+    the only way the "never twice" rule gets exercised, since it is
+    about what happened on a previous cycle.
+    """
+    auto_amass: bool = False
+    auto_resolve_ips: bool = False
+    auto_reverse_dns: bool = False
+    auto_nmap: str = "off"
+    auto_web: str = "off"
+    auto_nuclei: str = "off"
+    #: (host, has_address) for every target in the project.
+    targets: list[tuple[str, bool]] = field(default_factory=list)
+    #: Every address the project has OBSERVED, from `target_addresses`
+    #: -- what resolution, port scanning and the importers recorded,
+    #: as opposed to the addresses somebody typed in as a target.
+    #:
+    #: Separate from `targets` because the two are different facts. A
+    #: target named `10.0.0.1` is an address an operator entered; a row
+    #: here is an address the estate was found to answer on. The
+    #: reverse-DNS policy wants both and used to see only the first.
+    addresses: set[str] = field(default_factory=set)
+    #: Zones already handed to amass (`DomainSearch.domain`).
+    searched: set[str] = field(default_factory=set)
+    #: Zones the scope list NAMES with a wildcard. These are candidates
+    #: in their own right, not only the zones derived from hostnames:
+    #: `registrable("one.zone.acme.example")` is `acme.example`, which
+    #: `*.zone.acme.example` does not cover, so deriving from hosts
+    #: alone means the engagement never enumerates the zone it was
+    #: actually authorised against. Same reasoning as `domainRoots`.
+    scope_zones: set[str] = field(default_factory=set)
+    #: Every web address in the project, as a url. The subject
+    #: a crawl or a content-discovery run actually needs.
+    web_urls: set[str] = field(default_factory=set)
+    #: {origin: [url, ...]} -- paths content discovery found that no
+    #: crawl has started from. See `webtargets.crawl_seeds`, which
+    #: explains at length why this one source is allowed to point a
+    #: crawler at something other than an origin.
+    seeds: dict[str, list[str]] = field(default_factory=dict)
+    #: (kind, subject) this project has ever tasked. See "one attempt
+    #: per subject" in the module docstring.
+    tasked: set[tuple[str, str]] = field(default_factory=set)
+
+
+def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
+    """What the policies would like to do, before the gate is consulted.
+
+    Pure. `limit` is per policy and defaults to None, meaning all of
+    them: an operator who switched a policy on wants the backlog done,
+    not a page of it. Callers may still pass one, and the slices below
+    read `[:None]` as "everything", which is exactly the wanted
+    behaviour rather than a trick.
+
+    The order is stable regardless, so an interrupted cycle resumes
+    where it was rather than starting somewhere different.
+    """
+    out: list[Candidate] = []
+
+    if s.auto_amass:
+        zones: list[str] = []
+        seen: set[str] = set()
+        # Redundant against a snapshot built by `snapshot()`, whose
+        # scope_zones already covers every known host. Kept so `plan`
+        # stays a total function of its Snapshot rather than depending
+        # on one particular caller having filled a field -- the unit
+        # tests construct Snapshots directly, and so would anyone
+        # reasoning about this in isolation.
+        derived = [gen.registrable(h) for h, _ in s.targets if not is_ip(h)]
+        for z in list(s.scope_zones) + derived:
+            if not z or "." not in z or z in seen:
+                continue
+            seen.add(z)
+            if z in s.searched or ("amass", z) in s.tasked:
+                continue
+            zones.append(z)
+        out += [Candidate("amass", z, {"domain": z, "mode": "passive"},
+                          "auto_amass")
+                for z in sorted(zones)[:limit]]
+
+    if s.auto_resolve_ips:
+        want = sorted(
+            h for h, has_addr in s.targets
+            if not has_addr and not is_ip(h) and ("nslookup", h) not in s.tasked)
+        out += [Candidate("nslookup", h, {}, "auto_resolve_ips")
+                for h in want[:limit]]
+
+    if s.auto_reverse_dns:
+        # Two sources, and for a long time only the first was read.
+        #
+        # A target NAMED by its address has no name of its own, so it
+        # is the obvious candidate -- `has_addr` is not the question
+        # here and is not asked. But that is the case an operator
+        # creates by typing an address in, and on an engagement run
+        # from a scope list of hostnames and CIDRs it does not happen:
+        # the production estate had 1,038 targets, ZERO of them
+        # address-named, and 1,857 observed addresses. The policy was
+        # switched on and correct and could never queue anything.
+        #
+        # The addresses the estate was found to answer on are the ones
+        # worth asking about, because that is where a name we do not
+        # have yet lives -- shared hosting, a load balancer's own
+        # name, a management interface on a neighbouring address.
+        #
+        # Every one still goes through the scope gate individually,
+        # like every other candidate here. An observed address is not
+        # in scope by virtue of having been observed; `run_once` is
+        # what decides, and a discovered address that the gate refuses
+        # is simply not queued.
+        want = sorted(
+            {h for h, _ in s.targets if is_ip(h)} | s.addresses)
+        want = [h for h in want if ("reverse_ip", h) not in s.tasked]
+        out += [Candidate("reverse_ip", h, {}, "auto_reverse_dns")
+                for h in want[:limit]]
+
+    if s.auto_web in WEB_KINDS:
+        # Queued per ORIGIN. Neither tool can be pointed at a bare
+        # hostname, and neither gains anything from being pointed at a
+        # path: katana walks out from wherever it starts and gobuster
+        # applies its wordlist from the root. `webtargets.origin_of`
+        # is what collapses them, and the reason is in its docstring.
+        for kind in WEB_KINDS[s.auto_web]:
+            # `u.lower()`, because `tasked_subjects` lowercases what it
+            # records. Without it a subject whose spelling carried any
+            # uppercase never matched as already-done and was queued
+            # again on every single cycle -- which is how one project
+            # reached 97,959 queued tasks from 1,109, with individual
+            # subjects queued five times over. Origins are lowercased
+            # at the source now, so this is belt and braces; it is
+            # here because the cost of the two sides disagreeing again
+            # is measured in requests at a client.
+            want = sorted(u for u in s.web_urls
+                          if (kind, u.lower()) not in s.tasked)
+            # Capped per cycle regardless of `limit`. The policies
+            # above are bounded by the size of the estate; this one is
+            # bounded by how much of the web estate has been found,
+            # which grows as it runs. A cap does not withhold work --
+            # the next cycle takes the next batch -- it just stops a
+            # single miscount from becoming six figures of queued
+            # scanning before anybody looks.
+            cap = WEB_PER_CYCLE if limit is None else min(limit, WEB_PER_CYCLE)
+            out += [Candidate(kind, u, {"targets": [u]}, "auto_web")
+                    for u in want[:cap]]
+
+        # Crawls seeded with what content discovery found, which only
+        # applies when crawling is part of the mode: `gobuster` on its
+        # own is the operator asking for paths, not for the crawler to
+        # follow them.
+        #
+        # The subject is the ORIGIN, not the seeds, because the origin
+        # is what the scope gate is asked about and every seed in the
+        # group is on it by construction. The seeds ride in `targets`,
+        # where `tasked_subjects` records each of them -- so running
+        # this task is also what stops it being queued again.
+        if "katana" in WEB_KINDS[s.auto_web]:
+            cap = WEB_PER_CYCLE if limit is None else min(limit, WEB_PER_CYCLE)
+            out += [Candidate("katana", o, {"targets": list(urls)},
+                              "auto_web_seeded")
+                    for o, urls in sorted(s.seeds.items())[:cap]
+                    if urls]
+
+    if s.auto_nuclei in NUCLEI_KINDS:
+        # Per URL, like auto_web and for the same reason: nuclei takes
+        # a URL already known to answer (`PROBE_KINDS["nuclei"]`), and
+        # a bare hostname gives it nothing to request.
+        #
+        # The two kinds dedupe INDEPENDENTLY. They are separate
+        # entries in `tasked` because they are separate kinds, which
+        # is the whole reason `nuclei_tech` is its own kind rather
+        # than an argument on `nuclei`: one kind would mean running
+        # the vulnerability templates marked the URL done and the
+        # technology run never happened.
+        for kind in NUCLEI_KINDS[s.auto_nuclei]:
+            want = sorted(u for u in s.web_urls
+                          if (kind, u.lower()) not in s.tasked)
+            # Capped like the web policy. The subject list here is the
+            # same growing one -- discovered web addresses -- so it
+            # carries the same risk of a miscount becoming six figures
+            # of queued scanning.
+            cap = WEB_PER_CYCLE if limit is None else min(limit, WEB_PER_CYCLE)
+            out += [Candidate(kind, u,
+                              {"targets": [u],
+                               "extra": NUCLEI_PROFILES[kind]},
+                              "auto_nuclei")
+                    for u in want[:cap]]
+
+    if s.auto_nmap in NMAP_PROFILES:
+        args = NMAP_PROFILES[s.auto_nmap]
+        want = sorted(h for h, _ in s.targets if ("nmap", h) not in s.tasked)
+        out += [Candidate("nmap", h, dict(args), "auto_nmap")
+                for h in want[:limit]]
+
+    return out
+
+
+async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
+    """Read one project's state into a `Snapshot`."""
+    rows = (await session.execute(
+        select(Target).where(Target.project_id == pr.id)
+        .order_by(Target.host))).scalars().unique().all()
+    targets = [(t.host, bool(t.addresses)) for t in rows]
+
+    # Observed addresses, for `auto_reverse_dns`. Read from the table
+    # rather than walked off `rows`, so an address recorded against a
+    # target the eager load did not bring back is still seen, and so
+    # the cost is one query instead of one per target.
+    addresses = {a for a in (await session.execute(
+        select(TargetAddress.address).where(
+            TargetAddress.project_id == pr.id).distinct())).scalars().all()
+        if a}
+
+    searched = set((await session.execute(
+        select(DomainSearch.domain).where(
+            DomainSearch.project_id == pr.id))).scalars().all())
+
+    # Every zone worth enumerating, from the same function the
+    # "Search for more domains" dialog uses.
+    #
+    # This used to read only `kind == "wildcard"` and derive the rest
+    # from `Target.host`. Both halves were too narrow, and on a real
+    # project both mattered: one had three scope entries, all `fqdn`
+    # and no wildcards, so this set came back EMPTY and the only
+    # authorised domains were invisible to the automation meant to
+    # enumerate them; and 626 of its 1,038 targets carried alternate
+    # names or TLS SANs that only the dialog's wider sweep read.
+    #
+    # The symptom was an operator with auto_amass on still finding
+    # domains waiting every single time they opened the dialog.
+    scope_zones = await enumerable_roots(session, pr.id)
+
+    tasked = await tasked_subjects(
+        session, pr.id,
+        ("amass", "nslookup", "reverse_ip", "nmap", "katana", "gobuster"))
+
+    # Everywhere web discovery could be pointed. A crawl and a
+    # content-discovery run both need a URL to start from -- "scan
+    # example.com" is not a thing either can do -- and one host can
+    # serve several sites.
+    #
+    # This read `web_addresses` alone, and that was the whole policy's
+    # blind spot: a project that had been port-scanned but never
+    # crawled has no rows there, so a switch set to `both` looked at
+    # an empty set and queued nothing, for ever, without saying so.
+    # The case it could not see is the only case it exists for.
+    #
+    # `discoverable` adds the URLs derived from open web services, so
+    # the standing order now starts from the same places the Enumerate
+    # dialog offers. The policy's own filter is unchanged and still
+    # does the real work: of everywhere it could go, queue the ones
+    # nothing has been run against yet.
+    web_urls = set(await discoverable(session, pr.id))
+
+    # Read whatever the switch is set to, rather than only when a
+    # crawl is wanted: `plan` is where the policy lives, and a
+    # snapshot that quietly omits part of the estate depending on a
+    # setting is how `web_urls` came to be narrower than the dialog's
+    # list without anybody noticing.
+    seeds = await crawl_seeds(session, pr.id)
+
+    return Snapshot(
+        auto_amass=bool(pr.auto_amass),
+        auto_resolve_ips=bool(pr.auto_resolve_ips),
+        auto_reverse_dns=bool(pr.auto_reverse_dns),
+        auto_nmap=str(pr.auto_nmap or "off"),
+        auto_web=str(getattr(pr, "auto_web", None) or "off"),
+        auto_nuclei=str(getattr(pr, "auto_nuclei", None) or "off"),
+        targets=targets, addresses=addresses,
+        searched=searched, tasked=tasked,
+        scope_zones=scope_zones, web_urls=web_urls, seeds=seeds)
+
+
+async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
+    """Evaluate one project's policies and queue what the gate allows.
+
+    Returns a count per policy, which is what the log line and the
+    tests read. An empty dict means there was nothing to do, which is
+    the normal case and is not logged.
+    """
+    # Geolocation, if it is switched on and has databases. Done here
+    # because this loop is already the project's "follow-up work"
+    # cycle and runs on a timer; a lookup is a memory-mapped tree walk
+    # against a local file, so it costs nothing to ask and nothing
+    # leaves this machine.
+    #
+    # Bounded inside `tag_missing`: a project with forty thousand
+    # addresses does them over several cycles rather than in one.
+    try:
+        if n := await geoip.tag_missing(session, pr.id):
+            log.info("geoip: located %d address(es) in %s", n, pr.code)
+    except Exception as e:                       # noqa: BLE001
+        # Never fatal to the standing orders. Geolocation is a nicety;
+        # the scans are the job.
+        log.warning("geoip: %s", e)
+
+    snap = await snapshot(session, pr)
+    want = plan(snap)
+    if not want:
+        return {}
+
+    # Nothing is queued at all with no ghost to run it. The tasks would
+    # sit in the queue and be perfectly valid, but "25 queued" against
+    # an empty fleet every minute is a queue nobody asked for by the
+    # time anyone brings an agent up.
+    live = (await session.execute(
+        select(Agent.id).where(Agent.project_id == pr.id,
+                               Agent.status == "online").limit(1))).first()
+    if live is None:
+        return {}
+
+    idx = await index_for(session, pr.id)
+    # The same floor the queueing path enforces, for the same reason.
+    # `plan()` filters on what has ever been tasked and that filter
+    # was once wrong by a lowercase; this makes a second outstanding
+    # copy impossible rather than merely unplanned.
+    in_flight = await outstanding_subjects(
+        session, pr.id, tuple({c.kind for c in want}))
+    queued: dict[str, int] = {}
+    pending = 0
+    for c in want:
+        # What this task will actually be pointed at. Almost every
+        # policy names one subject and scans exactly it; a crawl
+        # seeded from content discovery names the origin as its
+        # subject and carries the unlinked paths underneath it.
+        #
+        # Both the gate and the in-flight floor are applied to this
+        # list rather than to `c.subject`, so the rule stays "every
+        # address a task will touch was cleared and is not already
+        # being touched" -- which is the property the single-subject
+        # form had by accident and this form has to keep on purpose.
+        aimed = ([c.subject] if c.kind == "amass"
+                 else [str(x) for x in (c.args.get("targets") or [c.subject])])
+        if any((c.kind, a.lower()) in in_flight for a in aimed):
+            continue
+        # A zone handed to amass is asked `check_zone`; everything else
+        # is a host something will be done TO, and gets `check`. The two
+        # disagree on exactly one input -- the apex of a wildcard -- and
+        # collapsing them would let a standing order queue a scan at a
+        # host the wildcard never covered, with nobody watching.
+        # `as_host` on the else branch: a web candidate's subject is a
+        # URL, and the scope document names hosts, so `check` on the
+        # raw string matched nothing and refused every web candidate
+        # silently -- refusals here are deliberately not logged per
+        # candidate, so auto_web queued nothing and said nothing.
+        if c.kind == "amass":
+            allowed = idx.check_zone(c.subject).allowed
+        else:
+            # EVERY aimed address, not just the first. A task that
+            # carries several is only as cleared as its least-cleared
+            # entry, and "the subject passed" would be a gate that
+            # checks one URL and scans twenty-five.
+            allowed = all(idx.check(as_host(a) or a).allowed for a in aimed)
+        if not allowed:
+            # Not an error and not logged per candidate: a project whose
+            # scope is narrower than its target list refuses the same
+            # names every cycle, and that would be the whole log.
+            continue
+        args = dict(c.args) if c.kind == "amass" else {**c.args,
+                                                       "targets": aimed}
+        t = AgentTask(agent_id=None, project_id=pr.id, requested_by=None,
+                      kind=c.kind, args=json.dumps(args),
+                      import_as=_import_as(c.kind), status="queued")
+        session.add(t)
+        queued[c.policy] = queued.get(c.policy, 0) + 1
+        pending += 1
+        # Flushed in batches rather than accumulating the whole backlog
+        # in one statement. A project switching a policy on for four
+        # thousand hosts is now one cycle, not a hundred and sixty, and
+        # that only works if the write is chunked.
+        if pending >= BATCH:
+            await session.flush()
+            pending = 0
+
+    if queued:
+        await session.commit()
+        await broker.publish("agents", action="task", project=pr.code)
+        log.info("standing orders for %s queued %s", pr.code,
+                 ", ".join(f"{n} {p}" for p, n in sorted(queued.items())))
+    return queued
+
+
+def _import_as(kind: str) -> str | None:
+    """What the result should be imported as, matching TASK_KINDS.
+
+    Imported lazily from the router rather than duplicated: two lists
+    of which tools produce importable output would disagree, and the
+    one that matters is whichever is consulted.
+    """
+    from .routers.agents import TASK_KINDS
+    return TASK_KINDS.get(kind)
+
+
+class Worker:
+    """The single background loop. Started once, at application startup."""
+
+    def __init__(self) -> None:
+        self.task: asyncio.Task | None = None
+        self.running = False
+        self.last: str | None = None
+
+    async def _cycle(self) -> None:
+        async with SessionLocal() as session:
+            # Only projects with something switched on, so an
+            # installation that uses none of this does one cheap query
+            # a minute and nothing else.
+            rows = (await session.execute(
+                select(Project).where(
+                    Project.status == "active",
+                    (Project.auto_amass.is_(True))
+                    | (Project.auto_resolve_ips.is_(True))
+                    | (Project.auto_reverse_dns.is_(True))
+                    | (Project.auto_nmap != "off")
+                    # `auto_web` was missing from this list. A project
+                    # with web discovery as its ONLY standing order
+                    # was never selected, so the policy did nothing
+                    # and said nothing -- the worker reported "no
+                    # project has a standing order" while one was set.
+                    # It went unnoticed because the only project using
+                    # it had the other four on as well, which selected
+                    # it for unrelated reasons.
+                    | (Project.auto_web != "off")
+                    | (Project.auto_nuclei != "off")))).scalars().all()
+            if not rows:
+                self.last = "no project has a standing order"
+                return
+            total: dict[str, int] = {}
+            for pr in rows:
+                for policy, n in (await run_once(session, pr)).items():
+                    total[policy] = total.get(policy, 0) + n
+            self.last = (", ".join(f"{n} {p}" for p, n in sorted(total.items()))
+                         if total else "nothing outstanding")
+
+    async def _loop(self) -> None:
+        log.info("standing-orders worker started")
+        while True:
+            try:
+                await self._cycle()
+                await asyncio.sleep(CYCLE_SECS)
+            except asyncio.CancelledError:
+                log.info("standing-orders worker stopped")
+                raise
+            except Exception:
+                # The worker must outlive any single failure. A crashed
+                # background task fails silently and forever, and this
+                # one failing silently means an operator believes
+                # scanning is happening when it is not.
+                log.exception("standing-orders iteration failed")
+                await asyncio.sleep(ERROR_SLEEP)
+
+    def start(self) -> None:
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self._loop())
+            self.running = True
+
+
+worker = Worker()

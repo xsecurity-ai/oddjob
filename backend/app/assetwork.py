@@ -1,0 +1,773 @@
+"""Drive the asset pipeline: fetch what is unfetched, scan what is unscanned.
+
+Stages 1 and 2 supplied the parts -- `assetfetch` retrieves a file
+and recovers its originals, `assetscan` reads them. This is the
+thing that actually runs them over a project and turns what comes
+back into findings.
+
+**Both halves resume.** Fetching is keyed on `fetched_at` and
+scanning on `WebAssetFile.scanned_at`, per file rather than per
+asset, so a sweep interrupted after 300 of 900 files picks up at
+301 and a source map that yields new sources on a later fetch gets
+those scanned without re-scanning the ninety that did not change.
+
+**Scope comes from the page, not the asset** (operator ruling: an
+asset of an in-scope page is in scope). Checked here, against the
+page that referenced it, because the asset's own host is frequently
+a CDN that would never clear the gate -- and refusing those would
+skip exactly the bundles worth reading. An asset with no
+identifiable in-scope page is skipped and counted, never fetched on
+the strength of its own hostname.
+
+**A finding needs a target.** `Vuln.target_id` is NOT NULL and an
+asset's target is nullable, so an asset nothing can attribute to a
+host is reported as unattributable rather than filed against a
+guess. Counted, so the number is visible instead of being the
+difference between two other numbers.
+
+Secrets never reach a log line here. `assetscan` redacts before a
+Finding exists, and nothing in this module prints a body.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import tempfile
+from dataclasses import dataclass, field
+from urllib.parse import urlparse
+
+import httpx
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from . import assetfetch, assetlinks, assetscan
+from .hosts import InvalidHost, normalise_host
+from .models import (
+    FindingSecret,
+    Target,
+    Vuln,
+    WebAsset,
+    WebAssetEndpoint,
+    WebAssetFile,
+    WebAssetRef,
+)
+from .scopegate import as_host, index_for
+
+log = logging.getLogger("oddjob.assetwork")
+
+#: Default batch. Each asset is at least one request to the client's
+#: estate, so a sweep is paced rather than unbounded.
+FETCH_BATCH = 50
+
+#: How many fetches are in flight at once, ACROSS hosts.
+#:
+#: The work is network-bound -- almost all of a fetch is waiting --
+#: so doing one at a time wasted the entire budget on latency.
+FETCH_CONCURRENCY = 8
+
+#: And at most one at a time PER HOST, which is the part that
+#: matters. The backlog is not spread evenly: on this estate 1,896
+#: of 7,800 queued assets are on a single host, so plain global
+#: concurrency would point all eight slots at one server. Every
+#: host sees the same one-request-at-a-time it saw before; what
+#: changes is that we now wait on several hosts at once instead of
+#: on one.
+_HOST_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _url_host(url: str) -> str:
+    """The hostname a request will actually go to."""
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _host_lock(host: str) -> asyncio.Lock:
+    lk = _HOST_LOCKS.get(host)
+    if lk is None:
+        lk = _HOST_LOCKS[host] = asyncio.Lock()
+    return lk
+SCAN_BATCH = 200          # one invocation covers all of them
+
+
+@dataclass
+class Swept:
+    considered: int = 0
+    fetched: int = 0
+    failed: int = 0
+    #: No in-scope page could be found to authorise it.
+    unauthorised: int = 0
+    files: int = 0
+    scanned: int = 0
+    findings: int = 0
+    #: Endpoints referenced by a bundle that nothing links to.
+    endpoints: int = 0
+    #: Cloud resources named in a bundle, added as `kind="cloud"`
+    #: targets.
+    cloud: int = 0
+    #: ...and those refused because the scope document does not
+    #: cover them, which is the ordinary case: a bundle references
+    #: a lot of somebody else's cloud. Counted rather than silent,
+    #: so a project seeing zero added knows whether that means
+    #: "none found" or "found and all out of scope".
+    cloud_refused: int = 0
+    #: Findings that could not be filed because nothing ties the
+    #: asset to a target. Surfaced, not swallowed.
+    unattributable: int = 0
+    notes: list[str] = field(default_factory=list)
+
+
+async def _page_hosts(session: AsyncSession, asset: WebAsset) -> list[str]:
+    """Every page known to reference this asset, as hosts."""
+    out: list[str] = []
+    if asset.first_page:
+        out.append(as_host(asset.first_page) or "")
+    for (u,) in (await session.execute(
+            select(WebAssetRef.page_url)
+            .where(WebAssetRef.asset_id == asset.id).limit(25))).all():
+        if u:
+            out.append(as_host(u) or "")
+    return [h for h in out if h]
+
+
+async def authorised(session: AsyncSession, idx, asset: WebAsset) -> bool:
+    """Whether any page referencing this asset is in scope.
+
+    ANY, not all: if an in-scope page causes a browser to fetch this
+    file, we are authorised to fetch the same file. A second page
+    out of scope referencing it as well does not withdraw that.
+    """
+    hosts = await _page_hosts(session, asset)
+    return any(idx.check(h).allowed for h in hosts)
+
+
+def spread_by_host(pool: list, limit: int) -> list:
+    """Round-robin a candidate pool by host, up to `limit`.
+
+    The queue is not spread evenly -- on one real estate 1,896 of
+    7,800 waiting assets were on a single host -- and rows come out
+    of the table in insertion order, which groups a host's assets
+    together. Taking the first N therefore meant N requests at one
+    server: the slowest possible ordering, because they serialise
+    behind that host's lock, and the least polite one.
+
+    Keyed on `host` rather than the URL, which is the cheap
+    approximation: this only decides the ORDER work is attempted
+    in, and the per-host lock keyed on the real URL is what
+    actually bounds the rate at a server.
+    """
+    by_host: dict[str, list] = {}
+    for a in pool:
+        by_host.setdefault(getattr(a, "host", None) or "", []).append(a)
+    out: list = []
+    while len(out) < limit and by_host:
+        for h in list(by_host):
+            if not by_host[h]:
+                del by_host[h]
+                continue
+            out.append(by_host[h].pop(0))
+            if len(out) >= limit:
+                break
+    return out
+
+
+async def fetch_project(session: AsyncSession, project_id: int, *,
+                        user_agent: str, limit: int = FETCH_BATCH) -> Swept:
+    """Retrieve assets this project knows of but has never read."""
+    out = Swept()
+    # Spread across hosts, not `ORDER BY id`.
+    #
+    # Insertion order groups a host's assets together, so a batch
+    # was usually twenty requests at one server -- the slowest
+    # possible ordering AND the least polite. Taking a wider slice
+    # and round-robining by host means a batch of twenty is twenty
+    # different servers wherever it can be, which is both faster
+    # and gentler at every one of them.
+    pool = (await session.execute(
+        select(WebAsset)
+        .where(WebAsset.project_id == project_id,
+               WebAsset.fetched_at.is_(None),
+               WebAsset.kind.in_(tuple(assetfetch.FETCHABLE_KINDS)))
+        .order_by(WebAsset.id).limit(limit * 20))).scalars().all()
+    if not pool:
+        return out
+    rows = spread_by_host(pool, limit)
+    idx = await index_for(session, project_id)
+
+    # Authorisation and the database work stay sequential -- they
+    # share one session, which is not safe to use concurrently. Only
+    # the NETWORK half runs in parallel, which is the part that was
+    # costing the time.
+    todo = []
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        for a in rows:
+            out.considered += 1
+            if not await authorised(session, idx, a):
+                out.unauthorised += 1
+                # Record the ATTEMPT, so this is not reconsidered on
+                # every cycle for ever. `fetched_at` is "when we last
+                # tried", not "when we got it" -- the error says which
+                # -- and without stamping it an asset nothing
+                # authorises stays in the backlog permanently, is
+                # re-examined every two minutes, and keeps `unfetched`
+                # from ever reaching zero so the figure stops meaning
+                # anything.
+                #
+                # If the scope later widens, clearing `fetch_error`
+                # puts it back in the queue. That is an operator
+                # action because a scope change is one.
+                a.fetched_at = assetfetch.now()
+                a.fetch_error = ("no in-scope page references this asset, "
+                                 "so nothing authorises fetching it")
+                continue
+            todo.append(a)
+
+        sem = asyncio.Semaphore(FETCH_CONCURRENCY)
+
+        async def _grab(asset):
+            # Keyed on the URL's hostname, NOT `asset.host`. That
+            # column is recorded at crawl time and can disagree with
+            # the URL -- and it is the URL that receives the
+            # request, so locking on the column protects the wrong
+            # server. Caught by the probe measuring two requests in
+            # flight at one host while the lock reported none.
+            async with sem, _host_lock(_url_host(asset.url)):
+                return asset, await assetfetch.fetch(
+                    client, asset.url, user_agent=user_agent)
+
+        results = await asyncio.gather(*(_grab(a) for a in todo),
+                                       return_exceptions=True)
+
+        for item in results:
+            if isinstance(item, BaseException):
+                # A fetch that raised out of `fetch` -- which is
+                # written not to -- must not lose the whole batch.
+                log.warning("assetwork: fetch task failed: %s", item)
+                out.failed += 1
+                continue
+            a, got = item
+            a.fetched_at = assetfetch.now()
+            a.status_code = got.status
+            a.content_type = got.content_type
+            a.minified = got.minified
+            a.sourcemap_url = (got.sourcemap_url or None)
+            if not got.ok:
+                a.fetch_error = got.error
+                out.failed += 1
+                continue
+            a.fetch_error = None
+            for origin, path, body in got.files:
+                sha, n = assetfetch.digest(body)
+                if origin == "raw":
+                    a.sha256, a.bytes, a.body = sha, n, body
+                existing = (await session.execute(
+                    select(WebAssetFile).where(
+                        WebAssetFile.asset_id == a.id,
+                        WebAssetFile.origin == origin,
+                        WebAssetFile.path == path))).scalar_one_or_none()
+                if existing is None:
+                    session.add(WebAssetFile(
+                        asset_id=a.id, project_id=project_id, origin=origin,
+                        path=path, body=body, sha256=sha, bytes=n))
+                    out.files += 1
+                elif existing.sha256 != sha:
+                    # Changed since last time: new content, so the
+                    # old scan verdict no longer describes it.
+                    existing.body, existing.sha256 = body, sha
+                    existing.bytes, existing.scanned_at = n, None
+                    out.files += 1
+            out.fetched += 1
+    await session.commit()
+    return out
+
+
+def _severity_floor(sev: str) -> str:
+    return sev if sev in ("critical", "high", "medium", "low", "info") else "info"
+
+
+async def _target_for(session: AsyncSession, asset: WebAsset) -> int | None:
+    """A target to file findings against, or None.
+
+    The asset's own target first, then the target of any page that
+    referenced it. None means nothing ties this file to a host we
+    know, and the caller reports it rather than picking one.
+    """
+    if asset.target_id:
+        return asset.target_id
+    row = (await session.execute(
+        select(WebAssetRef.target_id)
+        .where(WebAssetRef.asset_id == asset.id,
+               WebAssetRef.target_id.is_not(None)).limit(1))).first()
+    return row[0] if row else None
+
+
+async def _record_cloud(session: AsyncSession, project_id: int, idx,
+                        f) -> tuple[int, int]:
+    """Cloud resources named in one file, as targets.
+
+    -> (added, refused)
+
+    A bundle that talks to `acme-assets.s3.eu-west-1.amazonaws.com`
+    names an asset of the estate that nothing links to and no port
+    scan reaches: it is not on the client's address space, so it is
+    in no CIDR anybody scans, and no crawl finds it because no page
+    links to a bucket. The code is the only place it appears.
+
+    Recorded as `kind="cloud"` with the provider set, so the rest of
+    the system can tell it apart from a machine -- "no open ports"
+    on a bucket is not the finding that the same result on a server
+    would be.
+
+    **Scope-checked before creation, exactly as `enumerate` does.**
+    This is the whole reason these are matched as hostnames rather
+    than as ARNs: a bundle references plenty of cloud that belongs
+    to somebody else -- a CDN, an analytics vendor, a font host --
+    and auto-creating targets for those would put a third party's
+    infrastructure in an engagement, which is how a scanner ends up
+    pointed at a company nobody is authorised to touch. A bucket
+    hostname is an ordinary FQDN that `ScopeIndex` can rule on. An
+    ARN is not, and could never be checked at all.
+    """
+    found = assetlinks.cloud_resources(f.body or "")
+    if not found:
+        return 0, 0
+    added = refused = 0
+    for provider, host in found:
+        try:
+            h = normalise_host(host)
+        except InvalidHost:
+            continue
+        if not idx.check(h).allowed:
+            # Not an error. The overwhelmingly common case is a
+            # vendor's bucket, and refusing it is the feature.
+            refused += 1
+            continue
+        dup = (await session.execute(
+            select(Target).where(Target.project_id == project_id,
+                                 Target.host == h))).scalar_one_or_none()
+        if dup is not None:
+            # An existing host row that turns out to be a cloud
+            # resource is relabelled, not duplicated: the unique
+            # constraint is (project, host) and the kind is new
+            # information about a row we already had.
+            if dup.kind == "host" and not dup.provider:
+                dup.kind, dup.provider = "cloud", provider
+            continue
+        session.add(Target(project_id=project_id, host=h, kind="cloud",
+                           provider=provider, alive=None))
+        added += 1
+    return added, refused
+
+
+async def scan_project(session: AsyncSession, project_id: int, *,
+                       limit: int = SCAN_BATCH) -> Swept:
+    """Run the scanners over files nothing has read yet."""
+    out = Swept()
+    have = assetscan.available()
+    if not any(have.values()):
+        # Not an error and not a clean result. A sweep with no
+        # scanner present has not shown that these files are free of
+        # anything -- it has shown nothing, and saying so is the
+        # difference between a gap and a pass.
+        out.notes.append(
+            "no scanner is installed, so nothing was examined: "
+            f"{have}. This is not a clean result.")
+        return out
+    if not all(have.values()):
+        out.notes.append(f"only some scanners are present: {have}")
+
+    rows = (await session.execute(
+        select(WebAssetFile)
+        .where(WebAssetFile.project_id == project_id,
+               WebAssetFile.scanned_at.is_(None),
+               WebAssetFile.body.is_not(None))
+        .order_by(WebAssetFile.id).limit(limit))).scalars().all()
+
+    # One index for the batch. Built here rather than per file
+    # because it is a SELECT over the project's scope rows and the
+    # batch is a hundred files.
+    _idx = await index_for(session, project_id)
+
+    # Endpoints first: this is text extraction, it cannot fail, and
+    # it is worth having even on a sweep where the scanners are
+    # missing or time out. Only for files that are actually code --
+    # running it over a stylesheet finds the same handful of font
+    # URLs on every project.
+    for f in rows:
+        if os.path.splitext(f.path)[1].lower() not in (
+                ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue",
+                ".json", ".html", ""):
+            continue
+        out.endpoints += await _record_endpoints(session, f)
+        _added, _refused = await _record_cloud(session, project_id, _idx, f)
+        out.cloud += _added
+        out.cloud_refused += _refused
+
+    found, ok = await scan_batch([(f.id, f.path, f.body or "") for f in rows])
+    if not ok:
+        # Do NOT mark these scanned. A scanner that timed out has
+        # examined nothing, and stamping the file would retire it
+        # from the queue for ever on the strength of a failure.
+        out.notes.append(
+            "a scanner did not complete, so this batch is NOT marked "
+            "scanned and will be retried. Nothing here is a clean result.")
+    for f in rows:
+        out.scanned += 1
+        if ok:
+            f.scanned_at = assetfetch.now()
+        findings = found.get(f.id) or []
+        if not findings:
+            continue
+        asset = (await session.execute(
+            select(WebAsset).where(WebAsset.id == f.asset_id))).scalar_one()
+        tid = await _target_for(session, asset)
+        if tid is None:
+            out.unattributable += len(findings)
+            continue
+        for fi in findings:
+            if await _file_vuln(session, tid, fi, asset.url):
+                out.findings += 1
+    # Committed here, after one scanner run rather than one per file:
+    # the batch IS the unit of work now, so a partial commit would
+    # record files as scanned that the single invocation covered
+    # together.
+    await session.commit()
+    if rows:
+        await session.execute(
+            WebAsset.__table__.update()
+            .where(WebAsset.id.in_({f.asset_id for f in rows}))
+            .values(scanned_at=assetfetch.now()))
+    await session.commit()
+    return out
+
+
+async def scan_batch(items: list[tuple[int, str, str]]
+                     ) -> tuple[dict[int, list[assetscan.Finding]], bool]:
+    """Scan many files in ONE invocation of each scanner.
+
+    `items` is (id, path, body). Returns findings per id.
+
+    **One invocation per batch, not per file.** Both tools spend
+    almost all of their time starting up -- opengrep loads and
+    compiles its ruleset every run -- so a per-file loop paid that
+    cost for every file. Measured on the deployed image: 12.3s for a
+    single small .js file against the javascript rules alone, and a
+    timeout against the whole corpus. The same startup covers a
+    hundred files just as well, which is the difference between a
+    sweep that keeps up and one that never finishes.
+
+    Files are written under names WE choose (`<id>__<base>`), not the
+    paths from a source map: those are attacker-influenced, and a
+    filename handed to a subprocess is the one place that could
+    still matter. The id prefix is how results map back.
+    """
+    out: dict[int, list[assetscan.Finding]] = {i: [] for i, _, _ in items}
+    if not items:
+        return out, True
+    have = assetscan.available()
+    # Whether the scanners actually finished. A timeout returns no
+    # output, which is indistinguishable from "found nothing" unless
+    # it is tracked -- and a file marked scanned on the strength of a
+    # timeout is a file nobody will ever look at again. This is the
+    # whole "a failed lookup is not evidence" rule, applied to our
+    # own tooling: 50 files were stamped exactly that way in
+    # production before this existed.
+    ok = True
+    real = {i: path for i, path, _ in items}
+
+    with tempfile.TemporaryDirectory(prefix="oddjob-scan-") as d:
+        by_name: dict[str, int] = {}
+        exts: set[str] = set()
+        for fid, path, body in items:
+            ext = os.path.splitext(path)[1][:8] or ".txt"
+            exts.add(ext)
+            name = f"{fid}__{os.path.basename(path)[:60] or 'file'}"
+            if not name.endswith(ext):
+                name += ext
+            by_name[name] = fid
+            with open(os.path.join(d, name), "w",
+                      encoding="utf-8", errors="replace") as fh:
+                fh.write(body)
+
+        def owner(reported: str) -> int | None:
+            base = os.path.basename(reported or "")
+            if base in by_name:
+                return by_name[base]
+            head = base.split("__", 1)[0]
+            return int(head) if head.isdigit() else None
+
+        # The union of rule sets the batch needs, so a mixed batch is
+        # still one run rather than one per language.
+        rules: list[str] = []
+        for e in sorted(exts):
+            for r in assetscan.rules_for("x" + e):
+                if r not in rules:
+                    rules.append(r)
+
+        if have.get("opengrep") and rules:
+            argv = [assetscan.OPENGREP, "scan", "--json"]
+            argv += [f"--config={r}" for r in rules]
+            argv.append(d)
+            rc, so, se = await assetscan._run(
+                argv, b"", env=assetscan.OPENGREP_ENV)
+            if rc not in (0, 1):
+                ok = False
+                log.warning("assetwork: opengrep rc=%s (%s): %s",
+                            rc, "TIMED OUT" if rc == -1 else "failed",
+                            se[-200:])
+            for f in assetscan.parse_opengrep(so, ""):
+                fid = owner(f.path)
+                if fid is not None:
+                    out[fid].append(_reseat(f, real[fid]))
+
+        # detect-secrets runs IN PROCESS, per file: it is a Python
+        # library, not a subprocess, so there is no startup cost to
+        # amortise and batching would only lose the per-file path.
+        # It carries both vendor regexes and Shannon entropy, which
+        # is what finds a credential belonging to no issuer we have
+        # a pattern for.
+        if have.get("detect-secrets"):
+            for fid, fpath, fbody in items:
+                for f in assetscan.scan_detect_secrets(fpath, fbody):
+                    out[fid].append(f)
+    return out, ok
+
+
+def _reseat(f: assetscan.Finding, path: str) -> assetscan.Finding:
+    """Put the REAL path back on a finding.
+
+    The scanners saw our temporary name. A finding has to name the
+    file the developer would recognise -- `src/auth/session.ts`, not
+    `4821__session.ts` in a directory that no longer exists.
+    """
+    # Rebuilt from the real path, not string-replaced into the old
+    # one. Substituting the basename left the temporary directory in
+    # the title -- "... in /tmp/oddjob-scan-9e4nptlz/js/src/
+    # dropdown.js" -- naming a directory that no longer exists, in
+    # the field a client reads first.
+    title = f"{f.rule} in {path}"
+    return assetscan.Finding(
+        scanner=f.scanner, rule=f.rule, title=title[:1000],
+        severity=f.severity, path=path, line=f.line,
+        detail=f.detail, fingerprint=f.fingerprint, secret=f.secret)
+
+
+async def _record_endpoints(session: AsyncSession, f) -> int:
+    """Store the endpoints one file references. -> how many are new.
+
+    Upserted on (asset, value): the same path appears in a hundred
+    files of one bundle and again on every later sweep, so without
+    the key this table would grow without bound while saying nothing
+    new.
+    """
+    eps = assetlinks.extract(f.body or "")
+    if not eps:
+        return 0
+    have = {v for (v,) in (await session.execute(
+        select(WebAssetEndpoint.value).where(
+            WebAssetEndpoint.asset_id == f.asset_id))).all()}
+    added = 0
+    for e in eps:
+        if e.value in have:
+            continue
+        host = None
+        if e.kind == "url":
+            hs = assetlinks.hosts_of([e])
+            host = hs[0][:255] if hs else None
+        session.add(WebAssetEndpoint(
+            project_id=f.project_id, asset_id=f.asset_id, file_id=f.id,
+            kind=e.kind, value=e.value[:2000], host=host))
+        have.add(e.value)
+        added += 1
+    return added
+
+
+def origin_block(asset_url: str, path: str, line: int | None) -> str:
+    """Where a finding came from, as the tail of its description.
+
+    A named function and not an f-string inline, because the
+    `c5a2d83f61e4` migration parses this exact shape back out of
+    descriptions written before the origin had columns. Two places
+    that must agree about a format should be able to be tested
+    against each other, which an f-string buried in a function
+    body cannot be.
+    """
+    out = f"{asset_url}\n\nFile: {path}"
+    return (out + f":{line}") if line else out
+
+
+async def _file_vuln(session: AsyncSession, target_id: int,
+                     f: assetscan.Finding, asset_url: str) -> bool:
+    """Record one finding. -> True if it is new.
+
+    Keyed on the scanner fingerprint via `external_id`, which is the
+    project's existing upsert key for vulns. Re-running a sweep over
+    an unchanged file therefore amends rather than growing a second
+    copy of every finding.
+    """
+    eid = f"{f.scanner}:{f.fingerprint}"
+    existing = (await session.execute(
+        select(Vuln).where(Vuln.target_id == target_id,
+                           Vuln.external_id == eid))).scalar_one_or_none()
+
+    async def _keep_secret(vuln_id: int) -> None:
+        """Store the credential beside the finding, never inside it.
+
+        One row per finding, upserted: re-scanning the same bundle
+        must not accumulate copies of a key.
+        """
+        if not f.secret:
+            return
+        row = (await session.execute(select(FindingSecret).where(
+            FindingSecret.vuln_id == vuln_id))).scalar_one_or_none()
+        # Origin stored as columns as well as in the description.
+        # The description is for someone reading this one finding;
+        # these are for a list that has to show where a hundred
+        # credentials came from without parsing prose.
+        url, where, line = asset_url[:2000], f.path[:2000], f.line
+        if row is None:
+            session.add(FindingSecret(
+                vuln_id=vuln_id, secret=f.secret[:8000], detector=f.rule[:128],
+                asset_url=url, path=where, line=line))
+        else:
+            row.secret, row.detector = f.secret[:8000], f.rule[:128]
+            row.asset_url, row.path, row.line = url, where, line
+    body = f"{f.detail}\n\n{origin_block(asset_url, f.path, f.line)}"
+    if existing is not None:
+        existing.description = body[:8000]
+        existing.severity = _severity_floor(f.severity)
+        await _keep_secret(existing.id)
+        return False
+    v = Vuln(target_id=target_id, title=f.title[:1000],
+             severity=_severity_floor(f.severity), status="open",
+             description=body[:8000], external_id=eid[:128])
+    session.add(v)
+    # Flushed so the row has an id to hang the secret off.
+    await session.flush()
+    await _keep_secret(v.id)
+    return True
+
+
+async def pending(session: AsyncSession, project_id: int) -> dict[str, int]:
+    """What is still owed, for a page that wants to show a backlog."""
+    unfetched = (await session.execute(
+        select(func.count()).select_from(WebAsset).where(
+            WebAsset.project_id == project_id,
+            WebAsset.fetched_at.is_(None),
+            WebAsset.kind.in_(tuple(assetfetch.FETCHABLE_KINDS))))).scalar_one()
+    unscanned = (await session.execute(
+        select(func.count()).select_from(WebAssetFile).where(
+            WebAssetFile.project_id == project_id,
+            WebAssetFile.scanned_at.is_(None)))).scalar_one()
+    return {"unfetched": int(unfetched), "unscanned": int(unscanned)}
+
+
+
+
+
+# ------------------------------------------------------------- worker
+#
+# Automatic, for every project, with no switch to leave off.
+#
+# The other standing orders are opt-in because each one QUEUES SCANS
+# against a client and the operator decides when that starts. This
+# one is different in kind and that is why it is always on: the
+# assets are files a client's own pages already serve to every
+# visitor, and reading what an application ships is not an escalation
+# of what we are already doing to it -- it is reading the evidence a
+# crawl has already collected the references to.
+#
+# Paced rather than unbounded. A cycle does a small fetch batch and a
+# smaller scan batch: fetching sends one request per asset to the
+# client's estate, and opengrep takes seconds per file against the
+# full ruleset, so a large batch would hold the loop and flood the
+# far end for no benefit. The backlog drains over minutes instead of
+# in one burst, which is the right shape for something nobody asked
+# to start.
+
+#: Seconds between cycles.
+CYCLE_SECS = 120
+#: After an unexpected failure. Longer, so a persistent error does
+#: not become a hot loop against a client's servers.
+ERROR_SLEEP = 300
+#: Per cycle. Small on purpose -- see above.
+WORKER_FETCH = 20
+#: Bigger than the fetch batch on purpose. Scanning is ONE invocation
+#: of each tool over the whole batch, and almost all of the cost is
+#: startup: measured on the deployed image, 40 files in one run took
+#: 12.8s -- 0.32s/file against 12.3s for a single file on its own.
+#: A larger batch is therefore cheaper per file, where a larger
+#: FETCH batch is simply more requests at a client.
+WORKER_SCAN = 100
+
+
+class AssetWorker:
+    """Fetches and scans every project's assets, for ever."""
+
+    def __init__(self) -> None:
+        self.task = None
+        self.running = False
+        self.last = "not started"
+
+    async def _cycle(self) -> None:
+        from .db import SessionLocal
+        from .models import Project
+        from .routers.web import DEFAULT_UA
+
+        async with SessionLocal() as session:
+            projects = (await session.execute(
+                select(Project).where(
+                    Project.status.in_(("active", "paused"))))).scalars().all()
+            did: list[str] = []
+            for pr in projects:
+                owed = await pending(session, pr.id)
+                if not owed["unfetched"] and not owed["unscanned"]:
+                    continue
+                if owed["unfetched"]:
+                    sw = await fetch_project(
+                        session, pr.id,
+                        user_agent=(pr.user_agent or DEFAULT_UA),
+                        limit=WORKER_FETCH)
+                    if sw.fetched or sw.failed or sw.unauthorised:
+                        did.append(f"{pr.code}: fetched {sw.fetched}, "
+                                   f"failed {sw.failed}, "
+                                   f"unauthorised {sw.unauthorised}")
+                if owed["unscanned"]:
+                    sc = await scan_project(session, pr.id, limit=WORKER_SCAN)
+                    if sc.scanned:
+                        did.append(f"{pr.code}: scanned {sc.scanned}, "
+                                   f"{sc.findings} finding(s), "
+                                   f"{sc.unattributable} unattributable")
+                    # A missing scanner is worth saying once a cycle
+                    # rather than never: a sweep that examines nothing
+                    # must not look like a sweep that found nothing.
+                    for n in sc.notes:
+                        did.append(f"{pr.code}: {n}")
+            self.last = "; ".join(did) if did else "nothing outstanding"
+
+    async def _loop(self) -> None:
+        log.info("asset worker started")
+        while True:
+            try:
+                await self._cycle()
+                await asyncio.sleep(CYCLE_SECS)
+            except asyncio.CancelledError:
+                log.info("asset worker stopped")
+                raise
+            except Exception:
+                # Must outlive any single failure. A crashed background
+                # task fails silently and for ever, and this one dying
+                # quietly means an operator believes a client's
+                # JavaScript is being read when it is not.
+                log.exception("asset worker iteration failed")
+                await asyncio.sleep(ERROR_SLEEP)
+
+    def start(self) -> None:
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self._loop())
+            self.running = True
+
+
+worker = AssetWorker()
