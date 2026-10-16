@@ -79,7 +79,10 @@ export function SecretsPanel({ project, onFinding }: {
   project: string | null
   onFinding: (vulnId: number) => void
 }) {
-  const [sourceFor, setSourceFor] = useState<number | null>(null)
+  // The ROW, not just its id: the modal shows the verdict too, and
+  // the row already carries it. Holding the id alone would mean
+  // asking the server for something this table just rendered.
+  const [sourceFor, setSourceFor] = useState<SecretRow | null>(null)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['secrets', project],
@@ -95,7 +98,7 @@ export function SecretsPanel({ project, onFinding }: {
       field: 'secret', headerName: 'Secret', flex: 3, minWidth: 300,
       renderCell: (p) => (
         <SecretCell value={String(p.value ?? '')}
-          onSource={() => setSourceFor((p.row as SecretRow).vuln_id)} />
+          onSource={() => setSourceFor(p.row as SecretRow)} />
       ),
     },
     {
@@ -200,7 +203,10 @@ export function SecretsPanel({ project, onFinding }: {
       hiddenColumns={project ? { project_code: false } : undefined}
       note={`${data?.length ?? 0} stored in clear — reading this list is written to the audit log`}
     />
-    <SecretSourceModal vulnId={sourceFor} onClose={() => setSourceFor(null)} />
+    <SecretSourceModal
+      vulnId={sourceFor?.vuln_id ?? null}
+      triage={sourceFor?.triage ?? null}
+      onClose={() => setSourceFor(null)} />
     </>
   )
 }

@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert, Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle,
-  IconButton, Stack, Tooltip, Typography, alpha,
+  IconButton, MenuItem, Stack, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
+import { TRIAGE } from '../lib/triage'
 import { neon, glow } from '../theme'
 
 /** What `origin` means, said once rather than in three tooltips.
@@ -52,10 +53,41 @@ const LOCATED: Record<string, { sev: 'success' | 'warning' | 'error'; say: strin
  *  a `raw` bundle is one line of two megabytes, so "line 1" names the
  *  entire file. Offsets name the value.
  */
-export function SecretSourceModal({ vulnId, onClose }: {
+export function SecretSourceModal({ vulnId, triage, onClose }: {
   vulnId: number | null
+  /** The verdict as the table currently has it. Seeded from the row
+   *  rather than fetched: the panel already holds it for every
+   *  secret, and a second request per modal would be asking the
+   *  server something the caller just told us. */
+  triage: string | null
   onClose: () => void
 }) {
+  const qc = useQueryClient()
+
+  // The control is driven locally so the select moves the moment it
+  // is used, rather than after the list behind it has refetched.
+  // Seeded from the row and re-seeded when a DIFFERENT secret is
+  // opened -- without that, the second modal of a session opens
+  // showing the first one's verdict.
+  const [verdict, setVerdict] = useState(triage ?? 'needs_investigating')
+  useEffect(() => {
+    setVerdict(triage ?? 'needs_investigating')
+  }, [vulnId, triage])
+
+  const mark = useMutation({
+    mutationFn: (t: string) => api.setTriage(vulnId as number, t),
+    onSuccess: (_d, t) => {
+      setVerdict(t)
+      // The secrets table shows the same verdict in a column, and
+      // the findings views show it too. Both are invalidated, so a
+      // judgement made here is not contradicted by the list behind
+      // it.
+      void qc.invalidateQueries({ queryKey: ['secrets'] })
+      void qc.invalidateQueries({ queryKey: ['vulns'] })
+      void qc.invalidateQueries({ queryKey: ['vuln', vulnId] })
+    },
+  })
+
   const { data, isLoading, error } = useQuery({
     queryKey: ['secret-source', vulnId],
     queryFn: () => api.secretSource(vulnId!),
@@ -151,6 +183,39 @@ export function SecretSourceModal({ vulnId, onClose }: {
           <CloseIcon fontSize="small" />
         </IconButton>
       </DialogTitle>
+
+      {/* Judged here, where the evidence is. Reading the source IS
+          the act of deciding whether a hit is real, and making
+          somebody close this and find the same finding in another
+          table to say so is how a verdict never gets recorded.
+          The same control and the same vocabulary as VulnModal and
+          the table column -- a fourth spelling of these three states
+          is how they stop agreeing. */}
+      <Box sx={{
+        px: 3, pb: 1.5, display: 'flex', alignItems: 'center', gap: 1.5,
+        flexWrap: 'wrap',
+      }}>
+        <Typography sx={{
+          fontFamily: `'Orbitron', sans-serif`, fontSize: 10.5,
+          letterSpacing: '0.16em', color: neon.cyan,
+        }}>
+          TRIAGE
+        </Typography>
+        <TextField select size="small" value={verdict}
+          disabled={mark.isPending || vulnId == null}
+          onChange={(e) => mark.mutate(e.target.value)}
+          sx={{ minWidth: 210 }}>
+          {TRIAGE.map((t) => (
+            <MenuItem key={t.value} value={t.value}
+              sx={{ fontSize: 12.5, color: t.colour }}>{t.label}</MenuItem>
+          ))}
+        </TextField>
+        {mark.isError && (
+          <Typography sx={{ fontSize: 11, color: neon.red }}>
+            {(mark.error as Error).message}
+          </Typography>
+        )}
+      </Box>
 
       <DialogContent dividers
         sx={{ borderColor: alpha(neon.purple, 0.3), p: 0,
