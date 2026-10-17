@@ -42,7 +42,6 @@ import { HealthView } from './views/HealthView'
 import { WebView } from './views/WebView'
 import { ImportView } from './views/ImportView'
 import { ReportsView } from './views/ReportsView'
-import { GhostDebugView } from './views/GhostDebugView'
 import { GhostsView } from './views/GhostsView'
 import { ProjectConfigView } from './views/ProjectConfigView'
 import { useHostModal } from './components/HostModal'
@@ -97,7 +96,7 @@ function StatChip({ label, value, colour }: { label: string; value: number; colo
 }
 
 export default function App() {
-  const { me, loading, setupRequired, signOut, isAdmin } = useAuth()
+  const { me, loading, setupRequired, signOut } = useAuth()
   // Initialised FROM the URL, so a theme switch — which remounts the
   // tree to recompute alpha() colours — lands back where you were
   // instead of resetting to Targets.
@@ -296,24 +295,13 @@ export default function App() {
     // Its own entry, directly below Reports rather than nested inside
     // it. Nesting cost a click to reach a view an operator checks while
     // a scan is running, and hid it entirely until Reports was open.
-    // A group rather than a leaf, for the same reason Services is
-    // one: Debug is a second view of the same fleet, and an operator
-    // reaches for it while a scan is running.
-    {
-      key: 'ghosts', label: 'Ghosts', icon: <MemoryIcon fontSize="small" />,
-      children: [
-        { key: 'ghosts', label: 'Fleet', icon: <MemoryIcon fontSize="small" /> },
-        // Administrators of this engagement only, matching the
-        // endpoint. A tab that is always visible and answers 403 for
-        // most of the people who can see it teaches them to ignore
-        // the ones that do not -- and the view behind it refuses on
-        // its own account too, because a sidebar is not a control.
-        ...(isAdmin(scope)
-          ? ([{ key: 'ghost-debug', label: 'Debug',
-               icon: <BugReportIcon fontSize="small" /> }] satisfies NavLeaf[])
-          : []),
-      ],
-    },
+    // A LEAF, not a group. Debug was a child behind a dropdown,
+    // which cost a click to reach a view an operator checks while a
+    // scan is running and hid it until the group was open. It is a
+    // second view of the same fleet, so it is a tab on that page
+    // now. The `ghost-debug` route still resolves and opens that
+    // tab, so existing links keep working.
+    { key: 'ghosts', label: 'Ghosts', icon: <MemoryIcon fontSize="small" /> },
     // No sidebar entry for Project Config: it is reached from the edit
     // button on its own row in Projects, which is where you already are
     // when you want it. The route still resolves, so existing links and
@@ -358,7 +346,11 @@ export default function App() {
     import: <ImportView project={project === ALL ? null : project} />,
     reports: <ReportsView project={project === ALL ? null : project} />,
     ghosts: <GhostsView project={project === ALL ? null : project} />,
-    'ghost-debug': <GhostDebugView project={project === ALL ? null : project} />,
+    // Kept so bookmarks and existing links resolve. It is the same
+    // page with the Debug tab open, not a second view -- the
+    // admin check lives there, because a route is not a control.
+    'ghost-debug': <GhostsView project={project === ALL ? null : project}
+                              tab="debug" />,
     settings: <ProjectConfigView project={project === ALL ? null : project} />,
     config: <SiteConfigView />,
     health: <HealthView />,

@@ -198,6 +198,121 @@ routing policies and region configuration are all in the
 
 ---
 
+## Browsing through a Ghost: the SOCKS proxy
+
+A Ghost can carry your browser's traffic. You point the browser at
+Oddjob, Oddjob hands the stream to the Ghost over the tunnel it
+already holds open, and the Ghost makes the connection — so the
+request arrives **from inside the estate, at the address the client
+already sees you at**, instead of from your laptop.
+
+**It is off, and it stays off until three separate things are done.**
+That is deliberate: this is a proxy *into* a client's network, and
+every one of the three is somebody deciding, not a default.
+
+### 1. Turn the listener on
+
+**Site Config → SOCKS5 proxy through ghosts.** It binds `127.0.0.1`
+on port **8443**.
+
+Loopback is the default because it is useless from another machine,
+which is the point — reaching it means an SSH tunnel, and whoever
+set that up has already proved who they are:
+
+```bash
+ssh -N -L 8443:127.0.0.1:8443 you@oddjob-host
+```
+
+Widen `proxy.bind` only on purpose. `0.0.0.0` publishes a route into
+the engagement to anyone who can reach the host.
+
+**It is 8443 and cannot be 443.** A browser pointed at a SOCKS proxy
+speaks raw SOCKS5 — first byte `0x05`, no TLS, no SNI — and nginx
+routes 443 by SNI. There is nothing for it to match on, so the two
+cannot share a port without a first-byte demuxer nginx does not have.
+
+### 2. Enable it for one Ghost
+
+**Ghosts → pick one → Proxy.** Per agent, and off by default. A Ghost
+that has not been told to proxy is refused *even with a valid
+credential*, so enabling it is a decision made in Oddjob rather than
+something an agent can arrange for itself.
+
+The Ghost then dials the tunnel out and holds it open. There is no
+inbound listener on the Ghost and no way to ask for one.
+
+### 3. Issue a credential
+
+**Ghosts → that Ghost → Proxy → New credential.** You get a username
+and password **once**; only a hash is stored.
+
+The credential is bound to that one Ghost. It is not an Oddjob login
+and must never be one — SOCKS5 sends the password in clear text on
+every connection, so it has to be a secret worth exactly this one
+capability, which you can revoke without touching an account.
+
+### Point the browser at it
+
+Firefox, which has real per-browser proxy settings (Chrome uses the
+system ones, so prefer Firefox unless you want it machine-wide):
+
+**Settings → Network Settings → Manual proxy configuration**
+
+| | |
+|---|---|
+| SOCKS Host | `127.0.0.1` |
+| Port | `8443` |
+| | SOCKS v5 |
+| | ✅ Proxy DNS when using SOCKS v5 |
+
+Then browse. Firefox will ask for the username and password on the
+first request.
+
+**Tick "Proxy DNS".** Without it Firefox resolves the hostname on
+*your* machine and sends Oddjob an address, which defeats the point:
+split-horizon DNS inside an estate is the normal case, and the name
+you typed is the one the Ghost should resolve where it sits. It is
+also the name the scope gate rules on.
+
+With `curl`, for the same reason, use `socks5h` and not `socks5` —
+the `h` is what makes the remote end resolve:
+
+```bash
+curl --proxy socks5h://user:pass@127.0.0.1:8443 https://intranet.acme.example/
+```
+
+### What it will refuse, and why
+
+| | |
+|---|---|
+| No credential | SOCKS5 offers a "no authentication" method and every browser will use it happily. Accepting it would make this an open proxy, so it is answered with `0xFF`. |
+| SOCKS4 | No authentication at all. |
+| BIND, UDP ASSOCIATE | Both need the proxy to listen or relay datagrams — a second inbound surface. CONNECT is what a browser uses. |
+| Out of scope | **Every destination goes through the same scope gate a task does**, on the host as you typed it. The proxy cannot reach what a scan could not. |
+| A Ghost that is not connected | Reported as network-unreachable, separately from a refusal, because "that Ghost is not here" and "you may not go there" send you to different places. |
+
+### Everything is recorded
+
+Every connection is written down — **accepted and refused alike**.
+A proxy that logged only what it allowed could not answer *"did
+anybody try to reach that"*, which is the question this feature gets
+asked afterwards.
+
+What is stored is the decision, the destination and which credential
+was used. **No bodies and no byte contents**: the traffic is the
+client's and does not belong in this database.
+
+### If a credential leaks
+
+Revoke it. **Ghosts → that Ghost → Proxy → Revoke**, and it stops
+working on the next connection. Revocation is a timestamp rather than
+a delete, so the audit trail still has something to point at.
+
+Grants can also carry an expiry, and should: a proxy credential that
+lives for ever is one nobody remembers to take away.
+
+---
+
 ## Driving it from outside: the MCP server
 
 Oddjob ships an MCP server, so a model in Claude Code, Claude Desktop or

@@ -2,10 +2,12 @@ import { useState } from 'react'
 import {
   Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent,
   DialogTitle, Divider, IconButton, MenuItem, Select, Stack, Step, StepLabel,
+  Tab, Tabs,
   Stepper, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
 import DownloadIcon from '@mui/icons-material/Download'
+import LanIcon from '@mui/icons-material/Lan'
 import EditIcon from '@mui/icons-material/EditOutlined'
 import ContentCopyIcon from '@mui/icons-material/ContentCopy'
 import PowerSettingsNewIcon from '@mui/icons-material/PowerSettingsNew'
@@ -19,7 +21,9 @@ import { useAuth } from '../lib/auth'
 import { DataTable } from '../components/DataTable'
 import { GhostQueueDialog } from '../components/GhostQueueDialog'
 import { GhostTasksTable } from '../components/GhostTasksTable'
-import { neon, glow } from '../theme'
+import { neon, glow, TAB_SX } from '../theme'
+import { ProxySetupDialog } from '../components/ProxySetupDialog'
+import { GhostDebugView } from './GhostDebugView'
 import { CountryPicker } from '../components/CountryPicker'
 
 const STATUS_COLOUR: Record<string, string> = {
@@ -625,11 +629,19 @@ function EditAgentDialog({ project, agent, mode, geoipAvailable, onClose }: {
 }
 
 // ------------------------------------------------------------- the view
-export function GhostsView({ project }: { project: string | null }) {
+export function GhostsView({ project, tab: initialTab = 'fleet' }: {
+  project: string | null
+  /** Which tab to open on. `ghost-debug` used to be its own route
+   *  and still resolves, so a bookmark lands on Debug rather than
+   *  on a page that no longer exists. */
+  tab?: 'fleet' | 'debug'
+}) {
+  const [tab, setTab] = useState<'fleet' | 'debug'>(initialTab)
   const qc = useQueryClient()
   const { canWrite, roleOn } = useAuth()
   const [wizard, setWizard] = useState(false)
   const [confirmKill, setConfirmKill] = useState<GhostAgent | null>(null)
+  const [proxyFor, setProxyFor] = useState<GhostAgent | null>(null)
   const [editing, setEditing] = useState<GhostAgent | null>(null)
   // A killed agent leaves the table, because the table answers "what
   // is deployed" and it no longer is. The record stays — it holds the
@@ -667,6 +679,18 @@ export function GhostsView({ project }: { project: string | null }) {
   // is not offered to anyone else — a dropdown that answers 403 teaches
   // people the app is broken.
   const admin = roleOn(project ?? null) === 'admin'
+
+  // Enabling opens the setup straight away: the credential is shown
+  // exactly once, and a dialog you have to go and find afterwards is
+  // one whose secret ends up written down somewhere worse.
+  const proxyToggle = useMutation({
+    mutationFn: ({ id, enabled }: { id: number; enabled: boolean }) =>
+      api.setGhostProxy(project as string, id, enabled),
+    onSuccess: (a) => {
+      void qc.invalidateQueries({ queryKey: ['agents'] })
+      if (a.proxy_enabled) setProxyFor(a)
+    },
+  })
   const setParallel = useMutation({
     mutationFn: ({ id, n }: { id: number; n: number }) =>
       api.patchAgent(project as string, id, { parallel_override: n }),
@@ -1105,6 +1129,30 @@ export function GhostsView({ project }: { project: string | null }) {
         }
         return (
           <Stack direction="row" spacing={0.2}>
+            {/* Proxying, per ghost and off by default. Admin only,
+                because this is the difference between a Ghost that
+                runs the tasks it is given and one that carries
+                arbitrary traffic into the client's network. */}
+            {admin && (
+              <Tooltip title={p.row.proxy_enabled
+                ? (p.row.proxy_connected
+                   ? 'Proxying on, tunnel up — open the browser setup'
+                   : 'Proxying on, but this Ghost has not dialled in yet')
+                : 'Route a browser through this Ghost (SOCKS5)'}>
+                <IconButton size="small"
+                  onClick={() => {
+                    if (p.row.proxy_enabled) { setProxyFor(p.row); return }
+                    proxyToggle.mutate({ id: p.row.id, enabled: true })
+                  }}
+                  disabled={proxyToggle.isPending}>
+                  <LanIcon sx={{
+                    fontSize: 17,
+                    color: !p.row.proxy_enabled ? alpha(neon.muted, 0.55)
+                      : p.row.proxy_connected ? neon.green : neon.yellow,
+                  }} />
+                </IconButton>
+              </Tooltip>
+            )}
             <Tooltip title="Edit this Ghost">
               <IconButton size="small" onClick={() => setEditing(p.row)}>
                 <EditIcon sx={{ fontSize: 16, color: neon.cyan }} />
@@ -1149,6 +1197,22 @@ export function GhostsView({ project }: { project: string | null }) {
     // tables off MUI's DataGrid, which did its own scrolling and did
     // not care what its parent was.
     <Box sx={{ p: 2, flex: 1, minHeight: 0, overflowY: 'auto' }}>
+      {/* One page, two tabs. Debug was a second sidebar entry behind
+          a dropdown, which cost a click to reach a view an operator
+          checks WHILE a scan is running -- and hid it entirely until
+          the group was open. It is a second view of the same fleet,
+          so it belongs beside it. */}
+      {admin && (
+        <Tabs value={tab} onChange={(_, v) => setTab(v)}
+          sx={{ minHeight: 34, mb: 1,
+                borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
+          <Tab value="fleet" label="Fleet" sx={TAB_SX} />
+          <Tab value="debug" label="Debug" sx={TAB_SX} />
+        </Tabs>
+      )}
+      {admin && tab === 'debug' && <GhostDebugView project={project} />}
+      {tab === 'debug' && admin ? null : (
+      <>
       <Routing project={project} routing={routing} />
       <Box sx={{ height: '60vh', minHeight: 320,
                  display: 'flex', flexDirection: 'column' }}>
@@ -1198,8 +1262,17 @@ export function GhostsView({ project }: { project: string | null }) {
         <GhostTasksTable project={project} />
       </Box>
 
+      </>
+      )}
+
       {wizard && (
         <DeployWizard project={project} onClose={() => setWizard(false)} />
+      )}
+
+      {proxyFor && (
+        <ProxySetupDialog project={project} agent={proxyFor}
+          host={window.location.hostname}
+          onClose={() => setProxyFor(null)} />
       )}
 
       {editing && (

@@ -374,6 +374,18 @@ export interface Takeover {
   seen_at: string | null
 }
 
+/** A SOCKS5 credential for one ghost. Never carries the password:
+ *  that is returned once, by the call that makes it. */
+export interface ProxyGrant {
+  id: number
+  username: string
+  note: string | null
+  created_at: string | null
+  expires_at: string | null
+  last_used_at: string | null
+  revoked_at: string | null
+}
+
 export interface WebAddress {
   id: number; target_id: number; service_id: number | null
   host: string; project_code: string
@@ -513,6 +525,13 @@ export interface GhostAgent {
   version: string | null
   hostname: string | null
   privileged: boolean
+  /** Whether this ghost will carry proxied browser traffic. Off
+   *  unless somebody turned it on, per ghost. */
+  proxy_enabled: boolean
+  /** Whether its tunnel is up right now. Not stored anywhere — a
+   *  tunnel is only true while its socket is, so this is false
+   *  after a server restart until the ghost redials. */
+  proxy_connected: boolean
   tools: Record<string, string>
   call_in_url: string | null
   last_seen: string | null
@@ -1032,6 +1051,29 @@ export const api = {
   /** Every exchange recorded for one URL. Drives the expanded row. */
   webByUrl: (target_id: number, url: string) =>
     req<Page<WebAddress>>('/api/web/by-url' + qs({ target_id, url, limit: 500 })),
+
+  /** Turn SOCKS proxying on or off for one ghost. Admin only, and
+   *  switching it off drops the live tunnel immediately. */
+  setGhostProxy: (project: string, agentId: number, enabled: boolean) =>
+    req<GhostAgent>(`/api/ghosts/${agentId}/proxy` + qs({ project }),
+               { method: 'PATCH', body: JSON.stringify({ enabled }) }),
+
+  /** Credentials issued for one ghost. Never the secrets. */
+  proxyGrants: (project: string, agentId: number) =>
+    req<ProxyGrant[]>(`/api/ghosts/${agentId}/proxy/grants` + qs({ project })),
+
+  /** Issue one. The password comes back ONCE and is never retrievable. */
+  newProxyGrant: (project: string, agentId: number,
+                  body: { note?: string; expires_days?: number } = {}) =>
+    req<{ grant: ProxyGrant; username: string; password: string }>(
+      `/api/ghosts/${agentId}/proxy/grants` + qs({ project }),
+      { method: 'POST', body: JSON.stringify(body) }),
+
+  /** Revoke one. It stops working on the next connection. */
+  revokeProxyGrant: (project: string, agentId: number, grantId: number) =>
+    req<ProxyGrant>(
+      `/api/ghosts/${agentId}/proxy/grants/${grantId}` + qs({ project }),
+      { method: 'DELETE' }),
 
   /** Names in this engagement pointing at something unclaimed.
    *  Reads rows already decided; it resolves nothing itself. */
