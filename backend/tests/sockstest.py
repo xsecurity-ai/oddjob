@@ -400,5 +400,131 @@ if _ws_go.is_file():
               _m.group(1) == TUNNEL_PATH, (_m.group(1), TUNNEL_PATH))
 
 
+
+# ============================================ the listener, for real
+# A real socket, a real SOCKS5 handshake. The point is the refusals:
+# everything below is what stops this being an open proxy, and a
+# parser test does not prove the listener wires it up.
+import socket as _socket  # noqa: E402
+
+from app import proxyserver  # noqa: E402
+
+
+async def _listen():
+    srv = await proxyserver.serve("127.0.0.1", 0)
+    port = srv.sockets[0].getsockname()[1]
+    return srv, port
+
+
+def talk(port, payload, expect=2):
+    """Send bytes, read a reply, close."""
+    s = _socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        s.sendall(payload)
+        return s.recv(expect)
+    finally:
+        s.close()
+
+
+async def _no_auth_is_refused():
+    srv, port = await _listen()
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            None, talk, port, bytes((5, 1, socks.NO_AUTH)))
+    finally:
+        srv.close()
+        await srv.wait_closed()
+
+
+print("\n== the listener refuses an unauthenticated client ==")
+reply = run(_no_auth_is_refused())
+# The whole feature turns on this byte. A browser offering only
+# no-auth must be told 0xFF, or this port is an open proxy into
+# whatever the ghost can reach.
+check("a client offering only no-auth gets 0xFF",
+      reply == bytes((5, socks.NO_ACCEPTABLE)), reply.hex() if reply else None)
+
+
+async def _userpass_is_offered():
+    srv, port = await _listen()
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            None, talk, port, bytes((5, 2, socks.NO_AUTH, socks.USERPASS)))
+    finally:
+        srv.close()
+        await srv.wait_closed()
+
+
+reply = run(_userpass_is_offered())
+check("...and one offering both is steered to user/pass",
+      reply == bytes((5, socks.USERPASS)), reply.hex() if reply else None)
+
+
+async def _bad_credentials_are_refused():
+    srv, port = await _listen()
+    try:
+        def go():
+            s = _socket.create_connection(("127.0.0.1", port), timeout=5)
+            try:
+                s.sendall(bytes((5, 1, socks.USERPASS)))
+                if s.recv(2) != bytes((5, socks.USERPASS)):
+                    return None
+                u, p = b"oddsocks_nope", b"wrong"
+                s.sendall(bytes((1, len(u))) + u + bytes((len(p),)) + p)
+                # A CONNECT the gate never gets to rule on, because
+                # the credential is checked first.
+                host = b"acme.example"
+                s.sendall(bytes((5, 1, 0, socks.ATYP_DOMAIN, len(host)))
+                          + host + b"\x01\xbb")
+                return s.recv(10)
+            finally:
+                s.close()
+        return await asyncio.get_running_loop().run_in_executor(None, go)
+    finally:
+        srv.close()
+        await srv.wait_closed()
+
+
+print("\n== a credential that does not resolve ==")
+reply = run(_bad_credentials_are_refused())
+check("an unknown credential is refused", reply is not None and len(reply) >= 2,
+      reply.hex() if reply else None)
+if reply and len(reply) >= 2:
+    check("...with NOT_ALLOWED, not a connection",
+          reply[1] == socks.NOT_ALLOWED, reply[1])
+
+
+async def _socks4_is_refused():
+    srv, port = await _listen()
+    try:
+        def go():
+            s = _socket.create_connection(("127.0.0.1", port), timeout=5)
+            try:
+                # SOCKS4 CONNECT. It has no authentication at all, so
+                # answering it would be answering an unauthenticated
+                # protocol.
+                s.sendall(bytes((4, 1, 0x01, 0xBB, 127, 0, 0, 1)) + b"x\x00")
+                s.settimeout(3)
+                try:
+                    return s.recv(8)
+                except (TimeoutError, OSError):
+                    return b""
+            finally:
+                s.close()
+        return await asyncio.get_running_loop().run_in_executor(None, go)
+    finally:
+        srv.close()
+        await srv.wait_closed()
+
+
+print("\n== SOCKS4 gets nothing ==")
+reply = run(_socks4_is_refused())
+# Either the connection is dropped or nothing useful comes back.
+# What must NOT happen is a SOCKS4 success reply (0x00 0x5A).
+check("a SOCKS4 client is not answered with success",
+      not (reply and len(reply) >= 2 and reply[1] == 0x5A),
+      reply.hex() if reply else "(closed)")
+
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
