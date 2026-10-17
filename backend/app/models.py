@@ -1881,6 +1881,17 @@ class Agent(Base, TimestampMixin):
     call_in_key_hash: Mapped[str | None] = mapped_column(String(128))
     call_in_url: Mapped[str | None] = mapped_column(String(300))
 
+    #: Whether this Ghost will relay a SOCKS5 proxy stream.
+    #:
+    #: Off, and the default is the point. A proxy is a live socket
+    #: into wherever the Ghost sits, which is a different kind of
+    #: thing from a task: a task is queued, scoped and finished, while
+    #: this is open for as long as somebody holds it. Switching it on
+    #: is a deliberate act per agent, and `proxy_grants` are refused
+    #: while it is off even if the credential is otherwise good.
+    proxy_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False)
+
     #: The agent's Ed25519 public key, base64 raw. The private half is
     #: made on the agent's own host at enrollment and never sent, so what
     #: is stored here cannot impersonate it -- unlike the key hashes
@@ -2063,6 +2074,96 @@ class Agent(Base, TimestampMixin):
     #: when a ghost is misbehaving and off again afterwards.
     debug: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false", nullable=False)
+
+
+class ProxyGrant(Base, TimestampMixin):
+    """A SOCKS5 credential that routes through one Ghost.
+
+    Its own table and not a reuse of anything a person logs in with.
+    SOCKS5 sends the password in clear text on every connection, so
+    whatever is typed into a browser's proxy settings must be a
+    secret that is worth exactly this one capability and can be taken
+    away without touching an account.
+
+    Only the hash is kept, as with `Agent.callback_key_hash`: a dump
+    of this table must not hand anybody a route into the engagement.
+    The plaintext is shown once, when the grant is made.
+
+    **Scoped to one agent on purpose.** A grant that floated across a
+    project would let a credential issued for a lab Ghost be used
+    through one sitting inside the client, which is precisely the
+    mistake worth making impossible rather than improbable.
+    """
+    __tablename__ = "proxy_grants"
+    __table_args__ = (
+        UniqueConstraint("username", name="uq_proxy_grant_username"),
+        Index("ix_proxy_grants_agent_revoked", "agent_id", "revoked_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Indexed, and the detector deletes through it when an agent goes.
+    agent_id: Mapped[int] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+
+    #: What goes in the browser's proxy username box. Unique across
+    #: the installation so a lookup needs no second field, and so two
+    #: engagements cannot collide on one.
+    username: Mapped[str] = mapped_column(String(64))
+    password_hash: Mapped[str] = mapped_column(String(128))
+
+    #: Who asked for it, for the question that gets asked later.
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
+    note: Mapped[str | None] = mapped_column(String(300))
+
+    #: Revocation is a timestamp rather than a delete, so the audit
+    #: trail still has something to point at. A grant with this set is
+    #: refused; nothing reads it back.
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: When it stops working regardless. A proxy credential that lives
+    #: for ever is one nobody remembers to take away.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProxyConnection(Base):
+    """One connection the proxy accepted or refused, and where to.
+
+    Written for ACCEPTED and REFUSED alike. A proxy that only records
+    what it allowed cannot answer "did anybody try to reach that", and
+    a refusal is the more interesting half when somebody asks whether
+    a credential was misused.
+
+    No bodies and no byte contents -- just the decision, the
+    destination and who held the credential. The traffic itself is the
+    client's and does not belong in our database.
+    """
+    __tablename__ = "proxy_connections"
+    __table_args__ = (
+        Index("ix_proxy_conn_project_at", "project_id", "at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), index=True)
+    grant_id: Mapped[int | None] = mapped_column(
+        ForeignKey("proxy_grants.id", ondelete="SET NULL"), index=True)
+
+    #: The destination as the CLIENT asked for it -- a name stays a
+    #: name. What the Ghost resolved it to is a different fact and is
+    #: not invented here.
+    host: Mapped[str] = mapped_column(String(253))
+    port: Mapped[int] = mapped_column(Integer)
+    #: allowed | refused_scope | refused_auth | refused_command
+    outcome: Mapped[str] = mapped_column(String(24), index=True)
+    #: The scope gate's own sentence, when it is the one that refused.
+    reason: Mapped[str | None] = mapped_column(String(300))
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False)
 
 
 class AgentDebugLog(Base):
