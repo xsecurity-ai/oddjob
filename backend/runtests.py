@@ -40,6 +40,7 @@ SUITES = [
     ("tests/scantest.py",     TMP / "ms-scan.db"),
     ("tests/importtest.py",   TMP / "ms-imp.db"),
     ("tests/webtest.py",      TMP / "ms-web.db"),
+    ("tests/sockstest.py",    TMP / "ms-socks.db"),
     ("tests/reporttest.py",   TMP / "ms-rep.db"),
     ("tests/slacktest.py",    TMP / "ms-slack.db"),
     ("tests/slackchattest.py", TMP / "ms-slackchat.db"),
