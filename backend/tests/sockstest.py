@@ -178,5 +178,227 @@ check("a stream id with the top bit set survives the round trip",
       big.stream == 0xFFFFFFFF, big.stream)
 
 
+
+# ========================================================= the hub
+# One Ghost's tunnel, many streams over it. Routing and lifecycle,
+# which is where a multiplexer goes wrong: a frame landing in the
+# wrong stream reads as corruption, not as a routing bug.
+import asyncio  # noqa: E402
+
+from app import proxyhub  # noqa: E402
+from app.proxytunnel import (  # noqa: E402
+    CLOSE,
+    DATA,
+    FAILED,
+    OPENED,
+    decode,
+    encode,
+)
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+class Sink:
+    """Collects what the hub would have sent down the websocket."""
+
+    def __init__(self):
+        self.sent = []
+
+    async def __call__(self, raw):
+        self.sent.append(decode(raw))
+
+    def kinds(self):
+        return [f.kind for f in self.sent]
+
+
+print("\n== a dial that the ghost confirms ==")
+
+
+async def _opens():
+    sink = Sink()
+    t = proxyhub.Tunnel(1, sink)
+    task = asyncio.create_task(t.open("acme.example", 443, timeout=2))
+    await asyncio.sleep(0)
+    opened = [f for f in sink.sent if f.kind == 0x01]
+    if opened:
+        t.on_frame(decode(encode(OPENED, opened[0].stream, b"")))
+    return await task, sink
+
+
+(stream, why), sink = run(_opens())
+check("an OPEN goes down the tunnel", 0x01 in sink.kinds(), sink.kinds())
+check("...and a confirmed dial yields a stream", stream is not None, why)
+check("...with no reason, because nothing went wrong", why == "", why)
+
+print("\n== a dial the ghost refuses ==")
+
+
+async def _fails():
+    sink = Sink()
+    t = proxyhub.Tunnel(1, sink)
+    task = asyncio.create_task(t.open("nope.invalid", 80, timeout=2))
+    await asyncio.sleep(0)
+    sid = [f for f in sink.sent if f.kind == 0x01][0].stream
+    t.on_frame(decode(encode(FAILED, sid, b"no such host")))
+    return await task, t
+
+
+(stream, why), t = run(_fails())
+# A SOCKS client told OK and then finding nothing there is worse
+# than one told no.
+check("a refused dial yields NO stream", stream is None)
+check("...and carries the ghost's reason, which SOCKS cannot express",
+      "no such host" in why, why)
+check("...and leaves nothing behind", t.live == 0, t.live)
+
+print("\n== a ghost that never answers ==")
+
+
+async def _times_out():
+    t = proxyhub.Tunnel(1, Sink())
+    return await t.open("slow.example", 80, timeout=0.05)
+
+
+stream, why = run(_times_out())
+check("a dial with no answer times out", stream is None)
+# Said as a timeout, not a refusal: the ghost never answering is a
+# different problem from the target refusing, and sends an operator
+# somewhere else.
+check("...and says the GHOST did not answer, not that the target refused",
+      "ghost did not answer" in why, why)
+
+print("\n== streams do not collide ==")
+
+
+async def _two():
+    sink = Sink()
+    t = proxyhub.Tunnel(1, sink)
+    a = asyncio.create_task(t.open("a.example", 80, timeout=2))
+    await asyncio.sleep(0)
+    b = asyncio.create_task(t.open("b.example", 80, timeout=2))
+    await asyncio.sleep(0)
+    ids = [f.stream for f in sink.sent if f.kind == 0x01]
+    for sid in ids:
+        t.on_frame(decode(encode(OPENED, sid, b"")))
+    (sa, _), (sb, _) = await a, await b
+    # Push distinct bytes at each and check each reader sees its own.
+    t.on_frame(decode(encode(DATA, sa.id, b"for-a")))
+    t.on_frame(decode(encode(DATA, sb.id, b"for-b")))
+    return ids, await sa.recv(), await sb.recv()
+
+
+ids, got_a, got_b = run(_two())
+check("two streams get different ids", len(set(ids)) == 2, ids)
+check("...and each reader sees only its own bytes",
+      (got_a, got_b) == (b"for-a", b"for-b"), (got_a, got_b))
+
+print("\n== ids are not reused ==")
+
+
+async def _no_reuse():
+    sink = Sink()
+    t = proxyhub.Tunnel(1, sink)
+    seen = []
+    for _ in range(3):
+        task = asyncio.create_task(t.open("x.example", 80, timeout=2))
+        await asyncio.sleep(0)
+        sid = [f.stream for f in sink.sent if f.kind == 0x01][-1]
+        seen.append(sid)
+        t.on_frame(decode(encode(OPENED, sid, b"")))
+        s, _ = await task
+        await s.close()
+    return seen
+
+
+seen = run(_no_reuse())
+# A late frame for a dead stream landing in a live one is the
+# failure this avoids.
+check("a closed stream's id is not handed out again",
+      len(set(seen)) == 3, seen)
+
+print("\n== frames for a stream that has gone ==")
+
+
+async def _orphan():
+    t = proxyhub.Tunnel(1, Sink())
+    # Normal on a multiplexed tunnel: both ends can close at once.
+    t.on_frame(decode(encode(DATA, 999, b"late")))
+    t.on_frame(decode(encode(CLOSE, 999, b"")))
+    return True
+
+
+check("late frames for a dead stream are dropped, not fatal", run(_orphan()))
+
+print("\n== the tunnel ending ==")
+
+
+async def _shutdown():
+    sink = Sink()
+    t = proxyhub.Tunnel(1, sink)
+    task = asyncio.create_task(t.open("a.example", 80, timeout=2))
+    await asyncio.sleep(0)
+    sid = [f.stream for f in sink.sent if f.kind == 0x01][0]
+    t.on_frame(decode(encode(OPENED, sid, b"")))
+    s, _ = await task
+    t.shutdown()
+    # A reader blocked on a dead tunnel must be woken, or the SOCKS
+    # connection hangs until the client gives up.
+    return t.live, await asyncio.wait_for(s.recv(), 1)
+
+
+live, after = run(_shutdown())
+check("shutdown finishes every stream", live == 0, live)
+check("...and wakes a reader with end-of-stream rather than hanging",
+      after is None, after)
+
+print("\n== the hub ==")
+
+
+async def _hub():
+    h = proxyhub.Hub()
+    t1 = h.register(5, Sink())
+    check("a registered tunnel is findable", h.get(5) is t1)
+    # A ghost that reconnects after a drop has a tunnel the server
+    # still believes in. Refusing the new one would leave it unable
+    # to proxy until something noticed the old was dead.
+    t2 = h.register(5, Sink())
+    check("reconnecting replaces the old tunnel", h.get(5) is t2)
+    check("...and the old one is shut down", t1._gone is True)
+    # The guard: a late close from the OLD tunnel must not evict the
+    # new one.
+    h.drop(5, t1)
+    check("a late close from the old tunnel does not evict the new",
+          h.get(5) is t2)
+    h.drop(5, t2)
+    check("...while the current one does detach", h.get(5) is None)
+    return True
+
+
+run(_hub())
+
+
+
+print("\n== the two sides agree on the tunnel path ==")
+# The Ed25519 signature covers the PATH. If these two strings drift
+# apart, every tunnel is a 401 and nothing says why -- the agent
+# signs one string and the server verifies another. Cheap to assert,
+# miserable to debug.
+import re as _re  # noqa: E402
+
+from app.routers.agents import TUNNEL_PATH  # noqa: E402
+
+_ws_go = (_pathlib.Path(__file__).resolve().parents[2]
+          / "ghost" / "internal" / "socksrelay" / "ws.go")
+check("the agent's ws.go is where this expects", _ws_go.is_file(), str(_ws_go))
+if _ws_go.is_file():
+    _m = _re.search(r'TunnelPath\s*=\s*"([^"]+)"', _ws_go.read_text())
+    check("the agent declares a tunnel path", _m is not None)
+    if _m:
+        check("...and it is the one the server serves",
+              _m.group(1) == TUNNEL_PATH, (_m.group(1), TUNNEL_PATH))
+
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
