@@ -565,7 +565,13 @@ async def from_ct(body: CtRequest, project: str = Query(...),
                 continue
             ruling = idx.check(n)
             if not ruling.allowed:
-                refused[n] = ruling.why or "out of scope"
+                # `reason`, not `why`. The first version guessed, and
+                # guessed on the ONLY branch no test covered: a CT
+                # lookup that proposes nothing out of scope never
+                # reaches this line, so three of the engagement's
+                # four root domains returned 200 and the fourth
+                # returned 500.
+                refused[n] = ruling.reason or "out of scope"
                 continue
             existing.add(n)
             proposed.append(n)
