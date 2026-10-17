@@ -856,10 +856,39 @@ check("...while the whole chain survives for a reader",
       d is not None and d.chain == ["edge.corp.com", "i.github.io"], d and d.chain)
 
 print("\n== a takeover becomes a finding ==")
+def _sev(verdict, claimable):
+    return _tk.severity_for(_tk.Candidate(
+        "h", "cn", ["cn"], "P", claimable, verdict,
+        None if verdict == "candidate" else "evidence"))
+
 check("a record nobody can re-register is Low",
-      _tk.SEVERITY_BY_CLAIMABLE[False] == "low")
+      _sev("fingerprint", False) == "low")
 check("...and one anybody can is not",
-      _tk.SEVERITY_BY_CLAIMABLE[True] == "high")
+      _sev("fingerprint", True) == "high")
+
+# The inversion this table exists to prevent, measured on a live
+# engagement: keyed on `claimable` alone, an EVIDENCED CloudFront
+# finding ranked Low while an UNEVIDENCED Heroku name would have
+# ranked High. A report where a proven misconfiguration sits below a
+# guess teaches its reader to distrust the severities.
+print("\n== a guess never outranks evidence ==")
+_rank = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+_evidenced = [_sev(v, c) for v in ("dangling", "fingerprint")
+              for c in (False, True)]
+_guesses = [_sev("candidate", c) for c in (False, True)]
+check("the worst unevidenced row does not outrank the best evidenced one",
+      max(_rank[x] for x in _guesses) <= min(_rank[x] for x in _evidenced),
+      (_guesses, _evidenced))
+check("an unevidenced claimable row no longer borrows High",
+      _sev("candidate", True) == "low", _sev("candidate", True))
+check("evidence on a claimable provider is still the top of the table",
+      _sev("dangling", True) == "high")
+check("claimable=False is Low throughout, as specified",
+      all(_sev(v, False) == "low"
+          for v in ("dangling", "fingerprint", "candidate")))
+check("a verdict the table has never met falls to the floor, not the top",
+      _tk.severity_for(_tk.Candidate("h", "c", ["c"], "P", True,
+                                     "something-new", None)) == "low")
 _c = _tk.Candidate("x.corp.com", "y.elb.eu-west-1.amazonaws.com",
                    ["y.elb.eu-west-1.amazonaws.com"], "AWS ELB",
                    False, "candidate", None)
@@ -935,12 +964,14 @@ st, vs = call("/api/vulns?project=WEB&limit=500", token=admin)
 tv = [v for v in (vs or {}).get("items", [])
       if (v.get("external_id") or "").startswith("takeover:")]
 check("a finding was raised for the takeover", len(tv) >= 1, len(tv))
-# dead.corp.com points at Heroku, which IS first-come, so this one is
-# the HIGH case. The Low case is the ELB below -- and getting these
-# the wrong way round in a report is exactly what `claimable` exists
-# to prevent, so both are asserted rather than one.
-check("...at High, because a Heroku name is first-come",
-      all(v["severity"] == "high" for v in tv), [v["severity"] for v in tv])
+# dead.corp.com points at Heroku, which IS first-come -- but nothing
+# here showed the name to be unclaimed, so the verdict is `candidate`
+# and the severity is Low. Claimable says how bad IF TRUE; the
+# verdict says whether we know it is true, and it caps the answer.
+# This assertion read High until the severity table grew its second
+# input, which is the inversion it was written to catch.
+check("...at Low: first-come, but nothing showed it was unclaimed",
+      all(v["severity"] == "low" for v in tv), [v["severity"] for v in tv])
 check("...keyed on external_id so it can be found again",
       all(v["external_id"].startswith("takeover:") for v in tv), tv[:1])
 
@@ -968,6 +999,27 @@ elb = [v for v in (vs3 or {}).get("items", [])
 check("an ELB-backed record is raised too", len(elb) == 1, len(elb))
 check("...at Low, because the name is AWS-assigned and not re-registerable",
       elb and elb[0]["severity"] == "low", elb and elb[0]["severity"])
+
+# The High case end to end: a first-come provider AND evidence. This
+# is the only shape that reaches the top of the table, and without a
+# test for it the severity column could be stuck on Low and nothing
+# would say so.
+S3_HTTPX = json.dumps(
+    {"url": "https://gone.corp.com", "input": "gone.corp.com",
+     "host": "10.0.0.91", "port": 443, "scheme": "https",
+     "status_code": 404, "cname": ["gone-assets.s3.amazonaws.com"],
+     "response": "HTTP/1.1 404\r\n\r\n<Error><Code>NoSuchBucket</Code>"
+                 "<Message>The specified bucket does not exist</Message>"
+                 "</Error>"})
+imp(S3_HTTPX)
+call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
+st, vs4 = call("/api/vulns?project=WEB&limit=500", token=admin)
+s3 = [v for v in (vs4 or {}).get("items", [])
+      if (v.get("external_id") or "") == "takeover:gone.corp.com"]
+check("an evidenced takeover on a first-come provider is raised",
+      len(s3) == 1, len(s3))
+check("...at High — the one shape that reaches the top of the table",
+      s3 and s3[0]["severity"] == "high", s3 and s3[0]["severity"])
 
 check("...and the note with it",
       again.get("dead.corp.com", {}).get("note") == "client owns it",
