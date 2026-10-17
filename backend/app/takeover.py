@@ -266,8 +266,38 @@ def decide(hostname: str, cnames, bodies: list[str] | None = None,
                 return Candidate(hostname, hop, hops, p.name, p.claimable,
                                  "fingerprint", hit)
         return Candidate(hostname, hop, hops, p.name, p.claimable,
-                         "candidate", None)
+                         "candidate", undetermined(p, hop, bool(bodies)))
     return None
+
+
+def undetermined(p: Provider, hop: str, had_bodies: bool) -> str:
+    """Why neither check could convict, in terms of what is missing.
+
+    "Could not determine" on its own tells a reader that a
+    conclusion is absent without telling them what is absent, which
+    is the one thing they need to know to go and settle it. Each of
+    these three sentences implies a different next action, and they
+    are genuinely different situations rather than shades of one.
+    """
+    if not p.fingerprints:
+        # Beanstalk, ELB, CloudFront. Nothing to match against, ever
+        # -- so no amount of fetching the page will decide this one
+        # and only the resolver can.
+        return (f"{p.name} serves no distinctive unclaimed page, so only a "
+                f"chain that fails to resolve can settle this — and no "
+                f"lookup has reported {hop} as empty. Run a DNS lookup "
+                f"against {hop}.")
+    if not had_bodies:
+        return (f"nothing has been fetched from this host, so there is no "
+                f"page to match against {p.name}'s unclaimed one, and no "
+                f"lookup has reported {hop} as empty. Run httpx or a DNS "
+                f"lookup against it.")
+    # We looked at a page and it was not the provider's "nothing is
+    # here" page. Weak evidence the resource IS claimed and live,
+    # which is worth saying rather than leaving as silence.
+    return (f"the page fetched from this host is not {p.name}'s unclaimed "
+            f"one, which suggests the resource is live — but no lookup has "
+            f"reported {hop} as empty, so it is not proven either way.")
 
 
 #: Which rows become a finding, and at what severity.
@@ -356,11 +386,15 @@ def vuln_description(c: Candidate) -> str:
                     f"({c.evidence}). The record points at nothing.",
         "fingerprint": f"{c.provider} served its own unclaimed-resource page "
                        f"(matched: {c.evidence!r}).",
-        "candidate": "Neither check could be run against this host, so this "
-                     "is a record to go and look at rather than a confirmed "
-                     "dangling one. It is reported because the name it "
-                     "points at is a provider surface, not because anything "
-                     "showed it to be unclaimed.",
+        # The reason, not the bare fact of its absence. A finding
+        # that says "could not determine" without saying what is
+        # missing gives its reader nothing to act on -- and this one
+        # names the check that could not run and what to run instead.
+        "candidate": (
+            f"Not confirmed: {c.evidence}" if c.evidence else
+            "Neither check could be run against this host, so this is a "
+            "record to go and look at rather than a confirmed dangling "
+            "one."),
     }[c.verdict]
     claim = (
         "The name this points at is assigned by the provider and cannot be "

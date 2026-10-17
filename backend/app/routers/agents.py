@@ -53,6 +53,7 @@ from .. import (
     countrygate,
     geoip,
     lookuphistory,
+    proxyauth,
     proxyhub,
     proxytunnel,
 )
@@ -60,7 +61,16 @@ from ..db import get_session
 from ..events import broker
 from ..hosts import validate_host
 from ..lookups import LOOKUP_KINDS
-from ..models import Agent, AgentDebugLog, AgentTask, Project, Setting, Target, User
+from ..models import (
+    Agent,
+    AgentDebugLog,
+    AgentTask,
+    Project,
+    ProxyGrant,
+    Setting,
+    Target,
+    User,
+)
 from ..scopegate import as_host, check_task_targets, index_for, refuse
 from ..security import get_current_user, new_agent_key, require_project, verify_key
 from ..tasking import outstanding_subjects, tasked_subjects
@@ -271,6 +281,12 @@ class AgentOut(BaseModel):
     version: str | None = None
     hostname: str | None = None
     privileged: bool = False
+    #: Whether this Ghost will carry proxied streams. Off unless
+    #: somebody turned it on; see the SOCKS section of the README.
+    proxy_enabled: bool = False
+    #: Whether its tunnel is up RIGHT NOW, in this process. Not
+    #: stored anywhere -- a tunnel is only true while its socket is.
+    proxy_connected: bool = False
     tools: dict = {}
     #: Reported by the agent about itself, not observed here.
     outbound_ip: str | None = None
@@ -572,6 +588,8 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         id=a.id, project_code=code, name=a.name, status=a.status,
         platform=a.platform, arch=a.arch, version=a.version,
         hostname=a.hostname, privileged=a.privileged, tools=_tools(a.tools),
+        proxy_enabled=bool(a.proxy_enabled),
+        proxy_connected=proxyhub.hub.get(a.id) is not None,
         call_in_url=a.call_in_url, last_seen=a.last_seen, last_ip=a.last_ip,
         retired_at=a.retired_at, retired_reason=a.retired_reason,
         retired_cleanup=_json_or_none(a.retired_cleanup),
@@ -3567,3 +3585,151 @@ async def proxy_tunnel(ws: WebSocket,
         # evicting it here would drop the live tunnel.
         proxyhub.hub.drop(agent.id, tunnel)
         log.info("proxy tunnel down for agent %d", agent.id)
+
+
+# ------------------------------------------------- proxy, from the UI
+class ProxyToggle(BaseModel):
+    enabled: bool
+
+
+class GrantOut(BaseModel):
+    id: int
+    username: str
+    note: str | None = None
+    created_at: str | None = None
+    expires_at: str | None = None
+    last_used_at: str | None = None
+    revoked_at: str | None = None
+
+    @property
+    def live(self) -> bool:
+        return self.revoked_at is None
+
+
+class GrantNew(BaseModel):
+    note: str | None = Field(None, max_length=300)
+    #: Days until it stops working. A proxy credential that lives for
+    #: ever is one nobody remembers to take away, so this defaults to
+    #: a fortnight rather than to never.
+    expires_days: int | None = Field(14, ge=1, le=365)
+
+
+def _grant_out(g: ProxyGrant) -> GrantOut:
+    def iso(d):
+        return d.isoformat() if d else None
+    return GrantOut(id=g.id, username=g.username, note=g.note,
+                    created_at=iso(g.created_at), expires_at=iso(g.expires_at),
+                    last_used_at=iso(g.last_used_at),
+                    revoked_at=iso(g.revoked_at))
+
+
+@router.patch("/{agent_id}/proxy", response_model=AgentOut)
+async def set_proxy(agent_id: int, body: ProxyToggle,
+                    pr: Project = Depends(require_project("admin")),
+                    user: User = Depends(get_current_user),
+                    session: AsyncSession = Depends(get_session)):
+    """Switch proxying on or off for one Ghost.
+
+    **Admin, not user.** This is the difference between a Ghost that
+    runs the tasks it is given and one that will carry arbitrary
+    traffic into the client's network on anybody's say-so, and that
+    is not a routine operation.
+
+    Switching it OFF drops the live tunnel immediately rather than
+    waiting for the Ghost to notice. A revocation that takes effect
+    at some unspecified later point is not a revocation.
+    """
+    a = (await session.execute(
+        select(Agent).where(Agent.id == agent_id,
+                            Agent.project_id == pr.id))).scalar_one_or_none()
+    if a is None:
+        raise HTTPException(404, "no such ghost on this project")
+    a.proxy_enabled = bool(body.enabled)
+    if not a.proxy_enabled:
+        proxyhub.hub.drop(a.id)
+    await audit.record(session, user, "ghost.proxy",
+                       f"{a.name}: proxying "
+                       f"{'enabled' if a.proxy_enabled else 'disabled'}")
+    await session.commit()
+    await session.refresh(a)
+    return _agent_out(a, pr.code)
+
+
+@router.get("/{agent_id}/proxy/grants", response_model=list[GrantOut])
+async def list_grants(agent_id: int,
+                      pr: Project = Depends(require_project("admin")),
+                      _: User = Depends(get_current_user),
+                      session: AsyncSession = Depends(get_session)):
+    """The credentials issued for this Ghost. Never the secrets."""
+    rows = (await session.execute(
+        select(ProxyGrant)
+        .where(ProxyGrant.agent_id == agent_id,
+               ProxyGrant.project_id == pr.id)
+        .order_by(ProxyGrant.id.desc()))).scalars().all()
+    return [_grant_out(g) for g in rows]
+
+
+@router.post("/{agent_id}/proxy/grants", response_model=dict)
+async def make_grant(agent_id: int, body: GrantNew,
+                     pr: Project = Depends(require_project("admin")),
+                     user: User = Depends(get_current_user),
+                     session: AsyncSession = Depends(get_session)):
+    """Issue a credential. The password is returned ONCE.
+
+    Only the hash is stored, as with an agent's enrollment key. If
+    the operator loses it they make another and revoke this one --
+    which is the behaviour you want from a secret that opens a route
+    into an engagement.
+    """
+    a = (await session.execute(
+        select(Agent).where(Agent.id == agent_id,
+                            Agent.project_id == pr.id))).scalar_one_or_none()
+    if a is None:
+        raise HTTPException(404, "no such ghost on this project")
+
+    username, password, hashed = proxyauth.new_grant()
+    expires = None
+    if body.expires_days:
+        expires = datetime.now(UTC) + timedelta(days=body.expires_days)
+    g = ProxyGrant(agent_id=a.id, project_id=pr.id, username=username,
+                   password_hash=hashed, created_by=user.id,
+                   note=(body.note or None), expires_at=expires)
+    session.add(g)
+    # The password is NOT in the audit line. The whole point of
+    # storing a hash is undone by writing the plaintext somewhere
+    # that is kept for longer.
+    await audit.record(session, user, "ghost.proxy.grant",
+                       f"{a.name}: issued proxy credential {username}")
+    await session.commit()
+    await session.refresh(g)
+    return {"grant": _grant_out(g).model_dump(),
+            "username": username,
+            # Shown once. There is no endpoint that returns it again.
+            "password": password}
+
+
+@router.delete("/{agent_id}/proxy/grants/{grant_id}", response_model=GrantOut)
+async def revoke_grant(agent_id: int, grant_id: int,
+                       pr: Project = Depends(require_project("admin")),
+                       user: User = Depends(get_current_user),
+                       session: AsyncSession = Depends(get_session)):
+    """Revoke a credential. It stops working on the next connection.
+
+    A timestamp rather than a delete, so the audit trail still has
+    something to point at when somebody asks what that credential
+    reached.
+    """
+    g = (await session.execute(
+        select(ProxyGrant)
+        .where(ProxyGrant.id == grant_id,
+               ProxyGrant.agent_id == agent_id,
+               ProxyGrant.project_id == pr.id))).scalar_one_or_none()
+    if g is None:
+        raise HTTPException(404, "no such credential")
+    if g.revoked_at is None:
+        g.revoked_at = datetime.now(UTC)
+        await audit.record(session, user, "ghost.proxy.revoke",
+                           f"revoked proxy credential {g.username}")
+    await session.commit()
+    await session.refresh(g)
+    return _grant_out(g)

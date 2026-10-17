@@ -787,8 +787,15 @@ check("...and quotes the marker, so nobody has to refetch the page to know why",
 d = _tk.decide("c.corp.com", ["c.myshopify.com"], bodies=["a perfectly live store"])
 check("a provider with neither piece of evidence is `candidate`, not a finding",
       d is not None and d.verdict == "candidate", d and d.verdict)
-check("...with no evidence, which is the point of the value",
-      d is not None and d.evidence is None, d and d.evidence)
+# It carries no evidence FOR a takeover -- that is what `candidate`
+# means -- but it does now say why neither check could convict. A
+# bare "could not determine" tells a reader a conclusion is absent
+# without telling them what is absent.
+check("...carrying no proof of a takeover",
+      d is not None and d.verdict == "candidate", d and d.verdict)
+check("...but saying why it could not be settled",
+      d is not None and d.evidence and "not proven either way" in d.evidence,
+      d and d.evidence)
 
 check("a host pointing nowhere interesting is not a row at all",
       _tk.decide("d.corp.com", ["d.corp.com.cdn.internal"]) is None)
@@ -834,6 +841,39 @@ check("...and the external-1 spelling",
 check("...while a plain bucket is still claimable, unlike an ELB",
       (_tk.provider_for("b.s3.amazonaws.com")
        or _tk.Provider("", ())).claimable is True)
+
+print("\n== an undetermined row says WHAT is missing ==")
+# "Could not determine" on its own tells a reader a conclusion is
+# absent without telling them what is absent, which is the one thing
+# they need to go and settle it. Three genuinely different
+# situations hide behind that phrase and each implies a different
+# next action.
+_elb = _tk.decide("a.corp.com", ["x.elb.eu-west-1.amazonaws.com"])
+check("a provider with no unclaimed page says so",
+      "no distinctive unclaimed page" in (_elb.evidence or ""), _elb.evidence)
+check("...and names the lookup that would settle it",
+      "Run a DNS lookup" in (_elb.evidence or ""), _elb.evidence)
+
+_none = _tk.decide("b.corp.com", ["b.s3.amazonaws.com"])
+check("nothing fetched says nothing was fetched",
+      "nothing has been fetched" in (_none.evidence or ""), _none.evidence)
+check("...and says what to run", "httpx" in (_none.evidence or ""),
+      _none.evidence)
+
+_live = _tk.decide("c.corp.com", ["c.s3.amazonaws.com"],
+                   bodies=["<html>a perfectly live bucket</html>"])
+check("a page that is NOT the unclaimed one says the resource looks live",
+      "suggests the resource is live" in (_live.evidence or ""), _live.evidence)
+check("...while still not claiming it is proven either way",
+      "not proven either way" in (_live.evidence or ""), _live.evidence)
+
+check("the three reasons are actually different",
+      len({_elb.evidence, _none.evidence, _live.evidence}) == 3)
+# The finding carries it too: a vuln that says "could not determine"
+# with no reason gives its reader nothing to act on.
+check("the finding description carries the reason",
+      "Not confirmed:" in _tk.vuln_description(_elb),
+      _tk.vuln_description(_elb)[:80])
 
 print("\n== not every dangling record is an exploitable takeover ==")
 d = _tk.decide("g.corp.com", ["g.elasticbeanstalk.com"],

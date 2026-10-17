@@ -143,14 +143,32 @@ export function TakeoversPanel({ project }: { project: string | null }) {
       renderCell: (p) => {
         const row = p.row as Takeover
         if (!row.evidence) {
-          // Saying "nothing was found" and "nothing was checked" the
-          // same way is how the third answer gets lost.
+          // Only rows written before the detector explained itself.
+          // A bare "not determined" tells a reader a conclusion is
+          // absent without telling them WHAT is absent, which is the
+          // one thing they need in order to go and settle it — so
+          // this is a fallback, not the normal path.
           return (
-            <Tooltip title="Neither check could be run against this host. Not a
-                            statement that it is safe.">
+            <Tooltip title="This row predates the detector recording why
+                            neither check could be run. Refresh to get the
+                            reason.">
               <Box sx={{ fontSize: 11, color: alpha(neon.muted, 0.6),
                          fontStyle: 'italic', cursor: 'help' }}>
-                not determined
+                not determined — refresh for why
+              </Box>
+            </Tooltip>
+          )
+        }
+        if (row.verdict === 'candidate') {
+          // Prose, not a marker: this says what is MISSING and what
+          // to run to settle it, so it is read rather than matched.
+          // Monospace and nowrap would make a sentence unreadable.
+          return (
+            <Tooltip title={row.evidence}>
+              <Box sx={{ fontSize: 11, color: alpha(neon.muted, 0.95),
+                         cursor: 'help', overflow: 'hidden',
+                         textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {row.evidence}
               </Box>
             </Tooltip>
           )
