@@ -973,6 +973,28 @@ def build(session: AsyncSession, project: Project | None, user: User,
         from ..routers.scans import formats
         return await _via(formats, _=user)
 
+    async def get_finding_secret(finding_id: int) -> dict:
+        """The actual credential behind a secret finding.
+
+        Exists because the agent used to say "the database doesn't
+        hold the actual secret values, only the findings recording
+        that they exist" -- half right in a way that stopped the
+        work. The value IS stored, in `finding_secrets`, and the UI
+        has always had a reveal button for it. There was simply no
+        tool, so the model reasoned correctly from a premise nobody
+        had told it was false.
+
+        Routed through the same endpoint the UI calls, so all three
+        of its guards apply unchanged: `user` role rather than
+        readonly, an audit entry written BEFORE the value is
+        returned, and the project visibility rule. Reading a
+        credential through the assistant leaves exactly the record
+        reading it through the UI does.
+        """
+        from ..routers.findings import reveal_secret
+        return await _via(reveal_secret, vuln_id=int(finding_id),
+                          user=user, session=session)
+
     async def list_credentials(search: str = "", limit: int = 50) -> dict:
         stmt = select(Credential).where(scoped(Credential.project_id))
         if search:
@@ -1190,6 +1212,14 @@ def build(session: AsyncSession, project: Project | None, user: User,
         Tool("get_host", "Everything known about one host: services, findings, "
              "C2 implants and web addresses.",
              _obj({"host": {"type": "string"}}, ["host"]), get_host),
+        Tool("get_finding_secret",
+             "The actual credential value behind a secret finding, by "
+             "finding id. The values ARE stored -- `list_findings` and "
+             "the secrets list tell you a secret exists and where; this "
+             "returns what it is, so you can say what it unlocks. Needs "
+             "`user` role and is written to the audit log.",
+             _obj({"finding_id": {"type": "integer"}},
+                  ["finding_id"]), get_finding_secret),
         Tool("list_findings", "Search the findings. Filter by severity or host.",
              _obj({"severity": {"type": "string",
                                 "enum": ["critical", "high", "medium", "low", "info"]},
