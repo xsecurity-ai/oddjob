@@ -33,13 +33,29 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse
 from pydantic import AliasChoices, BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import agentcrypto, audit, countrygate, geoip, lookuphistory
+from .. import (
+    agentcrypto,
+    audit,
+    countrygate,
+    geoip,
+    lookuphistory,
+    proxyhub,
+    proxytunnel,
+)
 from ..db import get_session
 from ..events import broker
 from ..hosts import validate_host
@@ -3452,3 +3468,102 @@ async def submit_result(task_id: int, body: ResultIn,
     for ch in ("targets", "services", "vulns", "web"):
         await broker.publish(ch, action="agent", project=code)
     return {"ok": True, "imported": imported}
+
+
+# ------------------------------------------------------ proxy tunnel
+async def _tunnel_agent(ws: WebSocket, session: AsyncSession) -> Agent | None:
+    """Authenticate a tunnel upgrade. -> the agent, or None to refuse.
+
+    The SAME Ed25519 scheme as every other request from a Ghost,
+    signed over this path with an empty body, so there is no second
+    way in to get wrong. A WebSocket handshake is an HTTP request and
+    carries headers like any other.
+
+    Returns None rather than raising: the socket is not accepted yet,
+    so there is nothing to send a status on beyond the handshake, and
+    the caller closes it with a code.
+    """
+    sig = ws.headers.get(agentcrypto.SIG_HEADER, "").strip()
+    claimed = ws.headers.get(agentcrypto.AGENT_HEADER, "").strip()
+    ts = ws.headers.get(agentcrypto.TS_HEADER, "").strip()
+    nonce = ws.headers.get(agentcrypto.NONCE_HEADER, "").strip()
+    if not (sig and claimed and ts and nonce):
+        return None
+    if not agentcrypto.fresh(ts):
+        return None
+    if not agentcrypto.nonces.check_and_add(nonce):
+        return None
+    try:
+        a = await session.get(Agent, int(claimed))
+    except ValueError:
+        return None
+    if a is None or not a.public_key:
+        return None
+    # Empty body: a handshake has none, and the agent signs the same
+    # shape. `TUNNEL_PATH` is a constant on both sides because the
+    # signature covers it.
+    if not agentcrypto.verify(a.public_key, sig, "GET", TUNNEL_PATH, b"",
+                              ts, nonce):
+        return None
+    return a
+
+
+#: Must match `socksrelay.TunnelPath` in the agent. The signature
+#: covers the path, so a disagreement is a 401 on every tunnel.
+TUNNEL_PATH = "/api/ghosts/proxy/tunnel"
+
+
+@router.websocket("/proxy/tunnel")
+async def proxy_tunnel(ws: WebSocket,
+                       session: AsyncSession = Depends(get_session)):
+    """A Ghost offering to carry proxied streams.
+
+    Refused unless the agent is enrolled, signs correctly, is not
+    disabled, and has `proxy_enabled` set. The last one is the switch
+    an operator throws: a Ghost that has not been told to proxy is
+    refused even with a perfect signature, so turning this on is a
+    decision made in Oddjob rather than something an agent can
+    arrange for itself.
+    """
+    agent = await _tunnel_agent(ws, session)
+    if agent is None:
+        # 1008 is "policy violation", the nearest thing a WebSocket
+        # close has to 401. The handshake is accepted first because
+        # a close code cannot be sent on a refused upgrade.
+        await ws.accept()
+        await ws.close(code=1008, reason="tunnel authentication failed")
+        return
+    if agent.status == "disabled":
+        await ws.accept()
+        await ws.close(code=1008, reason="this agent is disabled")
+        return
+    if not agent.proxy_enabled:
+        await ws.accept()
+        await ws.close(code=1008, reason="proxying is not enabled for this ghost")
+        return
+
+    await ws.accept()
+    tunnel = proxyhub.hub.register(agent.id, ws.send_bytes)
+    log.info("proxy tunnel up for agent %d (%s)", agent.id, agent.name)
+    try:
+        while True:
+            raw = await ws.receive_bytes()
+            try:
+                tunnel.on_frame(proxytunnel.decode(raw))
+            except proxytunnel.FrameError as e:
+                # Framing is lost; there is no way to know where the
+                # next frame starts, so the tunnel ends rather than
+                # risk feeding one stream's bytes to another.
+                log.warning("agent %d sent an unreadable frame: %s",
+                            agent.id, e)
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("proxy tunnel for agent %d ended: %s", agent.id, e)
+    finally:
+        # Guarded with the tunnel object: a Ghost that reconnected
+        # while this one was finishing already owns the slot, and
+        # evicting it here would drop the live tunnel.
+        proxyhub.hub.drop(agent.id, tunnel)
+        log.info("proxy tunnel down for agent %d", agent.id)
