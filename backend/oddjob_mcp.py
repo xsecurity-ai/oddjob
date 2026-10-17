@@ -181,6 +181,19 @@ AGENT_ONLY: dict[str, str] = {
         "note in README) and then delete this entry; until then an MCP "
         "caller composes rank_targets out of list_vulns and port_summary, "
         "which is slower but is not a second opinion.",
+    "get_finding_secret":
+        "Deliberately NOT here, for the reason `list_credentials` gives "
+        "above and in the same words: this server serves a model whose "
+        "context is shipped to a third party and may be logged there, and "
+        "a hardcoded key is still live on the client's estate after the "
+        "engagement ends. The in-platform agent runs inside the operator's "
+        "own deployment against their own database, which is a different "
+        "exposure and is why it has the tool. An MCP caller is told by "
+        "`list_vulns` that a secret finding exists and where; retrieving "
+        "the value is a click in the UI, which is audited and does not "
+        "put the plaintext into somebody else's model context. Covering "
+        "it here would undo the decision `list_credentials` took on "
+        "purpose.",
 }
 
 

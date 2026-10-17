@@ -2805,5 +2805,40 @@ st, _ = call("/api/ghosts/debug?project=AGENT", key=DKEY)
 check("a ghost's own key does not open the operator's view",
       st in (302, 401, 403), st)
 
+
+# ================================= the agent can read a secret value
+# The assistant told an operator "the database doesn't hold the actual
+# secret values, only the findings recording that they exist". Half
+# right, in the way that stops the work: the value IS stored in
+# `finding_secrets` and the UI has always had a reveal button. There
+# was simply no tool, so the model reasoned correctly from a premise
+# nobody had told it was false.
+print("\n== reading a secret through the assistant ==")
+check("get_finding_secret exists at all", "get_finding_secret" in _ro,
+      sorted(_ro)[:5])
+# Reading a credential is reporting work's dangerous half, not its
+# ordinary one -- but it is a READ, so it must not need write mode.
+check("...without needing write mode", "get_finding_secret" in _ro)
+check("...and is there with writes too", "get_finding_secret" in _rw)
+
+_t = _ro.get("get_finding_secret")
+check("it takes a finding id", _t is not None
+      and "finding_id" in (_t.schema or {}).get("properties", {}),
+      _t and _t.schema)
+# The description is what the model reads before deciding whether the
+# capability exists. It saying the values ARE stored is the fix.
+check("...and its description says the values are stored",
+      _t is not None and "ARE stored" in (_t.description or ""),
+      _t and (_t.description or "")[:80])
+
+# Routed through the same endpoint the UI calls, so the role check and
+# the audit entry are not reimplemented here and cannot drift.
+import inspect as _inspect  # noqa: E402
+
+_src = _inspect.getsource(_build)
+check("it goes through the HTTP handler rather than its own query",
+      "reveal_secret" in _src, "reveal_secret" not in _src)
+
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
