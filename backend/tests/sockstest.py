@@ -117,5 +117,66 @@ check("...and a well-formed address, not a lie about our network",
 check("auth success is zero", socks.auth_reply(True) == bytes((1, 0)))
 check("auth failure is not", socks.auth_reply(False) != bytes((1, 0)))
 
+
+# ====================================================== tunnel frames
+from app import proxytunnel as tun  # noqa: E402
+
+print("\n== the frame codec, against the vectors the Go half uses ==")
+# These same rows are in ghost/internal/socksrelay/frame_test.go. Two
+# languages implementing one codec from a paragraph of prose is how a
+# tunnel hangs in production; this is the cheapest place to find out.
+for label, kind, stream, payload, want in tun.VECTORS:
+    got = tun.encode(kind, stream, payload).hex()
+    check(f"encode: {label}", got == want, got if got != want else "")
+    f = tun.decode(bytes.fromhex(want))
+    check(f"decode: {label}",
+          (f.kind, f.stream, f.payload) == (kind, stream, payload),
+          (f.kind, f.stream, f.payload))
+
+print("\n== losing framing drops the tunnel, so junk must raise ==")
+for label, raw_bytes in [("an empty frame", b""),
+                         ("one shorter than its header", bytes((tun.DATA, 0, 0, 0))),
+                         ("an unknown type", bytes((0x7F, 0, 0, 0, 1)))]:
+    try:
+        tun.decode(raw_bytes)
+        check(label + " is refused", False, "decoded when it should not")
+    except tun.FrameError:
+        check(label + " is refused", True)
+
+for label, kind in [("an unknown type", 0x7F)]:
+    try:
+        tun.encode(kind, 1, b"")
+        check("encoding " + label + " is refused", False)
+    except tun.FrameError:
+        check("encoding " + label + " is refused", True)
+
+print("\n== OPEN carries a name, not an address ==")
+f = tun.decode(tun.encode_open(7, "shop.acme.example", 8443))
+host, port = tun.decode_open(f)
+check("an OPEN round-trips", (host, port) == ("shop.acme.example", 8443),
+      (host, port))
+# The ghost resolves it, where the estate is. Resolving on this side
+# would pick the destination from Oddjob's view of DNS.
+check("...and the host is still a name", not host[0].isdigit(), host)
+for bad in (0, -1, 65536):
+    try:
+        tun.encode_open(1, "h", bad)
+        check(f"port {bad} is refused", False)
+    except tun.FrameError:
+        check(f"port {bad} is refused", True)
+try:
+    tun.decode_open(tun.decode(tun.encode(tun.DATA, 1, b"x")))
+    check("a DATA frame is not read as an OPEN", False)
+except tun.FrameError:
+    check("a DATA frame is not read as an OPEN", True)
+
+# The boundary that catches a signed/unsigned mistake across the two
+# languages: Python's struct "!I" and Go's uint32 must agree once a
+# long-lived tunnel's counter climbs past 2^31.
+big = tun.decode(tun.encode(tun.DATA, 0xFFFFFFFF, b"x"))
+check("a stream id with the top bit set survives the round trip",
+      big.stream == 0xFFFFFFFF, big.stream)
+
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
