@@ -890,6 +890,17 @@ TAKEOVER_HTTPX = "\n".join(json.dumps(x) for x in [
 imp(TAKEOVER_HTTPX)
 st, r = call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
 check("refresh runs and reports what it decided", st == 200, f"{st} {r}")
+# `total` counts TAKEOVERS. The findings raised are a separate number:
+# folding them into the same dict made `sum(counts.values())` report
+# eight rows for four, which is the sort of wrong a findings page
+# should not be able to show.
+check("total is the takeover count, not takeovers plus findings",
+      (r or {}).get("total") == sum((r or {}).get("counts", {}).values()),
+      r)
+check("...and the findings raised are reported separately",
+      "findings_open" in (r or {}), r)
+check("no verdict key is an internal one",
+      not any(k.startswith("_") for k in (r or {}).get("counts", {})), r)
 st, r = call("/api/web/takeovers?project=WEB", token=admin)
 check("the endpoint answers", st == 200, st)
 hosts = {i["hostname"]: i for i in (r or {}).get("items", [])}

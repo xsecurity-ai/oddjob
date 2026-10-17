@@ -1248,9 +1248,11 @@ async def refresh_takeovers(
     brought back and response bodies already captured. A `user`
     action rather than readonly because it rewrites rows.
     """
-    counts = await takeover.refresh(session, pr.id)
+    r = await takeover.refresh(session, pr.id)
     await session.commit()
-    return {"counts": counts, "total": sum(counts.values())}
+    # `total` is the takeover count. The findings raised are their own
+    # number -- adding them in reported eight rows for four.
+    return {"counts": r.counts, "total": r.total, "findings_open": r.vulns}
 
 
 @router.patch("/takeovers/{takeover_id}", response_model=TakeoverOut)

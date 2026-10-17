@@ -24,7 +24,7 @@ morning on a live Shopify store that simply belongs to the client.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 #: How sure we are, strongest first. `Takeover.verdict` holds one.
@@ -400,8 +400,29 @@ async def _sync_vulns(session, project_id: int,
     return open_now
 
 
-async def refresh(session, project_id: int) -> dict[str, int]:
-    """Re-derive this project's takeover rows. -> {verdict: count}.
+@dataclass
+class Refreshed:
+    """What one detector pass did.
+
+    The vuln count is a FIELD and not another entry in `counts`. It
+    lived in there briefly and the endpoint's `sum(counts.values())`
+    promptly reported eight takeovers when there were four -- a
+    number nobody could have checked without reading this function,
+    which is the sort of wrong a findings page should not be able to
+    show.
+    """
+    #: {verdict: how many rows}. Verdicts only.
+    counts: dict[str, int] = field(default_factory=dict)
+    #: How many findings are open as a result.
+    vulns: int = 0
+
+    @property
+    def total(self) -> int:
+        return sum(self.counts.values())
+
+
+async def refresh(session, project_id: int) -> Refreshed:
+    """Re-derive this project's takeover rows.
 
     Re-derived rather than accumulated, because a dangling record that
     somebody finally deleted should stop being a finding. The operator
@@ -441,7 +462,11 @@ async def refresh(session, project_id: int) -> dict[str, int]:
     if not interesting:
         await session.execute(
             _delete(Takeover).where(Takeover.project_id == project_id))
-        return {}
+        # Still syncs: a project whose last dangling record was fixed
+        # must have its findings closed, not merely stop gaining new
+        # ones.
+        return Refreshed(counts={},
+                         vulns=await _sync_vulns(session, project_id, {}))
 
     # The two evidence sources, fetched once for the whole set.
     every_hop = sorted({h for _, _, hops in interesting for h in hops})
@@ -488,5 +513,5 @@ async def refresh(session, project_id: int) -> dict[str, int]:
     # Findings are part of the same pass deliberately. A detector that
     # writes its own table and leaves raising the finding to somebody
     # else is a detector whose output nobody reads.
-    counts["_vulns"] = await _sync_vulns(session, project_id, decided)
-    return counts
+    return Refreshed(counts=counts,
+                     vulns=await _sync_vulns(session, project_id, decided))
