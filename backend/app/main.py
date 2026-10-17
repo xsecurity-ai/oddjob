@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -189,7 +190,32 @@ async def lifespan(app: FastAPI):
     # masked DSN is the honest answer and never shows the password.
     from .db import display_url
     print(f"Oddjob API ready — db: {display_url()}")
+    # The SOCKS listener, if somebody switched it on. Started here
+    # rather than as its own process so it shares the hub: a tunnel
+    # is a live socket in THIS process, and a listener somewhere else
+    # would have no way to reach one.
+    #
+    # Failure to bind is logged and not fatal. A port already in use
+    # should not stop Oddjob serving the UI that would let somebody
+    # fix it.
+    proxy_srv = None
+    try:
+        from . import proxyserver
+        from .routers.settings import load_all
+        async with SessionLocal() as s:
+            cfg = await load_all(s)
+        if cfg.get("proxy.enabled"):
+            proxy_srv = await proxyserver.serve(
+                str(cfg.get("proxy.bind") or "127.0.0.1"),
+                int(cfg.get("proxy.port") or 8443))
+    except Exception as e:                                   # noqa: BLE001
+        print(f"socks proxy did not start: {e}")
+
     yield
+    if proxy_srv is not None:
+        proxy_srv.close()
+        with contextlib.suppress(Exception):
+            await proxy_srv.wait_closed()
     audit_task.cancel()
     vulnfeed_task.cancel()
     await worker.stop()

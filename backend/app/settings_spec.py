@@ -75,6 +75,37 @@ SPEC = [
              "MaxMind's own GeoIP.conf. City answers country too and is "
              "27 MB against Country's 3 MB, so an installation that only "
              "wants a country code can drop it."},
+    # ------------------------------------------------- socks proxy
+    # The only listener in this product that carries somebody else's
+    # traffic. Off, bound to loopback, and saying so where it is
+    # switched on rather than in a docstring nobody opens.
+    {"key": "proxy.enabled", "group": "Site",
+     "label": "SOCKS5 proxy through ghosts", "type": "bool",
+     "default": False,
+     "help": "Lets an operator point a browser at Oddjob and have the "
+             "requests come out of a Ghost — inside the estate, from the "
+             "address the client already sees. READ THIS BEFORE ENABLING: "
+             "this is a proxy INTO a client's network. Every connection "
+             "needs a per-ghost credential, is ruled on by the scope gate "
+             "and is recorded, and each ghost must be switched on "
+             "separately — but if a credential leaks, whoever has it "
+             "reaches whatever that ghost reaches. Off until somebody "
+             "decides otherwise."},
+    {"key": "proxy.bind", "group": "Site",
+     "label": "Proxy listen address", "type": "text",
+     "default": "127.0.0.1",
+     "help": "127.0.0.1 is the default and is useless from another "
+             "machine, which is the point: reaching it then needs an SSH "
+             "tunnel, and the person doing that has already proved who "
+             "they are. Widen it only deliberately — 0.0.0.0 publishes a "
+             "route into the engagement to anyone who can reach this "
+             "host."},
+    {"key": "proxy.port", "group": "Site",
+     "label": "Proxy port", "type": "number", "default": 8443,
+     "help": "Not 443. A browser pointed at a SOCKS proxy speaks raw "
+             "SOCKS5 — no TLS, no SNI — and nginx routes 443 by SNI, so "
+             "there is nothing for it to match on and the two cannot "
+             "share a port without a demuxer nginx does not have."},
     # ----------------------------------------- certificate transparency
     # The one source here that SENDS something. Everything else in
     # this file either stays local (geoip looks up a database this
