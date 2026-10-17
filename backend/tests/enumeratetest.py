@@ -1262,5 +1262,41 @@ else:
           EnumerateRequest(domains="localhost").wanted() == ["localhost"])
 
 
+
+# ============================== certificate transparency, the gate
+# The endpoint is mostly gate, so that is what is tested. There is no
+# network here: with `ct.enabled` off -- the default, and the state
+# every test database is in -- `lookup` raises before it can reach a
+# third party, which is exactly the property worth asserting.
+print("\n== CT refuses before it reaches the wire ==")
+call("/api/projects", "POST", {"code": "CTP", "name": "CT",
+                               "scope": ["10.70.0.0/24"]}, token=admin)
+st, r = call("/api/domains/candidates/ct?project=CTP", "POST",
+             {"roots": ["acme.example"]}, token=admin)
+check("a lookup with the gate shut is refused, not attempted",
+      st == 409, f"{st} {r}")
+check("...with a 409, because the fix is a decision and not a retry",
+      st == 409, st)
+check("...and the message says what enabling it would send",
+      "third party" in json.dumps(r), r)
+
+st, r = call("/api/domains/candidates/ct?project=CTP", "POST",
+             {"roots": []}, token=admin)
+check("naming no root is a 400, not a silent empty pass", st == 400, st)
+
+# The shape that produced a 500 on a live engagement. `Ruling` carries
+# `reason`; the handler read `.why`, which only executes when a name
+# is actually REFUSED -- so every lookup that proposed nothing out of
+# scope returned 200 and the one that did not returned 500.
+print("\n== a refusal is reported, not raised ==")
+from app.scope import Ruling  # noqa: E402
+
+_r = Ruling(verdict="barred", reason="x matches the out-of-scope entry y")
+check("Ruling carries `reason`", _r.reason.startswith("x matches"))
+check("...and has no `why`, which is what the handler used to read",
+      not hasattr(_r, "why"))
+check("a barred ruling is not allowed", _r.allowed is False)
+
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
