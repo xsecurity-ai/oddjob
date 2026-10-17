@@ -272,16 +272,55 @@ def decide(hostname: str, cnames, bodies: list[str] | None = None,
 
 #: Which rows become a finding, and at what severity.
 #:
-#: Keyed on `claimable`, because that is the question a reader of the
-#: report is actually asking. A record pointing at a provider surface
-#: nobody can re-register is a cleanup job; one pointing at a surface
-#: anyone can claim is somebody else's foothold on the client's
-#: domain, and the two must not arrive in a report wearing the same
-#: colour.
-SEVERITY_BY_CLAIMABLE: dict[bool, str] = {
-    False: "low",
-    True: "high",
+#: Two inputs, and the ORDER they apply in is the whole point.
+#:
+#: `claimable` answers "how bad if true": a record pointing at a
+#: provider surface nobody can re-register is a cleanup job, one
+#: pointing at a first-come surface is somebody else's foothold on
+#: the client's domain.
+#:
+#: The verdict answers "do we know it is true at all", and it caps
+#: the answer. **An unevidenced row never outranks an evidenced
+#: one.** The first version keyed on `claimable` alone and produced
+#: exactly that inversion on the live engagement: a CloudFront
+#: distribution caught serving its own unclaimed-resource page --
+#: evidence, on a client hostname -- ranked Low, while a Heroku name
+#: nothing had checked would have ranked High. A report where a
+#: proven misconfiguration sits below a guess teaches its reader to
+#: distrust the severities, which is worse than having none.
+#:
+#: So: evidence sets the floor, `claimable` sets the ceiling.
+#:
+#:                     claimable=False   claimable=True
+#:     dangling              low              high
+#:     fingerprint           low              high
+#:     candidate             low              low
+#:
+#: `claimable=False -> low` throughout is the rule as specified. The
+#: change is that `candidate` no longer borrows the severity of a
+#: finding it has not earned.
+SEVERITY: dict[tuple[str, bool], str] = {
+    ("dangling", False): "low",
+    ("dangling", True): "high",
+    ("fingerprint", False): "low",
+    ("fingerprint", True): "high",
+    # Not determined. Reported so somebody goes and looks, ranked so
+    # nobody reads it as a finding.
+    ("candidate", False): "low",
+    ("candidate", True): "low",
 }
+
+
+def severity_for(c: Candidate) -> str:
+    """Severity of one takeover. Unknown shapes fall to `low`.
+
+    Falling to the floor rather than raising: a verdict this table
+    has not met is, by definition, one nothing has reasoned about,
+    and guessing high on it would put an unexamined row at the top of
+    a client's report.
+    """
+    return SEVERITY.get((c.verdict, bool(c.claimable)), "low")
+
 
 #: Which verdicts are worth raising at all.
 #:
@@ -374,7 +413,7 @@ async def _sync_vulns(session, project_id: int,
     for host, c in wanted.items():
         tid = decided[host][0]
         key = f"{VULN_PREFIX}{host}"
-        sev = SEVERITY_BY_CLAIMABLE[bool(c.claimable)]
+        sev = severity_for(c)
         v = existing.get(key)
         if v is None:
             session.add(Vuln(
