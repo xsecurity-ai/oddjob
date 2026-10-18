@@ -187,6 +187,15 @@ export function ImportScanDialog({ project, onClose }: {
                   {result.command}
                 </Typography>
               )}
+              {/* Above the per-line errors, because it is the one
+                  that changes how everything else should be read: a
+                  clean set of zeros means nothing if the file could
+                  not be understood in the first place. */}
+              {result.parsed_nothing && (
+                <Alert severity="error" variant="outlined" sx={{ mt: 1.5, fontSize: 11.5 }}>
+                  {result.parsed_nothing}
+                </Alert>
+              )}
               {result.errors.length > 0 && (
                 <Alert severity="warning" variant="outlined" sx={{ mt: 1.5, fontSize: 11.5 }}>
                   {result.errors.map((e, i) => <Box key={i}>{e}</Box>)}

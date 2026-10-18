@@ -738,6 +738,13 @@ export interface ImportResult {
   implants_created: number; implants_updated: number
   hosts_flagged: number
   scripts_captured: number; notes_recorded: number
+  /**
+   * Set when a document with real size in it parsed to nothing at all.
+   * "Found nothing" and "could not read it" are different answers;
+   * this is the one that is usually a changed output format rather
+   * than a clean estate.
+   */
+  parsed_nothing?: string | null
   errors: string[]
   /** Present when the server is holding the file for a decision. */
   upload_id?: string | null

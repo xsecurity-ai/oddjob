@@ -1813,4 +1813,82 @@ check("...nor one behind the short label",
 check("a hostname that merely looks addressy is kept",
       _cn.san_names(["10.0.0.1.nodes.example"]) == ["10.0.0.1.nodes.example"])
 
+print("\n== a file that parsed to nothing says so ==")
+# The failure mode this exists for: a nuclei template release changes
+# the JSON shape, the tool still exits 0, the importer still succeeds,
+# and the run reports a clean estate. "Found nothing" and "could not
+# read it" are different answers and collapsing the second into the
+# first is how a finding gets missed.
+#
+# Shaped as the real thing: well-formed nmap XML whose host elements
+# the parser cannot use, with enough bytes in it to be a real file.
+_PADDING = "<!-- " + ("x" * 3000) + " -->"
+_MOVED = (
+    '<?xml version="1.0"?>\n'
+    '<nmaprun scanner="nmap" version="9.99" start="1700000000">\n'
+    + _PADDING + "\n"
+    # The elements a future nmap might emit instead. Well-formed, and
+    # nothing here knows what to do with them.
+    '<scantarget><reachable/><identity value="h1.acme.example"/>'
+    '<listening><entry num="443"/></listening></scantarget>\n'
+    "</nmaprun>\n")
+
+st, r = call("/api/scans/import?project=EMPTYP&format=nmap", "POST",
+             {"content": _MOVED}, token=admin)
+if st == 404:
+    call("/api/projects", "POST", {"code": "EMPTYP", "name": "Empty parse"},
+         token=admin)
+    st, r = call("/api/scans/import?project=EMPTYP&format=nmap", "POST",
+                 {"content": _MOVED}, token=admin)
+check("a document the parser cannot use still imports", st == 200, (st, r))
+check("...and nothing was written", (r or {}).get("hosts_seen") == 0, r)
+check("...but it is NOT reported as a clean nothing",
+      bool((r or {}).get("parsed_nothing")), r)
+if (r or {}).get("parsed_nothing"):
+    _w = r["parsed_nothing"]
+    check("...the warning says how much was read",
+          "bytes" in _w, _w)
+    check("...and names the format change as the likely cause",
+          "format" in _w.lower(), _w)
+
+# A genuinely empty scan is a real thing and must not be flagged. A
+# masscan that found no open ports has nothing to report and is right.
+_EMPTY = ('<?xml version="1.0"?>\n'
+          '<nmaprun scanner="nmap" version="7.94" start="1700000000">\n'
+          '</nmaprun>\n')
+st, r2 = call("/api/scans/import?project=EMPTYP&format=nmap", "POST",
+              {"content": _EMPTY}, token=admin)
+check("a small empty scan imports", st == 200, (st, r2))
+check("...and is NOT flagged, because there was nothing in it to read",
+      not (r2 or {}).get("parsed_nothing"), r2)
+
+# Nor is a file that parsed fine. The flag is about silence, not
+# about size.
+st, r3 = call("/api/scans/import?project=EMPTYP&format=nmap", "POST",
+              {"content": '<?xml version="1.0"?>'
+                          '<nmaprun scanner="nmap" version="7.94" start="1">'
+                          + _PADDING +
+                          '<host><status state="up"/>'
+                          '<address addr="198.51.100.44" addrtype="ipv4"/>'
+                          '<ports><port protocol="tcp" portid="443">'
+                          '<state state="open"/><service name="https"/>'
+                          '</port></ports></host></nmaprun>'},
+              token=admin)
+check("a large file that DID parse is not flagged",
+      st == 200 and not (r3 or {}).get("parsed_nothing"), (st, r3))
+
+# And a file whose unusable lines were reported is not flagged either:
+# the errors already say what happened, and two warnings about one
+# fact is noise.
+from app.importers.model import ParsedScan as _PS  # noqa: E402
+
+_withrr = _PS(tool="nuclei", errors=["line 4: could not be read"])
+check("a parse that reported errors is not also flagged",
+      _withrr.read_nothing(100_000) is None)
+check("a parse with records is not flagged",
+      _PS(tool="nmap", notes=[object()]).read_nothing(100_000) is None)
+check("a silent parse of a real file is",
+      _PS(tool="nmap").read_nothing(100_000) is not None)
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

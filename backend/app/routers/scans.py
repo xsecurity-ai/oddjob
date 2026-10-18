@@ -136,6 +136,13 @@ class ImportResult(BaseModel):
     hosts_flagged: int = Field(0, description="Targets newly marked compromised")
     scripts_captured: int = 0
     notes_recorded: int = 0
+    #: Set when a document with real size in it parsed to nothing at
+    #: all -- no records and no errors. "Found nothing" and "could not
+    #: read it" are different answers and this is the one that is
+    #: usually a format change rather than a clean estate. Carries the
+    #: sentence rather than a flag, because a bare boolean in a result
+    #: is something every caller has to remember to render.
+    parsed_nothing: str | None = None
     errors: list[str] = []
     #: Set when strict mode found hosts the project does not have. Nothing
     #: was written; the caller decides and posts again.
@@ -1012,6 +1019,14 @@ async def _run(session: AsyncSession, project: Project, text: str, fmt: str,
     except ImportError_ as e:
         raise HTTPException(422, str(e)) from e
 
+    # A document with substance in it that yields no records and no
+    # errors is not an empty scan -- it is what a changed output
+    # format looks like. Carried through to the result rather than
+    # raised: the import is not wrong, and refusing it would be a
+    # stronger claim than this can make. It just must not be reported
+    # as a clean nothing.
+    _nothing = scan.read_nothing(len(text.encode("utf-8", "replace")))
+
     known = await _known(session, project)
     policy = Policy(mode=("open" if mode == "open" else "strict"), known=set(known),
                     scope=await index_for(session, project.id),
@@ -1033,10 +1048,14 @@ async def _run(session: AsyncSession, project: Project, text: str, fmt: str,
                 unknown_hosts=[UnknownHostOut(**{**u.__dict__, "total": u.total})
                                for u in unknown],
                 barred_hosts=dict(policy.barred),
+                parsed_nothing=_nothing,
                 errors=list(scan.errors))
 
-    return await ingest(session, project, scan, detected,
-                        f"{detected}:{source}", policy)
+    res = await ingest(session, project, scan, detected,
+                       f"{detected}:{source}", policy)
+    if _nothing:
+        res.parsed_nothing = _nothing
+    return res
 
 
 
