@@ -5,7 +5,6 @@ import {
 import ScanIcon from '@mui/icons-material/RadarOutlined'
 import type { ColumnDef } from '../lib/columns'
 import { countryCell, extraAddresses } from '../lib/cellFacts'
-import { StandingOrders } from '../components/StandingOrders'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Target } from '../lib/api'
 import { useAuth } from '../lib/auth'
@@ -654,12 +653,6 @@ export function TargetsView({ project }: { project: string | null }) {
           loading={pending.isLoading} error={pending.error as Error | null}
           auto={auto} onClose={() => setPicking(false)} />
       )}
-      {/* Only with one engagement in view: these are per-project
-          settings and "all projects" has no sensible meaning for
-          them. Above the table rather than behind a menu, because
-          something that scans a client on its own should be visible
-          from the screen that shows what it scanned. */}
-      {project && <StandingOrders project={project} />}
       <Tabs value={tab} onChange={(_, v) => setTab(v)}
         sx={{ minHeight: 34, px: 2, pt: 0.5,
               borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
@@ -669,7 +662,8 @@ export function TargetsView({ project }: { project: string | null }) {
           label={`Cloud${cloudRows.length ? ` (${cloudRows.length.toLocaleString()})` : ''}`} />
       </Tabs>
       {tab === 'cloud' ? (
-        <Box sx={{ flex: 1, minHeight: 0, height: '100%' }}>
+        <Box sx={{ flex: 1, minHeight: 0, height: '100%',
+                   display: 'flex', flexDirection: 'column' }}>
           <CloudTargetsPanel rows={cloudRows} onOpen={(t) => open(t.project_code, t.host)} />
         </Box>
       ) : (
