@@ -1429,8 +1429,59 @@ check("the URL beats a wrong content type, because /app.js is javascript",
 check("a declared type is used when the URL has no extension",
       _aw.page_ext("https://acme.example/api/session",
                    "application/json; charset=utf-8") == ".json")
-check("a route with neither is still read",
-      _aw.page_ext("https://acme.example/api/session", None) == ".txt")
+# 96% of the eligible responses on a live engagement declared no
+# content type at all -- 48,990 of 51,059 -- so this branch is not
+# an edge case, it is the common path, and what it returns is what
+# the sweep actually does. Returning `.txt` sent nearly every page
+# to the `generic` ruleset, whose `gitleaks.generic-api-key` rule
+# then supplied 54% of everything the first 300 pages produced.
+check("a route with neither is read as what its BODY looks like",
+      _aw.page_ext("https://acme.example/api/session", None,
+                   '{"session": "x"}') == ".json")
+check("...markup is html, which is the ruleset a page wants",
+      _aw.page_ext("https://acme.example/login", None,
+                   "<!DOCTYPE html><html>") == ".html")
+check("...including a fragment, which starts with a tag and no doctype",
+      _aw.page_ext("https://acme.example/widget", None,
+                   "<div id=x>hello</div>") == ".html")
+check("...an xml declaration is xml",
+      _aw.page_ext("https://acme.example/feed", None,
+                   "<?xml version='1.0'?><rss/>") == ".xml")
+# NOT read. `.txt` selects the `generic` ruleset, whose
+# `gitleaks.generic-api-key` rule supplied 54% of everything the
+# first 300 pages of the live sweep produced. A classifier that
+# always answers is one whose answer means nothing -- "could not
+# determine" is its own answer here too, and it means skip.
+check("...and text we cannot name is NOT thrown at a catch-all ruleset",
+      _aw.page_ext("https://acme.example/robots", None,
+                   "User-agent: *") is None)
+check("javascript served at a web address gets the javascript rules",
+      _aw.page_ext("https://acme.example/app", None,
+                   "/* @license */ (function(){})()") == ".js")
+check("...and a stylesheet gets css",
+      _aw.page_ext("https://acme.example/s", None,
+                   ".sec-container{padding-top:1px}") == ".css")
+# Reading a binary as text is how an entropy detector finds a
+# credential in a compression stream. 131 PDFs were in the corpus.
+check("a PDF is not read at all",
+      _aw.page_ext("https://acme.example/doc", None, "%PDF-1.7 %abc") is None)
+check("...nor a PNG", _aw.page_ext("https://acme.example/i", None,
+                                   "\x89PNG\r\n") is None)
+# Both cost real pages on the live corpus: 148 behind a BOM, 150
+# behind a chunked-transfer size line the capture never stripped.
+check("HTML behind a byte-order mark is still HTML",
+      _aw.page_ext("https://acme.example/b", None,
+                   "\ufeff<!DOCTYPE html PUBLIC") == ".html")
+check("...and HTML behind a chunk-size line is too",
+      _aw.page_ext("https://acme.example/c", None,
+                   "14e27\r\n<!DOCTYPE html>") == ".html")
+check("nothing to go on at all is not read",
+      _aw.page_ext("https://acme.example/empty", None, "") is None)
+# A declared type still wins over the body: the server saying what
+# it sent is better evidence than our guess at it.
+check("a declared type beats the sniff",
+      _aw.page_ext("https://acme.example/x", "application/json",
+                   "<html>") == ".json")
 # Guessing `.txt` at an unknown type is how a font ends up in front
 # of a secret scanner, which finds entropy in all of them.
 check("an image is NOT read",
@@ -1556,6 +1607,30 @@ async def _again():
         return await _aw.scan_pages(s, pid, limit=50)
 
 check("a second pass reads nothing again", asyncio.run(_again()).scanned == 0)
+
+print("\n== entropy is not a finding on a page ==")
+# `assetscan` already says why for a bundle -- "a high-entropy
+# string in minified JavaScript is very often a hash" -- and on
+# markup it is worse: SRI digests, CSP nonces, inline data URIs and
+# analytics ids are all high-entropy and none is a credential.
+# Measured on the first 300 pages of the live sweep, 39% of
+# everything raised was one of these two detectors.
+check("the suppressed detectors are the entropy ones, by name",
+      set(_asx._ENTROPY_TYPES) ==
+      {"Base64 High Entropy String", "Hex High Entropy String"},
+      _asx._ENTROPY_TYPES)
+check("a sweep can say how many it dropped",
+      _aw.Swept().entropy_skipped == 0)
+# The distinction that keeps this from being censorship: dropping
+# "it looked random" is not dropping "this is a Google API key",
+# and the second is the reason to read pages at all.
+_named = _asx.scan_detect_secrets(
+    "page.html",
+    '<html><script>var apiKey = "a3f1c9e7b2d84f60a1c5e8b3d7f20946";'
+    "</script></html>")
+check("a named-shape secret still fires",
+      any(f.rule not in _asx._ENTROPY_TYPES for f in _named),
+      [f.rule for f in _named])
 
 
 srv.shutdown()
