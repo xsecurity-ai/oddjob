@@ -426,6 +426,32 @@ export interface AgentStatus {
   allow_writes: boolean; max_steps: number; tools: string[]
   detail: string | null
 }
+/** One message in a shared agent thread. */
+export interface AgentTurn {
+  id: number
+  seq: number
+  role: 'user' | 'assistant'
+  text: string
+  steps: AgentStep[]
+  /** Who typed it, for a user turn. The point of sharing the thread
+   *  is knowing which of you already asked. */
+  author: string | null
+  at: string | null
+}
+
+/** An agent conversation, owned by the ENGAGEMENT rather than by the
+ *  browser that started it. Switching project lands on that
+ *  project's thread, never carries this one across. */
+export interface AgentSession {
+  id: number
+  project_code: string
+  title: string | null
+  opened_by: string | null
+  closed: boolean
+  at: string | null
+  turns: AgentTurn[]
+}
+
 export interface AgentReply {
   text: string; provider: string; model: string
   steps: AgentStep[]; stop_reason: string
@@ -1183,6 +1209,16 @@ export const api = {
   agentChat: (project: string, message: string, history: unknown[]) =>
     req<AgentReply>('/api/agent/chat' + qs({ project }),
       { method: 'POST', body: JSON.stringify({ message, history }) }),
+  /** This engagement's agent thread, as everyone on it sees it.
+   *  Null when the project has not been asked anything yet — which
+   *  is different from an empty thread somebody started. */
+  agentSession: (project: string) =>
+    req<AgentSession | null>('/api/agent/session' + qs({ project })),
+  /** Close the current thread and open a fresh one. Closed, not
+   *  deleted: what was asked during an engagement is part of it. */
+  newAgentSession: (project: string) =>
+    req<AgentSession>('/api/agent/session/new' + qs({ project }),
+      { method: 'POST', body: '{}' }),
   importReport: (project: string, content: string, format = 'auto',
                  mode: 'strict' | 'open' = 'strict',
                  decisions: Record<string, HostDecision> = {}) =>
