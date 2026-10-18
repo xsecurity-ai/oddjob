@@ -256,6 +256,35 @@ class ParsedWebAddress(_Scrubbed):
 
 
 @dataclass
+class ParsedScreenshot(_Scrubbed):
+    """A picture of one URL, as a browser drew it.
+
+    `image` is bytes, not text, and that is the whole reason this is
+    its own record rather than a field on ParsedWebAddress. A PNG
+    contains NUL bytes; Postgres refuses them in a text column and
+    SQLite accepts them, which is the difference that has already
+    cost this project one import that worked on a laptop and failed
+    against the real database part-way through. Bytes never reach
+    `scrub`, because bytes are not a string.
+
+    `status` of None means the browser never reported one -- a
+    navigation that ended in its own error page. That is "could not
+    determine", not 200.
+    """
+    url: str
+    image: bytes
+    host: str | None = None
+    final_url: str | None = None
+    status_code: int | None = None
+    title: str | None = None
+    content_type: str = "image/png"
+    width: int | None = None
+    height: int | None = None
+    sha256: str | None = None
+    captured_at: datetime | None = None
+
+
+@dataclass
 class ParsedNote(_Scrubbed):
     host: str
     summary: str
@@ -287,6 +316,7 @@ class ParsedScan(_Scrubbed):
     implants: list[ParsedImplant] = field(default_factory=list)
     web: list[ParsedWebAddress] = field(default_factory=list)
     assets: list[ParsedAsset] = field(default_factory=list)
+    screenshots: list[ParsedScreenshot] = field(default_factory=list)
     notes: list[ParsedNote] = field(default_factory=list)
     #: What the scanner actually did, per protocol, as (technique,
     #: protocol, port-spec) — e.g. ("version", "tcp", "1-1024").
@@ -312,7 +342,7 @@ class ParsedScan(_Scrubbed):
         """How many records of any kind came out of the document."""
         return (len(self.hosts) + len(self.vulns) + len(self.credentials)
                 + len(self.implants) + len(self.web) + len(self.assets)
-                + len(self.notes))
+                + len(self.screenshots) + len(self.notes))
 
     def read_nothing(self, source_bytes: int) -> str | None:
         """-> why an empty parse is suspicious, or None if it is not.

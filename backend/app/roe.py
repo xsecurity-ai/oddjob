@@ -97,6 +97,25 @@ IMPACT: dict[str, str] = {
     #: does nothing of the sort; "usually" is not the standard an
     #: authorisation letter is held to.
     "katana": "state_changing",
+    #: A headless browser loading the page.
+    #:
+    #: NOT read-only, and the distinction is the whole point of
+    #: classifying by what a technique DOES rather than by what it is
+    #: called. Fetching a URL and rendering it are different acts: the
+    #: renderer EXECUTES the page's JavaScript. Whatever the author
+    #: wrote to run on load, runs -- analytics beacons, a WebSocket,
+    #: an XHR that writes a session row, a single-page application
+    #: that routes itself somewhere on boot and fetches that too. The
+    #: agent asks for one URL; the browser decides what else to ask
+    #: for, and it does it in milliseconds with nobody watching.
+    #:
+    #: `katana` is state-changing because a link can be `/logout`.
+    #: This is a strictly larger claim: it does everything a link can
+    #: do AND runs the site's own code. Classifying it read-only
+    #: because "it is only a screenshot" would let a `read_only`
+    #: engagement run a browser over a client's estate, which is the
+    #: ceiling failing at precisely the case it was written for.
+    "screenshot": "state_changing",
     #: Templates that send payloads. That is what they are for.
     "nuclei": "state_changing",
     #: An operator's edited request, sent verbatim. Classified upward

@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Box, Chip, Menu, MenuItem, Stack, Tab, Tabs, ToggleButton, ToggleButtonGroup,
-  Tooltip, Typography, alpha,
+  Alert, Box, Chip, Menu, MenuItem, Snackbar, Stack, Tab, Tabs, ToggleButton,
+  ToggleButtonGroup, Tooltip, Typography, alpha,
 } from '@mui/material'
 import LaunchIcon from '@mui/icons-material/Launch'
 import { WebAssetsPanel } from '../components/WebAssetsPanel'
 import ArticleIcon from '@mui/icons-material/ArticleOutlined'
 import ContentCopyIcon from '@mui/icons-material/ContentCopy'
 import ReplayIcon from '@mui/icons-material/Replay'
+import PhotoCameraIcon from '@mui/icons-material/PhotoCameraOutlined'
 import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import CircularProgress from '@mui/material/CircularProgress'
@@ -21,6 +22,7 @@ import { TakeoversPanel } from '../components/TakeoversPanel'
 import { useHostModal } from '../components/HostModal'
 import { PacketModal } from '../components/PacketModal'
 import { ReplayModal } from '../components/ReplayModal'
+import { queue } from '../components/ghostTasking'
 import { neon, glow, TAB_SX } from '../theme'
 
 /**
@@ -84,6 +86,35 @@ export function WebView({ project }: { project: string | null }) {
   const [children, setChildren] = useState<Record<string, WebAddress[]>>({})
   const [loadingKey, setLoadingKey] = useState<string | null>(null)
   const [replay, setReplay] = useState<number | null>(null)
+  // What the last queue attempt did. A task queued from a context
+  // menu is otherwise entirely silent: the work goes to an agent
+  // somewhere else and nothing on this page changes for minutes.
+  const [notice, setNotice] = useState<string | null>(null)
+
+  /** Ask a ghost to photograph this URL.
+   *
+   *  Pooled rather than addressed to an agent: which ghost is the
+   *  routing policy's decision, and this menu has no business
+   *  overriding it. A ghost too small to hold chromium reports the
+   *  kind as unaffordable on its heartbeat and is simply not offered
+   *  the task -- which is why this does not ask whether the fleet can
+   *  do it before queueing.
+   *
+   *  The task is state-changing under the rules of engagement, since
+   *  a headless browser runs the page's own JavaScript, so a
+   *  read-only engagement refuses it HERE, at the server, and says
+   *  so. That refusal is worth reading rather than swallowing.
+   */
+  const photograph = async (url: string) => {
+    if (!project) return
+    try {
+      await queue(project, null, 'screenshot', { url }, '')
+      setNotice(`Queued a screenshot of ${url}. It appears on the packet `
+                + `view once a ghost reports back.`)
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   const toggle = async (g: WebGroup) => {
     const key = rowKey(g)
@@ -443,6 +474,12 @@ export function WebView({ project }: { project: string | null }) {
           <ReplayIcon sx={{ fontSize: 16, mr: 1 }} />
           Edit and resend
         </MenuItem>
+        <MenuItem
+          onClick={() => { const u = menu!.row.url; setMenu(null); void photograph(u) }}
+          sx={{ fontSize: 12.5, color: neon.purple }}>
+          <PhotoCameraIcon sx={{ fontSize: 16, mr: 1 }} />
+          Photograph this page
+        </MenuItem>
         {/* `href` is kept so middle-click and "copy link address" still
             work, but the navigation is done explicitly rather than left
             to the anchor's default. Closing the menu in the same handler
@@ -468,6 +505,15 @@ export function WebView({ project }: { project: string | null }) {
           Copy URL
         </MenuItem>
       </Menu>
+
+      <Snackbar open={!!notice} autoHideDuration={8000}
+        onClose={() => setNotice(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
+        <Alert severity="info" variant="outlined"
+          onClose={() => setNotice(null)} sx={{ fontSize: 12.5 }}>
+          {notice}
+        </Alert>
+      </Snackbar>
 
       <ReplayModal
         id={replay} onClose={() => setReplay(null)}
