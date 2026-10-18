@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import re
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -13,8 +14,9 @@ from sqlalchemy.orm import load_only
 from .. import slack
 from ..db import get_session
 from ..events import broker
-from ..models import REPORT_KINDS, Project, Report, User
+from ..models import REPORT_KINDS, Project, Report, ReportRender, User
 from ..reports import ReportDoc, filename, render
+from ..reports.render import MEDIA_TYPE
 from ..reports.runner import schedule
 from ..security import get_current_user, require_project
 
@@ -85,6 +87,19 @@ class KindInfo(BaseModel):
     name: str
     label: str
     sections: list[str]
+
+
+def _name(row: Report, fmt: str) -> str:
+    """The download filename, from metadata rather than the document.
+
+    `filename()` takes a ReportDoc, and the whole point of the cached
+    path is not to load one. The pieces it uses -- the kind, the
+    title and the date -- are all on the row.
+    """
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-",
+                  f"{row.title or row.kind or 'report'}").strip("-")
+    day = row.created_at.date().isoformat() if row.created_at else "undated"
+    return f"{stem or 'report'}-{day}.{fmt}"
 
 
 def _out(row: Report, code: str, who: str | None) -> ReportOut:
@@ -194,7 +209,15 @@ async def download(report_id: int, format: str = Query("pdf"),
     if fmt not in ("pdf", "docx"):
         raise HTTPException(422, "format must be pdf or docx")
 
-    row = await session.get(Report, report_id)
+    # Metadata only. `content` is the whole document -- twelve
+    # megabytes on a real engagement -- and a cached download never
+    # needs to look at it.
+    row = (await session.execute(
+        select(Report)
+        .options(load_only(Report.id, Report.project_id, Report.status,
+                           Report.error, Report.kind, Report.title,
+                           Report.created_at))
+        .where(Report.id == report_id))).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, "no such report")
     pr = await session.get(Project, row.project_id)
@@ -206,14 +229,47 @@ async def download(report_id: int, format: str = Query("pdf"),
     if await effective_role(session, user, pr.id) is None:
         raise HTTPException(404, "no such report")
 
-    if row.status != "ready" or not row.content:
+    if row.status != "ready":
         raise HTTPException(
             409, f"this report is {row.status}"
                  + (f": {row.error}" if row.error else
                     "; it is not ready to download yet"))
 
-    doc = ReportDoc.from_json(json.loads(row.content))
-    data, media = render(doc, fmt)
+    # The fast path, and on a report generated since this exists it
+    # is the only path: the bytes were built when the report was,
+    # from the same document as the other format.
+    cached = (await session.execute(
+        select(ReportRender).where(
+            ReportRender.report_id == row.id,
+            ReportRender.fmt == fmt))).scalar_one_or_none()
+    if cached is not None:
+        return Response(
+            content=cached.data, media_type=MEDIA_TYPE[fmt],
+            headers={"Content-Disposition":
+                     f'attachment; filename="{_name(row, fmt)}"',
+                     "Content-Length": str(cached.bytes)})
+
+    # No cached render. Either the report predates this, or that one
+    # renderer failed while the other succeeded. Build it, keep it,
+    # and be fast from here on — the document is loaded for exactly
+    # this case and no other.
+    doc_row = (await session.execute(
+        select(Report.content).where(Report.id == row.id))).scalar_one_or_none()
+    if not doc_row:
+        raise HTTPException(
+            409, "this report has no stored document to render")
+    doc = ReportDoc.from_json(json.loads(doc_row))
+    try:
+        data, media = render(doc, fmt)
+    except Exception as e:                               # noqa: BLE001
+        # Said rather than swallowed. One renderer failing is a fact
+        # about that format, not about the report, and the other
+        # format may well be sitting there working.
+        raise HTTPException(
+            500, f"this report could not be rendered as {fmt}: {e}") from e
+    session.add(ReportRender(report_id=row.id, fmt=fmt, data=data,
+                             bytes=len(data), rendered_at=datetime.now(UTC)))
+    await session.commit()
     return Response(
         content=data, media_type=media,
         headers={"Content-Disposition":
