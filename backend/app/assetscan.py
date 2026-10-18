@@ -312,6 +312,31 @@ def shannon(value: str) -> float:
 #: is what makes it a credential.
 MIN_KEYWORD_ENTROPY = 3.2
 
+#: Longest a high-entropy string can be and still be a credential.
+#:
+#: Measured on 1,498 entropy findings from a live estate: 163 were
+#: over 200 characters and the commonest single length was 452 --
+#: inline source-map fragments, base64 fonts and data URIs. Nothing
+#: is ISSUED at that size. JWTs are the one long credential and they
+#: have their own detector and an `eyJ` prefix, so they do not come
+#: through here.
+MAX_ENTROPY_LEN = 200
+
+#: How many entropy hits one file may produce before none of them is
+#: credible.
+#:
+#: A file holding fifty high-entropy strings is a file full of
+#: generated data, not a file with a secret in it. A real leaked
+#: credential is one or two in a file.
+#:
+#: Twelve because of where the real distribution falls, not because
+#: it is a round number: across the same estate the per-file counts
+#: were 311, 5, 4, 3, 3, 3, 3, 3, 2, 2 and nine files with 1. There
+#: is nothing at all between 5 and 311, so any cap in that gap
+#: separates the blob from the rest, and a low one leaves no room
+#: for a file that genuinely holds a handful.
+MAX_ENTROPY_PER_FILE = 12
+
 
 def implausible_secret(value: str, detector: str) -> str | None:
     """-> why this is not a credential, or None if it might be.
@@ -377,6 +402,12 @@ def implausible_secret(value: str, detector: str) -> str | None:
     if _ASPNET_DP.match(v):
         return ("an ASP.NET Data Protection token -- issued to the "
                 "browser on purpose and rotated per request")
+    # Only for entropy. A vendor shape this long would be a vendor
+    # shape and is somebody else's problem to be wrong about.
+    if detector in _ENTROPY_TYPES and len(v) > MAX_ENTROPY_LEN:
+        return (f"{len(v)} characters -- too long to be an issued "
+                f"credential; at this size it is a source-map fragment, "
+                f"an embedded font or a data URI")
     return None
 
 
@@ -459,7 +490,31 @@ def scan_detect_secrets(path: str, body: str,
         # nothing, and the caller reports that rather than treating
         # it as a clean file.
         log.warning("assetscan: detect-secrets failed on %s (%s)", path, e)
-    return out
+    return _drop_entropy_blobs(path, out)
+
+
+def _drop_entropy_blobs(path: str, found: list[Finding]) -> list[Finding]:
+    """A file full of high-entropy strings has no secret in it.
+
+    It is a sprite sheet, a font, a source map, a wordlist or a
+    table of generated ids. A real leaked credential is one or two
+    in a file; three hundred is the file's nature rather than a
+    mistake somebody made.
+
+    Applied per FILE and only to the entropy detectors. A file with
+    forty AWS keys in it is a different thing entirely and every one
+    of them is kept.
+    """
+    entropy = [f for f in found if f.rule in _ENTROPY_TYPES]
+    if len(entropy) <= MAX_ENTROPY_PER_FILE:
+        return found
+    # Said at info, not debug. Dropping 311 findings from one file
+    # is a decision somebody may want to disagree with, and it
+    # should be possible to find out that it happened.
+    log.info("assetscan: %s produced %d high-entropy strings, which is a "
+             "generated file rather than a leak; all of them dropped",
+             path, len(entropy))
+    return [f for f in found if f.rule not in _ENTROPY_TYPES]
 
 
 def available() -> dict[str, bool]:
