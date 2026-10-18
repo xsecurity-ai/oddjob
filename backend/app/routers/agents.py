@@ -2955,7 +2955,24 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
     # leave alone.
     idx = await index_for(session, a.project_id)
 
-    def scope_refusal(task: AgentTask) -> str | None:
+    # The CNAME carve-out has to hold HERE as well as at queue time,
+    # and it did not: 35 lookups queued cleanly and then every one
+    # of them failed with "refused by the project's scope at
+    # dispatch". Two gates, one patched -- which is a gate.
+    #
+    # Loaded lazily, and only when a resolve-only task is actually
+    # about to be refused. A heartbeat arrives every few seconds
+    # from every ghost, and a query per beat to answer a question
+    # almost no beat asks is the wrong trade.
+    hops: set[str] | None = None
+
+    async def hop_set() -> set[str]:
+        nonlocal hops
+        if hops is None:
+            hops = await scopegate.cname_hops(session, a.project_id)
+        return hops
+
+    async def scope_refusal(task: AgentTask) -> str | None:
         if not idx.defined or task.kind not in SCOPED_KINDS:
             return None
         try:
@@ -2963,7 +2980,20 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
         except ValueError:
             args = {}
         ruling = check_task_targets(idx, args if isinstance(args, dict) else {})
-        return ruling.reason if ruling is not None else None
+        if ruling is None:
+            return None
+        # Refused by the list. The one thing that may still pass is a
+        # DNS lookup of a name an in-scope host's own CNAME points
+        # at -- same rule, same single kind, same closed candidate
+        # set as at queue time.
+        if task.kind in scopegate.RESOLVE_ONLY_KINDS:
+            subjects = (args.get("targets") or []) if isinstance(args, dict) else []
+            known = await hop_set()
+            if subjects and all(
+                    scopegate.resolvable_hop(task.kind, str(t), known)
+                    for t in subjects):
+                return None
+        return ruling.reason
 
     def drop(task: AgentTask, why: str) -> None:
         """Fail it rather than skip it. A task silently passed over on
@@ -3093,7 +3123,7 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
                      AgentTask.status == "queued"))).scalars():
         if len(chosen) >= free:
             break
-        why = scope_refusal(cand)
+        why = await scope_refusal(cand)
         if why is not None:
             drop(cand, why)
             continue
@@ -3139,7 +3169,7 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
         for cand in pool:
             if len(chosen) >= free:
                 break
-            why = scope_refusal(cand)
+            why = await scope_refusal(cand)
             if why is not None:
                 drop(cand, why)
                 continue
