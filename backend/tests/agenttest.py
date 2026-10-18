@@ -2752,6 +2752,57 @@ _first_nmap = _kinds.index("nmap") if "nmap" in _kinds else -1
 check("the scarce kind comes up early, not at the end",
       0 <= _first_nmap <= 2, _first_nmap)
 
+
+async def _queue_jump_drill():
+    """Priority has to beat BOTH orderings, not one of them.
+
+    The window reads DISPATCH_WINDOW rows, so ordering only the final
+    result is no use: a task sitting at position 3,000 of its own kind
+    is not in the window to be re-ordered in the first place. The row
+    number within a kind is computed with priority first, which puts a
+    jumping task at rn=1 for its kind and therefore inside the window,
+    and the outer ordering then puts it ahead of every other kind's
+    rn=1 as well.
+
+    So this is planted the hardest way round: newest of its kind,
+    behind a batch three times the window, of a kind that round-robin
+    would otherwise take first.
+    """
+    async with _Session() as db:
+        pid = (await db.execute(
+            _sel(_Pr.id).where(_Pr.code == "AGENT"))).scalar_one()
+        db.add_all([_Tk(project_id=pid, kind="katana", status="queued")
+                    for _ in range(300)])
+        await db.commit()
+        jump = _Tk(project_id=pid, kind="katana", status="queued",
+                   priority=100)
+        db.add(jump)
+        await db.commit()
+        jid = jump.id
+        rows = (await db.execute(_next_up(
+            _Tk.project_id == pid, _Tk.agent_id.is_(None),
+            _Tk.status == "queued"))).scalars().all()
+    return jid, [(t.id, t.kind) for t in rows]
+
+
+_jid, _order = _aio.run(_queue_jump_drill())
+check("a priority task is handed out first, ahead of everything older",
+      _order and _order[0][0] == _jid,
+      f"first was #{_order[0][0] if _order else None}, wanted #{_jid}")
+check("and is in the window at all, which plain ordering would not manage",
+      _jid in [i for i, _ in _order])
+# Nothing else moves. Age still orders within a kind -- asserted per
+# kind, not across the whole window, because round-robin interleaves
+# the kinds on purpose and a globally sorted list would mean THAT had
+# been broken instead.
+_rest = [(i, k) for i, k in _order[1:]]
+check("priority does not otherwise reshuffle the queue: within each kind "
+      "the rest is still oldest-first",
+      all([i for i, k in _rest if k == kind]
+          == sorted(i for i, k in _rest if k == kind)
+          for kind in {k for _, k in _rest}),
+      str(_order[:6]))
+
 # ------------------------------------------------- the ghost's own log
 # Diagnosing a ghost meant an account on the box it runs on, and this
 # fleet is a GCP VM behind IAP, a Windows host whose docker lives in

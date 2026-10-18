@@ -99,6 +99,16 @@ IMPACT: dict[str, str] = {
     "katana": "state_changing",
     #: Templates that send payloads. That is what they are for.
     "nuclei": "state_changing",
+    #: An operator's edited request, sent verbatim. Classified upward
+    #: for the reason the note at the top of this file gives: the
+    #: request is whatever somebody typed, and the interesting ones
+    #: are POSTs with a payload in them. A tool cannot read the verb
+    #: and conclude the target is unchanged -- a GET to `/logout` is
+    #: state-changing and looks exactly like a GET. "Usually
+    #: read-only" is not the standard an authorisation letter is held
+    #: to, and a client who wrote "no intrusive testing" did not mean
+    #: "except by hand".
+    "replay": "state_changing",
     #: Narrower than `nuclei` -- only the CVEs already matched to
     #: something on the host -- but confirming a CVE means sending
     #: the thing that triggers it, which is the same act.

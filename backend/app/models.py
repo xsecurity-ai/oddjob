@@ -2577,6 +2577,22 @@ class AgentTask(Base, TimestampMixin):
 
     kind: Mapped[str] = mapped_column(String(32), index=True)
     args: Mapped[str | None] = mapped_column(Text)              # JSON
+    #: Higher goes first. Zero for everything a scan queues.
+    #:
+    #: The queue is ordered by age within a kind, which is right for
+    #: work nobody is waiting on and wrong for work somebody is. An
+    #: operator who presses Send on a replayed request is sitting
+    #: looking at the dialog; a project with four thousand queued
+    #: crawls would make that a twenty-minute wait for one packet, and
+    #: the feature would read as broken rather than as busy.
+    #:
+    #: Not an index of its own. Every dispatch query already narrows on
+    #: (agent_id, status) or (project_id, agent_id IS NULL, status),
+    #: all of which are indexed; the ordering then happens over a set
+    #: the planner has already cut down, and a second index on a column
+    #: that is 0 for almost every row would not be read.
+    priority: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0")
     #: How many times an agent has tried and failed this.
     #:
     #: A failure is usually about the agent or the moment, not the
