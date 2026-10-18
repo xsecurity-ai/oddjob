@@ -22,6 +22,17 @@ export interface WebAsset {
   /** The pages that pull this in. The asset holds the bytes once;
    *  these are the sightings. */
   loaded_by: string[]
+  /** What this asset is CARRYING: findings raised out of its own
+   *  bytes, not findings on the host that serves it. A CDN bundle's
+   *  host is somebody else's infrastructure; the bundle is ours to
+   *  answer for. */
+  vulns: number
+  criticals: number
+  highs: number
+  /** Counted apart from the total. A stored credential is not a
+   *  severity — it is the one finding somebody goes looking for by
+   *  name, and burying it in a total is how it gets missed. */
+  secrets: number
 }
 
 export interface Project {
