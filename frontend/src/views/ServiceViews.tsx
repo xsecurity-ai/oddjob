@@ -76,23 +76,66 @@ const notesCol: ColumnDef<Service> = {
   valueGetter: (v) => v ?? '',
 }
 
-/** Version strings are long and frequently empty; keep them last and let
- *  them flex. The field is `banner` — what nmap and Faraday both call it. */
+/** What is running here, from whichever field actually has it.
+ *
+ *  This column read `banner` alone, and on a real estate the banner
+ *  is set on 1,061 services out of 919,752 — so it was empty on
+ *  99.9% of rows while `product` was populated on 999 of them and
+ *  `version` on 36, in columns it never looked at. The column was
+ *  not broken so much as reading one field out of four.
+ *
+ *  Composed in nmap's own order — product, version, extrainfo — and
+ *  falling back to the banner, which is the raw thing a service
+ *  said about itself when nothing parsed it.
+ */
+function identified(s: Service): string {
+  const parts = [s.product, s.version].filter(Boolean) as string[]
+  const extra = s.extrainfo ? `(${s.extrainfo})` : ''
+  const composed = [...parts, extra].filter(Boolean).join(' ').trim()
+  return composed || (s.banner ?? '').trim()
+}
+
+/** Why there is nothing to show, which is not one answer but three.
+ *
+ *  A blank cell reads as "fine" and these are not the same fact:
+ *  nothing looked, something looked and could not tell, and the port
+ *  accepted a connection and then hung up without saying a word.
+ *  The third is `tcpwrapped`, and on this estate it is 917,402 rows
+ *  across 53 hosts — a device answering every port, not services.
+ */
+function whyBlank(s: Service): string {
+  if (s.name === 'tcpwrapped') {
+    return 'accepted the connection and closed it without responding'
+  }
+  if (!s.method) return 'not probed for a version'
+  if (s.name === 'UNKNOWN') return 'probed; nothing recognised it'
+  return 'probed; no version offered'
+}
+
 const bannerCol: ColumnDef<Service> = {
   field: 'banner',
   headerName: 'Version',
   flex: 3,
   minWidth: 240,
-  valueGetter: (v) => v ?? '',
-  renderCell: (p) =>
-    p.value ? (
-      <Box sx={{ color: neon.muted, whiteSpace: 'nowrap', overflow: 'hidden',
-                 textOverflow: 'ellipsis' }} title={String(p.value)}>
-        {p.value}
+  // Sorts and filters on what is DISPLAYED. Sorting a column by a
+  // field it does not show is the kind of thing nobody reports and
+  // everybody distrusts.
+  valueGetter: (_v, row) => identified(row as Service),
+  renderCell: (p) => {
+    const s = p.row as Service
+    const got = identified(s)
+    return got ? (
+      <Box sx={{ color: neon.text, whiteSpace: 'nowrap', overflow: 'hidden',
+                 textOverflow: 'ellipsis' }} title={got}>
+        {got}
       </Box>
     ) : (
-      <Box component="span" sx={{ color: alpha(neon.muted, 0.35) }}>—</Box>
-    ),
+      <Box component="span" title={whyBlank(s)}
+        sx={{ color: alpha(neon.muted, 0.5), fontSize: 11, cursor: 'help' }}>
+        {s.name === 'tcpwrapped' ? 'no reply' : '—'}
+      </Box>
+    )
+  },
 }
 
 const projectCol: ColumnDef<Service> = {

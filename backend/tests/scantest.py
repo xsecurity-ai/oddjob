@@ -295,4 +295,76 @@ check("a readonly member cannot import", st == 403, f"status={st}")
 st, _ = call("/api/targets/SCAN/web01.example.com/timeline", token=v)
 check("but can read the timeline", st == 200, f"status={st}")
 
+print("\n== a host that answers every port is not a host with every service ==")
+# `tcpwrapped` is nmap saying the handshake completed and the far
+# end closed without a word. A handful is ordinary; seventeen
+# thousand on one host is a firewall answering indiscriminately.
+#
+# On the estate this was found on it was 917,402 rows across 53
+# hosts -- 99.7% of every service record -- none carrying a product,
+# a version or a banner, burying the 2,348 real ones.
+_WRAP = "".join(
+    f'<port protocol="tcp" portid="{p}"><state state="open" reason="syn-ack"/>'
+    f'<service name="tcpwrapped" method="probed" conf="8"/></port>'
+    for p in range(1000, 1200))
+FLOOD = f"""<?xml version="1.0"?>
+<nmaprun scanner="nmap" version="7.94" args="nmap -sV" start="1700000000">
+ <host><status state="up"/>
+  <address addr="198.51.100.80" addrtype="ipv4"/>
+  <hostnames><hostname name="wall.acme.example" type="PTR"/></hostnames>
+  <ports>{_WRAP}
+   <port protocol="tcp" portid="443"><state state="open" reason="syn-ack"/>
+    <service name="https" product="nginx" version="1.25.3" method="probed"/>
+   </port>
+  </ports>
+ </host>
+</nmaprun>
+"""
+st, r = call("/api/scans/nmap?project=SCAN", "POST", {"xml": FLOOD}, token=admin)
+check("the scan imports", st == 200, f"{st} {str(r)[:120]}")
+# The one real service survives; the 200 that said nothing do not.
+check("the service that actually answered is recorded",
+      r.get("services_created") == 1, r.get("services_created"))
+check("...and the ports that said nothing are not",
+      r.get("ports_indiscriminate") == 200, r.get("ports_indiscriminate"))
+
+st, d = call("/api/targets/SCAN/wall.acme.example/detail", token=admin)
+_svcs = (d or {}).get("services") or []
+check("the host carries one service, not two hundred and one",
+      len(_svcs) == 1, len(_svcs))
+check("...and it is the one with a version on it",
+      _svcs and _svcs[0].get("product") == "nginx", _svcs[:1])
+
+# The fact is not lost -- it is recorded once, on the host, where it
+# belongs. An open port on a box like this is not evidence of
+# anything listening, and that is worth more than 200 rows saying so
+# individually.
+st, tl = call("/api/targets/SCAN/wall.acme.example/timeline", token=admin)
+_rows = tl if isinstance(tl, list) else (tl or {}).get("items") or []
+check("the host is told it answers indiscriminately",
+      any("without responding" in str(x.get("summary", "")) for x in _rows),
+      [str(x.get("summary"))[:50] for x in _rows[:3]])
+
+# Below the threshold it is ordinary and is kept: a genuine
+# tcpwrapper in front of a few services is a real configuration.
+FEW = """<?xml version="1.0"?>
+<nmaprun scanner="nmap" version="7.94" args="nmap -sV" start="1700000000">
+ <host><status state="up"/>
+  <address addr="198.51.100.81" addrtype="ipv4"/>
+  <hostnames><hostname name="few.acme.example" type="PTR"/></hostnames>
+  <ports>
+   <port protocol="tcp" portid="22"><state state="open" reason="syn-ack"/>
+    <service name="tcpwrapped" method="probed"/></port>
+   <port protocol="tcp" portid="23"><state state="open" reason="syn-ack"/>
+    <service name="tcpwrapped" method="probed"/></port>
+  </ports>
+ </host>
+</nmaprun>
+"""
+st, r = call("/api/scans/nmap?project=SCAN", "POST", {"xml": FEW}, token=admin)
+check("a handful of tcpwrapped ports is ordinary and is kept",
+      r.get("services_created") == 2 and r.get("ports_indiscriminate") == 0,
+      (r.get("services_created"), r.get("ports_indiscriminate")))
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
