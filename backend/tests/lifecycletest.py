@@ -267,5 +267,190 @@ check("...including for the hand-written finding",
       _tv.get("Reviewer found this by hand", {}).get("lifecycle")
       == "unconfirmed")
 
+# ============================================================
+# The hole in `resolved`, and the manifest that closes it
+# ============================================================
+#
+#     nuclei -severity critical,high   found CVE-2021-44228
+#     nuclei -severity critical        did not
+#
+# Same tool, same host, later timestamp. Nothing about any of those
+# says the second run was configured not to look, and before the
+# manifest the tool said `resolved` out loud.
+
+print("\n== what a run was configured to look for ==")
+from app import manifest as mf
+
+_a = mf.build("nuclei", "-severity critical,high -rate 150 -c 25")
+_b = mf.build("nuclei", "-severity high,critical -rate 900 -timeout 30")
+_c = mf.build("nuclei", "-severity critical")
+check("pacing is not part of a run's identity", _a[0] == _b[0], (_a, _b))
+check("...nor is the order a filter was written in", _a[0] == _b[0])
+check("a narrower template filter IS a different run", _a[0] != _c[0])
+check("the detail says what went into the hash",
+      _a[1] == {"tool": "nuclei", "-severity": "critical,high"}, _a[1])
+check("...and the difference is reportable in words",
+      mf.differences(_a[1], _c[1]) == ["-severity: 'critical,high' -> "
+                                       "'critical'"],
+      mf.differences(_a[1], _c[1]))
+
+# nmap: the things that change what a scan can FIND.
+_n1 = mf.build("nmap", "nmap -sV -p 1-1024 -T4 --script default,safe")
+_n2 = mf.build("nmap", "nmap -sV -p 1-1024 -T2 --script default,safe")
+_n3 = mf.build("nmap", "nmap -sV -p 1-65535 --script default,safe")
+_n4 = mf.build("nmap", "nmap -sV -sU -p 1-1024 --script default,safe")
+check("nmap timing template is not part of the identity", _n1[0] == _n2[0])
+check("a wider port range is a different run", _n1[0] != _n3[0])
+check("adding UDP is a different run", _n1[0] != _n4[0])
+check("a positional target is not part of what was looked FOR",
+      mf.build("nmap", "nmap -sV 198.51.100.1")[0]
+      == mf.build("nmap", "nmap -sV 203.0.113.9")[0])
+check("an unknown flag is dropped rather than guessed at",
+      mf.build("nmap", "nmap -sV --some-future-flag x")[0]
+      == mf.build("nmap", "nmap -sV")[0])
+check("`-severity=high` and `-severity high` are one run",
+      mf.build("nuclei", "-severity=high")[0]
+      == mf.build("nuclei", "-severity high")[0])
+check("an unbalanced quote does not lose the configuration",
+      mf.build("nuclei", "-severity high -tags \"unclosed")[1].get("-severity")
+      == "high")
+check("a tool nothing is known about yields its name and no more",
+      mf.build("some-future-tool", "-whatever x")[1] == {
+          "tool": "some-future-tool"})
+
+print("\n== a sweep that was configured not to look ==")
+_T0 = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
+_T1 = datetime(2026, 4, 1, 9, 0, tzinfo=UTC)
+_T2 = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+
+_same = lc.verdict("nuclei", _T0, _T1, _T2, "abc", "abc")
+check("a later sweep with the SAME configuration resolves it",
+      _same.state == lc.RESOLVED, _same)
+check("...and says the configurations matched",
+      "same configuration" in _same.why, _same.why)
+
+_diff = lc.verdict("nuclei", _T0, _T1, _T2, "abc", "xyz")
+check("a later sweep configured DIFFERENTLY resolves nothing",
+      _diff.state == lc.UNCONFIRMED, _diff)
+check("...and says why: it was not looking for this",
+      "configured differently" in _diff.why
+      and "proves nothing" in _diff.why, _diff.why)
+check("...while still reporting that a scan did happen",
+      _diff.last_looked == _T2, _diff)
+check("...and carrying both manifests, so a UI can name the change",
+      (_diff.found_by, _diff.looked_with) == ("abc", "xyz"), _diff)
+
+# Not recorded is NOT the same as configured differently, and the
+# weaker claim has to read as the weaker claim.
+_unknown = lc.verdict("nuclei", _T0, _T1, _T2, None, None)
+check("an unrecorded configuration still resolves",
+      _unknown.state == lc.RESOLVED, _unknown)
+check("...but says it cannot show the two runs were comparable",
+      "not recorded" in _unknown.why, _unknown.why)
+check("...which reads differently from a matched configuration",
+      _unknown.why != _same.why)
+for _one_side in (("abc", None), (None, "abc")):
+    _v = lc.verdict("nuclei", _T0, _T1, _T2, *_one_side)
+    check(f"one side unrecorded {_one_side} is still the weaker resolve",
+          _v.state == lc.RESOLVED and "not recorded" in _v.why, _v)
+
+print("\n== end to end: narrowing the scan does not close findings ==")
+call("/api/projects", "POST", {"code": "MANI", "name": "Manifest"},
+     token=admin)
+
+
+def _nuc(ids, args):
+    return "\n".join(json.dumps({
+        "template-id": i, "host": "shop.acme.example",
+        "matched-at": f"https://shop.acme.example/{i}",
+        "info": {"name": f"m {i}", "severity": "high"},
+        # nuclei records the command line it ran under.
+        "cmd": args,
+    }) for i in ids)
+
+
+# The importer reads the command line off the scan where the format
+# carries one. For nuclei JSONL it does not, so the manifest is the
+# tool name -- which is the unrecorded case, and is covered above.
+# Here the shape is proved with nmap, whose XML DOES carry `args`.
+def _nmap(ports, scripts):
+    return f"""<?xml version="1.0"?>
+<nmaprun scanner="nmap" version="7.94" args="nmap -sV -p {ports} --script {scripts}" start="1700000000">
+ <host><status state="up"/>
+  <address addr="198.51.100.21" addrtype="ipv4"/>
+  <hostnames><hostname name="ftp.acme.example" type="PTR"/></hostnames>
+  <ports><port protocol="tcp" portid="21"><state state="open"/>
+   <service name="ftp" product="vsftpd" version="2.3.4"/>
+   <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+  </port></ports>
+ </host>
+</nmaprun>
+"""
+
+
+st, r = call("/api/scans/import?project=MANI", "POST",
+             {"format": "nmap", "mode": "open",
+              "content": _nmap("1-1024", "default,safe,vuln")}, token=admin)
+check("the full scan imported", st == 200, (st, r))
+st, v = call("/api/vulns?project=MANI&limit=20", token=admin)
+_items = (v or {}).get("items") or []
+check("the NSE finding was raised", len(_items) == 1,
+      [x["title"] for x in _items])
+check("...and is NEW", _items and _items[0]["lifecycle"] == "new", _items[:1])
+
+# Now a scan of the same host with a NARROWER script set. Scripts
+# DID run -- so a sweep is genuinely recorded -- and ftp-anon is not
+# among what they reported, because `default` does not include it.
+# That is the exact shape that used to say `resolved`.
+_NARROW = _nmap("1-1024", "default").replace(
+    '<script id="ftp-anon" output="Anonymous FTP login allowed '
+    '(FTP code 230)"/>',
+    '<script id="ftp-syst" output="STAT: FTP server status"/>')
+st, r = call("/api/scans/import?project=MANI", "POST",
+             {"format": "nmap", "mode": "open", "content": _NARROW},
+             token=admin)
+check("the narrower scan imported", st == 200, (st, r))
+
+st, v = call("/api/vulns?project=MANI&limit=20", token=admin)
+_items = (v or {}).get("items") or []
+check("a scan that was configured not to look does NOT resolve it",
+      _items and _items[0]["lifecycle"] == "unconfirmed",
+      [(x["title"], x["lifecycle"]) for x in _items])
+check("...and says the configuration differed",
+      _items and "configured differently" in (_items[0]["lifecycle_why"] or ""),
+      _items[0]["lifecycle_why"] if _items else None)
+
+# "The configuration changed" on its own is a dead end for whoever
+# reads it. The detail is stored so this list can exist.
+st, _d = call(f"/api/vulns/{_items[0]['id']}", token=admin)
+_ch = (_d or {}).get("configuration_changed") or []
+check("the detail names WHICH part of the configuration changed",
+      any("--script" in c for c in _ch), _ch)
+check("...showing both sides of it",
+      any("vuln" in c and "default" in c for c in _ch), _ch)
+
+# And the control: the SAME script set, with the finding gone, does
+# resolve it. Otherwise the above proves only that nothing resolves.
+st, r = call("/api/scans/import?project=MANI", "POST",
+             {"format": "nmap", "mode": "open",
+              "content": _nmap("1-1024", "default,safe,vuln").replace(
+                  '<script id="ftp-anon" output="Anonymous FTP login '
+                  'allowed (FTP code 230)"/>',
+                  '<script id="ftp-syst" output="STAT: ok"/>')}, token=admin)
+check("the comparable scan imported", st == 200, (st, r))
+st, v = call("/api/vulns?project=MANI&limit=20", token=admin)
+_items = (v or {}).get("items") or []
+check("the SAME configuration, with the finding gone, DOES resolve it",
+      _items and _items[0]["lifecycle"] == "resolved",
+      [(x["title"], x["lifecycle"]) for x in _items])
+check("...and says the configurations matched",
+      _items and "same configuration" in (_items[0]["lifecycle_why"] or ""),
+      _items[0]["lifecycle_why"] if _items else None)
+st, _d = call(f"/api/vulns/{_items[0]['id']}", token=admin)
+check("...with nothing to report as changed, because nothing did",
+      ((_d or {}).get("configuration_changed") or []) == [],
+      (_d or {}).get("configuration_changed"))
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 _sys.exit(1 if fail else 0)

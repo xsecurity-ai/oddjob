@@ -19,6 +19,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { SEVERITY_COLOUR } from '../lib/severity'
 import { TRIAGE } from '../lib/triage'
+import { LIFECYCLE_COLOUR, LIFECYCLE_LABEL } from '../lib/lifecycle'
 import { neon, glow } from '../theme'
 
 /** A long scanner paragraph, shown as written rather than reflowed:
@@ -271,6 +272,58 @@ export function VulnModal({ id, onClose, onHost }: {
                 not about the finding — the tool may not have supplied one.
               </Typography>
             )}
+
+            {/* What the last scan said about this, and on what
+                basis. Above the affected systems because it changes
+                how the whole finding should be read: "still there on
+                14 hosts" and "nothing has looked since March" are
+                different reports. */}
+            <Box sx={{ p: 1.2, borderRadius: 1,
+                       border: `1px solid ${alpha(
+                         LIFECYCLE_COLOUR[data.lifecycle] ?? neon.muted,
+                         0.35)}` }}>
+              <Stack direction="row" spacing={1}
+                sx={{ alignItems: 'baseline', flexWrap: 'wrap' }}>
+                <Typography sx={{ fontFamily: `'Orbitron', sans-serif`,
+                                  fontSize: 10.5, letterSpacing: '0.16em',
+                                  color: LIFECYCLE_COLOUR[data.lifecycle]
+                                         ?? neon.muted }}>
+                  {(LIFECYCLE_LABEL[data.lifecycle]
+                    ?? data.lifecycle).toUpperCase()}
+                </Typography>
+                {data.scanner && (
+                  <Typography sx={{ fontSize: 11, color: neon.muted }}>
+                    reported by {data.scanner}
+                  </Typography>
+                )}
+              </Stack>
+              {/* The sentence, always. `Resolved` is a claim about a
+                  client's estate and a word on its own is not one a
+                  reader can check. */}
+              {data.lifecycle_why && (
+                <Typography sx={{ fontSize: 11.5, color: neon.text, mt: 0.6 }}>
+                  {data.lifecycle_why}.
+                </Typography>
+              )}
+              {/* "The configuration changed" is a dead end without
+                  this. It is the whole reason the manifest detail is
+                  stored rather than only its hash. */}
+              {data.configuration_changed?.length > 0 && (
+                <Box sx={{ mt: 0.8 }}>
+                  <Typography sx={{ fontSize: 10.5, color: neon.muted }}>
+                    What changed between the run that found it and the run
+                    that did not:
+                  </Typography>
+                  {data.configuration_changed.map((c, i) => (
+                    <Typography key={i} sx={{ fontSize: 11.5,
+                                              fontFamily: 'monospace',
+                                              color: neon.yellow }}>
+                      {c}
+                    </Typography>
+                  ))}
+                </Box>
+              )}
+            </Box>
 
             <Divider sx={{ borderColor: alpha(neon.purple, 0.25) }} />
 

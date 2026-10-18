@@ -49,7 +49,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import lifecycle
+from . import lifecycle, manifest
 from .models import Service, Target, Vuln
 
 #: How these findings are attributed, and what a sweep of them is
@@ -261,7 +261,8 @@ def external_id(port: int | None, protocol: str | None, script: str) -> str:
 
 async def record(session: AsyncSession, target_id: int, port: int | None,
                  protocol: str | None, f: NseFinding,
-                 seen_at: datetime | None = None) -> bool:
+                 seen_at: datetime | None = None,
+                 run_manifest: str | None = None) -> bool:
     """Write one finding. -> True if it is new.
 
     The severity is re-asserted on an existing row but the triage is
@@ -289,19 +290,55 @@ async def record(session: AsyncSession, target_id: int, port: int | None,
             row.first_seen_at = seen_at
         if not row.scanner:
             row.scanner = SCANNER
+        row.found_by_manifest = run_manifest
         return False
     session.add(Vuln(
         target_id=target_id, title=f.title[:1000], severity=f.severity,
         status="open", port=port, protocol=protocol,
         description=body[:8000], external_id=eid,
-        scanner=SCANNER, first_seen_at=seen_at, last_seen_at=seen_at))
+        scanner=SCANNER, first_seen_at=seen_at, last_seen_at=seen_at,
+        found_by_manifest=run_manifest))
     return True
+
+
+def manifest_detail(args: str | None) -> dict:
+    """The selectors behind `manifest_for`, for storing alongside.
+
+    A hash that cannot be explained is a hash nobody will trust when
+    it says two runs differ, and "the script set changed" is only
+    actionable if somebody can see which scripts.
+    """
+    sel = manifest.selectors("nmap", args)
+    keep = {k: v for k, v in sel.items()
+            if k in ("--script", "--script-args", "-sC", "-A")}
+    return manifest.build(SCANNER, None, keep)[1]
+
+
+def manifest_for(args: str | None) -> str:
+    """The run identity for NSE findings, from an nmap command line.
+
+    The SCRIPT SET and nothing else. A port range changes which
+    services get looked at, which the sweep already records per
+    host; the script list changes what the scripts could find, and
+    that is the only thing `resolved` turns on here.
+
+    A scan whose arguments were not recorded yields the manifest of
+    the bare scanner name, which compares equal to other such runs
+    and to nothing with a known script set. That is the honest
+    answer: two runs we know nothing about are not demonstrably
+    different, and one we know about is not demonstrably the same.
+    """
+    sel = manifest.selectors("nmap", args)
+    keep = {k: v for k, v in sel.items()
+            if k in ("--script", "--script-args", "-sC", "-A")}
+    return manifest.build(SCANNER, None, keep)[0]
 
 
 async def record_service(session: AsyncSession, target_id: int,
                          port: int | None, protocol: str | None,
                          scripts: dict[str, str] | str | None,
-                         seen_at: datetime | None = None) -> int:
+                         seen_at: datetime | None = None,
+                         run_manifest: str | None = None) -> int:
     """Every finding in one service's script output. -> how many are new.
 
     A service that HAS script output is a service nmap ran scripts
@@ -319,13 +356,14 @@ async def record_service(session: AsyncSession, target_id: int,
     new = 0
     seen_at = seen_at or datetime.now(UTC)
     for f in findings_for(blob):
-        if await record(session, target_id, port, protocol, f, seen_at):
+        if await record(session, target_id, port, protocol, f, seen_at,
+                        run_manifest):
             new += 1
     if looked:
         t = await session.get(Target, target_id)
         if t is not None:
             await lifecycle.record_sweep(session, t.project_id, target_id,
-                                         SCANNER, seen_at)
+                                         SCANNER, seen_at, run_manifest)
     return new
 
 

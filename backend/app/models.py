@@ -806,8 +806,38 @@ class Vuln(Base, TimestampMixin):
         DateTime(timezone=True))
     last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True)
+    #: The manifest of the run that last REPORTED it, so a later
+    #: sweep can be checked for being able to find the same thing.
+    found_by_manifest: Mapped[str | None] = mapped_column(String(32))
 
     target: Mapped[Target] = relationship(back_populates="vulns")
+
+
+class RunManifest(Base):
+    """What one scan configuration was, keyed by its hash.
+
+    Stored once per distinct configuration rather than on every
+    sweep row: one nuclei profile covers every host in an
+    engagement, and copying the same JSON four thousand times would
+    be four thousand copies of one sentence.
+
+    Kept at all because a hash that cannot be explained is a hash
+    nobody will trust when it says two runs differ. "The
+    configuration changed" is only actionable if somebody can see
+    which part of it.
+    """
+    __tablename__ = "run_manifests"
+
+    #: The hash itself is the key. Two runs with identical
+    #: configuration ARE the same manifest, so there is nothing for a
+    #: surrogate id to distinguish.
+    manifest: Mapped[str] = mapped_column(String(32), primary_key=True)
+    scanner: Mapped[str] = mapped_column(String(64), index=True)
+    #: The selectors that produced the hash, as JSON. Shown to a
+    #: person reading why a finding could not be called resolved.
+    detail: Mapped[str] = mapped_column(Text)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False)
 
 
 class FindingSweep(Base):
@@ -844,6 +874,18 @@ class FindingSweep(Base):
     scanner: Mapped[str] = mapped_column(String(64))
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True),
                                          nullable=False)
+    #: What this run was configured to look FOR. See `app/manifest.py`.
+    #:
+    #: Without it, `resolved` had a hole in it: a nuclei run with
+    #: `-severity critical` does not report the high-severity finding
+    #: the previous run found, and nothing about the tool name, the
+    #: host or the timestamp says it was configured not to look.
+    #:
+    #: NULL means the configuration was not recorded — every scan
+    #: imported before this, and every file somebody uploads by hand.
+    #: That is NOT the same as "configured differently", and
+    #: `lifecycle.verdict` treats the two differently.
+    manifest: Mapped[str | None] = mapped_column(String(32), index=True)
 
 
 class FindingSecret(Base, TimestampMixin):

@@ -5,12 +5,15 @@ them. Full CRUD so the API is complete and bulk import has somewhere to land.
 """
 from __future__ import annotations
 
+import contextlib
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import assetfetch, audit, lifecycle, slack
+from .. import assetfetch, audit, lifecycle, manifest, slack
 from ..db import get_session
 from ..events import broker
 from ..hosts import normalise_host
@@ -20,6 +23,7 @@ from ..models import (
     FindingSecret,
     Poc,
     Project,
+    RunManifest,
     Target,
     User,
     Vuln,
@@ -267,6 +271,15 @@ class VulnDetail(VulnOut):
     #: Whether the match was by identifier or by title, so a reader can
     #: judge how much to trust the grouping.
     grouped_by: str = "title"
+    #: When a sweep could not clear this finding because it was
+    #: configured differently, WHICH part of the configuration
+    #: changed -- `-severity: 'critical,high' -> 'critical'`.
+    #:
+    #: Empty whenever there is nothing to say, which is most of the
+    #: time. "The configuration changed" on its own is a dead end for
+    #: whoever reads it; the whole reason the manifest detail is
+    #: stored is so this list can exist.
+    configuration_changed: list[str] = []
     #: Whether there is a credential stored against this finding.
     #:
     #: Asked of the database rather than guessed from the detector's
@@ -307,9 +320,25 @@ async def get_vuln(vuln_id: int,
         select(FindingSecret.id).where(
             FindingSecret.vuln_id == vuln.id))).scalar_one_or_none() is not None
 
+    out = _vuln_out(row, await lifecycle.sweeps_for_targets(
+        session, [vuln.target_id]))
+    # Only looked up when the verdict actually turned on it. Two
+    # extra rows per finding detail for a case that does not arise on
+    # most of them.
+    changed: list[str] = []
+    vd = lifecycle.verdict_for(vuln, await lifecycle.sweeps_for_targets(
+        session, [vuln.target_id]))
+    if vd.found_by and vd.looked_with and vd.found_by != vd.looked_with:
+        a = await session.get(RunManifest, vd.found_by)
+        b = await session.get(RunManifest, vd.looked_with)
+        if a is not None and b is not None:
+            with contextlib.suppress(ValueError):
+                changed = manifest.differences(json.loads(a.detail),
+                                               json.loads(b.detail))
+
     return VulnDetail(
-        **_vuln_out(row, await lifecycle.sweeps_for_targets(
-            session, [vuln.target_id])).model_dump(),
+        **out.model_dump(),
+        configuration_changed=changed,
         grouped_by=grouped,
         has_secret=has_secret,
         # `_base` selects (Vuln, Target.host, Project.code) — the second

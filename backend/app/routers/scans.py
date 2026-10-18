@@ -27,7 +27,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import addresses, importers, lifecycle, nsefindings, slack
+from .. import (
+    addresses,
+    importers,
+    lifecycle,
+    manifest,
+    nsefindings,
+    slack,
+)
 from ..db import SessionLocal, get_session
 from ..events import broker
 from ..hosts import InvalidHost, normalise_host
@@ -197,7 +204,8 @@ def _j(v) -> str | None:
 
 # --------------------------------------------------------------- services
 async def _service(session: AsyncSession, target: Target, ps: ParsedService,
-                   res: ImportResult) -> list[str]:
+                   res: ImportResult,
+                   nse_manifest: str | None = None) -> list[str]:
     row = (await session.execute(
         select(Service).where(Service.target_id == target.id,
                               Service.port == ps.port,
@@ -214,8 +222,14 @@ async def _service(session: AsyncSession, target: Target, ps: ParsedService,
     # until this call every "Anonymous FTP login allowed" it reported
     # sat in a JSON column that nothing selected. No extra traffic:
     # this is the answer already in hand.
+    # The manifest for NSE is the SCRIPT SET, taken from the nmap
+    # command line this scan reported. It is the one thing that
+    # decides what the scripts could have found, and a run with
+    # `--script default` genuinely cannot speak for a finding that
+    # `--script vuln` produced.
     res.vulns_created += await nsefindings.record_service(
-        session, target.id, ps.port, ps.protocol, ps.scripts)
+        session, target.id, ps.port, ps.protocol, ps.scripts,
+        run_manifest=nse_manifest)
     if ps.state == "open" and ps.name == "UNKNOWN":
         res.services_unknown += 1
     # A service that answered is proof the host is up, whatever the host
@@ -333,9 +347,21 @@ async def _host(session: AsyncSession, project: Project, ph: ParsedHost,
                      if ph.extra.get("os_matches") else None,
                      actor=actor, source=source)
 
+    # NSE findings are attributed to `nse` and not to `nmap` (see
+    # nsefindings.SCANNER), so they need their OWN manifest: the
+    # script set, not the port range. A run with `--script default`
+    # cannot speak for a finding that `--script vuln` produced.
+    nse_manifest = nsefindings.manifest_for(scan.args)
+    # Stored as well as hashed, or "the script set changed" has
+    # nothing behind it when somebody opens the finding and asks
+    # which scripts.
+    await lifecycle.remember_manifest(
+        session, nsefindings.SCANNER, nse_manifest,
+        nsefindings.manifest_detail(scan.args), datetime.now(UTC))
+
     svc_changes: list[str] = []
     for ps in ph.services:
-        svc_changes += await _service(session, target, ps, res)
+        svc_changes += await _service(session, target, ps, res, nse_manifest)
         if ps.scripts:
             await record(
                 session, target.id, "scan",
@@ -365,7 +391,8 @@ async def _vuln(session: AsyncSession, target: Target, pv: ParsedVuln,
                 scan: ParsedScan, res: ImportResult, source: str,
                 announce: list | None = None,
                 scanner: str | None = None,
-                seen_at: datetime | None = None) -> None:
+                seen_at: datetime | None = None,
+                run_manifest: str | None = None) -> None:
     """Record one finding, and that this scanner saw it now.
 
     `seen_at` is passed in rather than taken here so every finding in
@@ -391,7 +418,8 @@ async def _vuln(session: AsyncSession, target: Target, pv: ParsedVuln,
                          description=pv.description, remediation=pv.remediation,
                          external_id=pv.external_id,
                          scanner=scanner, first_seen_at=seen_at,
-                         last_seen_at=seen_at))
+                         last_seen_at=seen_at,
+                         found_by_manifest=run_manifest))
         res.vulns_created += 1
         # Findings are one of only two things that reach Slack. Gathered
         # here and posted after the commit: a finding announced and then
@@ -412,6 +440,11 @@ async def _vuln(session: AsyncSession, target: Target, pv: ParsedVuln,
     row.last_seen_at = seen_at
     if row.first_seen_at is None:
         row.first_seen_at = seen_at
+    # The manifest of the run that LAST reported it, not the first.
+    # A finding seen again by a narrower run is a finding that
+    # narrower run can speak for, and holding the original would
+    # make a later identical sweep look incomparable.
+    row.found_by_manifest = run_manifest
     # Never overwritten once set. A finding first reported by Nessus
     # and later matched by title from an nmap import is still a
     # Nessus finding, and reassigning it would let an nmap sweep
@@ -807,11 +840,30 @@ async def ingest(session: AsyncSession, project: Project, scan: ParsedScan,
     # older than the sweep that covered both, and `resolved` turns on
     # exactly that comparison.
     seen_at = datetime.now(UTC)
+
+    # What this run was configured to look FOR, from the tool's own
+    # record of itself. Without it `resolved` has a hole: a nuclei
+    # run with `-severity critical` does not report the high-severity
+    # finding the previous run found, and nothing about the tool
+    # name, the host or the timestamp says it was configured not to
+    # look. See app/manifest.py.
+    #
+    # `scan.args` is what the TOOL said it ran, not what somebody
+    # meant to run -- nmap asked for -sS without raw sockets performs
+    # a connect scan and says so. A format that records no arguments
+    # yields a manifest of the tool name alone, which compares equal
+    # to itself and to nothing else: honest, and no worse than the
+    # NULL every row had before this.
+    run_manifest, manifest_detail = manifest.build(fmt, scan.args)
+    await lifecycle.remember_manifest(session, fmt, run_manifest,
+                                      manifest_detail, seen_at)
+
     for pv in scan.vulns:
         t = await resolve(pv.host)
         if t is not None:
             await _vuln(session, t, pv, scan, res, source, new_findings,
-                        scanner=fmt, seen_at=seen_at)
+                        scanner=fmt, seen_at=seen_at,
+                        run_manifest=run_manifest)
 
     # Every host this scan READ, not only the ones it found something
     # on. That is the whole point: a host swept by nuclei and reported
@@ -821,7 +873,8 @@ async def ingest(session: AsyncSession, project: Project, scan: ParsedScan,
     # Recorded after the findings, so a failure writing one does not
     # leave a sweep claiming a look that produced nothing.
     for t in targets.values():
-        await lifecycle.record_sweep(session, project.id, t.id, fmt, seen_at)
+        await lifecycle.record_sweep(session, project.id, t.id, fmt, seen_at,
+                                     run_manifest)
 
     for pc in scan.credentials:
         t = await resolve(pc.host) if pc.host else None

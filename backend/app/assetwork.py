@@ -43,7 +43,7 @@ import httpx
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import assetfetch, assetlinks, assetscan, lifecycle
+from . import assetfetch, assetlinks, assetscan, lifecycle, manifest
 from .hosts import InvalidHost, normalise_host
 from .models import (
     FindingSecret,
@@ -467,10 +467,17 @@ async def scan_project(session: AsyncSession, project_id: int, *,
     if ok and swept:
         now = datetime.now(UTC)
         live = [n for n, present in assetscan.available().items() if present]
-        for tid in swept:
-            for name in live:
+        for name in live:
+            # These two take no run-time arguments that change what
+            # they can find -- the rule set is whatever is installed
+            # -- so the manifest is the scanner's own identity. It
+            # compares equal to itself across runs, which is the true
+            # answer: nothing about the configuration moved.
+            mf, detail = manifest.build(name)
+            await lifecycle.remember_manifest(session, name, mf, detail, now)
+            for tid in swept:
                 await lifecycle.record_sweep(session, project_id, tid,
-                                             name, now)
+                                             name, now, mf)
     # Committed here, after one scanner run rather than one per file:
     # the batch IS the unit of work now, so a partial commit would
     # record files as scanned that the single invocation covered
@@ -691,12 +698,14 @@ async def _file_vuln(session: AsyncSession, target_id: int,
             existing.first_seen_at = now
         if not existing.scanner:
             existing.scanner = f.scanner[:64]
+        existing.found_by_manifest = manifest.build(f.scanner)[0]
         await _keep_secret(existing.id)
         return False
     v = Vuln(target_id=target_id, title=f.title[:1000],
              severity=_severity_floor(f.severity), status="open",
              description=body[:8000], external_id=eid[:128],
-             scanner=f.scanner[:64], first_seen_at=now, last_seen_at=now)
+             scanner=f.scanner[:64], first_seen_at=now, last_seen_at=now,
+             found_by_manifest=manifest.build(f.scanner)[0])
     session.add(v)
     # Flushed so the row has an id to hang the secret off.
     await session.flush()
