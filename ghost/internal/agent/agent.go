@@ -618,8 +618,31 @@ func (a *Agent) beat(ctx context.Context) (*client.HeartbeatResp, error) {
 		SlotsFree:      free,
 		Capacity:       allowed,
 		CapacityReason: why,
-		CannotRun:      capacity.CannotRun(),
+		// Two reasons a kind cannot run here, reported as one list
+		// because the server does one thing with it: skip the kind
+		// when choosing work. `capacity` answers "this host cannot
+		// hold it"; `tasks.Unsupported` answers "this host has not
+		// got what it needs" -- today, a browser. Sorted, so a
+		// heartbeat that says the same thing looks the same.
+		CannotRun: cannotRun(),
 	})
+}
+
+// cannotRun is every kind this ghost should not be offered, from
+// both reasons it can be true of one. Deduplicated, because a host
+// that is both too small for a browser and has not got one would
+// otherwise say so twice.
+func cannotRun() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, k := range append(capacity.CannotRun(), tasks.Unsupported()...) {
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // onHeartbeat applies everything the server said, before any work

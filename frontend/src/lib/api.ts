@@ -776,7 +776,34 @@ export interface WebPacket {
   /** The capture was cut at the import cap; this is not the whole thing. */
   truncated: boolean
   sources: string | null; notes: string | null
+  /** The picture a ghost took of this URL, if one is on file.
+   *  Metadata only — the image is its own request. */
+  screenshot: WebShot | null
 }
+
+/** A stored screenshot, minus the bytes. */
+export interface WebShot {
+  id: number
+  url: string
+  /** Where the browser ended up, when it is not where it was sent. */
+  final_url: string | null
+  status_code: number | null
+  title: string | null
+  width: number | null
+  height: number | null
+  bytes: number
+  sha256: string | null
+  /** When the shutter went, not when the row was written. A picture
+   *  is only as good as its date. */
+  captured_at: string | null
+  sources: string | null
+}
+
+/** Where the PNG itself lives. Fetched by the browser with the
+ *  session cookie, like any other same-origin image. */
+export const screenshotUrl = (id: number) =>
+  `/api/web/screenshots/${id}/image`
+
 /** A URL, standing for every exchange recorded against it. */
 export interface WebGroup extends WebAddress {
   hits: number

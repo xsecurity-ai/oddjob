@@ -947,6 +947,28 @@ class WebAddressOut(BaseModel):
         return _as(v, list)
 
 
+class WebShot(BaseModel):
+    """What is known about a stored screenshot, minus the image.
+
+    `captured_at` is here because a picture is only as good as its
+    date: a page photographed three weeks ago may have been rebuilt
+    twice since, and a viewer that shows the image without saying
+    when it was taken invites it to be read as current.
+    """
+    id: int
+    url: str
+    #: Where the browser ended up, when that differs from `url`.
+    final_url: str | None = None
+    status_code: int | None = None
+    title: str | None = None
+    width: int | None = None
+    height: int | None = None
+    bytes: int = 0
+    sha256: str | None = None
+    captured_at: str | None = None
+    sources: str | None = None
+
+
 class WebPacket(BaseModel):
     """One exchange, fetched on demand.
 
@@ -964,6 +986,11 @@ class WebPacket(BaseModel):
     truncated: bool = False
     sources: str | None = None
     notes: str | None = None
+    #: The picture of this URL, when a ghost has taken one. Metadata
+    #: only -- the image itself is a separate request, for the same
+    #: reason the exchange is: nobody wants a megabyte of PNG inside
+    #: a JSON document they opened to read a status code.
+    screenshot: WebShot | None = None
 
 
 class WebAddressCreate(BaseModel):

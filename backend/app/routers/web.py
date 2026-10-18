@@ -50,8 +50,16 @@ from ..models import (
     WebAddress,
     WebAsset,
     WebAssetRef,
+    WebScreenshot,
 )
-from ..schemas import Page, WebAddressCreate, WebAddressOut, WebAddressUpdate, WebPacket
+from ..schemas import (
+    Page,
+    WebAddressCreate,
+    WebAddressOut,
+    WebAddressUpdate,
+    WebPacket,
+    WebShot,
+)
 from ..scopegate import assert_allowed
 from ..security import (
     assert_role_for_target,
@@ -1586,7 +1594,90 @@ async def packet(wid: int, user: User = Depends(get_current_user),
     return WebPacket(
         id=row.id, url=row.url, method=row.method, status_code=row.status_code,
         host=t.host, request=row.request, response=row.response,
-        truncated=bool(row.truncated), sources=row.sources, notes=row.notes)
+        truncated=bool(row.truncated), sources=row.sources, notes=row.notes,
+        screenshot=await _shot_for(session, row))
+
+
+async def _shot_for(session: AsyncSession, row: WebAddress) -> WebShot | None:
+    """The picture of this URL, without its bytes.
+
+    Looked up by `(target, url_hash)` rather than by `web_address_id`,
+    and that is deliberate: `web_addresses` is keyed on the EXCHANGE,
+    so one URL has a row per capture, and the screenshot is linked to
+    whichever of them existed when it was imported. Keying the lookup
+    on the id would show the picture on one row of ten and leave the
+    other nine looking as though nothing had ever been photographed.
+
+    `image` is never selected here. It is a deferred column and this
+    builds the columns by hand, so neither path can drag a megabyte
+    into a listing by accident.
+    """
+    s = (await session.execute(
+        select(WebScreenshot).where(
+            WebScreenshot.target_id == row.target_id,
+            WebScreenshot.url_hash == row.url_hash))).scalar_one_or_none()
+    if s is None:
+        return None
+    return WebShot(
+        id=s.id, url=s.url, final_url=s.final_url, status_code=s.status_code,
+        title=s.title, width=s.width, height=s.height, bytes=s.bytes or 0,
+        sha256=s.sha256, sources=s.sources,
+        captured_at=s.captured_at.isoformat() if s.captured_at else None)
+
+
+@router.get("/screenshots/{shot_id}/image")
+async def screenshot_image(shot_id: int,
+                           user: User = Depends(get_current_user),
+                           session: AsyncSession = Depends(get_session)):
+    """The PNG itself.
+
+    Its own endpoint, serving bytes, because that is what an `<img>`
+    needs: the browser asks for it with the session cookie it already
+    has, and nothing base64-encodes a megabyte into a JSON document
+    to get it onto a page.
+
+    Access follows the project, like everything else here. A missing
+    row and a row in somebody else's project answer the same 404 --
+    an id that is not yours must not be distinguishable from an id
+    that does not exist.
+
+    `private` rather than public: this is a picture of a client's
+    internal application, and an intermediary caching it is a copy of
+    engagement data somewhere nobody chose.
+
+    Deliberately NOT `immutable`, and the max-age is short. A
+    re-shoot replaces the bytes under the same id -- that is the
+    whole point of keying one picture per URL -- so an id's content
+    does change, and telling the browser otherwise would show
+    yesterday's page after somebody re-photographed it to see what
+    had changed.
+    """
+    from fastapi.responses import Response
+    from sqlalchemy.orm import undefer
+
+    # `undefer`, explicitly. The column is deferred so that no other
+    # query drags it in, and on an async session a deferred attribute
+    # touched after the fact does not lazily load -- it raises,
+    # because the IO would happen outside the await. Asking for it in
+    # the query is the only way to have it here.
+    s = (await session.execute(
+        select(WebScreenshot)
+        .options(undefer(WebScreenshot.image))
+        .where(WebScreenshot.id == shot_id))).scalar_one_or_none()
+    if s is None:
+        raise HTTPException(404, "not found")
+    t = await session.get(Target, s.target_id)
+    from ..security import effective_role
+    if t is None or await effective_role(session, user, t.project_id) is None:
+        raise HTTPException(404, "not found")
+    return Response(
+        content=s.image, media_type=s.content_type or "image/png",
+        headers={"Cache-Control": "private, max-age=60",
+                 # Shown, never downloaded-as-something-else. The
+                 # filename is the row id and not the URL: a URL in a
+                 # Content-Disposition header is a client's hostname
+                 # in a filename on somebody's laptop.
+                 "Content-Disposition": f'inline; filename="shot-{s.id}.png"'})
 
 
 # ------------------------------------------------------------ takeovers

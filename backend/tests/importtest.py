@@ -1891,4 +1891,89 @@ check("a silent parse of a real file is",
       _PS(tool="nmap").read_nothing(100_000) is not None)
 
 
+print("== a screenshot is read as bytes, or refused ==")
+# The one importer that produces binary. Everything else here reads a
+# document and writes text; this decodes base64 and must be able to
+# say, before anything is stored, whether what arrived is actually a
+# PNG. A field named `png_base64` holding something else would
+# otherwise put a file in the database that renders as nothing.
+import base64 as _b64  # noqa: E402
+
+from app.importers import screenshot as _shot  # noqa: E402
+
+_PNG = (b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+
+
+def _result(**over):
+    doc = {"browser": "/usr/bin/chromium",
+           "viewport": {"width": 1280, "height": 800},
+           "shots": [{"url": "https://portal.acme.example/",
+                      "status": 200, "title": "ACME",
+                      "png_base64": _b64.b64encode(_PNG).decode()}]}
+    doc.update(over)
+    return json.dumps(doc)
+
+
+check("a screenshot result is recognised without being told",
+      detect(_result()) == "screenshot", detect(_result()))
+# The two live next to each other in the registry and both are JSON
+# objects from the same agent. `vhost` and `gobuster` once read each
+# other's documents for exactly this reason.
+check("...and a crawl result is still a crawl",
+      detect(json.dumps({"sites": [], "urls": ["https://a.acme.example/"],
+                         "by_type": {}})) == "crawl")
+
+_s = _shot.parse(_result())
+check("the image arrives as bytes, not as text",
+      len(_s.screenshots) == 1 and isinstance(_s.screenshots[0].image, bytes),
+      type(_s.screenshots[0].image).__name__ if _s.screenshots else None)
+check("...and the URL is recorded as fetched beside it",
+      len(_s.web) == 1 and _s.web[0].crawled is True,
+      [(w.url, w.crawled) for w in _s.web])
+check("...with the image's own media type, not the page's",
+      _s.screenshots[0].content_type == "image/png",
+      _s.screenshots[0].content_type)
+
+_bad = _shot.parse(_result(shots=[
+    {"url": "https://ok.acme.example/",
+     "png_base64": _b64.b64encode(_PNG).decode()},
+    {"url": "https://gif.acme.example/",
+     "png_base64": _b64.b64encode(b"GIF89a").decode()},
+    {"url": "https://junk.acme.example/", "png_base64": "not base64 at all!"},
+    {"url": "https://empty.acme.example/"},
+]))
+check("one good image still imports when its neighbours are junk",
+      len(_bad.screenshots) == 1, [s.url for s in _bad.screenshots])
+# Each refusal is NAMED. Silently dropping three of four would leave
+# an operator comparing "4 captured" on the task with one row here
+# and nothing to explain the difference.
+for _who, _why in (("gif", "not a PNG"), ("junk", "not valid base64"),
+                   ("empty", "no image")):
+    check(f"...and the {_who} one says why",
+          any(_who in e and _why in e for e in _bad.errors), _bad.errors)
+
+# Checked on the ENCODED length, before decoding: a broken or hostile
+# agent must not be able to make this process allocate whatever it
+# felt like sending.
+_huge = _shot.parse(_result(shots=[
+    {"url": "https://ok.acme.example/",
+     "png_base64": _b64.b64encode(_PNG).decode()},
+    {"url": "https://huge.acme.example/",
+     "png_base64": "A" * (_shot.MAX_IMAGE_BYTES * 2)}]))
+check("an image past the cap is refused rather than stored",
+      [s.url for s in _huge.screenshots] == ["https://ok.acme.example/"],
+      [s.url for s in _huge.screenshots])
+check("...and says how big it was against what is allowed",
+      any("larger than" in e for e in _huge.errors), _huge.errors)
+
+# A task that photographed nothing is not an import of nothing. The
+# same rule the crawl importer follows, for the same reason.
+try:
+    _shot.parse(_result(shots=[]))
+    check("a screenshot task with no images is refused", False, "accepted")
+except Exception as e:                                       # noqa: BLE001
+    check("a screenshot task with no images is refused",
+          "no usable image" in str(e), str(e)[:80])
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

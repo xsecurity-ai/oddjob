@@ -10,7 +10,7 @@ import LaunchIcon from '@mui/icons-material/Launch'
 import WrapIcon from '@mui/icons-material/WrapText'
 import SendIcon from '@mui/icons-material/Send'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type ReplayResult } from '../lib/api'
+import { api, screenshotUrl, type ReplayResult, type WebShot } from '../lib/api'
 import { neon, glow } from '../theme'
 
 /**
@@ -274,6 +274,96 @@ function Pane({ title, colour, raw, wrap }: {
   );
 }
 
+/**
+ * The picture of the page, beside what it said.
+ *
+ * Collapsed to a strip rather than given a pane of its own: the
+ * question it answers — "what IS this" — is usually settled in a
+ * glance, and the request and response are what the rest of this
+ * dialog exists for.
+ *
+ * The date is shown next to the image and not in a tooltip. A
+ * screenshot carries no evidence of its own age, so one presented
+ * without a date reads as current, and a page photographed three
+ * weeks ago may have been rebuilt twice since.
+ *
+ * **Not the same thing as the AS DRAWN pane**, which is beside the
+ * response and is easy to mistake for it. That one renders the bytes
+ * already captured, offline, with nothing fetched and nothing
+ * executed — it is a reading of the capture. This one is a
+ * photograph taken by a real browser standing inside the engagement:
+ * it ran the page's scripts, loaded its stylesheets and images, and
+ * saw what a visitor on the client's network sees. An application
+ * that draws itself entirely in JavaScript is a blank frame in the
+ * first and a working screen in the second, and only the second can
+ * say what the page looks like when a URL has no captured body at
+ * all.
+ */
+function Shot({ shot }: { shot: WebShot }) {
+  const [open, setOpen] = useState(true)
+  const when = shot.captured_at
+    ? new Date(shot.captured_at).toLocaleString()
+    : 'date unknown'
+  // `final_url` is only worth the line when it is not where we aimed.
+  const moved = shot.final_url && shot.final_url !== shot.url
+
+  return (
+    <Box sx={{
+      border: `1px solid ${alpha(neon.purple, 0.35)}`, borderRadius: 1,
+      background: alpha(neon.bgDeep, 0.55), overflow: 'hidden',
+    }}>
+      <Stack direction="row" spacing={1} sx={{
+        alignItems: 'center', px: 1.2, py: 0.6,
+        borderBottom: `1px solid ${alpha(neon.purple, 0.3)}`,
+        background: alpha(neon.purple, 0.08), cursor: 'pointer',
+      }} onClick={() => setOpen(!open)}>
+        <Typography sx={{
+          fontFamily: `'Orbitron', sans-serif`, fontSize: 10,
+          letterSpacing: '0.16em', color: neon.purple,
+          textShadow: glow(neon.purple, 0.4),
+        }}>SCREENSHOT</Typography>
+        <Typography sx={{ fontSize: 10.5, color: alpha(neon.muted, 0.9) }}>
+          {when}
+          {shot.width && shot.height ? ` · ${shot.width}×${shot.height}` : ''}
+          {shot.bytes ? ` · ${(shot.bytes / 1024).toFixed(0)} KB` : ''}
+          {shot.sources ? ` · ${shot.sources}` : ''}
+        </Typography>
+        <Box sx={{ flex: 1 }} />
+        <Typography sx={{ fontSize: 10.5, color: neon.purple }}>
+          {open ? 'hide' : 'show'}
+        </Typography>
+      </Stack>
+      {open && (
+        <Box sx={{ p: 1.2 }}>
+          {moved && (
+            <Typography sx={{
+              fontSize: 10.5, color: neon.yellow, mb: 0.8,
+              wordBreak: 'break-all',
+            }}>
+              the browser ended up at {shot.final_url}
+            </Typography>
+          )}
+          {/* Served as bytes from its own endpoint, with the session
+              cookie the page already has. Opening it in a tab is the
+              full-size view; there is no lightbox to get wrong. */}
+          <Box component="a" href={screenshotUrl(shot.id)}
+            target="_blank" rel="noopener noreferrer"
+            sx={{ display: 'block', lineHeight: 0 }}>
+            <Box component="img" src={screenshotUrl(shot.id)}
+              alt={`Screenshot of ${shot.url}`}
+              sx={{
+                display: 'block', maxWidth: '100%', maxHeight: '36vh',
+                objectFit: 'contain', objectPosition: 'top',
+                border: `1px solid ${alpha(neon.purple, 0.25)}`,
+                borderRadius: 0.5, background: '#fff',
+              }} />
+          </Box>
+        </Box>
+      )}
+    </Box>
+  )
+}
+
 export function PacketModal({ id, onClose, onReplay }: {
   id: number
   onClose: () => void
@@ -479,6 +569,10 @@ export function PacketModal({ id, onClose, onReplay }: {
                 bearer tokens. Treat this pane as credential material.
               </Alert>
             )}
+            {/* A page photographed in a browser, where one has been.
+                Above the exchange because it answers "what is this"
+                faster than any amount of reading. */}
+            {data.screenshot && <Shot shot={data.screenshot} />}
             {/* Side by side, because the point is comparing them. */}
             <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.2}
                    sx={{ flex: 1, minHeight: 0 }}>
