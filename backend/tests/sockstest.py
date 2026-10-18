@@ -6,6 +6,7 @@ network by accident.
 """
 
 # Run from anywhere: the suites import `app`, which lives one level up.
+import os as _os
 import pathlib as _pathlib
 import sys as _sys
 
@@ -663,6 +664,98 @@ _used = set(_re.findall(r"\bd\.([a-z_]+)", _inspect.getsource(_ph)))
 check("the CONNECT handler reads only fields Decision has",
       not (_used - set(_pa.Decision.__dataclass_fields__)),
       sorted(_used - set(_pa.Decision.__dataclass_fields__)))
+
+
+print("\n== the TLS listener does a real handshake ==")
+# Written because the first version of this did NOT work and shipped
+# anyway: the demux consumed a byte to classify the connection, and
+# `loop.start_tls()` then had a ClientHello missing its first byte.
+# Feeding it back through `data_received` put it in the
+# StreamReader's buffer, which is not where the TLS state machine
+# reads from, so the handshake hung for ever -- `openssl s_client`
+# printing "Connecting to 127.0.0.1" and nothing more.
+#
+# There was no test because there was no certificate to hand. So:
+# generate one.
+import datetime as _dt  # noqa: E402
+import ssl as _ssl  # noqa: E402
+import tempfile as _tf  # noqa: E402
+
+_have_crypto = True
+try:
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+except ImportError:
+    _have_crypto = False
+
+
+def _selfsigned(dirname):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = _dt.datetime.now(_dt.UTC)
+    cert = (x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - _dt.timedelta(days=1))
+            .not_valid_after(now + _dt.timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName(
+                [x509.DNSName("localhost")]), critical=False)
+            .sign(key, hashes.SHA256()))
+    cp = _os.path.join(dirname, "c.pem")
+    kp = _os.path.join(dirname, "k.pem")
+    with open(cp, "wb") as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+    with open(kp, "wb") as f:
+        f.write(key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption()))
+    return cp, kp
+
+
+async def _tls_connect_probe(certfile, keyfile):
+    """Full handshake, then a CONNECT inside it."""
+    from app import proxyhttps
+    ctx = proxyhttps.context(certfile, keyfile)
+    srv = await _ps.serve_tls("127.0.0.1", 0, ctx)
+    port = srv.sockets[0].getsockname()[1]
+
+    def go():
+        c = _ssl.create_default_context()
+        c.check_hostname = False
+        c.verify_mode = _ssl.CERT_NONE
+        raw = _socket.create_connection(("127.0.0.1", port), timeout=10)
+        with c.wrap_socket(raw, server_hostname="localhost") as tls:
+            proto = tls.version()
+            tls.sendall(b"CONNECT a.acme.example:443 HTTP/1.1\r\n"
+                        b"Host: a.acme.example:443\r\n\r\n")
+            return proto, tls.recv(200)
+
+    try:
+        return await asyncio.get_running_loop().run_in_executor(None, go)
+    finally:
+        srv.close()
+        await srv.wait_closed()
+
+
+if _have_crypto:
+    with _tf.TemporaryDirectory() as _d:
+        _cp, _kp = _selfsigned(_d)
+        _proto, _reply = run(_tls_connect_probe(_cp, _kp))
+    check("the TLS handshake completes", bool(_proto), _proto)
+    # The floor the listener sets, because a proxy credential crosses
+    # this and the whole reason it exists is that SOCKS has none.
+    check("...at TLS 1.2 or better", _proto in ("TLSv1.2", "TLSv1.3"), _proto)
+    check("CONNECT inside it is answered, not hung",
+          _reply.startswith(b"HTTP/1.1 407"), _reply[:60])
+    check("...with the credential challenge, so a browser can prompt",
+          b"Proxy-Authenticate: Basic" in _reply, _reply[:120])
+else:
+    check("skipped: no `cryptography` to mint a test certificate", True,
+          "(it is a dependency of the app, so this should not happen)")
 
 
 print(f"\n{ok} passed, {fail} failed")
