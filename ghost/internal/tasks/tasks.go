@@ -612,6 +612,41 @@ const NSEScripts = "default,safe,vuln,ssl-cert,ssl-enum-ciphers," +
 	"mysql-empty-password,ms-sql-empty-password," +
 	"smtp-open-relay,dns-zone-transfer,ntp-monlist,ssh-auth-methods"
 
+// explainExec turns an EPERM from exec into the sentence that
+// actually helps.
+//
+// `fork/exec /usr/bin/nmap: operation not permitted` says nothing
+// about capabilities, and the obvious readings are all wrong: the
+// process is root, the file is 0755, AppArmor and seccomp are off,
+// and every other binary in the image execs. It cost an afternoon.
+//
+// The cause is that the nmap PACKAGE ships the binary with file
+// capabilities, and the kernel refuses to exec a file whose
+// capabilities it cannot grant from the bounding set. Drop
+// CAP_NET_BIND_SERVICE -- which no reasonable person adds to a
+// scanner's cap list, because nothing here binds a low port -- and
+// nmap stops being executable at all.
+//
+// Matched on the message rather than on errno because what reaches
+// here is already a formatted string: the exec happens inside
+// os/exec and the typed error is wrapped by the time a Result is
+// built.
+func explainExec(detail string) string {
+	d := strings.ToLower(detail)
+	if !strings.Contains(d, "operation not permitted") ||
+		!strings.Contains(d, "exec") {
+		return detail
+	}
+	return detail + " — this is almost always a FILE CAPABILITY on the " +
+		"binary, not a file mode: the package ships nmap with " +
+		"cap_net_bind_service among others, and the kernel will not exec " +
+		"a file whose capabilities are outside the container's bounding " +
+		"set. Add --cap-add=NET_BIND_SERVICE (it is not for binding a " +
+		"port; it is for being allowed to run the binary at all). Being " +
+		"root does not help, and neither does disabling AppArmor or " +
+		"seccomp."
+}
+
 // UDPTopPorts is how many of nmap's commonest UDP ports a `udp` task
 // sweeps when the caller names none.
 //
@@ -712,7 +747,7 @@ func runNmap(ctx context.Context, args map[string]any, workDir string) Result {
 		}
 		return Result{Status: "failed", Output: xml, Stderr: tail(r.stderr, 4000),
 			ExitCode: r.code,
-			Error:    fmt.Sprintf("nmap did not complete: %s", detail)}
+			Error:    fmt.Sprintf("nmap did not complete: %s", explainExec(detail))}
 	}
 	priv, advice := tools.RawSocketCapable()
 	sum := fmt.Sprintf("nmap over %d target(s)", len(tg))
