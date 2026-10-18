@@ -41,6 +41,100 @@ function split(raw: string | null | undefined): [string, string] {
   return [raw.slice(0, i), raw.slice(i + gap)]
 }
 
+/** Is this response something a browser would have drawn? */
+function renderable(headers: string, body: string): boolean {
+  if (!body.trim()) return false
+  const ct = headers.match(/^content-type:\s*(.*)$/im)?.[1] ?? ''
+  if (ct) return /\b(?:text\/html|application\/xhtml\+xml)\b/i.test(ct)
+  // A capture whose headers were not kept. Judged on the bytes
+  // instead, because "we did not store the content type" is not a
+  // reason to refuse to show somebody their own evidence.
+  return /^\s*(?:<!doctype html|<html|<head|<body)/i.test(body)
+}
+
+/** The captured response, drawn.
+ *
+ *  **It renders the PACKET, not the site.** The bytes in this pane
+ *  are the ones that were captured; re-fetching the URL would show
+ *  what the server returns today, which is a different thing and is
+ *  exactly the mistake that made the secret-source viewer useless —
+ *  it re-read a file that had changed and then announced the value
+ *  was missing.
+ *
+ *  **Nothing is fetched and nothing executes.** Two separate locks,
+ *  because either alone is not enough:
+ *
+ *  `sandbox` with no `allow-scripts` and no `allow-same-origin`
+ *  means the client's JavaScript does not run in an operator's
+ *  browser, and the frame has no access to this origin if it did.
+ *
+ *  A `default-src 'none'` CSP means its images, fonts, stylesheets
+ *  and frames are not fetched either. That one matters more than it
+ *  looks: without it, opening this modal would make the OPERATOR'S
+ *  browser connect to the client's server directly — out of band,
+ *  from the wrong address, outside the proxy, and outside everything
+ *  Oddjob records. A viewer that quietly sends traffic at a client
+ *  is not a viewer.
+ *
+ *  The cost is that a page needing its stylesheet looks unstyled and
+ *  a page needing JavaScript looks empty. That is said on the pane
+ *  rather than left to be inferred from a blank rectangle.
+ */
+function Rendered({ raw }: { raw: string | null | undefined }) {
+  const [headers, body] = useMemo(() => split(raw), [raw])
+  const ok = useMemo(() => renderable(headers, body), [headers, body])
+
+  const doc = useMemo(() => {
+    if (!ok) return ''
+    // Prepended rather than merged into the document's own head: the
+    // capture may have no head at all, and a CSP that depends on the
+    // page being well formed is a CSP that fails on exactly the
+    // malformed pages worth looking at.
+    return '<meta http-equiv="Content-Security-Policy" '
+      + `content="default-src 'none'; style-src 'unsafe-inline'; `
+      + `img-src data:">`
+      + body
+  }, [ok, body])
+
+  return (
+    <Box sx={{
+      flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column',
+      border: `1px solid ${alpha(neon.cyan, 0.35)}`, borderRadius: 1,
+      background: alpha(neon.bgDeep, 0.55), overflow: 'hidden',
+    }}>
+      <Stack direction="row" spacing={1}
+        sx={{ alignItems: 'center', px: 1, py: 0.5,
+              borderBottom: `1px solid ${alpha(neon.cyan, 0.25)}` }}>
+        <Typography sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 10,
+                          letterSpacing: '0.14em', color: neon.cyan }}>
+          AS DRAWN
+        </Typography>
+        <Typography sx={{ fontSize: 10, color: alpha(neon.muted, 0.85) }}>
+          from the captured bytes · nothing fetched, nothing executed
+        </Typography>
+      </Stack>
+      {ok ? (
+        <Box
+          component="iframe"
+          title="The captured response, rendered"
+          srcDoc={doc}
+          sandbox=""
+          referrerPolicy="no-referrer"
+          sx={{ flex: 1, minHeight: 0, width: '100%', border: 0,
+                background: '#fff' }} />
+      ) : (
+        <Box sx={{ p: 1.5, fontSize: 11.5, color: alpha(neon.muted, 0.9) }}>
+          {body.trim()
+            ? 'This response is not HTML, so there is nothing to draw. '
+              + 'The bytes are in the pane to the left.'
+            : 'No response body was captured, so there is nothing to draw. '
+              + 'That is a fact about the capture, not about the page.'}
+        </Box>
+      )}
+    </Box>
+  )
+}
+
 function Pane({ title, colour, raw, wrap }: {
   title: string; colour: string; raw: string | null | undefined; wrap: boolean
 }) {
@@ -147,7 +241,9 @@ export function PacketModal({ id, onClose, onReplay }: {
         backgroundColor: alpha(neon.paper, 0.98), backgroundImage: 'none',
         border: `1px solid ${alpha(neon.cyan, 0.45)}`,
         boxShadow: `0 0 44px ${alpha(neon.cyan, 0.2)}`,
-        width: '96vw', maxWidth: 1500, height: '88vh',
+        // Three panes now, not two. 1500 was comfortable for request
+        // and response and leaves the rendering a letterbox.
+        width: '97vw', maxWidth: 2000, height: '90vh',
       } } }}>
       <DialogTitle sx={{
         py: 1.2, borderBottom: `1px solid ${alpha(neon.cyan, 0.28)}`,
@@ -244,6 +340,13 @@ export function PacketModal({ id, onClose, onReplay }: {
                    sx={{ flex: 1, minHeight: 0 }}>
               <Pane title="REQUEST" colour={neon.pink} raw={data.request} wrap={wrap} />
               <Pane title="RESPONSE" colour={neon.green} raw={data.response} wrap={wrap} />
+              {/* Far right, and for every packet that has a body —
+                  no button, nothing to ask for. The rendering IS the
+                  screenshot: it is produced from the bytes already
+                  stored, so there is nothing to generate in advance
+                  and nothing that can go stale against the capture
+                  it belongs to. */}
+              <Rendered raw={data.response} />
             </Stack>
             {(data.sources || data.notes) && (
               <Stack direction="row" spacing={1} useFlexGap sx={{
