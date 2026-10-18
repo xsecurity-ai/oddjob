@@ -2519,6 +2519,10 @@ class CveRecord(Base):
     __tablename__ = "cve_records"
     __table_args__ = (
         Index("ix_cve_severity_score", "severity", "cvss_score"),
+        # The ordering a findings list actually wants: what is being
+        # exploited, then what is likely to be, then how bad it would
+        # be. See `vulnfeed.triage_order`.
+        Index("ix_cve_triage", "kev", "epss", "cvss_score"),
     )
 
     #: CVE-2021-41773. The natural key, for the same reason as above.
@@ -2539,6 +2543,38 @@ class CveRecord(Base):
     #: what keeps matching a 4,000-host project from being a join
     #: against 290,000 rows per service.
     products: Mapped[str | None] = mapped_column(Text, index=True)
+    #: On CISA's Known Exploited Vulnerabilities list: somebody has
+    #: been seen using this, in the wild, against somebody.
+    #:
+    #: Columns on the CVE rather than a table of their own, because
+    #: both of these are one fact per CVE and the question is always
+    #: asked WITH the CVE ("sort these findings"). A join per finding
+    #: to answer it would be a join nobody needs.
+    #:
+    #: Tri-state on purpose. False is "CISA has not listed it";
+    #: NULL is "the KEV feed has never been synced here", and a
+    #: findings list must not show those the same way -- the whole
+    #: reason `status()` exists in vulnfeed.py is that an empty table
+    #: is not evidence of absence.
+    kev: Mapped[bool | None] = mapped_column(Boolean, index=True)
+    #: When CISA added it. Useful on its own: a KEV entry from last
+    #: week is a different conversation from one added in 2021.
+    kev_added: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    #: The date CISA set for federal agencies to have fixed it. Not
+    #: binding on a private client, and worth showing anyway -- it is
+    #: the clearest public statement of how urgent somebody
+    #: independent thought this was.
+    kev_due: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: FIRST's EPSS: probability, 0..1, that this CVE will be
+    #: exploited in the next 30 days. Answers the question CVSS
+    #: cannot -- "a 9.8 nobody has ever used" and "a 7.5 being
+    #: exploited this week" sort identically by severity alone.
+    epss: Mapped[float | None] = mapped_column(Float, index=True)
+    #: Percentile among all scored CVEs. Carried because the raw
+    #: probability is small and hard to read: 0.00042 means little,
+    #: "higher than 11% of all CVEs" means something.
+    epss_percentile: Mapped[float | None] = mapped_column(Float)
 
 
 class FeedState(Base):

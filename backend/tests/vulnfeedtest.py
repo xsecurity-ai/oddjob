@@ -49,7 +49,13 @@ admin = call("/api/auth/setup", "POST",
              {"username": "root", "password": "root-password-1"})[1]["access_token"]
 
 print("== parsing, without touching the network ==")
-from app.vulnfeed import _parse_exploits, parse_cve, product_terms, version_matches
+from app import vulnfeed as _vf
+from app.vulnfeed import (
+    _parse_exploits,
+    parse_cve,
+    product_terms,
+    version_matches,
+)
 
 CSV = ("id,file,description,date_published,author,type,platform,port,codes,verified\n"
        "50383,exploits/multiple/webapps/50383.sh,Apache HTTP Server 2.4.49 - "
@@ -224,7 +230,6 @@ print("\n== a failed sync keeps the ground it covered ==")
 import asyncio as _aio  # noqa: E402
 from datetime import datetime as _dt  # noqa: E402
 
-import app.vulnfeed as _vf  # noqa: E402
 from app.db import SessionLocal as _SL  # noqa: E402
 
 
@@ -331,6 +336,88 @@ check("and an over-long version is bounded rather than carried whole",
 # a later SQLAlchemy.
 check("a blank version yields no candidates to build a query from",
       _vc("   ") == [], str(_vc("   ")))
+
+# ======================================= being exploited, vs being bad
+# CVSS alone puts a 9.8 nobody has ever used above a 7.5 being
+# exploited this week, which is the wrong way round for somebody
+# deciding what to fix on a Tuesday.
+
+print("\n== CISA's KEV catalogue ==")
+_kev = _vf.parse_kev({"vulnerabilities": [
+    {"cveID": "CVE-2021-44228", "dateAdded": "2021-12-10",
+     "dueDate": "2021-12-24", "vendorProject": "Apache"},
+    {"cveID": "cve-2020-1472", "dateAdded": "2020-11-03"},
+    {"cveID": "", "dateAdded": "2020-01-01"},
+    {"notACve": "x"},
+]})
+check("a listed CVE is marked", _kev.get("CVE-2021-44228", {}).get("kev") is True)
+check("...with the date CISA added it",
+      _kev["CVE-2021-44228"]["kev_added"].year == 2021,
+      _kev["CVE-2021-44228"]["kev_added"])
+check("...and the date it was due to be fixed",
+      _kev["CVE-2021-44228"]["kev_due"].day == 24)
+check("an id in the wrong case is still a CVE", "CVE-2020-1472" in _kev)
+check("a missing due date is None, not an error",
+      _kev["CVE-2020-1472"]["kev_due"] is None)
+check("rows that are not CVEs are skipped, not guessed at", len(_kev) == 2,
+      sorted(_kev))
+# A document that parses to nothing is a format change, not an empty
+# catalogue -- CISA has never published zero. The caller treats {} as
+# a failure and keeps the existing data.
+check("an unrecognised document yields nothing to write",
+      _vf.parse_kev({"items": []}) == {})
+
+print("\n== FIRST's EPSS ==")
+_e = _vf.parse_epss(
+    "#model_version:v2025.03.14,score_date:2026-10-18\n"
+    "cve,epss,percentile\n"
+    "CVE-2021-44228,0.94380,0.99950\n"
+    "CVE-2016-0001,0.00042,0.11000\n"
+    "garbage,notanumber,x\n"
+    "CVE-2020-9999,,\n")
+check("a scored CVE carries its probability",
+      _e.get("CVE-2021-44228", (None,))[0] == 0.9438, _e.get("CVE-2021-44228"))
+check("...and its percentile, which is the readable half",
+      _e["CVE-2021-44228"][1] == 0.9995)
+check("a low score is kept, not rounded away",
+      _e["CVE-2016-0001"][0] == 0.00042, _e.get("CVE-2016-0001"))
+# The file opens with a comment line and a header, both of which csv
+# hands back as data.
+check("the comment and header lines are not rows", "cve" not in _e
+      and not any(k.startswith("#") for k in _e), sorted(_e))
+check("unparseable rows are skipped rather than zeroed",
+      "garbage" not in _e and "CVE-2020-9999" not in _e, sorted(_e))
+
+print("\n== the order a findings list actually wants ==")
+_rows = [
+    {"id": "exploited-but-medium", "kev": True, "epss": 0.01, "cvss_score": 5.0},
+    {"id": "critical-never-used", "kev": False, "epss": 0.0001, "cvss_score": 9.8},
+    {"id": "likely-next", "kev": False, "epss": 0.78, "cvss_score": 7.5},
+    {"id": "unscored", "kev": False, "epss": None, "cvss_score": 8.1},
+]
+_order = [r["id"] for r in _vf.triage_order(_rows)]
+check("what is being exploited comes first, whatever it scores",
+      _order[0] == "exploited-but-medium", _order)
+check("...then what is most likely to be next",
+      _order[1] == "likely-next", _order)
+check("...and a 9.8 nobody has ever used ranks below both",
+      _order.index("critical-never-used") > _order.index("likely-next"),
+      _order)
+# Unscored is unscored, not harmless.
+check("a CVE with no EPSS is kept, sorted as though zero",
+      "unscored" in _order and len(_order) == 4, _order)
+check("the same ordering works on objects, not just dicts",
+      [r.id for r in _vf.triage_order(
+          [type("R", (), {"id": "a", "kev": False, "epss": 0.1,
+                          "cvss_score": 1})(),
+           type("R", (), {"id": "b", "kev": True, "epss": 0.0,
+                          "cvss_score": 0})()])] == ["b", "a"])
+
+# Missing these feeds degrades the ORDER, not the answer. Blocking a
+# CVE lookup because EPSS has not synced would be the wrong trade.
+check("an unsynced KEV/EPSS does not make the corpus unusable",
+      "kev" not in ("exploitdb", "nvd") and "epss" not in ("exploitdb", "nvd"))
+
 
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 _sys.exit(1 if fail else 0)

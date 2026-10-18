@@ -291,6 +291,13 @@ Two ports, and the split is forced rather than chosen:
 | `proxy.port` (8443) | SOCKS5, **or** plain CONNECT | a tunnel, or a TLS terminator in front |
 | `proxy.tls_port` (8444) | CONNECT **inside TLS** | a browser, pointed straight at the host |
 
+**Check the host port is free before publishing it.** A bind failure
+stops the container starting *at all* — that takes Oddjob down, not
+just the proxy. On one shared host 8444 was already held by another
+service's rootless-networking helper, and the published port had to
+move while the container side stayed 8444. `ss -ltn | grep 8444`
+first.
+
 8443 tells SOCKS from plain CONNECT by the first byte — `0x05` for a
 SOCKS5 greeting, `A`–`Z` for an HTTP verb. TLS cannot join them:
 classifying means *reading* that first byte, and a TLS handshake
@@ -346,6 +353,18 @@ is the supported way to say it, and Oddjob serves one:
 
 ```
 https://your-oddjob-host/api/ghosts/proxy.pac
+```
+
+Verify it before trusting it — the handshake, not the log line:
+
+```bash
+openssl s_client -connect your-oddjob-host:8444 -servername your-oddjob-host
+#   Verify return code: 0 (ok)     <- a browser will accept this
+
+printf 'CONNECT example.com:443 HTTP/1.1\r\n\r\n' | \
+  openssl s_client -quiet -connect your-oddjob-host:8444 \
+                   -servername your-oddjob-host
+#   HTTP/1.1 407 Proxy Authentication Required
 ```
 
 That PAC deliberately has **no `DIRECT` fallback**. A PAC that says
