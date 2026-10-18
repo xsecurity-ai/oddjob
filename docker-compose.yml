@@ -130,6 +130,23 @@ services:
       # `proxy.tls_cert` first: without a certificate this port is
       # SOCKS5, whose credential is plaintext on the wire.
       - "${PROXY_BIND_ADDRESS:-127.0.0.1}:${PROXY_PORT:-8443}:8443"
+      # The TLS proxy port: CONNECT inside TLS, so a browser can
+      # be pointed at this host without an SSH tunnel. Listens
+      # only when proxy.tls_cert is set.
+      #
+      # 0.0.0.0 here IS the point -- reaching it from a browser
+      # is what it exists for, and the credential travels inside
+      # TLS. Every connection still needs a per-ghost grant,
+      # passes the scope gate and is recorded. There is no rate
+      # limiting in front of it, so an IP allowlist is cheap
+      # insurance.
+      #
+      # CHECK THE HOST PORT IS FREE before publishing it. On a
+      # shared host 8444 was already held by another service's
+      # rootless-networking helper, and the container then would
+      # not start at all -- which takes Oddjob down, not just
+      # the proxy. `ss -ltn | grep 8444` first.
+      - "${PROXY_TLS_BIND_ADDRESS:-0.0.0.0}:${PROXY_TLS_PORT:-8444}:8444"
 
 volumes:
   pgdata:
