@@ -56,6 +56,7 @@ from .. import (
     proxyauth,
     proxyhub,
     proxytunnel,
+    scopegate,
 )
 from ..db import get_session
 from ..events import broker
@@ -2142,8 +2143,17 @@ async def queue_per_host(session: AsyncSession, pr: Project, kind: str,
     be a different and much stronger claim than this knows how to make.
     """
     idx = await index_for(session, pr.id)
+    # Loaded once for the batch, and only for the kind that can use
+    # it. See the carve-out at the foot of scopegate.py: a DNS
+    # lookup of a hop an in-scope host's own CNAME points at is
+    # allowed, because without it the takeover detector can never
+    # reach a verdict -- and nothing else is.
+    hops: set[str] = set()
+    if kind in scopegate.RESOLVE_ONLY_KINDS:
+        hops = await scopegate.cname_hops(session, pr.id)
     created: list[int] = []
     refused: dict[str, str] = {}
+    by_cname: list[str] = []
     skipped: dict[str, int] = {}
     already: list[str] = []
     repeated: list[str] = []
@@ -2205,8 +2215,14 @@ async def queue_per_host(session: AsyncSession, pr: Project, kind: str,
         # callers did not.
         ruling = idx.check(as_host(subject) or subject)
         if not ruling.allowed:
-            refused[subject] = ruling.reason
-            continue
+            if scopegate.resolvable_hop(kind, subject, hops):
+                # Allowed by the carve-out, not by the scope list,
+                # and named back separately so the difference is
+                # visible to whoever reads the result.
+                by_cname.append(subject)
+            else:
+                refused[subject] = ruling.reason
+                continue
         # After the gate, so an out-of-scope subject still reads as
         # refused. Which of the two it is matters: one is a scope
         # problem to fix, the other is this run declining to repeat
@@ -2243,6 +2259,8 @@ async def queue_per_host(session: AsyncSession, pr: Project, kind: str,
                        project_code=pr.code,
                        detail=f"queued {len(created)} {kind} task(s), one "
                               f"per target"
+                              + (f"; {len(by_cname)} allowed as CNAME hops"
+                                 if by_cname else "")
                               + (f"; {len(refused)} refused" if refused else "")
                               + (f"; {len(skipped)} already answered empty"
                                  if skipped else "")
@@ -2253,7 +2271,12 @@ async def queue_per_host(session: AsyncSession, pr: Project, kind: str,
                        commit=True)
     return {"ids": created, "refused": refused, "queued": len(created),
             "skipped": skipped, "already_queued": already,
-            "already_done": repeated}
+            "already_done": repeated,
+            # Named back, not folded into `queued`. A permission used
+            # silently is one nobody audits, and this one is the
+            # single place a task runs against a name the scope list
+            # does not carry.
+            "allowed_as_cname_hop": by_cname}
 
 
 @router.post("/tasks/bulk", response_model=dict, status_code=201)
