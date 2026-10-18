@@ -30,7 +30,13 @@ import ssl
 from . import connect, proxyauth
 from .db import SessionLocal
 from .proxyhub import hub
-from .proxyserver import CHUNK, HANDSHAKE_TIMEOUT, _pump_client, _pump_stream
+from .proxyserver import (
+    CHUNK,
+    HANDSHAKE_TIMEOUT,
+    Tap,
+    _pump_client,
+    _pump_stream,
+)
 
 log = logging.getLogger("oddjob.proxy")
 
@@ -115,9 +121,13 @@ async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
         w.write(connect.ok())
         await w.drain()
 
-        # From here it is the SOCKS listener's relay, unchanged.
-        a = asyncio.create_task(_pump_client(r, stream))
-        b = asyncio.create_task(_pump_stream(stream, w))
+        # From here it is the SOCKS listener's relay, and its tap:
+        # the two front ends differ in how a destination is asked
+        # for and in nothing after that, so the capture lives in one
+        # place and both get it.
+        tap = Tap(d.project_id, req.host, req.port) if d.project_id else None
+        a = asyncio.create_task(_pump_client(r, stream, tap))
+        b = asyncio.create_task(_pump_stream(stream, w, tap))
         try:
             _done, pending = await asyncio.wait(
                 {a, b}, return_when=asyncio.FIRST_COMPLETED)
@@ -126,6 +136,8 @@ async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.gather(*pending, return_exceptions=True)
         finally:
+            if tap is not None:
+                tap.close()
             await stream.close()
 
     except (asyncio.IncompleteReadError, ConnectionResetError, TimeoutError):

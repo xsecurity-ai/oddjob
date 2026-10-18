@@ -864,5 +864,169 @@ check("the CONNECT relay does too",
       "grant_id=d.grant_id" in _inspect.getsource(_ph))
 
 
+print("\n== the traffic that goes through the proxy is kept ==")
+# An operator browsing a client's application through a Ghost is
+# doing the same work a scanner does, by hand, and it produced one
+# row saying a connection had happened and nothing about what was in
+# it. An afternoon of manual testing left no evidence at all.
+from app import proxycapture as _pc  # noqa: E402
+
+_ex = _pc.Exchange("app.acme.example", 80)
+_ex.add_request(b"GET /api/users?id=1 HTTP/1.1\r\n"
+                b"Host: app.acme.example\r\n\r\n")
+_ex.add_response(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                 b"Content-Length: 17\r\n\r\n{\"users\":[1,2,3]}")
+check("a proxied request is read back as a method and a URL",
+      (_ex.method, _ex.url)
+      == ("GET", "http://app.acme.example/api/users?id=1"),
+      (_ex.method, _ex.url))
+check("...with its status", _ex.status == 200, _ex.status)
+check("...and Content-Length says the response is whole", _ex.complete())
+check("...and the body is kept, because JSON is evidence",
+      '{"users":[1,2,3]}' in _ex.response_text()[0], _ex.response_text()[0][-30:])
+
+# Absolute-form, which is what a plain HTTP proxy request carries as
+# opposed to the origin-form inside a CONNECT tunnel. Both arrive on
+# this socket and both must produce the same answer.
+_abs = _pc.Exchange("app.acme.example", 80)
+_abs.add_request(b"GET http://app.acme.example/x HTTP/1.1\r\nHost: h\r\n\r\n")
+check("an absolute-form request URL is used as given",
+      _abs.url == "http://app.acme.example/x", _abs.url)
+
+# A browser pulls images, fonts and video. A megabyte of JPEG in a
+# Text column is neither evidence nor searchable.
+_img = _pc.Exchange("app.acme.example", 80)
+_img.add_request(b"GET /logo.png HTTP/1.1\r\nHost: h\r\n\r\n")
+_img.add_response(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n"
+                  b"Content-Length: 4\r\n\r\n\x89PNG")
+_body, _dropped = _img.response_text()
+check("a non-text body is not stored", _dropped is True)
+check("...but its headers are, and the omission is recorded",
+      "image/png" in _body and "not stored" in _body, _body[-60:])
+
+# Postgres refuses a NUL in a text column and SQLite accepts it. A
+# proxy sees whatever a browser asks for, so this is not an edge case.
+check("NUL bytes are stripped, because Postgres will not store them",
+      "\x00" not in _pc.decode(b"a\x00b"), _pc.decode(b"a\x00b"))
+
+print("\n-- what a tunnel CANNOT see --")
+# A CONNECT to 443 is a TLS session this server has no key for. The
+# bytes crossing the relay are ciphertext, and nothing here pretends
+# otherwise.
+check("a TLS ClientHello is not mistaken for a request",
+      not _pc.looks_http(b"\x16\x03\x01\x02\x00\x01\x00\x01\xfc"))
+check("...nor is SSH", not _pc.looks_http(b"SSH-2.0-OpenSSH_9.6\r\n"))
+check("...nor is a bare byte stream", not _pc.looks_http(b"\x00\x01\x02"))
+check("a real request IS recognised",
+      _pc.looks_http(b"POST /login HTTP/1.1\r\nHost: h\r\n\r\n"))
+# Said out loud rather than left to be discovered: the UI has to be
+# able to explain a missing capture.
+check("443 is reported as a destination whose contents are opaque",
+      _pc.tls_opaque(443) and _pc.tls_opaque(8443))
+check("...and 80 is not", not _pc.tls_opaque(80))
+
+# The tap must give up on a connection that is not HTTP rather than
+# buffering ciphertext on the chance it becomes a request.
+from app.proxyserver import Tap  # noqa: E402
+
+_t = Tap(1, "app.acme.example", 443)
+_t.client(b"\x16\x03\x01\x02\x00" + b"\xab" * 500)
+check("a TLS connection is dropped from capture immediately",
+      _t.dead is True and _t.ex is None)
+for _ in range(40):
+    _t.client(b"\xcd" * 512)
+check("...and stays dropped, so ciphertext never accumulates",
+      _t.dead is True and _t.ex is None)
+
+_t2 = Tap(1, "app.acme.example", 80)
+_t2.client(b"GET /one HTTP/1.1\r\nHost: h\r\n\r\n")
+check("a plain HTTP connection IS captured", _t2.ex is not None)
+check("...and reads the first request", _t2.ex.method == "GET", _t2.ex)
+
+print("\n-- the capture reaches the database --")
+# The writer, against a real session: scope, target creation and
+# dedupe are the parts that decide whether an afternoon of manual
+# testing is evidence or noise.
+import asyncio as _a2  # noqa: E402
+
+from sqlalchemy import select as _sel2  # noqa: E402
+
+from app.db import SessionLocal as _S2  # noqa: E402
+from app.models import (  # noqa: E402
+    Project as _Proj,
+)
+from app.models import (
+    ProjectScope as _Scope,
+)
+from app.models import (
+    WebAddress as _WA,
+)
+
+
+async def _capture_once(host, port, body, scope_lines=None):
+    async with _S2() as s:
+        pr = (await s.execute(_sel2(_Proj).where(
+            _Proj.code == "CAPT"))).scalar_one_or_none()
+        if pr is None:
+            pr = _Proj(code="CAPT", name="Capture")
+            s.add(pr)
+            await s.flush()
+            for line in (scope_lines or []):
+                s.add(_Scope(project_id=pr.id, kind="wildcard", value=line,
+                             included=True))
+            await s.commit()
+        pid = pr.id
+    ex = _pc.Exchange(host, port)
+    ex.add_request(f"GET /p HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
+    ex.add_response(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: "
+        + str(len(body)).encode() + b"\r\n\r\n" + body)
+    wrote = await _pc.store(pid, ex)
+    async with _S2() as s:
+        rows = (await s.execute(_sel2(_WA).where(
+            _WA.url.like(f"%{host}%")))).scalars().all()
+    return wrote, rows
+
+
+_wrote, _rows = _a2.run(_capture_once(
+    "shop.acme.example", 80, b"<html>hello</html>",
+    scope_lines=["*.acme.example"]))
+check("a proxied exchange is written to web_addresses", _wrote is True)
+check("...exactly once", len(_rows) == 1, len(_rows))
+if _rows:
+    _r = _rows[0]
+    check("...with the method and status", _r.method == "GET"
+          and _r.status_code == 200, (_r.method, _r.status_code))
+    check("...and the body kept, because it is text",
+          "<html>hello</html>" in (_r.response or ""), (_r.response or "")[:60])
+    check("...and the request kept beside it",
+          "GET /p HTTP/1.1" in (_r.request or ""), (_r.request or "")[:40])
+    # So a report can tell a page somebody opened by hand from one a
+    # crawler reached.
+    check("...marked as having come through the proxy",
+          "proxy" in (_r.sources or ""), _r.sources)
+
+# A reload is not new evidence.
+_again, _rows2 = _a2.run(_capture_once("shop.acme.example", 80,
+                                       b"<html>hello</html>"))
+check("the identical exchange seen again adds no second row",
+      _again is False and len(_rows2) == 1, (_again, len(_rows2)))
+
+# A target nobody had recorded. The operator deliberately browsed it
+# through this project's Ghost and the scope gate allowed it, so a
+# capture with nowhere to hang would be a capture discarded.
+_w3, _rows3 = _a2.run(_capture_once("new.acme.example", 80, b"<p>x</p>"))
+check("a host the project did not have gets a target rather than "
+      "losing the capture", _w3 is True and len(_rows3) == 1,
+      (_w3, len(_rows3)))
+
+# The second gate. `decide` ruled on this destination when the
+# connection opened; a keep-alive session can outlive the list that
+# permitted it.
+_w4, _rows4 = _a2.run(_capture_once("evil.example", 80, b"<p>x</p>"))
+check("a host outside the scope list is NOT written, even though the "
+      "connection was permitted when it opened",
+      _w4 is False and len(_rows4) == 0, (_w4, len(_rows4)))
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

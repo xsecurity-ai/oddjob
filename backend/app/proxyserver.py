@@ -54,7 +54,7 @@ import contextlib
 import logging
 import ssl
 
-from . import proxyauth, socks
+from . import proxyauth, proxycapture, socks
 from .db import SessionLocal
 from .proxyhub import Stream, hub
 
@@ -112,23 +112,110 @@ async def _request(r: asyncio.StreamReader) -> socks.Request:
     return socks.parse_request(head + rest)
 
 
-async def _pump_client(r: asyncio.StreamReader, s: Stream) -> None:
+async def _pump_client(r: asyncio.StreamReader, s: Stream,
+                       tap: Tap | None = None) -> None:
     """Client -> target."""
     while True:
         data = await r.read(CHUNK)
         if not data:
             return
+        if tap is not None:
+            tap.client(data)
         await s.send(data)
 
 
-async def _pump_stream(s: Stream, w: asyncio.StreamWriter) -> None:
+async def _pump_stream(s: Stream, w: asyncio.StreamWriter,
+                       tap: Tap | None = None) -> None:
     """Target -> client."""
     while True:
         data = await s.recv()
         if data is None:
             return
+        if tap is not None:
+            await tap.server(data)
         w.write(data)
         await w.drain()
+
+
+class Tap:
+    """Watches a relayed connection and records the HTTP in it.
+
+    Both proxy front ends -- SOCKS and CONNECT -- share the two pump
+    functions above, so this is the one place the bytes can be seen.
+
+    **It never affects the relay.** The data is written on whatever
+    this does, the tap keeps no reference once an exchange is
+    emitted, and the store runs as its own task so a slow database
+    cannot hold up a page load.
+
+    **It gives up quickly on anything that is not HTTP.** A CONNECT
+    to 443 is a TLS session this server has no key for, and the
+    first bytes say so; continuing to buffer ciphertext on the
+    chance it turns into a request would cost memory on every
+    proxied connection for nothing. See `proxycapture.tls_opaque`
+    for what the UI says about that.
+    """
+
+    def __init__(self, project_id: int, host: str, port: int) -> None:
+        self.project_id, self.host, self.port = project_id, host, port
+        self.ex: proxycapture.Exchange | None = None
+        self.dead = False          # not HTTP; stop looking
+        self.sniffed = 0
+        self.saw_request = False
+
+    def client(self, data: bytes) -> None:
+        if self.dead:
+            return
+        if self.ex is None or self.ex.resp:
+            # A new request. On a keep-alive connection this is the
+            # second and later ones, so the previous exchange is
+            # flushed first -- a browser pipelines, and losing every
+            # request after the first would capture a fraction of a
+            # session and look like it had captured all of it.
+            self._flush()
+            if not proxycapture.looks_http(data):
+                self.sniffed += len(data)
+                if self.sniffed >= proxycapture.SNIFF or not self.saw_request:
+                    self.dead = True
+                return
+            self.ex = proxycapture.Exchange(self.host, self.port)
+            self.saw_request = True
+        self.ex.add_request(data)
+
+    async def server(self, data: bytes) -> None:
+        if self.dead or self.ex is None:
+            return
+        self.ex.add_response(data)
+        if self.ex.complete():
+            self._flush()
+
+    def _flush(self) -> None:
+        """Hand off whatever is complete. Never blocks the relay."""
+        ex, self.ex = self.ex, None
+        if ex is None or not ex.worth_storing():
+            return
+        # Fire and forget, deliberately: the relay's job is the
+        # bytes. `store_safely` swallows and logs its own failures.
+        task = asyncio.create_task(
+            proxycapture.store_safely(self.project_id, ex))
+        _CAPTURES.add(task)
+        task.add_done_callback(_CAPTURES.discard)
+
+    def close(self) -> None:
+        """The connection ended. Emit a response with no length.
+
+        A response delimited by the connection closing -- HTTP/1.0
+        style, and what a streaming endpoint does -- is only ever
+        complete at this moment. Dropping it would lose exactly the
+        responses that carry the most.
+        """
+        self._flush()
+
+
+#: Strong references to in-flight capture writes. asyncio only holds
+#: a weak one, so a task nobody keeps can be collected mid-await and
+#: the capture silently lost.
+_CAPTURES: set[asyncio.Task] = set()
 
 
 async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
@@ -197,8 +284,13 @@ async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
         # other. A proxied stream is over when either end stops;
         # waiting for both would hold the socket on every request a
         # browser abandons.
-        a = asyncio.create_task(_pump_client(r, stream))
-        b = asyncio.create_task(_pump_stream(stream, w))
+        # The evidence. An operator browsing a client's application
+        # through a Ghost is doing the same work a scanner does, by
+        # hand, and it used to leave one row saying a connection had
+        # happened and nothing about what was in it.
+        tap = Tap(d.project_id, host, port) if d.project_id else None
+        a = asyncio.create_task(_pump_client(r, stream, tap))
+        b = asyncio.create_task(_pump_stream(stream, w, tap))
         try:
             done, pending = await asyncio.wait(
                 {a, b}, return_when=asyncio.FIRST_COMPLETED)
@@ -207,6 +299,8 @@ async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.gather(*pending, return_exceptions=True)
         finally:
+            if tap is not None:
+                tap.close()
             await stream.close()
 
     except (asyncio.IncompleteReadError, ConnectionResetError, TimeoutError):
