@@ -565,9 +565,46 @@ func nmapArgv(args map[string]any, outPath string, tg []string, rawSockets bool)
 //
 // Each addition costs scan time, which is the real budget here: the
 // queue was already moving at roughly seven nmap tasks an hour.
+// # The protocols that are not HTTP
+//
+// Four more named, each checked against nmap's own `categories`
+// field rather than assumed -- which corrected two guesses: both
+// `snmp-processes` and `snmp-win32-software` turn out to be
+// `default, safe` and were already running, needing a reader rather
+// than a place on this line.
+//
+// `smtp-open-relay` is the one that was most wrong. Oddjob has had
+// a judge for its output since the NSE work landed and the script
+// is `discovery, intrusive, external` -- in none of the categories
+// above -- so the judge could never once have fired. A reader with
+// nothing to read is the same bug as data with no reader, seen from
+// the other side.
+//
+// What it does, because `external` deserves saying: MAIL FROM and
+// RCPT TO, sixteen combinations, and never DATA. No message is
+// delivered even when the relay IS open. The envelope names nmap's
+// default test domain, which will appear in the client's mail logs.
+//
+// `dns-zone-transfer` is AXFR, which is the oldest finding in DNS
+// and is still there often enough to be worth one request.
+//
+// `ntp-monlist` is the amplification check: a server answering it
+// is a server somebody else can point at a victim. `discovery,
+// intrusive`, so it was not running either.
+//
+// `ssh-auth-methods` reports what the server will accept. `none` is
+// a critical finding and nothing else here could see it.
+//
+// Not added: `snmp-win32-users`, for the same reason
+// `smb-enum-users` is not -- it returns an organisation's usernames
+// into a database that is backed up, searched and exported, to
+// answer a question nobody has asked yet. And nothing for SOAP:
+// nmap has no SOAP script worth the name, and web services are
+// nuclei's job.
 const NSEScripts = "default,safe,vuln,ssl-cert,ssl-enum-ciphers," +
 	"smb-security-mode,smb2-security-mode,smb-enum-shares," +
-	"mysql-empty-password,ms-sql-empty-password"
+	"mysql-empty-password,ms-sql-empty-password," +
+	"smtp-open-relay,dns-zone-transfer,ntp-monlist,ssh-auth-methods"
 
 // UDPTopPorts is how many of nmap's commonest UDP ports a `udp` task
 // sweeps when the caller names none.
