@@ -1055,5 +1055,39 @@ check("with no hops recorded, nothing is allowed",
                              set()))
 
 
+print("\n== the carve-out has to hold at BOTH gates ==")
+# Scope is checked twice: once when a task is queued, and again when
+# it is handed to an agent -- the second because the list can move
+# while a task sits in the queue, which is a real case and worth
+# keeping.
+#
+# The first version of this patched only the queue-time gate. All 35
+# lookups queued cleanly and then every one failed with "refused by
+# the project's scope at dispatch". Two gates, one patched, which is
+# a gate.
+import inspect as _inspect  # noqa: E402
+
+from app.routers import agents as _ag  # noqa: E402
+
+_hb = _inspect.getsource(_ag.heartbeat)
+check("the dispatch gate knows about the carve-out at all",
+      "RESOLVE_ONLY_KINDS" in _hb,
+      "heartbeat() never mentions it — queue-time only")
+check("...and consults the same closed candidate set",
+      "cname_hops" in _hb and "resolvable_hop" in _hb)
+# Lazily: a heartbeat arrives every few seconds from every ghost,
+# and a query per beat to answer a question almost no beat asks is
+# the wrong trade.
+check("...without a query on every heartbeat",
+      "hops is None" in _hb, "hop set is not loaded lazily")
+
+# Both gates must agree about which kinds qualify. Two lists that
+# can drift is the same bug waiting to happen again.
+_queue = _inspect.getsource(_ag.queue_per_host)
+check("both gates read the kind list from scopegate, not a local copy",
+      "scopegate.RESOLVE_ONLY_KINDS" in _queue
+      and "scopegate.RESOLVE_ONLY_KINDS" in _hb)
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 raise SystemExit(1 if fail else 0)
