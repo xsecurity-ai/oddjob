@@ -258,17 +258,26 @@ async def demux(r: asyncio.StreamReader, w: asyncio.StreamWriter,
         return
 
     if first[0] == TLS_HELLO:
-        if tls is None:
-            # A browser tried TLS and we have no certificate. Say so
-            # in the log; there is nothing useful to say on the wire
-            # because the client is waiting for a ServerHello.
-            log.warning("proxy: TLS offered but no certificate is "
-                        "configured — set proxy.tls_cert and "
-                        "proxy.tls_key")
-            with contextlib.suppress(Exception):
-                w.close()
-            return
-        await _tls_then_connect(r, w, first, tls)
+        # A TLS ClientHello arriving HERE cannot be served, and the
+        # reason is worth writing down because the obvious fix does
+        # not work.
+        #
+        # Demuxing means consuming a byte to classify the
+        # connection. `loop.start_tls()` then has a ClientHello
+        # missing its first byte, and feeding that byte back through
+        # `protocol.data_received()` puts it in the StreamReader's
+        # buffer -- which is not where the TLS state machine reads
+        # from. The handshake waits for ever for a hello that
+        # already arrived: `openssl s_client` prints "Connecting to
+        # 127.0.0.1" and nothing else, which is how this was found.
+        #
+        # So TLS gets its own listener, where asyncio wraps the
+        # socket from byte zero and nothing has to be put back. See
+        # `serve_tls`.
+        log.info("proxy: TLS offered on the plaintext port — the TLS "
+                 "listener is a separate port (proxy.tls_port)")
+        with contextlib.suppress(Exception):
+            w.close()
         return
 
     # A plain HTTP verb. Either a browser speaking CONNECT to a port
@@ -331,43 +340,44 @@ class _Pushback:
         return getattr(self._inner, name)
 
 
-async def _tls_then_connect(r: asyncio.StreamReader,
-                            w: asyncio.StreamWriter, first: bytes,
-                            tls: ssl.SSLContext) -> None:
-    """Upgrade this connection to TLS and hand it to the CONNECT handler.
-
-    `start_tls` on an existing transport is the only way to do this
-    after peeking, and it needs the byte we took back in the stream
-    first -- the handshake starts at the ClientHello's first byte.
-    """
-    from . import proxyhttps
-
-    loop = asyncio.get_running_loop()
-    transport = w.transport
-    protocol = transport.get_protocol()
-    # Feed the peeked byte back before the handshake reads.
-    protocol.data_received(first)
-    try:
-        new_transport = await loop.start_tls(
-            transport, protocol, tls, server_side=True)
-    except (ssl.SSLError, ConnectionResetError, TimeoutError) as e:
-        log.info("proxy: TLS handshake failed — %s", e)
-        with contextlib.suppress(Exception):
-            w.close()
-        return
-    w._transport = new_transport                     # noqa: SLF001
-    await proxyhttps.handle(r, w)
-
-
 async def serve(bind: str, port: int,
                 tls: ssl.SSLContext | None = None) -> asyncio.AbstractServer:
-    """Start listening. The caller owns the server object."""
+    """The plaintext port: SOCKS5, and CONNECT from a TLS terminator.
+
+    `tls` is accepted so the caller can say whether a TLS listener
+    exists; terminating TLS on THIS port is not possible -- see
+    `demux`.
+    """
     async def _on(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
         await demux(r, w, tls)
 
     srv = await asyncio.start_server(_on, bind, port)
     where = ", ".join(str(s.getsockname()) for s in (srv.sockets or ()))
-    log.warning("proxy listening on %s (SOCKS5%s) — every connection is "
-                "authenticated, scope-gated and recorded",
-                where, " and CONNECT-over-TLS" if tls else ", no TLS cert")
+    log.warning("proxy listening on %s (SOCKS5, and CONNECT from a TLS "
+                "terminator in front) — every connection is "
+                "authenticated, scope-gated and recorded", where)
+    return srv
+
+
+async def serve_tls(bind: str, port: int,
+                    tls: ssl.SSLContext) -> asyncio.AbstractServer:
+    """The TLS port: CONNECT, with the handshake done by asyncio.
+
+    Its own listener rather than a branch of the demux, because a
+    demux has to read a byte to decide and TLS cannot survive having
+    its first byte read elsewhere. Here `start_server(ssl=...)` wraps
+    the socket from byte zero, which is the supported path and the
+    one that works.
+
+    The handler is the same one the plaintext port uses for CONNECT,
+    so both carry identical authorisation -- credential, scope gate,
+    audit row and tunnel are one code path, not two.
+    """
+    from . import proxyhttps
+
+    srv = await asyncio.start_server(proxyhttps.handle, bind, port, ssl=tls)
+    where = ", ".join(str(s.getsockname()) for s in (srv.sockets or ()))
+    log.warning("proxy TLS listening on %s (CONNECT inside TLS) — the "
+                "credential travels encrypted, which is what SOCKS5 "
+                "cannot offer", where)
     return srv

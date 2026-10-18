@@ -199,6 +199,7 @@ async def lifespan(app: FastAPI):
     # should not stop Oddjob serving the UI that would let somebody
     # fix it.
     proxy_srv = None
+    proxy_tls_srv = None
     try:
         from . import proxyserver
         from .routers.settings import load_all
@@ -220,17 +221,24 @@ async def lifespan(app: FastAPI):
                     tls = proxyhttps.context(cert, key)
                 except Exception as e:               # noqa: BLE001
                     print(f"proxy TLS off, certificate did not load: {e}")
+            bind = str(cfg.get("proxy.bind") or "0.0.0.0")
             proxy_srv = await proxyserver.serve(
-                str(cfg.get("proxy.bind") or "127.0.0.1"),
-                int(cfg.get("proxy.port") or 8443), tls)
+                bind, int(cfg.get("proxy.port") or 8443), tls)
+            if tls is not None:
+                # Its own port. A demux has to read a byte to
+                # classify the connection and TLS cannot survive
+                # that -- see proxyserver.demux.
+                proxy_tls_srv = await proxyserver.serve_tls(
+                    bind, int(cfg.get("proxy.tls_port") or 8444), tls)
     except Exception as e:                                   # noqa: BLE001
         print(f"socks proxy did not start: {e}")
 
     yield
-    if proxy_srv is not None:
-        proxy_srv.close()
-        with contextlib.suppress(Exception):
-            await proxy_srv.wait_closed()
+    for srv in (proxy_srv, proxy_tls_srv):
+        if srv is not None:
+            srv.close()
+            with contextlib.suppress(Exception):
+                await srv.wait_closed()
     audit_task.cancel()
     vulnfeed_task.cancel()
     await worker.stop()

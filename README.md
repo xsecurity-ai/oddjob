@@ -284,14 +284,24 @@ the clear, on a route into their network that anyone can reach.
 Inside TLS, the credential is a `Proxy-Authorization` header in an
 encrypted session.
 
-Three things arrive on 8443 and the first byte tells them apart, so
-nothing has to guess and your existing tunnel keeps working:
+Two ports, and the split is forced rather than chosen:
 
-| first byte | what it is | where it goes |
+| port | speaks | for |
 |---|---|---|
-| `0x05` | a SOCKS5 greeting | the SOCKS listener |
-| `0x16` | a TLS ClientHello | TLS, then CONNECT |
-| `A`–`Z` | a plain HTTP verb | CONNECT |
+| `proxy.port` (8443) | SOCKS5, **or** plain CONNECT | a tunnel, or a TLS terminator in front |
+| `proxy.tls_port` (8444) | CONNECT **inside TLS** | a browser, pointed straight at the host |
+
+8443 tells SOCKS from plain CONNECT by the first byte — `0x05` for a
+SOCKS5 greeting, `A`–`Z` for an HTTP verb. TLS cannot join them:
+classifying means *reading* that first byte, and a TLS handshake
+cannot survive having its first byte read by anything else. The
+ClientHello arrives incomplete and the handshake hangs for ever.
+(Observed, before this was split out: `openssl s_client` printing
+`Connecting to 127.0.0.1` and nothing more.) On its own port asyncio
+wraps the socket from byte zero, which works.
+
+Both ports end in the same handler after the credential check — same
+grants, same scope gate, same audit row.
 
 #### Prefer: let nginx hold the certificate
 

@@ -117,6 +117,16 @@ SPEC = [
              "share a port without a demuxer nginx does not have. This "
              "port carries both SOCKS5 and CONNECT-over-TLS: Oddjob "
              "demuxes them on the first byte, which nginx cannot do."},
+    {"key": "proxy.tls_port", "group": "Site",
+     "label": "Proxy TLS port", "type": "number", "default": 8444,
+     "help": "A SECOND port, which answers CONNECT inside TLS. Only "
+             "listens when a certificate is configured below. It is "
+             "separate from the plain port rather than sharing it, and "
+             "that is not a preference: telling SOCKS and TLS apart "
+             "means reading the first byte, and a TLS handshake cannot "
+             "survive having its first byte read by anything else — the "
+             "ClientHello is incomplete and the handshake hangs for "
+             "ever. Here asyncio wraps the socket from byte zero."},
     {"key": "proxy.tls_cert", "group": "Site",
      "label": "Proxy TLS certificate", "type": "text", "default": "",
      "help": "Path, inside the container, to a certificate for this "
