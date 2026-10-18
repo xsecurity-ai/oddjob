@@ -52,7 +52,7 @@ from .. import merge as merge_mod
 from ..db import get_session
 from ..domains import registrable
 from ..events import broker
-from ..hosts import InvalidHost, validate_host
+from ..hosts import InvalidHost, dns_subject, validate_host
 from ..lookups import BLOCKED, CHOICE, LOOKUP_KINDS
 from ..models import (
     AgentTask,
@@ -244,9 +244,15 @@ async def _outstanding(session: AsyncSession, pr: Project
                 # held, which is checked against the decision below.
                 if not [a for a in options if a not in t.ip_addresses]:
                     continue
-                # A mobile app has no address, so a forward lookup on
-                # one is not a gap to fill.
-                if t.kind == "mobile":
+                # Only targets that are named by a name. A mobile app's
+                # bundle id and a cloud resource's ARN or bucket name
+                # are identifiers, not hostnames, so an address against
+                # one is not an answer about that asset — and the
+                # absence of one is not a gap to fill. This read
+                # `kind == "mobile"` and let every cloud row through;
+                # `dns_subject` is now the single statement of the
+                # rule, shared with the standing orders.
+                if not dns_subject(t.kind):
                     continue
 
             if not subject:

@@ -68,6 +68,7 @@ from . import domains as gen
 from . import geoip
 from .db import SessionLocal
 from .events import broker
+from .hosts import dns_subject
 from .lookups import is_ip
 from .models import (
     NMAP_CHOICES,
@@ -251,6 +252,15 @@ class Snapshot:
     kitchen_sink: bool = False
     #: (host, has_address) for every target in the project.
     targets: list[tuple[str, bool]] = field(default_factory=list)
+    #: Of those, the ones whose identifier is not a DNS name — a cloud
+    #: resource id, a mobile bundle id. See `hosts.dns_subject`.
+    #:
+    #: A set beside `targets` rather than a third element in the tuple
+    #: because `targets` is what the port-scanning policy reads and it
+    #: wants all of them: a cloud resource usually has an address and
+    #: is perfectly scannable. It is only the NAME that is not a name,
+    #: so only the name-based policies subtract this.
+    not_dns_named: set[str] = field(default_factory=set)
     #: Every address the project has OBSERVED, from `target_addresses`
     #: -- what resolution, port scanning and the importers recorded,
     #: as opposed to the addresses somebody typed in as a target.
@@ -326,6 +336,29 @@ def effective(s: Snapshot) -> Snapshot:
     return replace(s, **KITCHEN_SINK)       # type: ignore[arg-type]
 
 
+def name_subjects(s: Snapshot) -> list[tuple[str, bool]]:
+    """The targets a NAME-based policy may take as a subject.
+
+    `auto_amass` enumerates under a zone and `auto_resolve_ips` asks a
+    resolver about a name; both derive their subject from the
+    identifier in `Target.host`, and for a cloud resource or a mobile
+    app that identifier is not a name — see `hosts.dns_subject`, which
+    is the one statement of that rule.
+
+    One function rather than the same filter written at each policy.
+    Two copies of a rule is how they come to disagree, which is the
+    bug `roots.py` was extracted to end and this is the same lesson:
+    the gap report below and `plan` must subtract exactly the same
+    targets, or the report shows work outstanding that the planner
+    will never queue, for ever.
+
+    The port-scanning policies are deliberately not filtered through
+    this. A bucket with an address is a thing to scan; it is only
+    unaskable ABOUT BY NAME.
+    """
+    return [(h, has) for h, has in s.targets if h not in s.not_dns_named]
+
+
 @dataclass(frozen=True)
 class Gap:
     """Something a standing order was supposed to cover and has not."""
@@ -366,7 +399,7 @@ def gaps(s: Snapshot) -> list[Gap]:
             len(zones))
     if s.auto_resolve_ips:
         add("auto_resolve_ips", "hostname(s) with no address recorded",
-            len([h for h, has in s.targets
+            len([h for h, has in name_subjects(s)
                  if not has and ("nslookup", h.lower()) not in s.tasked]))
     if s.auto_reverse_dns:
         add("auto_reverse_dns", "address(es) with no reverse lookup",
@@ -428,7 +461,8 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
         # on one particular caller having filled a field -- the unit
         # tests construct Snapshots directly, and so would anyone
         # reasoning about this in isolation.
-        derived = [gen.registrable(h) for h, _ in s.targets if not is_ip(h)]
+        derived = [gen.registrable(h) for h, _ in name_subjects(s)
+                   if not is_ip(h)]
         for z in list(s.scope_zones) + derived:
             if not z or "." not in z or z in seen:
                 continue
@@ -442,7 +476,7 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
 
     if s.auto_resolve_ips:
         want = sorted(
-            h for h, has_addr in s.targets
+            h for h, has_addr in name_subjects(s)
             if not has_addr and not is_ip(h) and ("nslookup", h) not in s.tasked)
         out += [Candidate("nslookup", h, {}, "auto_resolve_ips")
                 for h in want[:limit]]
@@ -609,6 +643,11 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
         select(Target).where(Target.project_id == pr.id)
         .order_by(Target.host))).scalars().unique().all()
     targets = [(t.host, bool(t.addresses)) for t in rows]
+    # Read here rather than inferred from the host string later. A
+    # bucket name has no punctuation that gives it away -- `acme-backups`
+    # is a perfectly well-formed hostname and simply is not one -- so
+    # the kind column is the only thing that actually knows.
+    not_dns_named = {t.host for t in rows if not dns_subject(t.kind)}
 
     # Observed addresses, for `auto_reverse_dns`. Read from the table
     # rather than walked off `rows`, so an address recorded against a
@@ -685,7 +724,7 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
         auto_vhost=bool(getattr(pr, "auto_vhost", False)),
         auto_httpx=bool(getattr(pr, "auto_httpx", False)),
         kitchen_sink=bool(getattr(pr, "kitchen_sink", False)),
-        targets=targets, addresses=addresses,
+        targets=targets, not_dns_named=not_dns_named, addresses=addresses,
         searched=searched, tasked=tasked,
         scope_zones=scope_zones, web_urls=web_urls, seeds=seeds,
         suspected=suspected)

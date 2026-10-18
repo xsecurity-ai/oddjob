@@ -77,9 +77,18 @@ function needsName(t: Target): boolean {
  *  A mobile app is excluded for the opposite reason to the other
  *  direction: it has no address because there is nothing to resolve,
  *  so it is not a gap. Listing it would turn a correct N/A into a
- *  permanent outstanding task. */
+ *  permanent outstanding task.
+ *
+ *  A cloud resource is excluded for the same reason and was not: its
+ *  identifier is an ARN, a bucket name or a resource path, not a
+ *  hostname, so there is no name here to look up. Queueing one sent
+ *  the client's resource names to a resolver to be told, correctly,
+ *  that no such name exists. The backend applies the same rule — see
+ *  `dns_subject` in `app/hosts.py` — so a sweep queued any other way
+ *  drops them too. */
 function needsAddress(t: Target): boolean {
-  return t.kind !== 'mobile' && hasName(t) && !(t.ip_address ?? '').trim()
+  return t.kind !== 'mobile' && t.kind !== 'cloud'
+    && hasName(t) && !(t.ip_address ?? '').trim()
 }
 
 // ----------------------------------------------------------- widths

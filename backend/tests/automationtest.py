@@ -138,6 +138,46 @@ check("amass picks the zone once, not once per host",
 check("...and passes the domain, not a target list",
       p[0].args.get("domain") == "acme.example", p[0].args)
 
+# A cloud resource's identifier is not a name. An ARN, a bucket name,
+# a resource path -- `registrable()` on one invents a zone belonging to
+# somebody who has never heard of the engagement, and a resolver asked
+# about one is told the client's resource names for no answer in
+# return. Both shapes are tested, because a bucket endpoint is the
+# case that looks fine: `backups.storage.example` as a CLOUD target is
+# a well-formed hostname and still is not one.
+CLOUDY = [("web.acme.example", True), ("bare.acme.example", False),
+          ("backups.storage.example", False),
+          ("arn:aws:s3:::acme-backups", False)]
+NOT_NAMES = {"backups.storage.example", "arn:aws:s3:::acme-backups"}
+p = plan(Snapshot(auto_resolve_ips=True, auto_amass=True, targets=CLOUDY,
+                  not_dns_named=NOT_NAMES))
+subs = {(c.kind, c.subject) for c in p}
+check("no resolve task takes a cloud identifier as its subject",
+      not [s for k, s in subs if k == "nslookup" and s in NOT_NAMES], subs)
+check("...and the plain host beside it is still resolved",
+      ("nslookup", "bare.acme.example") in subs, subs)
+check("no zone is derived from a cloud identifier",
+      ("amass", "storage.example") not in subs, subs)
+check("...and the hosts' own zone is still enumerated",
+      ("amass", "acme.example") in subs, subs)
+
+# The gap report has to subtract exactly the same targets. If it did
+# not, it would show work outstanding for ever that the planner will
+# never queue -- which is the complaint `roots.py` exists to end,
+# arriving by a different door.
+g = {x.policy: x.outstanding
+     for x in _au.gaps(Snapshot(auto_resolve_ips=True, targets=CLOUDY,
+                                not_dns_named=NOT_NAMES))}
+check("the gap report counts the one host, not the two cloud ids",
+      g.get("auto_resolve_ips") == 1, g)
+
+# Deliberately NOT filtered: a bucket usually has an address, and
+# dropping it from a port scan would leave a real asset uncovered. It
+# is the NAME that is unusable, not the asset.
+check("a cloud target is still port scanned",
+      len(plan(Snapshot(auto_nmap="top100", targets=CLOUDY,
+                        not_dns_named=NOT_NAMES))) == 4)
+
 p = plan(Snapshot(auto_nmap="top100", targets=ESTATE))
 check("nmap picks every host including the address",
       len(p) == 4, [c.subject for c in p])
@@ -686,6 +726,73 @@ async def roots_agree():
 
 
 asyncio.run(roots_agree())
+
+# =====================================================================
+# A cloud TARGET is not a source of domains, and not a name to resolve
+# =====================================================================
+print("\n--- a cloud target is neither enumerated nor resolved ---")
+
+# Different question from the section below, which is about a cloud
+# PROVIDER's zone. This one is about the project's own row: a target of
+# kind `cloud` is named by an ARN, a bucket name or a resource path,
+# and `registrable()` on one of those produces nonsense that was being
+# handed to amass and to a resolver.
+#
+# Read off the database deliberately, not from a hand-built Snapshot:
+# the half of this that can rot is `snapshot()` forgetting to carry the
+# kind, and a pure test cannot see that.
+call("/api/projects", "POST", {"code": "CLOUDT", "name": "CLOUDT"}, token=admin)
+# Only the host's zone is in scope. `storage.example` deliberately is
+# not: if the scope list named it, the scope half of `enumerable_roots`
+# would offer it legitimately and this test would be asserting nothing.
+call("/api/projects/CLOUDT/scope", "POST",
+     {"lines": ["acme.example"]}, token=admin)
+
+
+async def cloud_is_not_a_name():
+    from app.roots import enumerable_roots
+    async with SessionLocal() as s:
+        pr = (await s.execute(
+            select(Project).where(Project.code == "CLOUDT"))).scalar_one()
+        s.add(Target(project_id=pr.id, host="web.acme.example", kind="host"))
+        # The subtle one: a bucket whose identifier is a perfectly
+        # well-formed hostname. Nothing about the string says it is not
+        # a host, so the kind column is the only thing that knows.
+        s.add(Target(project_id=pr.id, host="backups.storage.example",
+                     kind="cloud", provider="aws"))
+        # And the one that is obviously not a hostname. It still
+        # reached the resolver, because nothing was checking.
+        s.add(Target(project_id=pr.id, host="arn:aws:s3:::acme-backups",
+                     kind="cloud", provider="aws"))
+        pr.auto_amass = True
+        pr.auto_resolve_ips = True
+        await s.commit()
+
+        found = await enumerable_roots(s, pr.id)
+        check("a cloud identifier yields no zone to enumerate",
+              "storage.example" not in found, sorted(found))
+        check("...while the host beside it still yields its own",
+              "acme.example" in found, sorted(found))
+
+        snap = await snapshot(s, pr)
+        check("the snapshot carries which targets are not DNS names",
+              snap.not_dns_named == {"backups.storage.example",
+                                     "arn:aws:s3:::acme-backups"},
+              sorted(snap.not_dns_named))
+        cands = {(c.kind, c.subject) for c in _au.plan(snap)}
+        check("no amass task is planned for a cloud target",
+              ("amass", "storage.example") not in cands, sorted(cands))
+        check("no nslookup task is planned for one either",
+              not [x for k, x in cands
+                   if k == "nslookup" and x in snap.not_dns_named],
+              sorted(cands))
+        check("...and the host beside them is still resolved",
+              ("nslookup", "web.acme.example") in cands, sorted(cands))
+        check("...and its zone still enumerated",
+              ("amass", "acme.example") in cands, sorted(cands))
+
+
+asyncio.run(cloud_is_not_a_name())
 
 # =====================================================================
 # Cloud providers: approved is not the same as enumerable

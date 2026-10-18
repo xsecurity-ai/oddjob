@@ -38,7 +38,7 @@ from sqlalchemy import true as sa_true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import assetsearch
-from ..hosts import InvalidHost, validate_host
+from ..hosts import InvalidHost, dns_subject, validate_host
 from ..models import (
     ROLE_ORDER,
     Agent,
@@ -1584,6 +1584,12 @@ def build(session: AsyncSession, project: Project | None, user: User,
                                "the project pool — routing will pick an agent",
                 "note": "queued; results import when the agent reports back"}
 
+    #: Task kinds whose subject is a NAME rather than a machine:
+    #: amass enumerates under a zone, nslookup asks a resolver about a
+    #: hostname. A target whose identifier is not a DNS name has
+    #: nothing for either to work on — see `hosts.dns_subject`.
+    _NAME_SUBJECT_KINDS = frozenset({"amass", "nslookup"})
+
     #: What `select` accepts, and what each one means. Kept beside the
     #: tool rather than in the description so the error can list them.
     _SELECTORS = {
@@ -1640,6 +1646,9 @@ def build(session: AsyncSession, project: Project | None, user: User,
 
         # ------------------------------------------------ choose hosts
         chosen_hosts: list[str] = []
+        #: What was picked by the selection and then dropped, with the
+        #: reason. Reported rather than quietly removed -- see below.
+        unscannable: dict[str, str] = {}
         if sel == "hosts":
             chosen_hosts = [h for h in re.split(r"[\s,]+", hosts or "") if h]
             if not chosen_hosts:
@@ -1676,6 +1685,24 @@ def build(session: AsyncSession, project: Project | None, user: User,
                         or "http" in (sv[2] or "")}
                     targets = [t for t in targets
                                if t.id in webbed or t.id in http]
+            if kind in _NAME_SUBJECT_KINDS:
+                # amass and nslookup take a NAME. A cloud resource id
+                # and a mobile bundle id are not names, and
+                # `validate_host` below does not catch them all: an
+                # ARN has a colon in it and is refused, but a bucket
+                # called `acme-backups` is a well-formed hostname and
+                # simply is not one. The kind column is what knows.
+                #
+                # Only these kinds. A cloud resource usually has an
+                # address, so dropping it from an nmap sweep would
+                # leave a real asset unscanned.
+                for t in targets:
+                    if not dns_subject(t.kind):
+                        unscannable[t.host] = (
+                            f"a {t.kind} target is named by an identifier, "
+                            f"not by a hostname, so there is nothing for "
+                            f"{kind} to ask about")
+                targets = [t for t in targets if dns_subject(t.kind)]
             chosen_hosts = [t.host for t in targets]
 
         # A project's inventory holds more than network hosts — an S3
@@ -1685,7 +1712,6 @@ def build(session: AsyncSession, project: Project | None, user: User,
         # reported rather than quietly removed: "I queued 1,700 of your
         # 1,738" is a fact the operator needs in order to notice that
         # thirty-eight assets are being covered by nothing at all.
-        unscannable: dict[str, str] = {}
         scannable: list[str] = []
         for h in chosen_hosts:
             try:
