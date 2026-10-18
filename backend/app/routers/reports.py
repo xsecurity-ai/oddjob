@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from .. import slack
 from ..db import get_session
@@ -87,6 +88,17 @@ class KindInfo(BaseModel):
 
 
 def _out(row: Report, code: str, who: str | None) -> ReportOut:
+    """One report's metadata. NEVER touches `content`.
+
+    `content` is the whole document as JSON -- twelve megabytes on a
+    real engagement. This used to parse it per row to pull out one
+    optional string, which made listing two reports a sixty-second
+    request. It timed out, the page got nothing, and it rendered as
+    "there are no reports" -- the worst possible way for a slow query
+    to fail, because it looks like data loss.
+
+    The note lives in `summary` now, which is a few hundred bytes.
+    """
     summary = {}
     try:
         summary = json.loads(row.summary) if row.summary else {}
@@ -99,16 +111,10 @@ def _out(row: Report, code: str, who: str | None) -> ReportOut:
         finished_at=row.finished_at, size_bytes=row.size_bytes,
         error=row.error, emailed_to=row.emailed_to, email_error=row.email_error,
         agent_edited=bool(summary.get("agent_edited")),
-        agent_note=_agent_note(row))
-
-
-def _agent_note(row: Report) -> str | None:
-    if not row.content:
-        return None
-    try:
-        return json.loads(row.content).get("agent_note")
-    except ValueError:
-        return None
+        # None for a report generated before the note was carried
+        # here. Absent, not empty: the document still has it and the
+        # download still reads it from there.
+        agent_note=summary.get("agent_note"))
 
 
 @router.get("/kinds", response_model=list[KindInfo])
@@ -122,8 +128,22 @@ async def kinds(_: User = Depends(get_current_user)):
 async def list_reports(project: str = Query(...),
                        pr: Project = Depends(require_project("readonly")),
                        session: AsyncSession = Depends(get_session)):
+    # Named columns, not the ORM object. `select(Report)` loads
+    # `content` with it -- twelve megabytes a row on a real
+    # engagement -- for a view that shows a title and a status.
+    #
+    # `load_only` rather than a tuple select so `_out` keeps taking a
+    # Report and the two cannot drift: a column added to the output
+    # and forgotten here would be an AttributeError at the first
+    # request, rather than a silent blank.
     rows = (await session.execute(
         select(Report, User.username)
+        .options(load_only(
+            Report.id, Report.kind, Report.title, Report.status,
+            Report.requested_by, Report.created_at, Report.started_at,
+            Report.finished_at, Report.size_bytes, Report.error,
+            Report.emailed_to, Report.email_error, Report.summary,
+            Report.project_id))
         .outerjoin(User, User.id == Report.requested_by)
         .where(Report.project_id == pr.id)
         .order_by(Report.created_at.desc()))).all()
