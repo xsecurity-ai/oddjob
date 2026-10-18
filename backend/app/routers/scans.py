@@ -18,7 +18,7 @@ import os
 import secrets
 import tempfile
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import addresses, importers, nsefindings, slack
+from .. import addresses, importers, lifecycle, nsefindings, slack
 from ..db import SessionLocal, get_session
 from ..events import broker
 from ..hosts import InvalidHost, normalise_host
@@ -356,7 +356,17 @@ async def _host(session: AsyncSession, project: Project, ph: ParsedHost,
 # ----------------------------------------------------------------- vulns
 async def _vuln(session: AsyncSession, target: Target, pv: ParsedVuln,
                 scan: ParsedScan, res: ImportResult, source: str,
-                announce: list | None = None) -> None:
+                announce: list | None = None,
+                scanner: str | None = None,
+                seen_at: datetime | None = None) -> None:
+    """Record one finding, and that this scanner saw it now.
+
+    `seen_at` is passed in rather than taken here so every finding in
+    one import shares one timestamp. Two findings from the same file
+    with timestamps a millisecond apart would make one of them look
+    older than a sweep that covered both.
+    """
+    seen_at = seen_at or datetime.now(UTC)
     row = None
     if pv.external_id:
         row = (await session.execute(
@@ -372,7 +382,9 @@ async def _vuln(session: AsyncSession, target: Target, pv: ParsedVuln,
                          severity=pv.severity, status=pv.status,
                          port=pv.port, protocol=pv.protocol,
                          description=pv.description, remediation=pv.remediation,
-                         external_id=pv.external_id))
+                         external_id=pv.external_id,
+                         scanner=scanner, first_seen_at=seen_at,
+                         last_seen_at=seen_at))
         res.vulns_created += 1
         # Findings are one of only two things that reach Slack. Gathered
         # here and posted after the commit: a finding announced and then
@@ -384,6 +396,21 @@ async def _vuln(session: AsyncSession, target: Target, pv: ParsedVuln,
                      f"{pv.severity.upper()}: {pv.title}"[:400],
                      detail=pv.description, actor=scan.tool, source=source)
         return
+    # Seen again. Recorded before anything else, and whether or not
+    # a single field changed: an unchanged finding reported by
+    # today's scan is still there, and that is the fact the lifecycle
+    # turns on. `vulns_updated` deliberately does not count it --
+    # "updated" means the content moved, and a report that called
+    # every unchanged finding an update would be noise.
+    row.last_seen_at = seen_at
+    if row.first_seen_at is None:
+        row.first_seen_at = seen_at
+    # Never overwritten once set. A finding first reported by Nessus
+    # and later matched by title from an nmap import is still a
+    # Nessus finding, and reassigning it would let an nmap sweep
+    # resolve it.
+    if not row.scanner and scanner:
+        row.scanner = scanner
     changed = []
     if row.severity != pv.severity:
         changed.append(f"severity: {row.severity} → {pv.severity}")
@@ -768,10 +795,26 @@ async def ingest(session: AsyncSession, project: Project, scan: ParsedScan,
         for t in cotenants:
             await _propagate_ports(session, project, t, idx, res)
 
+    # One timestamp for the whole import. Two findings from the same
+    # file stamped a millisecond apart would make one of them look
+    # older than the sweep that covered both, and `resolved` turns on
+    # exactly that comparison.
+    seen_at = datetime.now(UTC)
     for pv in scan.vulns:
         t = await resolve(pv.host)
         if t is not None:
-            await _vuln(session, t, pv, scan, res, source, new_findings)
+            await _vuln(session, t, pv, scan, res, source, new_findings,
+                        scanner=fmt, seen_at=seen_at)
+
+    # Every host this scan READ, not only the ones it found something
+    # on. That is the whole point: a host swept by nuclei and reported
+    # clean is the evidence that a nuclei finding there has gone, and a
+    # sweep recorded only where findings landed could never say so.
+    #
+    # Recorded after the findings, so a failure writing one does not
+    # leave a sweep claiming a look that produced nothing.
+    for t in targets.values():
+        await lifecycle.record_sweep(session, project.id, t.id, fmt, seen_at)
 
     for pc in scan.credentials:
         t = await resolve(pc.host) if pc.host else None

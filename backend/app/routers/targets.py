@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import addresses, webtargets
+from .. import addresses, lifecycle, webtargets
 from ..db import get_session
 from ..events import broker
 from ..hosts import normalise_host
@@ -85,7 +85,15 @@ def _keys(model, *computed) -> tuple[str, ...]:
 _TARGET_KEYS = _keys(TargetOut, "project_code", "total_vulns", "total_criticals",
                      "total_highs", "total_pocs", "total_ports")
 _SERVICE_KEYS = _keys(ServiceOut, "host", "project_code")
-_VULN_KEYS = _keys(VulnOut, "host", "project_code")
+# The lifecycle three are DERIVED -- worked out from the sweep table
+# per request, not columns on the row -- so they are excluded here
+# alongside the query-supplied names and filled in below. Leaving them
+# in made `getattr(vuln, "lifecycle")` a 500 on every target detail,
+# which is `_keys` doing exactly its job: a field added to the schema
+# reaches the client without anyone remembering a tuple, and that cuts
+# both ways.
+_VULN_KEYS = _keys(VulnOut, "host", "project_code",
+                   "lifecycle", "lifecycle_why", "last_looked_at")
 _POC_KEYS = _keys(PocOut, "host", "project_code")
 _IMPLANT_KEYS = _keys(ImplantOut, "host", "project_code")
 
@@ -545,12 +553,23 @@ async def target_detail(project: str, host: str,
                   Implant.framework))).scalars().all()
 
     code = (await session.get(Project, t.project_id)).code
+    # One query for this host's sweeps, then a verdict per finding.
+    # The target page is where "is this still there" gets asked most
+    # directly, so it is worth the one round trip.
+    sweeps = await lifecycle.sweeps_for_targets(session, [t.id])
+
+    def _vuln(x):
+        vd = lifecycle.verdict_for(x, sweeps)
+        return VulnOut(**{k: getattr(x, k) for k in _VULN_KEYS},
+                       host=t.host, project_code=code,
+                       lifecycle=vd.state, lifecycle_why=vd.why,
+                       last_looked_at=vd.last_looked)
+
     return TargetDetail(
         target=await _one(session, t.id),
         services=[ServiceOut(**{k: getattr(x, k) for k in _SERVICE_KEYS},
                              host=t.host, project_code=code) for x in svcs],
-        vulns=[VulnOut(**{k: getattr(x, k) for k in _VULN_KEYS},
-                       host=t.host, project_code=code) for x in vulns],
+        vulns=[_vuln(x) for x in vulns],
         pocs=[PocOut(**{k: getattr(x, k) for k in _POC_KEYS},
                      host=t.host, project_code=code) for x in pocs],
         implants=[ImplantOut(**{k: getattr(x, k) for k in _IMPLANT_KEYS},
