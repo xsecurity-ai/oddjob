@@ -59,7 +59,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -243,6 +243,12 @@ class Snapshot:
     auto_nmap: str = "off"
     auto_web: str = "off"
     auto_nuclei: str = "off"
+    auto_vhost: bool = False
+    auto_httpx: bool = False
+    #: Everything on, at its most thorough. Resolved by `effective`
+    #: rather than copied into the fields above, so switching it off
+    #: returns the project to whatever was set before.
+    kitchen_sink: bool = False
     #: (host, has_address) for every target in the project.
     targets: list[tuple[str, bool]] = field(default_factory=list)
     #: Every address the project has OBSERVED, from `target_addresses`
@@ -285,6 +291,116 @@ class Snapshot:
     tasked: set[tuple[str, str]] = field(default_factory=set)
 
 
+#: What each policy is set to when the kitchen sink is open.
+#:
+#: The most thorough value of each, not merely "on": a sink that
+#: left `auto_nmap` at `top100` would be a switch whose name
+#: promised one thing and did another.
+#:
+#: Certificate Transparency and archived-URL lookups are NOT here.
+#: They send a client's domain to a third party and are gated by an
+#: explicit site decision; a convenience switch that routed around a
+#: vendor-approval gate would be the gate not existing. See
+#: app/ctlogs.py, which argues it at length.
+KITCHEN_SINK: dict[str, object] = {
+    "auto_amass": True,
+    "auto_resolve_ips": True,
+    "auto_reverse_dns": True,
+    "auto_vhost": True,
+    "auto_httpx": True,
+    "auto_nmap": "full",
+    "auto_web": "both",
+    "auto_nuclei": "both+confirm",
+}
+
+
+def effective(s: Snapshot) -> Snapshot:
+    """The policies as they will actually be applied.
+
+    One place that resolves `kitchen_sink`, so nothing downstream has
+    to remember it exists. `plan` calls this; so does the gap report,
+    so the two cannot disagree about what was supposed to happen.
+    """
+    if not s.kitchen_sink:
+        return s
+    return replace(s, **KITCHEN_SINK)       # type: ignore[arg-type]
+
+
+@dataclass(frozen=True)
+class Gap:
+    """Something a standing order was supposed to cover and has not."""
+    policy: str
+    #: What is still owed, in the operator's words.
+    what: str
+    outstanding: int
+
+
+def gaps(s: Snapshot) -> list[Gap]:
+    """What the policies that are ON have still not done.
+
+    The point of a switch that says "everything" is that somebody
+    stops checking. So it has to be able to answer "is it actually
+    done", and the only honest answer is derived from the estate
+    rather than from whether the worker ran.
+
+    Reads `effective`, the same resolution `plan` uses. Two readings
+    of what a project asked for is how they come to differ, and a
+    gap report that disagreed with the planner would be worse than
+    none: it would be a clean bill of health for work nobody did.
+
+    An empty list means every policy that is on has nothing
+    outstanding. It does NOT mean the estate is fully enumerated --
+    a policy that is off has no gap by definition, which is why the
+    report names the policy and not just the number.
+    """
+    s = effective(s)
+    out: list[Gap] = []
+
+    def add(policy: str, what: str, n: int) -> None:
+        if n:
+            out.append(Gap(policy, what, n))
+
+    if s.auto_amass:
+        zones = {z for z in s.scope_zones if z} - s.searched
+        add("auto_amass", "in-scope zone(s) never handed to amass",
+            len(zones))
+    if s.auto_resolve_ips:
+        add("auto_resolve_ips", "hostname(s) with no address recorded",
+            len([h for h, has in s.targets
+                 if not has and ("nslookup", h.lower()) not in s.tasked]))
+    if s.auto_reverse_dns:
+        add("auto_reverse_dns", "address(es) with no reverse lookup",
+            len([a for a in s.addresses
+                 if ("reverse_ip", a.lower()) not in s.tasked]))
+    if s.auto_nmap != "off":
+        add("auto_nmap", "host(s) never port scanned",
+            len([h for h, _ in s.targets
+                 if ("nmap", h.lower()) not in s.tasked]))
+    for flag, kind, label in (
+            (s.auto_vhost, "vhost", "URL(s) never asked for virtual hosts"),
+            (s.auto_httpx, "httpx", "URL(s) never probed")):
+        if flag:
+            add(f"auto_{kind}", label,
+                len([u for u in s.web_urls
+                     if (kind, u.lower()) not in s.tasked]))
+    if s.auto_web in WEB_KINDS:
+        for kind in WEB_KINDS[s.auto_web]:
+            add("auto_web", f"URL(s) with no {kind} run",
+                len([u for u in s.web_urls
+                     if (kind, u.lower()) not in s.tasked]))
+    if s.auto_nuclei in NUCLEI_KINDS:
+        for kind in NUCLEI_KINDS[s.auto_nuclei]:
+            # `nuclei_confirm` is owed only where a version was
+            # actually detected: a CPE match without one is
+            # product-wide, and counting every URL as a gap would
+            # report work that is not supposed to happen.
+            pool = (set(s.suspected) if kind == "nuclei_confirm"
+                    else s.web_urls)
+            add("auto_nuclei", f"URL(s) with no {kind} run",
+                len([u for u in pool if (kind, u.lower()) not in s.tasked]))
+    return out
+
+
 def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
     """What the policies would like to do, before the gate is consulted.
 
@@ -297,6 +413,10 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
     The order is stable regardless, so an interrupted cycle resumes
     where it was rather than starting somewhere different.
     """
+    # The kitchen sink is resolved HERE and not at the call sites.
+    # Two readings of what a project asked for is how they come to
+    # differ, and the gap report below reads the same function.
+    s = effective(s)
     out: list[Candidate] = []
 
     if s.auto_amass:
@@ -400,6 +520,33 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
                               "auto_web_seeded")
                     for o, urls in sorted(s.seeds.items())[:cap]
                     if urls]
+
+    # What else does this address answer to? A host serving twelve
+    # virtual hosts is twelve applications behind one socket, and
+    # eleven of them are invisible to everything else here: content
+    # discovery asks what PATHS exist on a site, and this asks what
+    # SITES exist on a host.
+    #
+    # Per origin, like the web policies, and once ever per origin --
+    # the answer is a property of the server's configuration, not of
+    # the moment.
+    if s.auto_vhost:
+        want = sorted(u for u in s.web_urls
+                      if ("vhost", u.lower()) not in s.tasked)
+        cap = WEB_PER_CYCLE if limit is None else min(limit, WEB_PER_CYCLE)
+        out += [Candidate("vhost", u, {"targets": [u]}, "auto_vhost")
+                for u in want[:cap]]
+
+    # And the cheapest thing in the catalogue: ask every known URL
+    # what it answers with. It is what decides whether anything
+    # heavier is worth queueing against a URL at all, which is why
+    # it is worth doing to everything rather than to a selection.
+    if s.auto_httpx:
+        want = sorted(u for u in s.web_urls
+                      if ("httpx", u.lower()) not in s.tasked)
+        cap = WEB_PER_CYCLE if limit is None else min(limit, WEB_PER_CYCLE)
+        out += [Candidate("httpx", u, {"targets": [u]}, "auto_httpx")
+                for u in want[:cap]]
 
     if s.auto_nuclei in NUCLEI_KINDS:
         # Per URL, like auto_web and for the same reason: nuclei takes
@@ -535,6 +682,9 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
         auto_nmap=str(pr.auto_nmap or "off"),
         auto_web=str(getattr(pr, "auto_web", None) or "off"),
         auto_nuclei=str(getattr(pr, "auto_nuclei", None) or "off"),
+        auto_vhost=bool(getattr(pr, "auto_vhost", False)),
+        auto_httpx=bool(getattr(pr, "auto_httpx", False)),
+        kitchen_sink=bool(getattr(pr, "kitchen_sink", False)),
         targets=targets, addresses=addresses,
         searched=searched, tasked=tasked,
         scope_zones=scope_zones, web_urls=web_urls, seeds=seeds,
@@ -690,16 +840,41 @@ class Worker:
                     # it had the other four on as well, which selected
                     # it for unrelated reasons.
                     | (Project.auto_web != "off")
-                    | (Project.auto_nuclei != "off")))).scalars().all()
+                    | (Project.auto_nuclei != "off")
+                    # The two added later, and the switch that
+                    # implies every one of them. A project selected
+                    # by none of these predicates is a project the
+                    # worker never looks at, which is how `auto_web`
+                    # did nothing and said nothing for a month.
+                    | (Project.auto_vhost.is_(True))
+                    | (Project.auto_httpx.is_(True))
+                    | (Project.kitchen_sink.is_(True))))).scalars().all()
             if not rows:
                 self.last = "no project has a standing order"
                 return
             total: dict[str, int] = {}
+            outstanding: list[str] = []
             for pr in rows:
                 for policy, n in (await run_once(session, pr)).items():
                     total[policy] = total.get(policy, 0) + n
+                # The point of a switch that says "everything" is
+                # that somebody stops checking, so it has to be able
+                # to answer "is it actually done". Derived from the
+                # estate rather than from whether the worker ran.
+                if pr.kitchen_sink:
+                    g = gaps(await snapshot(session, pr))
+                    if g:
+                        outstanding.append(
+                            f"{pr.code}: " + "; ".join(
+                                f"{x.outstanding} {x.what}" for x in g[:4])
+                            + (f" (+{len(g) - 4} more)" if len(g) > 4 else ""))
             self.last = (", ".join(f"{n} {p}" for p, n in sorted(total.items()))
                          if total else "nothing outstanding")
+            # Said separately from what was queued. "Queued 40" and
+            # "still owes 4,000" are different facts and the second
+            # is the one somebody who turned the sink on wants.
+            if outstanding:
+                self.last += " | still owed — " + " | ".join(outstanding)
 
     async def _loop(self) -> None:
         log.info("standing-orders worker started")

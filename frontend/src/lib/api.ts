@@ -44,6 +44,16 @@ export interface Project {
    *  not, so neither covers the other. */
   auto_web: string
   auto_nuclei: string
+  /** Ask each web origin what OTHER names it answers to. */
+  auto_vhost: boolean
+  /** Probe every URL the project knows. */
+  auto_httpx: boolean
+  /** Everything on, at its most thorough. Resolved by the server when
+   *  the policies are read rather than copied into the fields above,
+   *  so turning it off returns the project to whatever was set
+   *  before. Does NOT imply the lookups that send the client's domain
+   *  to a third party. */
+  kitchen_sink: boolean
   /** Extra content-discovery paths, one per line. APPENDED to the
    *  wordlist the agent carries, never replacing it. */
   url_wordlist: string | null
@@ -1891,6 +1901,7 @@ export const api = {
     auto_amass?: boolean; auto_resolve_ips?: boolean
     auto_reverse_dns?: boolean; auto_nmap?: string; auto_web?: string;
     auto_nuclei?: string
+    auto_vhost?: boolean; auto_httpx?: boolean; kitchen_sink?: boolean
     url_wordlist?: string | null; user_agent?: string | null
     /** The rules of engagement. ISO-8601 UTC for the dates.
      *
@@ -1905,6 +1916,15 @@ export const api = {
   }) =>
     req<Project>(`/api/projects/${encodeURIComponent(project)}`,
       { method: 'PATCH', body: JSON.stringify(body) }),
+
+  /** What the standing orders that are ON have still not done.
+   *
+   *  An empty list means nothing is outstanding. It does NOT mean the
+   *  estate is fully enumerated — a policy that is off has no gap by
+   *  definition, which is why each entry names its policy. */
+  standingOrderGaps: (project: string) =>
+    req<{ policy: string; what: string; outstanding: number }[]>(
+      `/api/projects/${encodeURIComponent(project)}/standing-orders/gaps`),
 
   /** Remove both engagement dates, leaving testing unbounded by date.
    *

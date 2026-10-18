@@ -156,6 +156,9 @@ class ProjectUpdate(BaseModel):
     auto_web: str | None = None
     #: "off" | "vuln" | "tech" | "both".
     auto_nuclei: str | None = None
+    auto_vhost: bool | None = None
+    auto_httpx: bool | None = None
+    kitchen_sink: bool | None = None
     #: Extra content-discovery paths, one per line. Appended to the
     #: agent's wordlist, never replacing it.
     url_wordlist: str | None = None
@@ -294,6 +297,14 @@ class ProjectOut(ProjectBase):
     # API. The round trip is what was untested, and is what is tested
     # now.
     auto_web: str = "off"
+    auto_vhost: bool = False
+    auto_httpx: bool = False
+    #: Everything on, at its most thorough. Resolved when the
+    #: policies are read rather than copied into the fields above, so
+    #: turning it off returns the project to whatever was set before.
+    #: Deliberately does not imply the two lookups that send a
+    #: client's domain to a third party.
+    kitchen_sink: bool = False
     url_wordlist: str | None = None
     user_agent: str | None = None
     #: The authorisation letter's other two sentences. See app/roe.py.

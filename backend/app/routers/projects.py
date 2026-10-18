@@ -961,6 +961,35 @@ async def update_project(project: str, body: ProjectUpdate,
     return _out(row, await load_all(session))
 
 
+class GapOut(BaseModel):
+    """Something a standing order was supposed to cover and has not."""
+    policy: str
+    what: str
+    outstanding: int
+
+
+@router.get("/{project}/standing-orders/gaps", response_model=list[GapOut])
+async def standing_order_gaps(
+        project: str, pr: Project = Depends(require_project("user")),
+        _: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_session)):
+    """What the policies that are ON have still not done.
+
+    The point of a switch that says "everything" is that somebody
+    stops checking, so it has to be able to answer "is it actually
+    done" — and the only honest answer is derived from the estate
+    rather than from whether the worker ran.
+
+    An empty list means every policy that is on has nothing
+    outstanding. It does NOT mean the estate is fully enumerated: a
+    policy that is off has no gap by definition, which is why each
+    entry names its policy and not just a number.
+    """
+    from ..automation import gaps, snapshot
+    return [GapOut(policy=g.policy, what=g.what, outstanding=g.outstanding)
+            for g in gaps(await snapshot(session, pr))]
+
+
 @router.delete("/{project}/engagement-window", status_code=204)
 async def clear_engagement_window(
         project: str, pr: Project = Depends(require_project("admin")),
