@@ -215,16 +215,23 @@ every one of the three is somebody deciding, not a default.
 **Site Config → SOCKS5 proxy through ghosts.** It binds `127.0.0.1`
 on port **8443**.
 
-Loopback is the default because it is useless from another machine,
-which is the point — reaching it means an SSH tunnel, and whoever
-set that up has already proved who they are:
+**`proxy.bind` is inside the container, and it reads backwards.**
+`127.0.0.1` there is the *container's* loopback, and Docker forwards
+a published port to the container's bridge address — so it finds
+nothing listening and every connection is reset. The port looks open
+on the host, `ss` shows it `LISTEN`, and nothing answers. Leave it
+`0.0.0.0`; that publishes nothing by itself.
+
+**What the outside can reach is the `ports:` mapping**, which binds
+the host's `127.0.0.1` unless you set `PROXY_BIND_ADDRESS`. That is
+where the "only reachable locally" property actually comes from.
+
+On loopback it is reached with a tunnel, and whoever set that up has
+already proved who they are:
 
 ```bash
 ssh -N -L 8443:127.0.0.1:8443 you@oddjob-host
 ```
-
-Widen `proxy.bind` only on purpose. `0.0.0.0` publishes a route into
-the engagement to anyone who can reach the host.
 
 **It is 8443 and cannot be 443.** A browser pointed at a SOCKS proxy
 speaks raw SOCKS5 — first byte `0x05`, no TLS, no SNI — and nginx

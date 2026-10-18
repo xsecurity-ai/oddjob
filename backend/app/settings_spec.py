@@ -93,13 +93,22 @@ SPEC = [
              "decides otherwise."},
     {"key": "proxy.bind", "group": "Site",
      "label": "Proxy listen address", "type": "text",
-     "default": "127.0.0.1",
-     "help": "127.0.0.1 is the default and is useless from another "
-             "machine, which is the point: reaching it then needs an SSH "
-             "tunnel, and the person doing that has already proved who "
-             "they are. Widen it only deliberately — 0.0.0.0 publishes a "
-             "route into the engagement to anyone who can reach this "
-             "host."},
+     "default": "0.0.0.0",
+     "help": "Which interface the listener binds INSIDE the container — "
+             "not on the host. That distinction is the whole of this "
+             "setting and it reads backwards: 127.0.0.1 here is the "
+             "CONTAINER's loopback, and Docker forwards a published port "
+             "to the container's bridge address, so a published 8443 "
+             "finds nothing listening and every connection is reset. "
+             "That is exactly what happened: the port looked open on the "
+             "host, `ss` showed it LISTEN, and nothing answered. "
+             "0.0.0.0 is therefore the default for a containerised "
+             "deployment, and it does NOT publish anything — what the "
+             "outside can reach is decided by the ports mapping in "
+             "docker-compose.yml, which binds the host's 127.0.0.1 "
+             "unless PROXY_BIND_ADDRESS says otherwise. Running Oddjob "
+             "directly on a host rather than in a container is the case "
+             "where 127.0.0.1 here means what it looks like it means."},
     {"key": "proxy.port", "group": "Site",
      "label": "Proxy port", "type": "number", "default": 8443,
      "help": "Not 443. A browser pointed at a SOCKS proxy speaks raw "
