@@ -124,10 +124,69 @@ async def assert_allowed(session: AsyncSession, project_id: int, host: str,
 
 
 # ---------------------------------------------------------------- ghost
-#: Where a task's targets live in its args. Ghost runners take `targets`;
-#: the rest is defensive — a kind added later that names its hosts
-#: differently must not silently become an ungated path.
+#: Keys whose every token is a target, whatever it looks like.
+#: `targets` is what the server sends; the rest are the names the
+#: runners accept natively, and a bare `localhost` under one of these
+#: is still a host even though nothing about the string says so.
 TARGET_KEYS = ("targets", "target", "hosts", "host", "url", "urls")
+
+#: Everything else in the args dict is read too -- see `task_hosts`.
+#: This used to be an allowlist of six keys and nothing else, which
+#: was a gate with a door beside it:
+#:
+#:     {"kind": "nmap", "args": {"targets": ["in-scope.acme.example"],
+#:                               "extra": "203.0.113.0/24"}}
+#:
+#: `extra` is split on whitespace and spliced into argv ahead of the
+#: targets (`ghost/internal/tasks/tasks.go`), and nmap and masscan both
+#: take bare targets anywhere on their command line. The decoy in
+#: `targets` passed the gate and the range in `extra` was never looked
+#: at. The same held for every runner's native argument name --
+#: amass reads `domains`, katana `sites`, nslookup `queries`,
+#: reverse_ip `ips`, amass again `resolvers` -- none of which were in
+#: the list above.
+#:
+#: So the rule is inverted: everything in the args is examined, and a
+#: token is tested if it could be a host. A new runner argument is
+#: therefore gated the day it is added rather than the day somebody
+#: remembers to add it here.
+
+
+def targetish(tok: str) -> bool:
+    """Could this argument token be something a scanner dials?
+
+    The question is deliberately about *shape*, not about keys. A
+    flag, a port list, a template path and a timing number are not
+    hosts and testing them against the scope list would refuse
+    `-sV` on an allowlisted project. An address, a CIDR, a URL or a
+    dotted name is a host, and gets tested.
+
+    Wrong in the safe direction twice over: a token that merely looks
+    like a host is checked and almost always allowed, while a token
+    that looks like nothing is not a host any resolver would accept
+    either.
+    """
+    s = (tok or "").strip()
+    if not s or s.startswith("-"):
+        return False
+    if "://" in s:
+        return True
+    h = as_host(s)
+    if not h:
+        return False
+    if _is_cidr(h) or _parse_addr(h) is not None:
+        return True
+    # A dotted name. `2.3.4` is not one -- a version string reaches
+    # here from `-sV` style arguments and from template names.
+    return ("." in h and not h.replace(".", "").isdigit()
+            and bool(re.fullmatch(r"[a-z0-9._*-]+", h)))
+
+
+def _parse_addr(s: str):
+    try:
+        return ipaddress.ip_address(s)
+    except ValueError:
+        return None
 
 
 def task_hosts(args: dict | None) -> list[str]:
@@ -137,19 +196,32 @@ def task_hosts(args: dict | None) -> list[str]:
     string, a list, or a comma/space separated run of them all appear.
     A host this misses is a host that gets scanned unchecked, so the
     parsing errs towards finding more rather than fewer.
+
+    Under a key in `TARGET_KEYS` every token counts. Under any other
+    key -- including `extra`, which lands on the command line verbatim
+    -- a token counts if `targetish` says it could be a host.
     """
     out: list[str] = []
 
-    def take(v) -> None:
+    def take(v, strict: bool) -> None:
         if isinstance(v, str):
-            out.extend(p for p in re.split(r"[\s,]+", v) if p)
+            for p in re.split(r"[\s,]+", v):
+                if p and (strict or targetish(p)):
+                    out.append(p)
         elif isinstance(v, (list, tuple)):
             for item in v:
-                take(item)
+                take(item, strict)
+        elif isinstance(v, dict):
+            # Nested objects are not a shape any runner uses today.
+            # Walked anyway: the args are free-form JSON, and a gate
+            # that stops at the first nesting level is a gate with a
+            # documented way around it.
+            for k, item in v.items():
+                take(item, strict or k in TARGET_KEYS)
 
-    for k in TARGET_KEYS:
-        if isinstance(args, dict) and k in args:
-            take(args[k])
+    if isinstance(args, dict):
+        for k, v in args.items():
+            take(v, k in TARGET_KEYS)
     return out
 
 
@@ -163,15 +235,44 @@ def as_host(raw: str) -> str:
     s = (raw or "").strip()
     if "://" in s:
         s = s.split("://", 1)[1]
+    if "@" in s:
+        # userinfo. `https://user@barred.example/` is a request for
+        # barred.example, and leaving the prefix on made it a name
+        # the lists could not match.
+        s = s.rsplit("@", 1)[1]
     if "/" in s and not _is_cidr(s):
         s = s.split("/", 1)[0]
-    s = s.rstrip(".")
-    # host:port, but not an IPv6 literal, which has several colons.
-    if s.count(":") == 1:
+    # The bracketed form FIRST. A bracketed IPv6 literal carrying a
+    # port has colons inside it as well as before the port, so the
+    # port rule below cannot be trusted to find the boundary -- and
+    # `strip("[]")` only touches the ends, so running it last left
+    # `2001:db8::1]:443`, which parses as no address at all and was
+    # therefore compared only against the NAME list. A barred v6
+    # address written as a URL walked through the gate.
+    if s.startswith("["):
+        head, sep, rest = s.partition("]")
+        if sep:
+            s = head[1:]
+            # ...]:443
+            if rest.startswith(":") and rest[1:].rstrip(".").isdigit():
+                rest = ""
+            if rest:
+                # Anything else after the bracket is not a form we can
+                # read. Returned whole so it fails to parse as a host
+                # and the caller refuses it, rather than being
+                # silently trimmed into something that passes.
+                return s_lower(raw)
+    elif s.count(":") == 1:
+        # host:port, but not an unbracketed IPv6 literal, which has
+        # several colons.
         head, _, tail = s.partition(":")
-        if tail.isdigit():
+        if tail.rstrip(".").isdigit():
             s = head
-    return s.strip("[]").lower()
+    return s.strip("[]").rstrip(".").lower()
+
+
+def s_lower(raw: str) -> str:
+    return (raw or "").strip().lower()
 
 
 def _is_cidr(s: str) -> bool:

@@ -69,6 +69,17 @@ class Stream:
     """One proxied connection, from this side."""
     id: int
     tunnel: Tunnel
+    #: Which credential opened it. Carried so a revocation can reach
+    #: the connections that credential is already holding: `decide`
+    #: runs once per CONNECT, so without this a revoked credential
+    #: keeps relaying over any tunnel it established beforehand --
+    #: and revocation is usually the response to a credential having
+    #: leaked, which is the moment that matters most.
+    #:
+    #: None for a stream opened before the grant was known, which
+    #: nothing does today; a revocation leaves those alone rather
+    #: than guessing they belong to it.
+    grant_id: int | None = None
     inbox: asyncio.Queue[bytes | None] = field(
         default_factory=lambda: asyncio.Queue(QUEUE_DEPTH))
     #: Resolved when the Ghost says the dial worked or did not.
@@ -129,7 +140,8 @@ class Tunnel:
             await self._send(raw)
 
     async def open(self, host: str, port: int,
-                   timeout: float = DIAL_TIMEOUT) -> tuple[Stream | None, str]:
+                   timeout: float = DIAL_TIMEOUT,
+                   grant_id: int | None = None) -> tuple[Stream | None, str]:
         """Ask the Ghost to dial. -> (stream, why not).
 
         The caller gets a stream only when the Ghost reported the
@@ -138,7 +150,7 @@ class Tunnel:
         """
         if self._gone:
             return None, "the ghost's tunnel has ended"
-        s = Stream(id=self._take_id(), tunnel=self)
+        s = Stream(id=self._take_id(), tunnel=self, grant_id=grant_id)
         self._streams[s.id] = s
         try:
             await self.send(encode_open(s.id, host, port))
@@ -219,6 +231,25 @@ class Tunnel:
         for s in live.values():
             s._finish()
 
+    def drop_grant(self, grant_id: int) -> int:
+        """End the live streams one credential opened. -> how many.
+
+        The tunnel itself stays up and other credentials on the same
+        Ghost are untouched: revoking one operator's access is not a
+        reason to cut another's.
+
+        Local to this process. A deployment running several API
+        workers has a tunnel in exactly one of them -- the Ghost
+        holds one WebSocket -- so this reaches the connections that
+        exist, but it is not a distributed broadcast and does not
+        claim to be.
+        """
+        hit = [s for s in self._streams.values() if s.grant_id == grant_id]
+        for s in hit:
+            self._streams.pop(s.id, None)
+            s._finish()
+        return len(hit)
+
 
 class Hub:
     """Which Ghosts have a tunnel up, right now, in this process."""
@@ -256,6 +287,11 @@ class Hub:
 
     def get(self, agent_id: int) -> Tunnel | None:
         return self._tunnels.get(agent_id)
+
+    def drop_grant(self, agent_id: int, grant_id: int) -> int:
+        """Cut what one credential is holding. -> streams ended."""
+        t = self._tunnels.get(agent_id)
+        return t.drop_grant(grant_id) if t is not None else 0
 
     @property
     def agents(self) -> list[int]:

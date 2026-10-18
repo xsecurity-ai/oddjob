@@ -391,11 +391,36 @@ class _Attribution:
 
 
 def _parse_host(host: str):
-    """-> an ip_address object, or None if it is a name (or unusable)."""
+    """-> an ip_address object, or None if it is a name (or unusable).
+
+    An IPv4 address written as IPv6 comes back as the IPv4 address.
+    `::ffff:192.0.2.1` and `192.0.2.1` are one machine and one socket
+    -- Go's `net.Dial` opens the same TCP connection for both -- but
+    `ipaddress` gives the first `version == 6`, and the index buckets
+    entries by version. An out-of-scope list naming 192.0.2.1 did not
+    match the mapped form, so the barred host could be reached by
+    writing its address the other way, through the task gate and
+    through the internet-facing proxy alike. The audit row then
+    recorded the mapped spelling, so searching the log for the barred
+    address found nothing.
+
+    Unwrapped here rather than at the call sites because this is the
+    single funnel: everything that turns a host string into an address
+    comes through it, so one normalisation covers the lists, the
+    comparison and what gets written down.
+    """
     try:
-        return ipaddress.ip_address((host or "").strip().split("%", 1)[0])
+        a = ipaddress.ip_address((host or "").strip().split("%", 1)[0])
     except ValueError:
         return None
+    if a.version == 6:
+        # `ipv4_mapped` covers ::ffff:a.b.c.d; `sixtofour` and
+        # `teredo` are v6 addresses that carry a v4 one but are NOT
+        # the same socket, so they are deliberately left alone.
+        mapped = a.ipv4_mapped
+        if mapped is not None:
+            return mapped
+    return a
 
 
 class ScopeIndex:

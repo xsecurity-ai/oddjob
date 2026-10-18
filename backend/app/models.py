@@ -2265,7 +2265,15 @@ class ProxyConnection(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    project_id: Mapped[int] = mapped_column(
+    #: Nullable, and the NULL means something: a credential that
+    #: resolved to nothing has no engagement to be filed against.
+    #: This column was NOT NULL and `record` therefore returned
+    #: without writing, which made every failed credential attempt
+    #: against the internet-facing port invisible -- the one thing
+    #: this table exists to be able to answer. A row on the wrong
+    #: project would have been worse than no row; a row with no
+    #: project is the true one.
+    project_id: Mapped[int | None] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     agent_id: Mapped[int | None] = mapped_column(
         ForeignKey("agents.id", ondelete="SET NULL"), index=True)

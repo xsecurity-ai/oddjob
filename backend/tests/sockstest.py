@@ -758,5 +758,111 @@ else:
           "(it is a dependency of the app, so this should not happen)")
 
 
+print("\n== a refused credential leaves a row ==")
+# `record` used to return early when the decision had no project,
+# and a credential nobody can resolve has no project by definition.
+# So every failed attempt against the internet-facing TLS port left
+# nothing behind at all, while this module's own docstring said
+# refusals were the more interesting half. A sustained brute force
+# produced zero rows in the one table somebody would look in.
+import asyncio as _aio  # noqa: E402
+
+from sqlalchemy import select as _sel  # noqa: E402
+
+from app.db import SessionLocal as _Sess  # noqa: E402
+from app.models import ProxyConnection as _PC  # noqa: E402
+
+
+async def _attempt():
+    async with _Sess() as s:
+        d = await _pa.decide(s, "proxy-nosuchuser", "wrong-password",
+                             "198.51.100.9", 443)
+        await _pa.record(s, d, "198.51.100.9", 443)
+        await s.commit()
+        rows = (await s.execute(
+            _sel(_PC).where(_PC.outcome == "refused_auth",
+                            _PC.host == "198.51.100.9"))).scalars().all()
+        # The live listener earlier in this file refused a credential
+        # too, so this counts only its own. That those rows exist at
+        # all is the point: before this, the handler wrote none.
+        other = (await s.execute(
+            _sel(_PC).where(_PC.outcome == "refused_auth"))).scalars().all()
+        return d, rows, len(other)
+
+_d, _rows, _all = _aio.run(_attempt())
+check("an unresolvable credential is refused", not _d.allowed, _d)
+check("...with no project, because there is none to invent",
+      _d.project_id is None, _d)
+check("...and the attempt is written down anyway", len(_rows) == 1, len(_rows))
+# Not only through this helper: the listener's own refusals, earlier
+# in this file, are in the table too.
+check("...as are the refusals the live listener handled",
+      _all > len(_rows), _all)
+if _rows:
+    r = _rows[0]
+    check("...against no project rather than the wrong one",
+          r.project_id is None, r.project_id)
+    check("...naming the destination that was asked for",
+          r.host == "198.51.100.9" and r.port == 443, (r.host, r.port))
+    # Without the username, "somebody failed to authenticate" cannot
+    # be told from "a real issued credential is being hammered", and
+    # those call for different responses.
+    check("...and the username that was tried",
+          "proxy-nosuchuser" in (r.reason or ""), r.reason)
+    check("...but never the password",
+          "wrong-password" not in (r.reason or ""), r.reason)
+
+print("\n== revocation reaches a connection already open ==")
+# `decide` runs once per CONNECT, so a revocation timestamp alone
+# only stops the NEXT one. A credential revoked because it leaked
+# went on relaying over every tunnel it had already established --
+# and a CONNECT has no expiry of its own.
+# The streams are built directly rather than through `open`, which
+# waits for a dial result a fake ghost never sends. The bookkeeping
+# is what is under test, not the handshake.
+from app.proxyhub import Hub as _Hub, Stream as _Stream  # noqa: E402,I001
+
+_hub = _Hub()
+_t = _hub.register(77, lambda b: _aio.sleep(0))
+
+
+async def _cut():
+    s1 = _Stream(id=1, tunnel=_t, grant_id=11)
+    s2 = _Stream(id=2, tunnel=_t, grant_id=11)
+    s3 = _Stream(id=3, tunnel=_t, grant_id=22)
+    _t._streams.update({1: s1, 2: s2, 3: s3})
+    n = _hub.drop_grant(77, 11)
+    return n, s1, s2, s3
+
+_n, _s1, _s2, _s3 = _aio.run(_cut())
+check("both streams the revoked credential held are cut", _n == 2, _n)
+check("...and they know they are over", _s1.closed and _s2.closed)
+check("another credential on the same ghost is untouched",
+      not _s3.closed and _t.live == 1, _t.live)
+check("the tunnel itself stays up", not _t._gone)
+check("revoking a credential holding nothing cuts nothing",
+      _hub.drop_grant(77, 99) == 0)
+check("revoking against a ghost with no tunnel is not an error",
+      _hub.drop_grant(999, 11) == 0)
+
+# The route has to actually call it, or the above proves only that
+# the machinery exists.
+from app.routers import agents as _agr  # noqa: E402
+
+_rv = _inspect.getsource(_agr.revoke_grant)
+check("the revoke route cuts the live connections",
+      "drop_grant" in _rv, "revoke_grant never calls it")
+check("...and says how many in the audit line",
+      "cut " in _rv and "live connection" in _rv)
+
+# Both relay paths have to tag the stream, or there is nothing to cut.
+from app import proxyserver as _ps  # noqa: E402
+
+check("the SOCKS relay tags its stream with the credential",
+      "grant_id=d.grant_id" in _inspect.getsource(_ps))
+check("the CONNECT relay does too",
+      "grant_id=d.grant_id" in _inspect.getsource(_ph))
+
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

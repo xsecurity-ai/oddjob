@@ -30,8 +30,19 @@ class InvalidHost(ValueError):
 
 
 def normalise_host(raw: str) -> str:
-    """Lowercase, trim, drop a trailing root dot. Does not validate."""
-    return (raw or "").strip().rstrip(".").lower()
+    """Lowercase, trim, drop a trailing root dot. Does not validate.
+
+    A bracketed IPv6 literal loses its brackets. `[2001:db8::1]` and
+    `2001:db8::1` are one address, and keeping the brackets made the
+    first parse as no address at all -- so a scope check on it
+    consulted the NAME list and never the address list. The callers
+    that build a host out of a URL or a SOCKS frame strip them
+    already; this is the floor under the ones that do not.
+    """
+    h = (raw or "").strip().rstrip(".").lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    return h
 
 
 def validate_host(raw: str) -> str:

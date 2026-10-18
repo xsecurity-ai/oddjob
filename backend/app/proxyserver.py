@@ -182,7 +182,7 @@ async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
             log.info("proxy has no tunnel for agent %s", d.agent_id)
             return
 
-        stream, why = await tunnel.open(host, port)
+        stream, why = await tunnel.open(host, port, grant_id=d.grant_id)
         if stream is None:
             w.write(socks.reply(socks.HOST_UNREACHABLE))
             await w.drain()
