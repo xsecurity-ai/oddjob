@@ -1090,6 +1090,18 @@ class AssetWorker:
                 # The pages themselves, same scanners. Last in the
                 # cycle because the file sweep is the one with a
                 # fetch behind it and should not wait on this.
+                # Endpoints the scanners pulled out of bundles, as
+                # known addresses. Cheap -- no network, and it only
+                # writes rows the scope gate allows -- and it is the
+                # step that was missing: the table had been filling
+                # up since endpoint extraction landed and nothing
+                # read it.
+                ep = await record_endpoint_urls(session, pr.id)
+                if ep["added"] or ep["refused"]:
+                    did.append(
+                        f"{pr.code}: {ep['added']} endpoint(s) from code "
+                        f"became addresses, {ep['refused']} refused "
+                        f"(out of scope or not a target)")
                 if owed.get("unscanned_pages"):
                     sp = await scan_pages(session, pr.id, limit=WORKER_SCAN)
                     if sp.scanned:
@@ -1268,3 +1280,138 @@ def _library_body(name: str, version: str, cve: dict, url: str) -> str:
         f"Served from: {url}",
     ]
     return "\n".join(b for b in bits if b is not None)
+
+# ------------------------------------ endpoints found in code, as URLs
+#
+# `assetlinks.extract` has been pulling API paths out of bundles since
+# endpoint extraction landed, and `web_asset_endpoints` has been
+# filling up with them -- and nothing read the table. The paths were
+# recorded and never became part of the estate, so nothing probed
+# them, nothing scanned them, and they appeared in no inventory.
+#
+# This is the half that was missing. It is deliberately NOT a crawl
+# seed.
+#
+# **Why not a seed.** `webtargets.crawl_seeds` keeps a one-way edge --
+# gobuster feeds katana, a crawl never feeds itself -- because a crawl
+# that produces more crawling took one project from 1,109 queued tasks
+# to 97,959 in under an hour. These endpoints come OUT of files found
+# BY a crawl, so seeding crawls with them closes exactly that cycle:
+# crawl finds a bundle, bundle names a path, path is crawled, that
+# page has a bundle, and so on with no bound anybody can state in
+# advance.
+#
+# Recorded as web addresses instead. They become known surface --
+# visible in the Web view, probed by httpx, origin-scanned like
+# anything else -- without any step feeding its own input. The value
+# the loop was for is in knowing the endpoint exists; walking to it
+# from a crawler is not required to get that.
+#
+# **Scope-checked before creation, exactly as `_record_cloud` is.** A
+# bundle references a great deal that belongs to somebody else -- a
+# CDN, an analytics vendor, a payment provider -- and turning those
+# into addresses of this engagement would put a third party's
+# infrastructure in it.
+
+#: Longest path we will turn into an address. A "path" longer than
+#: this came out of a minified blob and is not a route.
+MAX_ENDPOINT_PATH = 512
+
+
+def endpoint_url(value: str, kind: str, page: str | None) -> str | None:
+    """One extracted endpoint as an absolute URL, or None.
+
+    A `path` is resolved against the page that loaded the bundle,
+    because a path alone says nothing about which host serves it. An
+    endpoint whose page is unknown is dropped rather than guessed at.
+    """
+    v = (value or "").strip()
+    if not v or len(v) > MAX_ENDPOINT_PATH:
+        return None
+    if kind == "url":
+        u = urlparse(v)
+        return v if u.scheme in ("http", "https") and u.netloc else None
+    if not v.startswith("/"):
+        # Relative to the bundle rather than to the site root, which
+        # we cannot resolve without knowing where the bundle lived.
+        # Dropped: a wrong URL is worse than a missing one.
+        return None
+    if not page:
+        return None
+    p = urlparse(page)
+    if p.scheme not in ("http", "https") or not p.netloc:
+        return None
+    return f"{p.scheme}://{p.netloc}{v}"
+
+
+async def record_endpoint_urls(session: AsyncSession, project_id: int,
+                               limit: int = 2000) -> dict[str, int]:
+    """Turn extracted endpoints into web addresses. -> counts.
+
+    Idempotent on the address's own uniqueness key, so running it
+    every cycle adds each endpoint once however often it is seen.
+    """
+    from .models import WebAddress, WebAssetEndpoint
+    from .weburl import BadUrl, exchange_key, merge_sources, parse, url_key
+
+    idx = await index_for(session, project_id)
+    rows = (await session.execute(
+        select(WebAssetEndpoint.kind, WebAssetEndpoint.value,
+               WebAsset.first_page)
+        .join(WebAsset, WebAsset.id == WebAssetEndpoint.asset_id)
+        .where(WebAssetEndpoint.project_id == project_id)
+        .limit(limit))).all()
+
+    out = {"considered": len(rows), "added": 0, "refused": 0,
+           "unresolvable": 0}
+    seen: set[str] = set()
+    for kind, value, page in rows:
+        url = endpoint_url(value, kind, page)
+        if not url:
+            out["unresolvable"] += 1
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        host = as_host(url)
+        if not host or not idx.check(host).allowed:
+            # The common case, and the feature: most of what a bundle
+            # names belongs to somebody else.
+            out["refused"] += 1
+            continue
+        tgt = (await session.execute(
+            select(Target).where(Target.project_id == project_id,
+                                 Target.host == host))).scalar_one_or_none()
+        if tgt is None:
+            # In scope but not a target yet. Not created here: making
+            # targets is `enumerate`'s job and it asks a person. An
+            # endpoint is not grounds for inventing a host.
+            out["refused"] += 1
+            continue
+        try:
+            u = parse(url, base_host=host)
+        except BadUrl:
+            out["unresolvable"] += 1
+            continue
+        xk = exchange_key("", u.url, None, None)
+        dup = (await session.execute(
+            select(WebAddress).where(
+                WebAddress.target_id == tgt.id,
+                WebAddress.exchange_hash == xk))).scalar_one_or_none()
+        if dup is not None:
+            # Already known from a crawl or a scan. Recorded as also
+            # being named in code, which is worth knowing: a path a
+            # bundle calls is a live route, not a leftover.
+            dup.sources = merge_sources(dup.sources, "assets")
+            continue
+        # `sources` says where it came from and deliberately is NOT
+        # "gobuster": `crawl_seeds` keys on that string to keep its
+        # one-way edge, and a row from here must never become a crawl
+        # seed. See the note at the top of this section.
+        session.add(WebAddress(
+            target_id=tgt.id, url=u.url, url_hash=url_key(u.url),
+            exchange_hash=xk, scheme=u.scheme, port=u.port, path=u.path,
+            method="", sources="assets"))
+        out["added"] += 1
+    await session.commit()
+    return out
