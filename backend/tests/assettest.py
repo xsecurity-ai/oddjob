@@ -1677,6 +1677,108 @@ _quiet = _aw._library_body("jQuery", "3.6.0",
 check("a CVE with no KEV or EPSS data says neither",
       "Known Exploited" not in _quiet and "EPSS" not in _quiet, _quiet[:60])
 
+print("\n== endpoints found in code become known addresses ==")
+# `assetlinks.extract` has pulled API paths out of bundles since
+# endpoint extraction landed, and NOTHING read the table. The paths
+# were recorded and never became part of the estate.
+
+# --- resolving one endpoint to an absolute URL
+check("a path resolves against the page that loaded the bundle",
+      _aw.endpoint_url("/api/v2/users", "path", "https://acme.example/app")
+      == "https://acme.example/api/v2/users")
+check("an absolute url is taken as it is",
+      _aw.endpoint_url("https://api.acme.example/x", "url", None)
+      == "https://api.acme.example/x")
+# A wrong URL is worse than a missing one: relative-to-the-bundle
+# cannot be resolved without knowing where the bundle lived.
+check("a bundle-relative path is dropped, not guessed at",
+      _aw.endpoint_url("api/v2", "path", "https://acme.example/app") is None)
+check("a path with no page is dropped",
+      _aw.endpoint_url("/x", "path", None) is None)
+# These are the shapes that would turn an extracted string into a
+# request somewhere nobody authorised.
+check("a javascript: url is not an endpoint",
+      _aw.endpoint_url("javascript:alert(1)", "url", "https://acme.example/")
+      is None)
+check("a protocol-relative url is not followed to another host",
+      _aw.endpoint_url("//evil.example/x", "url", "https://acme.example/")
+      is None)
+check("a data: url is not an endpoint",
+      _aw.endpoint_url("data:text/html,x", "url", "https://acme.example/")
+      is None)
+check("an over-long blob from a minified file is not a route",
+      _aw.endpoint_url("/" + "a" * 600, "path", "https://acme.example/")
+      is None)
+
+# --- the invariant that matters
+# `crawl_seeds` keeps a one-way edge -- gobuster feeds katana, a
+# crawl never feeds itself -- because a crawl producing more
+# crawling took one project from 1,109 queued tasks to 97,959 in an
+# hour. These endpoints come OUT of files found BY a crawl, so a row
+# written here must never be readable as a crawl seed.
+
+# --- scope, which is the other half
+async def _endpoints_in_scope():
+    async with SessionLocal() as s:
+        t = (await s.execute(select(Target).where(
+            Target.project_id == pid))).scalars().first()
+        a = (await s.execute(select(WebAsset).where(
+            WebAsset.project_id == pid))).scalars().first()
+        if a is None or t is None:
+            return None
+        a.first_page = f"https://{t.host}/app"
+        for kind, value in (("path", "/api/v2/users"),
+                            ("url", "https://cdn.vendor.example/lib.js"),
+                            ("url", "https://analytics.vendor.example/t")):
+            s.add(WebAssetEndpoint(project_id=pid, asset_id=a.id,
+                                   kind=kind, value=value))
+        await s.commit()
+        return await _aw.record_endpoint_urls(s, pid)
+
+from app.models import WebAssetEndpoint  # noqa: E402
+
+_res = asyncio.run(_endpoints_in_scope())
+if _res is not None:
+    check("a path on an in-scope target becomes an address",
+          _res["added"] >= 1, _res)
+    # The common case, and the feature: most of what a bundle names
+    # belongs to somebody else.
+    check("...while a vendor's CDN and analytics host are refused",
+          _res["refused"] >= 2, _res)
+    check("the counts are reported rather than inferred",
+          set(_res) == {"considered", "added", "refused", "unresolvable"},
+          sorted(_res))
+
+    async def _again2():
+        async with SessionLocal() as s:
+            return await _aw.record_endpoint_urls(s, pid)
+
+    check("running it twice adds nothing the second time",
+          asyncio.run(_again2())["added"] == 0)
+
+    # The invariant, checked against the ROWS and against
+    # `crawl_seeds` itself rather than against the source text. A
+    # crawl that produces more crawling took one project from 1,109
+    # queued tasks to 97,959 in an hour, and these endpoints come OUT
+    # of files found BY a crawl -- so a row written here must not be
+    # readable as a seed.
+    async def _seed_check():
+        async with SessionLocal() as s:
+            rows = (await s.execute(select(WebAddress).where(
+                WebAddress.sources == "assets"))).scalars().all()
+            from app.webtargets import crawl_seeds
+            seeds = await crawl_seeds(s, pid)
+            return ([r.url for r in rows],
+                    {u for urls in seeds.values() for u in urls})
+
+    _made, _seeded = asyncio.run(_seed_check())
+    check("the row says where it came from", bool(_made), _made[:2])
+    check("...and NO row from code is handed to a crawler",
+          not (set(_made) & _seeded),
+          sorted(set(_made) & _seeded)[:3])
+else:
+    check("skipped: no asset seeded to hang endpoints off", True)
+
 
 srv.shutdown()
 print(f"\n{passed} passed, {failed} failed")
