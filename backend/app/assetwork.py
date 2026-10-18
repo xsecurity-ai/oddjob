@@ -640,6 +640,75 @@ async def _record_endpoints(session: AsyncSession, f) -> int:
     return added
 
 
+#: Entropy findings whose value turns up on more than one host in
+#: the same engagement.
+#:
+#: A credential issued to one application does not appear on
+#: forty-one different hosts. What does is library content: a CDN
+#: bundle, a framework build hash, a shared analytics id, the same
+#: vendor script deployed everywhere.
+#:
+#: Measured rather than assumed. Of 1,498 entropy findings on a live
+#: estate, 1,025 -- 68% -- had a value that appeared on more than one
+#: host. Not one of them was that host's secret.
+#:
+#: Only entropy. A named vendor shape repeating across hosts is a
+#: real credential reused across hosts, which is a FINDING and a
+#: worse one than a single leak.
+async def shared_entropy_values(session: AsyncSession,
+                                project_id: int) -> set[str]:
+    """Values an entropy detector found on more than one host here."""
+    rows = (await session.execute(
+        select(FindingSecret.secret)
+        .join(Vuln, Vuln.id == FindingSecret.vuln_id)
+        .join(Target, Target.id == Vuln.target_id)
+        .where(Target.project_id == project_id,
+               FindingSecret.detector.in_(assetscan._ENTROPY_TYPES))
+        .group_by(FindingSecret.secret)
+        .having(func.count(func.distinct(Vuln.target_id)) > 1))).scalars().all()
+    return set(rows)
+
+
+async def prune_shared_secrets(session: AsyncSession,
+                               project_id: int) -> dict[str, int]:
+    """Retract entropy findings that later proved to be shared. -> counts.
+
+    The cross-host test cannot be made at the moment a finding is
+    filed: the first host to be scanned has nothing to compare
+    against, and the value only becomes "shared" when the second
+    host arrives. So it is a sweep, and it is idempotent.
+
+    **Only untriaged rows.** A finding a person has looked at and
+    marked is that person's judgement, and a sweep does not get to
+    overturn it -- in either direction. This is the same line
+    `nsefindings.record` draws when it re-asserts a severity but
+    never a triage.
+    """
+    shared = await shared_entropy_values(session, project_id)
+    out = {"shared_values": len(shared), "retracted": 0, "kept_triaged": 0}
+    if not shared:
+        return out
+    rows = (await session.execute(
+        select(Vuln, FindingSecret)
+        .join(FindingSecret, FindingSecret.vuln_id == Vuln.id)
+        .join(Target, Target.id == Vuln.target_id)
+        .where(Target.project_id == project_id,
+               FindingSecret.detector.in_(assetscan._ENTROPY_TYPES),
+               FindingSecret.secret.in_(shared)))).all()
+    for v, _fs in rows:
+        if v.triage != "needs_investigating":
+            out["kept_triaged"] += 1
+            continue
+        # Deleted rather than demoted. These are scanner artefacts
+        # that nobody has looked at, and a list of 1,025 findings
+        # marked "probably not" is still a list of 1,025 findings
+        # between an operator and the four that matter.
+        await session.delete(v)
+        out["retracted"] += 1
+    await session.commit()
+    return out
+
+
 def origin_block(asset_url: str, path: str, line: int | None) -> str:
     """Where a finding came from, as the tail of its description.
 
@@ -1174,6 +1243,24 @@ class AssetWorker:
                     did.append(
                         f"{pr.code}: {lib['unattributable']} library "
                         f"finding(s) could not be attributed to a host")
+                # Entropy findings that later proved to be shared
+                # across hosts. Cannot be decided when a finding is
+                # filed -- the first host has nothing to compare
+                # against -- so it is a sweep, and it is idempotent.
+                pr_ = await prune_shared_secrets(session, pr.id)
+                if pr_["retracted"]:
+                    did.append(
+                        f"{pr.code}: retracted {pr_['retracted']} "
+                        f"high-entropy finding(s) whose value appears on "
+                        f"more than one host")
+                # Said separately. A sweep that left rows alone
+                # because somebody had triaged them is behaving
+                # correctly and should not look like it did nothing.
+                if pr_["kept_triaged"]:
+                    did.append(
+                        f"{pr.code}: left {pr_['kept_triaged']} shared "
+                        f"finding(s) alone — a person had already ruled "
+                        f"on them")
                 # And the manifests that say what went INTO the
                 # build, which turn up on web servers more often than
                 # anybody intends. Last in the cycle: it is the

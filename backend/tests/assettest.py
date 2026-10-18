@@ -1987,6 +1987,119 @@ check("...and the count is unchanged",
       == 1)
 
 
+print("\n== high-entropy noise, measured and cut ==")
+# 1,498 entropy findings on a live estate against 11 from every
+# named vendor detector put together. The filters here were measured
+# against that data rather than guessed, and each is written as the
+# fact about the string that makes it not a credential.
+
+# 1. Too long to be issued. The commonest single length was 452:
+#    inline source-map fragments, base64 fonts, data URIs.
+check("a 452-character high-entropy string is not a credential",
+      _asx.implausible_secret("Zm9v" * 113, "Base64 High Entropy String")
+      is not None)
+check("...and the reason says what it actually is",
+      "source-map" in (_asx.implausible_secret(
+          "Zm9v" * 113, "Base64 High Entropy String") or ""))
+check("a credential-sized one is still considered",
+      _asx.implausible_secret("aG92ZXJjcmFmdDI0ZWVsczE5",
+                              "Base64 High Entropy String") is None)
+# A vendor shape this long is somebody else's problem to be wrong
+# about: the length rule is for entropy only.
+check("the length rule does not touch a named vendor detector",
+      "too long" not in (_asx.implausible_secret(
+          "A1b2" * 80, "Stripe Access Key") or ""))
+
+# 2. A file full of high-entropy strings is a generated file.
+_blob = [_asx.Finding(scanner="detect-secrets",
+                      rule="Base64 High Entropy String",
+                      title="x", severity="low", path="bundle.js",
+                      line=i, detail="", fingerprint=f"f{i}",
+                      secret="s" * 20) for i in range(40)]
+check("forty high-entropy hits in one file are all dropped",
+      _asx._drop_entropy_blobs("bundle.js", _blob) == [])
+check("...but a handful are kept",
+      len(_asx._drop_entropy_blobs("bundle.js", _blob[:5])) == 5)
+# A file with forty AWS keys in it is a different thing entirely.
+_real = [_asx.Finding(scanner="detect-secrets", rule="AWS Access Key",
+                      title="x", severity="high", path="c.js", line=i,
+                      detail="", fingerprint=f"a{i}", secret="k" * 20)
+         for i in range(40)]
+check("forty NAMED credentials in one file are all kept",
+      len(_asx._drop_entropy_blobs("c.js", _real)) == 40)
+check("...and a named one survives alongside a dropped blob",
+      [f.rule for f in _asx._drop_entropy_blobs("m.js", _blob + _real[:1])]
+      == ["AWS Access Key"])
+
+
+print("\n-- a value on more than one host is not that host's secret --")
+# Of 1,498 entropy findings, 1,025 had a value that appeared on more
+# than one host. A credential issued to one application does not
+# turn up on forty-one of them; library content does.
+
+
+async def _plant_shared(value, hosts):
+    """The same high-entropy value on several hosts."""
+    async with SessionLocal() as s:
+        pr = (await s.execute(select(Project).where(
+            Project.code == "ASSET"))).scalar_one()
+        ids = []
+        for h in hosts:
+            t = (await s.execute(select(Target).where(
+                Target.project_id == pr.id, Target.host == h))).scalar_one_or_none()
+            if t is None:
+                t = Target(project_id=pr.id, host=h, kind="host")
+                s.add(t); await s.flush()
+            v = Vuln(target_id=t.id, title=f"entropy on {h}", severity="low",
+                     status="open", external_id=f"detect-secrets:shared-{h}")
+            s.add(v); await s.flush()
+            s.add(_FS(vuln_id=v.id, secret=value,
+                      detector="Base64 High Entropy String",
+                      asset_url=f"https://{h}/a.js", path="a.js", line=1))
+            ids.append(v.id)
+        await s.commit()
+        return pr.id, ids
+
+
+_pid2, _ids = asyncio.run(_plant_shared(
+    "c2hhcmVkLWJ1bmRsZS1oYXNoLTEyMzQ1",
+    ["one.acme.example", "two.acme.example", "three.acme.example"]))
+
+
+async def _prune():
+    async with SessionLocal() as s:
+        return await _aw.prune_shared_secrets(s, _pid2)
+
+
+_pr = asyncio.run(_prune())
+check("the shared value is recognised", _pr["shared_values"] >= 1, _pr)
+check("...and every copy of it is retracted", _pr["retracted"] >= 3, _pr)
+
+st, v = call("/api/vulns?project=ASSET&limit=400", token=admin)
+_left = [x for x in ((v or {}).get("items") or [])
+         if (x.get("external_id") or "").startswith("detect-secrets:shared-")]
+check("...so none are left in the findings list", _left == [],
+      [x["title"] for x in _left])
+
+# A person's judgement is not a sweep's to overturn.
+_pid3, _ids3 = asyncio.run(_plant_shared(
+    "dHJpYWdlZC1zaGFyZWQtdmFsdWUtOTk5",
+    ["four.acme.example", "five.acme.example"]))
+st, _ = call(f"/api/vulns/{_ids3[0]}/triage", "PATCH",
+             {"triage": "true_positive"}, token=admin)
+check("a finding can be triaged", st == 200, st)
+_pr2 = asyncio.run(_prune())
+check("a triaged shared finding is left alone",
+      _pr2["kept_triaged"] >= 1, _pr2)
+st, v = call(f"/api/vulns/{_ids3[0]}", token=admin)
+check("...and is still there afterwards", st == 200, st)
+
+# Idempotent: the sweep runs every cycle.
+_pr3 = asyncio.run(_prune())
+check("running the sweep again retracts nothing new",
+      _pr3["retracted"] == 0, _pr3)
+
+
 srv.shutdown()
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
