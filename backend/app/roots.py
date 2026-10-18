@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import clouds
 from . import domains as gen
+from .hosts import dns_subject
 from .models import ProjectScope, Target, WebAddress
 
 #: Hostnames embedded in free text — certificate SANs, mostly.
@@ -51,13 +52,20 @@ async def known_hosts(session: AsyncSession, project_id: int) -> list[str]:
     hosts of web addresses, are exactly the material that makes a
     suggestion good — and they are the names most often absent from the
     inventory, because nobody got round to adding them.
+
+    A target whose kind says its identifier is not a DNS name
+    contributes everything EXCEPT that identifier. See `dns_subject`:
+    an ARN or a bundle id is not a hostname, and `registrable()` on
+    one invents a zone that belongs to somebody else. The alternate
+    names and SANs recorded against the same row were observed by
+    asking DNS, so they are real names and stay.
     """
     out: set[str] = set()
     rows = (await session.execute(
-        select(Target.host, Target.hostnames, Target.extra)
+        select(Target.host, Target.hostnames, Target.extra, Target.kind)
         .where(Target.project_id == project_id))).all()
-    for host, names_json, extra_json in rows:
-        if host:
+    for host, names_json, extra_json, kind in rows:
+        if host and dns_subject(kind):
             out.add(host.lower())
         for blob, key in ((names_json, None), (extra_json, "hostscripts")):
             if not blob:

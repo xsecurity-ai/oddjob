@@ -796,6 +796,43 @@ check("the refusal is still on the queue afterwards, with its reason",
 check("classified as blocked — there is nothing to pick",
       (p or {}).get("decision") == "blocked", str(p)[:280])
 
+print("-- a cloud resource is not a forward-lookup subject --")
+# A cloud target is named by whatever the provider uses — an ARN, a
+# bucket name, a resource path. That is an identifier, not a hostname,
+# so an address against one is not an answer about that asset and the
+# absence of one is not a gap in our coverage. The queueing paths no
+# longer offer cloud targets as subjects at all; this asserts the
+# apply side independently, because a result can arrive from a task
+# queued by hand before that was true.
+#
+# `backups.acme.example` as a CLOUD row is the case that needs the
+# kind column: the string itself is a perfectly good hostname.
+#
+# One of its answers is the barred address from the block above, so
+# the row would be REPORTED as blocked rather than silently applied —
+# that is what makes the queue assertion below bite. Both outcomes of
+# the old code are therefore covered: what gets written, and what the
+# operator is asked about.
+call("/api/targets?project=AUTO", "POST",
+     {"host": "backups.acme.example", "kind": "cloud", "provider": "aws"},
+     token=admin)
+call("/api/targets?project=AUTO", "POST",
+     {"host": "beside.acme.example"}, token=admin)
+afinish("nslookup", {"targets": ["backups.acme.example",
+                                 "beside.acme.example"]},
+        [{"query": "backups.acme.example",
+          "a": ["198.51.100.61", "203.0.113.200"]},
+         {"query": "beside.acme.example", "a": ["198.51.100.62"]}])
+check("the cloud target is not offered as a pending lookup",
+      apending("backups.acme.example") is None,
+      str(apending("backups.acme.example"))[:200])
+check("...and nothing was written to it",
+      atargets()["backups.acme.example"]["ip_addresses"] == [],
+      str(atargets()["backups.acme.example"]["ip_addresses"]))
+check("...while the host target in the same answer is resolved",
+      atargets()["beside.acme.example"]["ip_addresses"] == ["198.51.100.62"],
+      str(atargets()["beside.acme.example"]["ip_addresses"]))
+
 print("-- reverse lookup, ONE name: rename, no choice --")
 call("/api/targets?project=AUTO", "POST", {"host": "198.51.100.30"}, token=admin)
 afinish("reverse_ip", {"targets": ["198.51.100.30"]},
