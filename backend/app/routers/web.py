@@ -900,6 +900,12 @@ class SweepOut(BaseModel):
     #: a dozen were found and all belong to somebody else.
     cloud: int = 0
     cloud_refused: int = 0
+    #: Assets a bot filter refused rather than the origin, and which
+    #: products did it. Inside `failed` too -- the fetch did fail --
+    #: but a gap of a different kind, and one that reads as "the
+    #: client's servers refuse us" until it is named.
+    blocked: int = 0
+    blocked_by: dict[str, int] = {}
     notes: list[str] = []
     unfetched: int = 0
     unscanned: int = 0
