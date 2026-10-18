@@ -1097,6 +1097,22 @@ class AssetWorker:
                                    f"{sp.findings} finding(s)")
                     for n in sp.notes:
                         did.append(f"{pr.code}: {n}")
+                # The libraries those pages ship, against the CVE
+                # corpus. A version read out of a file the client
+                # serves is better evidence than a banner, and until
+                # now nothing was asking about it. Cheap: one query
+                # per distinct (name, version), and a project has
+                # tens of those because the same four libraries are
+                # on every page.
+                lib = await library_leads(session, pr.id)
+                if lib["findings"]:
+                    did.append(
+                        f"{pr.code}: {lib['findings']} finding(s) from "
+                        f"{lib['with_cves']} vulnerable librar(ies)")
+                if lib["unattributable"]:
+                    did.append(
+                        f"{pr.code}: {lib['unattributable']} library "
+                        f"finding(s) could not be attributed to a host")
             self.last = "; ".join(did) if did else "nothing outstanding"
 
     async def _loop(self) -> None:
@@ -1123,3 +1139,132 @@ class AssetWorker:
 
 
 worker = AssetWorker()
+
+
+# ------------------------------- the libraries a page ships, and their CVEs
+#
+# `web_assets` has carried `name` and `version` since library
+# detection landed -- jQuery 3.6.0, Bootstrap 5.3.2 -- and nothing
+# ever asked the CVE corpus about them. `leads_for_service` was only
+# ever called for PORTS.
+#
+# That is a gap with a client-visible cost. A service banner is a
+# guess about software we cannot see; a library version is read out
+# of a file the client's own page serves to every visitor, which
+# makes it better evidence than most of what a scan produces. An
+# estate running jQuery 1.12 on four hundred pages is a real finding
+# and nothing here could say so.
+#
+# **These are leads, and the finding says so.** The same caveat
+# `leads_for_service` carries applies harder here: a backported fix
+# leaves the version string alone, a bundler can mangle it, and the
+# library may not be reachable in a way that matters. The row is
+# `unconfirmed`, which is this database's word for exactly that.
+
+#: How many libraries to look up in one pass. Each distinct
+#: (name, version) is one query; a project has tens of them, not
+#: thousands, because the same four libraries are on every page.
+LIBRARY_BATCH = 200
+
+
+def library_external_id(name: str, version: str, cve: str) -> str:
+    """The upsert key. Stable, so a re-run amends rather than forks."""
+    return f"library:{name.lower()}:{version.lower()}:{cve}"[:128]
+
+
+async def library_leads(session: AsyncSession, project_id: int,
+                        limit: int = LIBRARY_BATCH) -> dict[str, int]:
+    """Raise a finding per (library version, CVE). -> counts."""
+    from .models import Vuln
+    from .vulnfeed import leads_for_service, triage_order
+
+    rows = (await session.execute(
+        select(WebAsset.name, WebAsset.version)
+        .where(WebAsset.project_id == project_id,
+               WebAsset.name.is_not(None),
+               WebAsset.version.is_not(None))
+        .distinct().limit(limit))).all()
+
+    out = {"libraries": len(rows), "with_cves": 0, "findings": 0,
+           "unattributable": 0}
+    for name, version in rows:
+        leads = await leads_for_service(session, name, version, limit=25)
+        # Exact CPE version matches only. "Product only" means the CPE
+        # covers every release of the library, which says nothing
+        # about the one this page ships and would file a finding
+        # against every site using jQuery at all.
+        cves = [c for c in (leads.get("cves") or [])
+                if str(c.get("version_match", "")).startswith("exact")]
+        if not cves:
+            continue
+        out["with_cves"] += 1
+        # Worst first, now that "is it being exploited" is knowable.
+        for c in triage_order(cves):
+            # Every asset carrying this exact library, so the finding
+            # lands on each host that serves it rather than on one
+            # arbitrary page.
+            assets = (await session.execute(
+                select(WebAsset).where(
+                    WebAsset.project_id == project_id,
+                    WebAsset.name == name,
+                    WebAsset.version == version))).scalars().all()
+            for a in assets:
+                tid = await _target_for(session, a)
+                if tid is None:
+                    out["unattributable"] += 1
+                    continue
+                eid = library_external_id(name, version, c["cve"])
+                dup = (await session.execute(
+                    select(Vuln).where(Vuln.target_id == tid,
+                                       Vuln.external_id == eid))
+                ).scalar_one_or_none()
+                body = _library_body(name, version, c, a.url)
+                if dup is not None:
+                    dup.description = body[:8000]
+                    continue
+                session.add(Vuln(
+                    target_id=tid,
+                    title=f"{name} {version} — {c['cve']}"[:1000],
+                    severity=_severity_floor(c.get("severity") or "info"),
+                    # `unconfirmed`, deliberately: a backported fix
+                    # leaves the version string alone, and nothing
+                    # here has tested the library is reachable in a
+                    # way that matters.
+                    status="open", external_id=eid, description=body[:8000]))
+                out["findings"] += 1
+    await session.commit()
+    return out
+
+
+def _library_body(name: str, version: str, cve: dict, url: str) -> str:
+    """What the finding says, in the words the evidence supports."""
+    bits = [f"{name} {version} is served by this host, and {cve['cve']} "
+            f"names that exact version.",
+            "",
+            (cve.get("summary") or "").strip()[:600],
+            ""]
+    # The two facts that change what somebody does about it this
+    # morning, when they are known. See vulnfeed.triage_order.
+    if cve.get("kev"):
+        bits.append("On CISA's Known Exploited Vulnerabilities list: this "
+                    "has been observed being used against somebody"
+                    + (f", added {cve['kev_added']}" if cve.get("kev_added")
+                       else "") + ".")
+    if cve.get("epss") is not None:
+        bits.append(f"EPSS {cve['epss']:.4f}"
+                    + (f" ({cve['epss_percentile']:.0%} of all CVEs score "
+                       f"lower)" if cve.get("epss_percentile") is not None
+                       else "")
+                    + " — the probability it is exploited in the next 30 "
+                      "days.")
+    bits += [
+        "",
+        "This is a LEAD, not a confirmed vulnerability. The version was "
+        "read from the file the page serves, which is better evidence "
+        "than a banner — but a backported fix leaves the version string "
+        "alone, a bundler can mangle it, and nothing here has tested "
+        "that the vulnerable code path is reachable.",
+        "",
+        f"Served from: {url}",
+    ]
+    return "\n".join(b for b in bits if b is not None)

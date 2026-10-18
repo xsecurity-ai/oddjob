@@ -1633,6 +1633,51 @@ check("a named-shape secret still fires",
       [f.rule for f in _named])
 
 
+print("\n== the libraries a page ships, against the CVE corpus ==")
+# `web_assets` has carried `name` and `version` since library
+# detection landed, and nothing ever asked the CVE corpus about
+# them -- `leads_for_service` was only ever called for PORTS. A
+# version read out of a file the client's own page serves is better
+# evidence than a service banner, which is a guess about software
+# nobody can see.
+
+check("the upsert key is stable, so a re-run amends",
+      _aw.library_external_id("jQuery", "3.6.0", "CVE-2020-11022")
+      == _aw.library_external_id("jquery", "3.6.0", "CVE-2020-11022"))
+check("...and distinguishes versions of the same library",
+      _aw.library_external_id("jQuery", "3.6.0", "CVE-1")
+      != _aw.library_external_id("jQuery", "1.12.4", "CVE-1"))
+
+_body = _aw._library_body(
+    "jQuery", "3.6.0",
+    {"cve": "CVE-2020-11022", "summary": "XSS in jQuery.",
+     "kev": True, "kev_added": "2022-05-03",
+     "epss": 0.0423, "epss_percentile": 0.91},
+    "https://acme.example/js/jquery.min.js")
+check("the finding names the library, the version and the CVE",
+      all(x in _body for x in ("jQuery 3.6.0", "CVE-2020-11022")), _body[:70])
+check("...and says where it is served from",
+      "https://acme.example/js/jquery.min.js" in _body)
+# The two facts that change what somebody does about it this
+# morning, now that both are knowable.
+check("...and that CISA has seen it used", "Known Exploited" in _body)
+check("...and how likely it is to be used next", "EPSS 0.0423" in _body)
+
+# The caveat is not decoration. A backported fix leaves the version
+# string alone, which is the single most common way a version-based
+# finding is wrong.
+check("it says plainly that this is a lead, not a confirmed finding",
+      "LEAD, not a confirmed vulnerability" in _body, _body[-220:])
+check("...and names the reason it might be wrong",
+      "backported fix" in _body)
+
+_quiet = _aw._library_body("jQuery", "3.6.0",
+                           {"cve": "CVE-1", "summary": "x"},
+                           "https://acme.example/a.js")
+check("a CVE with no KEV or EPSS data says neither",
+      "Known Exploited" not in _quiet and "EPSS" not in _quiet, _quiet[:60])
+
+
 srv.shutdown()
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
