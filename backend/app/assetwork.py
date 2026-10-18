@@ -665,6 +665,178 @@ async def _file_vuln(session: AsyncSession, target_id: int,
     return True
 
 
+# ------------------------------------------------------------- pages
+#
+# The same two scanners, over the pages themselves.
+#
+# `scan_project` above reads the files a page PULLS IN -- bundles,
+# source maps, the originals recovered from them. It never read the
+# page. That is a gap with nothing behind it: an API key inlined in
+# a <script> block, a comment holding a staging credential and a
+# JSON response carrying a token are the same finding as the same
+# string in a bundle, and the bundle is the one we were reading.
+#
+# **2xx only**, which is the operator's rule and also the right one:
+# a 404 body is the server's error template, identical across a
+# thousand URLs, and scanning it files the same finding a thousand
+# times. A 401 or a 403 is a page we were not shown.
+#
+# **The body, not the headers.** A captured exchange's header block
+# is full of session cookies and bearer tokens -- the client's own,
+# set by their own application, present on every authenticated
+# response. detect-secrets over those would report a credential on
+# every page in the estate and bury the one that is actually
+# inlined in the markup. What is worth finding here is what the
+# application SHIPS, so that is what is read.
+#
+# No scope gate and no fetching: every row here was already
+# retrieved, by a ghost, against a target that cleared the gate at
+# the time. This reads what is on record.
+
+#: Content types we will read, mapped to the extension that picks a
+#: ruleset. Anything else -- an image, a font, a PDF -- is bytes
+#: that opengrep has no rules for and detect-secrets would only
+#: find entropy in.
+_PAGE_TYPES = {
+    "text/html": ".html",
+    "application/xhtml+xml": ".html",
+    "text/javascript": ".js",
+    "application/javascript": ".js",
+    "application/x-javascript": ".js",
+    "application/json": ".json",
+    "text/json": ".json",
+    "application/xml": ".xml",
+    "text/xml": ".xml",
+    "text/plain": ".txt",
+    "text/css": ".css",
+}
+
+#: The longest body we will hand a scanner. The same cap the file
+#: sweep works under in practice, and a captured response can run to
+#: two megabytes of minified bundle that is already being read as an
+#: asset in its own right.
+PAGE_BODY_CAP = 400_000
+
+
+def page_ext(url: str, content_type: str | None) -> str | None:
+    """Which ruleset this response should be read against, or None.
+
+    The URL's own extension first, because `/app.js` is JavaScript
+    whatever a misconfigured server says the type is. The declared
+    content type second. Neither matching means we do not know what
+    this is, and guessing `.txt` at an unknown type is how a font
+    file ends up in front of a secret scanner.
+    """
+    ext = os.path.splitext(urlparse(url or "").path)[1].lower()
+    if ext in (".html", ".htm", ".js", ".mjs", ".json", ".xml", ".txt",
+               ".css", ".jsx", ".ts"):
+        return ".html" if ext == ".htm" else ext
+    ct = (content_type or "").split(";")[0].strip().lower()
+    if ct in _PAGE_TYPES:
+        return _PAGE_TYPES[ct]
+    # No extension and no type at all is the common shape for a
+    # route like `/api/session`, and those are worth reading.
+    if not ext and not ct:
+        return ".txt"
+    return None
+
+
+def response_body(raw: str) -> str:
+    """The body of a captured exchange, without the header block.
+
+    A capture may be a raw HTTP response -- status line, headers,
+    blank line, body -- or it may be the body alone, depending on
+    which importer wrote it. Detected rather than configured,
+    because both shapes are in the table already.
+
+    Returns the whole string when there is no header block to strip:
+    a body that happens to contain a blank line must not be cut at
+    it.
+    """
+    if not raw:
+        return ""
+    if not raw[:9].upper().startswith(("HTTP/1", "HTTP/2", "HTTP/3")):
+        return raw
+    for sep in ("\r\n\r\n", "\n\n"):
+        i = raw.find(sep)
+        if i != -1:
+            return raw[i + len(sep):]
+    # Headers and nothing else. Not an error -- a 204 looks like
+    # this -- and there is simply no body to read.
+    return ""
+
+
+async def scan_pages(session: AsyncSession, project_id: int, *,
+                     limit: int = SCAN_BATCH) -> Swept:
+    """Run the scanners over 2xx response bodies nothing has read."""
+    out = Swept()
+    have = assetscan.available()
+    if not any(have.values()):
+        # Same rule as the file sweep: a sweep with no scanner has
+        # not shown these pages are clean, it has shown nothing.
+        out.notes.append(
+            "no scanner is installed, so no page was examined: "
+            f"{have}. This is not a clean result.")
+        return out
+
+    from .models import WebAddress
+
+    rows = (await session.execute(
+        select(WebAddress)
+        .join(Target, Target.id == WebAddress.target_id)
+        .where(Target.project_id == project_id,
+               WebAddress.scanned_at.is_(None),
+               WebAddress.status_code >= 200,
+               WebAddress.status_code < 300,
+               WebAddress.response.is_not(None))
+        .order_by(WebAddress.id).limit(limit))).scalars().all()
+    if not rows:
+        return out
+
+    items: list[tuple[int, str, str]] = []
+    skipped: set[int] = set()
+    for w in rows:
+        ext = page_ext(w.url or "", w.content_type)
+        body = response_body(w.response or "")[:PAGE_BODY_CAP]
+        if ext is None or not body.strip():
+            # Nothing a scanner can read. Marked scanned so it does
+            # not sit at the head of the queue for ever -- unlike a
+            # scanner failure, this IS a finished answer: we looked
+            # at what it is and there is nothing to read.
+            skipped.add(w.id)
+            w.scanned_at = assetfetch.now()
+            out.scanned += 1
+            continue
+        # A name, not the URL. `scan_batch` writes these to disk and
+        # a URL carries slashes, query strings and whatever a target
+        # chose to put in a path.
+        base = os.path.basename(urlparse(w.url or "").path) or "index"
+        items.append((w.id, f"{base}{ext}"
+                      if not base.endswith(ext) else base, body))
+
+    found, ok = await scan_batch(items)
+    if not ok:
+        out.notes.append(
+            "a scanner did not complete, so this batch of pages is NOT "
+            "marked scanned and will be retried. Nothing here is a "
+            "clean result.")
+    for w in rows:
+        if w.id in skipped:
+            continue
+        out.scanned += 1
+        if ok:
+            w.scanned_at = assetfetch.now()
+        for fi in (found.get(w.id) or []):
+            # The URL is the origin, and a page always has a target:
+            # `WebAddress.target_id` is NOT NULL, which is why there
+            # is no `unattributable` count here as there is for
+            # assets.
+            if await _file_vuln(session, w.target_id, fi, w.url or ""):
+                out.findings += 1
+    await session.commit()
+    return out
+
+
 async def pending(session: AsyncSession, project_id: int) -> dict[str, int]:
     """What is still owed, for a page that wants to show a backlog."""
     unfetched = (await session.execute(
@@ -676,7 +848,17 @@ async def pending(session: AsyncSession, project_id: int) -> dict[str, int]:
         select(func.count()).select_from(WebAssetFile).where(
             WebAssetFile.project_id == project_id,
             WebAssetFile.scanned_at.is_(None)))).scalar_one()
-    return {"unfetched": int(unfetched), "unscanned": int(unscanned)}
+    from .models import WebAddress
+    unscanned_pages = (await session.execute(
+        select(func.count()).select_from(WebAddress)
+        .join(Target, Target.id == WebAddress.target_id)
+        .where(Target.project_id == project_id,
+               WebAddress.scanned_at.is_(None),
+               WebAddress.status_code >= 200,
+               WebAddress.status_code < 300,
+               WebAddress.response.is_not(None)))).scalar_one()
+    return {"unfetched": int(unfetched), "unscanned": int(unscanned),
+            "unscanned_pages": int(unscanned_pages)}
 
 
 
@@ -738,7 +920,7 @@ class AssetWorker:
             did: list[str] = []
             for pr in projects:
                 owed = await pending(session, pr.id)
-                if not owed["unfetched"] and not owed["unscanned"]:
+                if not any(owed.values()):
                     continue
                 if owed["unfetched"]:
                     sw = await fetch_project(
@@ -770,6 +952,16 @@ class AssetWorker:
                     # rather than never: a sweep that examines nothing
                     # must not look like a sweep that found nothing.
                     for n in sc.notes:
+                        did.append(f"{pr.code}: {n}")
+                # The pages themselves, same scanners. Last in the
+                # cycle because the file sweep is the one with a
+                # fetch behind it and should not wait on this.
+                if owed.get("unscanned_pages"):
+                    sp = await scan_pages(session, pr.id, limit=WORKER_SCAN)
+                    if sp.scanned:
+                        did.append(f"{pr.code}: read {sp.scanned} page(s), "
+                                   f"{sp.findings} finding(s)")
+                    for n in sp.notes:
                         did.append(f"{pr.code}: {n}")
             self.last = "; ".join(did) if did else "nothing outstanding"
 

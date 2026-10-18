@@ -909,6 +909,11 @@ class SweepOut(BaseModel):
     notes: list[str] = []
     unfetched: int = 0
     unscanned: int = 0
+    #: 2xx response bodies nothing has read yet. A separate backlog
+    #: from `unscanned`, which counts asset files, because the two
+    #: drain at different rates and one number covering both would
+    #: hide whichever is behind.
+    unscanned_pages: int = 0
 
 
 @router.get("/assets/pending", response_model=dict)
@@ -935,6 +940,32 @@ async def assets_fetch(limit: int = 50,
     sw = await assetwork.fetch_project(
         session, pr.id, user_agent=(pr.user_agent or DEFAULT_UA),
         limit=max(1, min(int(limit), 500)))
+    rest = await assetwork.pending(session, pr.id)
+    return SweepOut(**sw.__dict__, **rest)
+
+
+@router.post("/pages/scan", response_model=SweepOut)
+async def pages_scan(limit: int = 200,
+                     pr: Project = Depends(require_project("user")),
+                     _: User = Depends(get_current_user),
+                     session: AsyncSession = Depends(get_session)):
+    """Run the same two scanners over 2xx response bodies.
+
+    The asset sweep reads the files a page pulls in. This reads the
+    page: an API key inlined in a `<script>` block or a token in a
+    JSON response is the same finding as the same string in a
+    bundle, and the bundle was the one being read.
+
+    2xx only. A 404 body is the server's error template, identical
+    across a thousand URLs, and reading it would file one finding a
+    thousand times.
+
+    Sends nothing anywhere: every response here was already
+    retrieved, by a ghost, against a target that cleared the scope
+    gate at the time. Both scanners run offline.
+    """
+    sw = await assetwork.scan_pages(
+        session, pr.id, limit=max(1, min(int(limit), 2000)))
     rest = await assetwork.pending(session, pr.id)
     return SweepOut(**sw.__dict__, **rest)
 

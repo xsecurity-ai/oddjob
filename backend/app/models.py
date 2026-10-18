@@ -1218,6 +1218,18 @@ class WebAddress(Base, TimestampMixin):
     #: populated table. Second time this has bitten; it is in the README.
     truncated: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="0", default=False)
+    #: When the asset scanners last read this response body. NULL
+    #: means "never", which is what the page sweep queues on -- the
+    #: same resume key `WebAssetFile.scanned_at` gives the file
+    #: sweep, for the same reason: a run interrupted at 300 of 900
+    #: picks up at 301.
+    #:
+    #: Deliberately not set on a response the scanners failed to
+    #: read. A timeout has examined nothing, and stamping the row
+    #: would retire it from the queue for ever on the strength of a
+    #: failure.
+    scanned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True)
 
     target: Mapped[Target] = relationship(back_populates="web_addresses")
 
