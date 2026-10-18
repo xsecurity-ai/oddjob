@@ -74,9 +74,15 @@ var Runners = map[string]Runner{
 	// discovery into confirmation.
 	"nuclei_confirm": runNuclei,
 	"httpx":          runHTTPX,
-	"nslookup":       runNSLookup,
-	"reverse_ip":     runReverseIP,
-	"install":        runInstall,
+	// One operator-edited request, written to a socket verbatim. Not
+	// an HTTP client: every runner above is free to use net/http
+	// because it composes its own requests, and this one must not,
+	// because the request is somebody else's bytes and correcting
+	// them is how a replay sends a different test. See replay.go.
+	"replay":     runReplay,
+	"nslookup":   runNSLookup,
+	"reverse_ip": runReverseIP,
+	"install":    runInstall,
 }
 
 // ---------------------------------------------------------------- args

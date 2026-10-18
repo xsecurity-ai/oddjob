@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert, Box, Button, Chip, CircularProgress, Dialog, DialogContent,
   DialogTitle,
@@ -10,7 +10,7 @@ import LaunchIcon from '@mui/icons-material/Launch'
 import WrapIcon from '@mui/icons-material/WrapText'
 import SendIcon from '@mui/icons-material/Send'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api } from '../lib/api'
+import { api, type ReplayResult } from '../lib/api'
 import { neon, glow } from '../theme'
 
 /**
@@ -290,7 +290,12 @@ export function PacketModal({ id, onClose, onReplay }: {
   // than to what was there before.
   const [showing, setShowing] = useState(id)
   const [draft, setDraft] = useState<string | null>(null)
-  const [sent, setSent] = useState<{ ms: number; code: number | null } | null>(null)
+  const [sent, setSent] = useState<
+    { ms: number; code: number | null; via: string } | null>(null)
+  // The task a ghost is carrying. The packet does not leave from the
+  // Oddjob server — it leaves from an agent inside the client's
+  // estate, so pressing Send queues work rather than completing it.
+  const [task, setTask] = useState<ReplayResult | null>(null)
   const qc = useQueryClient()
 
   const { data, isLoading, error } = useQuery({
@@ -300,17 +305,44 @@ export function PacketModal({ id, onClose, onReplay }: {
 
   const send = useMutation({
     mutationFn: (raw: string) => api.replay(showing, raw),
-    onSuccess: (r) => {
-      // A NEW row, which is the point: the original and the edit sit
-      // side by side under the same URL and neither is overwritten.
-      // The modal follows the new one so the pane on the right is
-      // showing what came back, not what used to.
-      setSent({ ms: r.elapsed_ms, code: r.status_code })
-      setDraft(null)
-      setShowing(r.web.id)
-      void qc.invalidateQueries({ queryKey: ['web'] })
+    onSuccess: (r) => { setSent(null); setTask(r) },
+  })
+
+  const progress = useQuery({
+    queryKey: ['replay', task?.task_id],
+    queryFn: () => api.replayStatus(task!.task_id),
+    enabled: task != null,
+    refetchInterval: (q) => {
+      const s = q.state.data?.state
+      return s === 'done' || s === 'failed' || s === 'cancelled' ? false : 1500
     },
   })
+
+  // A NEW row, which is the point: the original and the edit sit side
+  // by side under the same URL and neither is overwritten. The modal
+  // follows the new one so the pane on the right is showing what came
+  // back, not what used to.
+  const landed = progress.data
+  const landedId = landed?.web?.id
+  useEffect(() => {
+    if (landed == null || landedId == null) return
+    setSent({ ms: landed.elapsed_ms, code: landed.status_code,
+              via: landed.agent })
+    setDraft(null)
+    setTask(null)
+    setShowing(landedId)
+    void qc.invalidateQueries({ queryKey: ['web'] })
+    // `landed` is the whole object and changes identity on every
+    // poll; keying on the row id is what makes this fire once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [landedId, qc])
+
+  // Waiting on a ghost counts as busy: the editor stays locked, so a
+  // second Send cannot put a second request at the client while the
+  // first is still in flight.
+  const waiting = send.isPending
+    || (task != null && !['failed', 'cancelled'].includes(
+      progress.data?.state ?? 'queued'))
 
   // The draft is seeded from whatever is on screen, so editing after
   // a resend starts from the request that was actually sent rather
@@ -384,8 +416,8 @@ export function PacketModal({ id, onClose, onReplay }: {
           )}
           {editing && (
             <Stack direction="row" spacing={0.8} sx={{ alignItems: 'center' }}>
-              <Button size="small" variant="contained" disabled={send.isPending}
-                startIcon={send.isPending
+              <Button size="small" variant="contained" disabled={waiting}
+                startIcon={waiting
                   ? <CircularProgress size={12} />
                   : <SendIcon sx={{ fontSize: 15 }} />}
                 onClick={() => send.mutate(draft ?? '')}
@@ -393,7 +425,7 @@ export function PacketModal({ id, onClose, onReplay }: {
                 Send
               </Button>
               <Button size="small" onClick={() => setDraft(null)}
-                disabled={send.isPending}
+                disabled={waiting}
                 sx={{ fontSize: 11, py: 0.1, color: neon.muted }}>
                 Cancel
               </Button>
@@ -469,12 +501,31 @@ export function PacketModal({ id, onClose, onReplay }: {
             {/* What the send actually did. Said as a fact with a
                 number on it: "sent" with no status is indistinguishable
                 from "the button worked". */}
+            {/* Queued is not sent, and saying so is the honest
+                answer: the packet leaves from a ghost inside the
+                client's estate, on that agent's next heartbeat. It
+                names which ghost, because the egress address the
+                request leaves from is part of the result. */}
+            {task && !sent && (
+              <Alert severity="info" variant="outlined"
+                icon={<CircularProgress size={13} thickness={6} />}
+                sx={{ fontSize: 11.5, py: 0.3 }}>
+                {progress.data?.note ?? task.note}
+              </Alert>
+            )}
+            {progress.data?.state === 'failed' && (
+              <Alert severity="error" variant="outlined"
+                sx={{ fontSize: 11.5, py: 0.3 }}>
+                {progress.data.error
+                  ?? `${progress.data.agent} could not carry it out`}
+              </Alert>
+            )}
             {sent && (
               <Alert severity={sent.code && sent.code < 400 ? 'success' : 'warning'}
                 variant="outlined" sx={{ fontSize: 11.5, py: 0.3 }}>
-                Sent — {sent.code ?? 'no status'} in {sent.ms} ms. Saved as a
-                new exchange beside the original, which is unchanged; this
-                modal is now showing the new one.
+                Sent from {sent.via} — {sent.code ?? 'no status'} in {sent.ms} ms.
+                Saved as a new exchange beside the original, which is
+                unchanged; this modal is now showing the new one.
               </Alert>
             )}
             {(data.sources || data.notes) && (

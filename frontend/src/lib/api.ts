@@ -784,8 +784,25 @@ export interface WebGroup extends WebAddress {
   statuses: number[]
 }
 
+/** Where a replayed request went, and — once the ghost reports — what
+ *  came back.
+ *
+ *  The POST answers the first half only. A replay leaves from a ghost
+ *  inside the client's estate, never from the Oddjob server, so at the
+ *  moment Send is pressed there is a task waiting for an agent and no
+ *  response yet. `replayStatus` fills in the rest. */
 export interface ReplayResult {
-  web: WebAddress
+  task_id: number
+  /** Which ghost. Part of the result: the egress address the packet
+   *  leaves from is the whole reason this is not sent from the server. */
+  agent: string
+  agent_id: number
+  /** idle | busy | absent — how far ahead of it the queue was. */
+  dispatch: string
+  /** queued | claimed | running | done | failed | cancelled */
+  state: string
+  note: string
+  web: WebAddress | null
   status_code: number | null
   elapsed_ms: number
   error: string | null
@@ -1226,12 +1243,22 @@ export const api = {
     req<Takeover>(`/api/web/takeovers/${id}` + qs({ project }),
                   { method: 'PATCH', body: JSON.stringify(body) }),
 
-  /** Send an edited request again. The result is a NEW row, so the
-   *  original and the edit sit side by side under the same URL. */
+  /** Queue an edited request for a ghost to send. The result is a NEW
+   *  row, so the original and the edit sit side by side under the same
+   *  URL — but it exists only once the ghost has reported, so this
+   *  returns the task to poll with `replayStatus`.
+   *
+   *  No `follow_redirects`: the ghost writes the request to a socket
+   *  byte for byte, and following a redirect means building a second
+   *  request out of the first one's parsed fields, which is the one
+   *  thing that path must not do. A 302 is the answer. */
   replay: (id: number, raw: string, opts: {
-    follow_redirects?: boolean; verify_tls?: boolean; timeout?: number } = {}) =>
+    verify_tls?: boolean; timeout?: number } = {}) =>
     req<ReplayResult>(`/api/web/${id}/replay`, {
       method: 'POST', body: JSON.stringify({ raw, ...opts }) }),
+  /** Has the ghost sent it yet, and what came back. */
+  replayStatus: (taskId: number) =>
+    req<ReplayResult>(`/api/web/replays/${taskId}`),
   /** Whether a Web view would have anything to show here. */
   webApplicable: (project?: string) =>
     req<{ applicable: boolean; web_services: number; web_addresses: number

@@ -20,11 +20,15 @@ def check(l, c, e=""):
     else: fail += 1; print(f"  FAIL  {l} {e}")
 
 
-def call(p, m="GET", b=None, token=None):
+def call(p, m="GET", b=None, token=None, key=None):
     r = urllib.request.Request(BASE + p, method=m)
     if b is not None:
         r.data = json.dumps(b).encode(); r.add_header("Content-Type", "application/json")
     if token: r.add_header("Authorization", f"Bearer {token}")
+    # A ghost authenticates with its own key, not as a person. The
+    # replay section below needs both in the same suite, because the
+    # route is an operator asking and an agent answering.
+    if key: r.add_header("X-Ghost-Key", key)
     try:
         with urllib.request.urlopen(r, timeout=60) as x:
             raw = x.read(); return x.status, (json.loads(raw) if raw else None)
@@ -345,12 +349,105 @@ check("a search applies to the grouped listing too", (g2 or {}).get("total") == 
 # Editing a captured request and sending it again has to produce a NEW
 # row: the original and the edited one sitting side by side under the
 # same URL is the entire point.
+#
+# **The packet leaves from a ghost, not from this server.** So this
+# suite has to be one. `_ghost_send` below is the whole of an agent's
+# replay loop — beat, take the task, write the bytes to a socket, post
+# the answer — which is what makes these assertions about the route
+# rather than about a mock: the bytes under test really do go over TCP
+# and really do come back off it.
 print("\n== replay ==")
+import socket as _socket  # noqa: E402
+
 _hostport = BASE.split("//", 1)[1]
 _h, _, _p = _hostport.partition(":")
 call(f"/api/targets?project={_X}", "POST", {"host": _h}, token=admin)
 _self = [t for t in call(f"/api/targets?project={_X}&limit=50", token=admin)[1]["items"]
          if t["host"] == _h][0]
+
+st, _en = call(f"/api/ghosts?project={_X}", "POST",
+               {"name": "replay-ghost"}, token=admin)
+GKEY = (_en or {}).get("callback_key")
+GID = ((_en or {}).get("agent") or {}).get("id")
+# Not "replay-ghost": enrollment appends a suffix so that a container
+# restarted under the same name does not become two agents sharing
+# one row. Read back rather than assumed.
+GNAME = ((_en or {}).get("agent") or {}).get("name")
+check("a ghost is enrolled to send from", st == 201 and bool(GKEY),
+      f"{st} {str(_en)[:90]}")
+call("/api/ghosts/register", "POST",
+     {"platform": "linux", "arch": "amd64", "version": "test",
+      "hostname": "ghost", "privileged": False, "tools": {}}, key=GKEY)
+
+
+def _beat(ready=True, running=None):
+    return call("/api/ghosts/heartbeat", "POST",
+                {"ready": ready, "running_tasks": running or []}, key=GKEY)[1] or {}
+
+
+def _take(task_id, beat=None):
+    """The task with this id out of a heartbeat's hand-out, or None."""
+    for t in (beat if beat is not None else _beat()).get("tasks") or []:
+        if t.get("id") == task_id:
+            return t
+    return None
+
+
+def _wire(task):
+    """Do what the Go runner does: write the bytes, read the answer.
+
+    A raw socket and not urllib, deliberately. The point of this whole
+    path is that the request goes out exactly as it was typed, and an
+    HTTP client would rebuild it from parsed fields — which is the
+    thing that must not happen.
+    """
+    a = task["args"]
+    raw = _b64.b64decode(a["raw_b64"])
+    s = _socket.create_connection((a["host"], a["port"]), timeout=10)
+    s.settimeout(10)
+    chunks: list[bytes] = []
+    try:
+        s.sendall(raw)
+        while sum(len(c) for c in chunks) < a.get("resp_cap", 48 * 1024):
+            got = s.recv(8192)
+            if not got:
+                break
+            chunks.append(got)
+    finally:
+        s.close()
+    blob = b"".join(chunks)
+    status = None
+    if blob[:5] == b"HTTP/":
+        try:
+            status = int(blob.split(b" ", 2)[1])
+        except (IndexError, ValueError):
+            status = None
+    return {"status": status, "elapsed_ms": 7,
+            "response_b64": _b64.b64encode(blob).decode()}
+
+
+def _ghost_send(task_id, payload=None):
+    """Carry one replay task through. -> (what the ghost was given, result)."""
+    task = _take(task_id)
+    if task is None:
+        return None, {"error": "the ghost was never handed the task"}
+    out = payload if payload is not None else _wire(task)
+    call(f"/api/ghosts/tasks/{task_id}/result", "POST",
+         {"status": "done", "output": json.dumps(out), "stderr": "",
+          "summary": "replay", "exit_code": 0}, key=GKEY)
+    return task, call(f"/api/web/replays/{task_id}", token=admin)[1] or {}
+
+
+def replay(seed_id, raw, **opts):
+    """POST a replay and run it to completion. -> (status, ReplayOut)."""
+    st, q = call(f"/api/web/{seed_id}/replay", "POST",
+                 {"raw": raw, **opts}, token=admin)
+    if st != 200:
+        return st, q
+    _task, done = _ghost_send(q["task_id"])
+    return st, done
+
+
 st, seed = call("/api/web", "POST",
                 {"target_id": _self["id"], "url": f"http://{_hostport}/api/auth/methods",
                  "method": "GET"}, token=admin)
@@ -365,7 +462,42 @@ _seed_response = (_seed_pkt or {}).get("response")
 
 _raw = (f"GET /api/auth/methods HTTP/1.1\r\nHost: {_hostport}\r\n"
         f"Accept: application/json\r\n\r\n")
-st, rep = call(f"/api/web/{seed['id']}/replay", "POST", {"raw": _raw}, token=admin)
+
+# The POST answers "where is it going", not "what did it say". Pinned
+# on its own before the end-to-end run, because an endpoint that
+# silently sent the packet from this server would still satisfy every
+# assertion below it.
+st, _q = call(f"/api/web/{seed['id']}/replay", "POST", {"raw": _raw}, token=admin)
+check("the POST queues rather than sending", st == 200 and _q.get("task_id"),
+      f"{st} {str(_q)[:140]}")
+check("and names the ghost it will leave from",
+      _q.get("agent") == GNAME and _q.get("agent_id") == GID,
+      str(_q)[:140])
+check("an idle ghost is reported as idle", _q.get("dispatch") == "idle",
+      str(_q.get("dispatch")))
+st, _qt = call(f"/api/ghosts/tasks?project={_X}&limit=50", token=admin)
+_qrow = next((t for t in (_qt or []) if t.get("id") == _q["task_id"]), {})
+check("the replay is an agent task like any other work",
+      _qrow.get("kind") == "replay", str(_qrow)[:120])
+check("and nothing has been sent yet",
+      (call(f"/api/web/replays/{_q['task_id']}", token=admin)[1] or {})
+      .get("state") == "queued")
+
+# The bytes the ghost is handed are the bytes the operator typed.
+_handed = _take(_q["task_id"])
+check("the ghost is handed the request verbatim, base64'd",
+      _handed is not None
+      and _b64.b64decode(_handed["args"]["raw_b64"]).decode() == _raw,
+      str(_handed)[:160] if _handed else "never handed over")
+check("and told where to dial out of the target row, not the Host header",
+      _handed and _handed["args"]["host"] == _h
+      and _handed["args"]["port"] == int(_p),
+      str((_handed or {}).get("args", {}))[:120])
+_out = _wire(_handed)
+call(f"/api/ghosts/tasks/{_q['task_id']}/result", "POST",
+     {"status": "done", "output": json.dumps(_out), "stderr": "",
+      "summary": "replay", "exit_code": 0}, key=GKEY)
+st, rep = call(f"/api/web/replays/{_q['task_id']}", token=admin)
 check("the request is sent and the result recorded", st == 200, f"{st} {str(rep)[:140]}")
 check("it reached the server", (rep or {}).get("status_code") == 200,
       f"{(rep or {}).get('status_code')} err={(rep or {}).get('error')}")
@@ -431,12 +563,12 @@ check("the replayed response really does carry a volatile Date header",
 _sec = int(_time.time())
 while int(_time.time()) == _sec:
     _time.sleep(0.02)
-st, rep2 = call(f"/api/web/{seed['id']}/replay", "POST", {"raw": _raw}, token=admin)
+st, rep2 = replay(seed["id"], _raw)
 check("replaying the identical request twice does not duplicate",
       (rep2 or {}).get("web", {}).get("id") == (rep or {}).get("web", {}).get("id"),
       f"{(rep2 or {}).get('web', {}).get('id')} vs {(rep or {}).get('web', {}).get('id')}")
 _raw2 = _raw.replace("Accept: application/json", "Accept: text/html\r\nX-Test: 1")
-st, rep3 = call(f"/api/web/{seed['id']}/replay", "POST", {"raw": _raw2}, token=admin)
+st, rep3 = replay(seed["id"], _raw2)
 check("an edited request is a new row",
       (rep3 or {}).get("web", {}).get("id") not in
       (seed["id"], (rep or {}).get("web", {}).get("id")),
@@ -536,18 +668,176 @@ for smuggle, why in [
 st, bad = call(f"/api/web/{seed['id']}/replay", "POST", {"raw": ""}, token=admin)
 check("an empty request is refused", st == 422, f"{st} {str(bad)[:80]}")
 
-# A connection that fails is a result worth keeping, not a 500.
+# A connection that fails is a result worth keeping, not a 500 and not
+# a failed task. "This host now refuses the connection" is a finding,
+# and a row is filed for it beside the original so the two can be
+# compared. The ghost reports `done` with the failure in its payload,
+# which is exactly what the Go runner does.
 call(f"/api/targets?project={_X}", "POST", {"host": "127.0.0.2"}, token=admin)
 _dead = [t for t in call(f"/api/targets?project={_X}&limit=50", token=admin)[1]["items"]
          if t["host"] == "127.0.0.2"][0]
 st, seed2 = call("/api/web", "POST",
                  {"target_id": _dead["id"], "url": "http://127.0.0.2:9/x",
                   "method": "GET"}, token=admin)
-st, dead = call(f"/api/web/{seed2['id']}/replay", "POST",
-                {"raw": "GET /x HTTP/1.1\r\nHost: 127.0.0.2:9\r\n\r\n",
-                 "timeout": 2}, token=admin)
+st, _dq = call(f"/api/web/{seed2['id']}/replay", "POST",
+               {"raw": "GET /x HTTP/1.1\r\nHost: 127.0.0.2:9\r\n\r\n",
+                "timeout": 2}, token=admin)
+_, dead = _ghost_send(_dq["task_id"],
+                      {"error": "dial tcp 127.0.0.2:9: connection refused",
+                       "elapsed_ms": 1, "response_b64": ""})
 check("a failed connection is recorded rather than raising",
       st == 200 and (dead or {}).get("error"), f"{st} {str(dead)[:120]}")
+check("and it is a row, not just a task error",
+      (dead or {}).get("web", {}).get("id") not in (None, seed2["id"]),
+      str((dead or {}).get("web"))[:90])
+check("whose status is absent rather than invented",
+      (dead or {}).get("status_code") is None
+      and (dead or {}).get("web", {}).get("crawled") is False,
+      str((dead or {}).get("web"))[:120])
+
+# ---------------------------------------------- the dispatch rule
+# "Skip the line and go to the first available; if none are available
+# then choose one and task anyone; if there is no ghost at all, say
+# so." Three cases, three different answers.
+print("-- which ghost, and how far ahead of the queue --")
+
+# A deep backlog on the same ghost, of a kind that would otherwise be
+# taken first. Four thousand would be the real case; forty proves the
+# same thing in a suite, because the hand-out window is 100 and the
+# ordering is what decides, not the depth.
+for _i in range(40):
+    call(f"/api/ghosts/{GID}/tasks?project={_X}", "POST",
+         {"kind": "nslookup", "args": {"targets": [f"q{_i}.acme.example"]}},
+         token=admin)
+st, _jump = call(f"/api/web/{seed['id']}/replay", "POST",
+                 {"raw": _raw.replace("Accept: application/json",
+                                      "Accept: application/jump")}, token=admin)
+check("a replay is queued behind a backlog", st == 200, f"{st} {str(_jump)[:90]}")
+_first = (_beat().get("tasks") or [{}])[0]
+check("and is handed over FIRST, ahead of all of it",
+      _first.get("id") == _jump["task_id"],
+      f"got {_first.get('kind')} #{_first.get('id')}, "
+      f"wanted replay #{_jump['task_id']}")
+# Mutation check on the assertion above: without the priority ordering
+# the oldest nslookup is what comes back, so pin that the backlog is
+# genuinely in front of it by age.
+check("the backlog really was older than the replay",
+      all(t["id"] < _jump["task_id"]
+          for t in (call(f"/api/ghosts/tasks?project={_X}&limit=200",
+                         token=admin)[1] or [])
+          if t.get("kind") == "nslookup"))
+call(f"/api/ghosts/tasks/{_jump['task_id']}/result", "POST",
+     {"status": "done", "output": json.dumps(_wire(_first)), "stderr": "",
+      "summary": "replay", "exit_code": 0}, key=GKEY)
+
+# No idle ghost: it is queued against one anyway rather than refused.
+# The ghost is made busy by telling the server it is holding work,
+# which is the only thing "busy" has ever meant here.
+_holding = [t["id"] for t in (_beat().get("tasks") or [])]
+_bz = _beat(ready=False, running=_holding)
+st, _busy = call(f"/api/web/{seed['id']}/replay", "POST",
+                 {"raw": _raw.replace("application/json", "application/busy")},
+                 token=admin)
+check("a busy fleet still takes the work rather than refusing",
+      st == 200 and _busy.get("agent_id") == GID, f"{st} {str(_busy)[:110]}")
+check("and says plainly that it is waiting for a slot",
+      _busy.get("dispatch") == "busy" and "mid-scan" in (_busy.get("note") or ""),
+      str(_busy)[:160])
+# Drain, so the suite leaves the ghost idle for anything after it —
+# the work it was holding, and then the replay that was waiting behind
+# it, which is itself the proof that "queued on a busy ghost" really
+# does arrive rather than merely being accepted.
+for _tid in _holding:
+    call(f"/api/ghosts/tasks/{_tid}/result", "POST",
+         {"status": "done", "output": "[]", "stderr": "", "summary": "done",
+          "exit_code": 0}, key=GKEY)
+_was_busy = _take(_busy["task_id"])
+check("and the queued replay is handed over once the slot frees",
+      _was_busy is not None, str(_busy)[:110])
+if _was_busy is not None:
+    call(f"/api/ghosts/tasks/{_busy['task_id']}/result", "POST",
+         {"status": "done", "output": json.dumps(_wire(_was_busy)),
+          "stderr": "", "summary": "replay", "exit_code": 0}, key=GKEY)
+
+# No ghost at all. A real answer about the engagement, not an error to
+# swallow and not a quiet fallback to sending it from this server --
+# which is the whole thing this change exists to stop.
+call("/api/projects", "POST", {"code": "NOGHOST", "name": "No ghost"}, token=admin)
+call("/api/targets?project=NOGHOST", "POST", {"host": _h}, token=admin)
+_ng_t = [t for t in call("/api/targets?project=NOGHOST&limit=50",
+                         token=admin)[1]["items"] if t["host"] == _h][0]
+st, _ng_seed = call("/api/web", "POST",
+                    {"target_id": _ng_t["id"],
+                     "url": f"http://{_hostport}/api/auth/methods",
+                     "method": "GET"}, token=admin)
+st, _ng = call(f"/api/web/{_ng_seed['id']}/replay", "POST",
+               {"raw": _raw}, token=admin)
+check("an engagement with no ghost is told so, plainly",
+      st == 409 and "no ghost" in str(_ng), f"{st} {str(_ng)[:140]}")
+_ng_rows = call("/api/web?project=NOGHOST&limit=50", token=admin)[1] or {}
+check("and nothing was sent from the server instead — the seed row and "
+      "no second one", _ng_rows.get("total") == 1, str(_ng_rows.get("total")))
+
+# The one transformation `wire_form` makes, and the one it does not.
+print("-- what goes on the wire --")
+from app.routers.web import wire_form as _wf  # noqa: E402
+
+check("bare LF line endings become CRLF, because a textarea cannot type one",
+      _wf("GET / HTTP/1.1\nHost: a.acme.example\n\n")
+      == "GET / HTTP/1.1\r\nHost: a.acme.example\r\n\r\n")
+check("a request already in CRLF is left exactly as it is",
+      _wf("GET / HTTP/1.1\r\nHost: a.acme.example\r\n\r\nx=1")
+      == "GET / HTTP/1.1\r\nHost: a.acme.example\r\n\r\nx=1")
+check("the body is bytes and is not rewritten",
+      _wf("POST / HTTP/1.1\nHost: a.acme.example\n\na\nb\r\nc")
+      == "POST / HTTP/1.1\r\nHost: a.acme.example\r\n\r\na\nb\r\nc")
+check("header order, casing and duplicates all survive",
+      _wf("get /X HTTP/1.1\nhOsT: a.acme.example\nA: 1\nA: 2\nZ: 3\n\n")
+      == "get /X HTTP/1.1\r\nhOsT: a.acme.example\r\nA: 1\r\nA: 2\r\nZ: 3\r\n\r\n")
+check("a deliberately malformed request line is not repaired",
+      _wf("GET  HTTP/9.9 /x\n\n") == "GET  HTTP/9.9 /x\r\n\r\n")
+check("a request with no blank line still gets a terminator",
+      _wf("GET / HTTP/1.1\nHost: a.acme.example")
+      == "GET / HTTP/1.1\r\nHost: a.acme.example\r\n\r\n")
+
+# What the dispatch-time scope gate is offered out of a replay's
+# arguments. The gate reads EVERY argument looking for hosts, which is
+# right, and it is the reason two of those arguments are shaped the way
+# they are:
+#
+#   the request is base64, or the gate would find the Referer, the
+#   Origin and every cookie domain in it and refuse the task because
+#   one of them is not in the engagement
+#
+#   the destination is `dest_url` and not `url`, because `url` is one
+#   of the keys under which every comma-separated token counts as a
+#   host whatever it looks like -- and `/report/a,b` is a path, not a
+#   request to send something to `b`
+print("-- what the scope gate sees of a replay --")
+from app.scopegate import task_hosts as _th  # noqa: E402
+
+st, _comma = call(f"/api/web/{seed['id']}/replay", "POST",
+                  {"raw": f"GET /api/auth/methods?x=a,b HTTP/1.1\r\n"
+                          f"Host: {_hostport}\r\n"
+                          f"Referer: https://out-of-scope.example/p\r\n"
+                          f"Cookie: s=1; Domain=another.example\r\n\r\n"},
+                  token=admin)
+check("a replay carrying out-of-scope header values is queued, not refused",
+      st == 200, f"{st} {str(_comma)[:110]}")
+_ch = _take(_comma["task_id"])
+_seen = set(_th((_ch or {}).get("args") or {}))
+check("and the gate is offered the destination",
+      any(_h in s for s in _seen), str(sorted(_seen))[:160])
+check("and nothing out of the request body or headers",
+      not any("out-of-scope.example" in s or "another.example" in s
+              for s in _seen), str(sorted(_seen))[:200])
+check("and no stray token out of the query string",
+      "b" not in _seen, str(sorted(_seen))[:200])
+# Finished off, so the suite does not leave the ghost holding work.
+if _ch is not None:
+    call(f"/api/ghosts/tasks/{_comma['task_id']}/result", "POST",
+         {"status": "done", "output": json.dumps(_wire(_ch)), "stderr": "",
+          "summary": "replay", "exit_code": 0}, key=GKEY)
 
 print("\n== roots do not require targets ==")
 # A fresh engagement has scope and no targets, which is exactly when

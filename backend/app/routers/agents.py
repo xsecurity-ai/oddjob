@@ -273,6 +273,13 @@ TASK_KINDS: dict[str, str | None] = {
     "httpx": "httpx",
     "nslookup": None,
     "reverse_ip": None,
+    #: One edited HTTP request, sent verbatim from inside the client's
+    #: estate. `None` here does NOT mean the output is discarded --
+    #: the warning above about that still stands. It means the result
+    #: is not a scan FILE: there is no nmap XML or nuclei JSONL to
+    #: hand an importer, only one exchange, which `routers/web.py`
+    #: files as a web_addresses row of its own. See `apply_replay`.
+    "replay": None,
     "install": None,
     "shell": None,
 }
@@ -789,12 +796,41 @@ async def reap_lost(session: AsyncSession, project_id: int,
 DISPATCH_WINDOW = 100
 
 
+#: The ordinary band. Everything a scan, a standing order or the bulk
+#: dialog queues sits here.
+PRIORITY_NORMAL = 0
+
+#: Work an operator is sitting and waiting for, which jumps the whole
+#: queue. Only `replay` uses it today.
+#:
+#: A band rather than a boolean so that a second interactive kind can
+#: be ranked against this one later without a migration, and so a
+#: number in the database reads as what it is.
+#:
+#: It is deliberately NOT a capacity override. A queue-jumping task
+#: still waits for a free slot, still goes through the scope gate at
+#: dispatch and still counts against the project's parallelism — it
+#: overtakes the backlog, it does not get its own lane past the
+#: controls.
+PRIORITY_INTERACTIVE = 100
+
+
 def _next_up(*where) -> object:
     """The next slice of the queue, taking each kind in turn.
 
     Oldest-first within a kind, round-robin across kinds: every kind's
     oldest task, then every kind's second, and so on. A single large
     batch therefore delays the other kinds rather than excluding them.
+
+    **Priority outranks both**, and has to outrank them in two places
+    rather than one. The window below reads DISPATCH_WINDOW rows, so
+    ordering only the final result would be no use at all: a task
+    sitting at position 3,000 of its own kind is not in the window to
+    be re-ordered. So the row number within a kind is computed with
+    priority first — which puts a jumping task at rn=1 for its kind,
+    inside the window — and the outer ordering then puts it ahead of
+    every other kind's rn=1 as well. Either one alone leaves a case
+    where the jump silently does not happen.
 
     Straight `ORDER BY id` was not merely unfair, it was invisible.
     Only DISPATCH_WINDOW rows are read, so a batch bigger than the
@@ -809,12 +845,14 @@ def _next_up(*where) -> object:
     Age still orders everything within a kind, so nothing overtakes
     work of its own type.
     """
-    rn = func.row_number().over(partition_by=AgentTask.kind,
-                                order_by=AgentTask.id).label("rn")
-    ranked = select(AgentTask.id.label("id"), rn).where(*where).subquery()
+    rn = func.row_number().over(
+        partition_by=AgentTask.kind,
+        order_by=[AgentTask.priority.desc(), AgentTask.id]).label("rn")
+    ranked = select(AgentTask.id.label("id"),
+                    AgentTask.priority.label("prio"), rn).where(*where).subquery()
     return (select(AgentTask)
             .join(ranked, AgentTask.id == ranked.c.id)
-            .order_by(ranked.c.rn, AgentTask.id)
+            .order_by(ranked.c.prio.desc(), ranked.c.rn, AgentTask.id)
             .limit(DISPATCH_WINDOW))
 
 
@@ -1037,6 +1075,19 @@ _PERMANENT = (
 def _retryable(error: str) -> bool:
     low = (error or "").lower()
     return not any(p in low for p in _PERMANENT)
+
+
+#: Kinds that are never handed to a second agent after a failure.
+#:
+#: Requeueing is right for a scan: the work is "find out what is on
+#: these hosts", any agent can do it, and the one that just died is the
+#: least likely to succeed. It is wrong for a replay. WHICH ghost sent
+#: the request is part of the result — the egress address is the whole
+#: reason this stopped being sent from the Oddjob server — so moving it
+#: to another ghost answers a different question, and sending the same
+#: edited POST twice because the first ghost's report was lost is a
+#: second real request at a client.
+NO_REQUEUE_KINDS = ("replay",)
 
 
 #: Task kinds whose output is a list of hostnames rather than a scan
@@ -1281,6 +1332,72 @@ async def _eligible_agents(session: AsyncSession, project_id: int) -> list[Agent
             AgentTask.status.in_(("claimed", "running"))).distinct())).all()}
     return [a for a in rows
             if _stale(a, 1 if a.id in busy else 0) in ("online", "busy")]
+
+
+#: What `pick_ghost` found, in the order it prefers them. The caller
+#: reports this to the operator verbatim, because the three are three
+#: different waits: none at all, a slot or two, and "whenever that host
+#: comes back".
+DISPATCH_IDLE = "idle"
+DISPATCH_BUSY = "busy"
+DISPATCH_ABSENT = "absent"
+
+
+async def pick_ghost(session: AsyncSession,
+                     project_id: int) -> tuple[Agent | None, str]:
+    """The ghost to put one piece of interactive work on.
+
+    -> (agent, where it stands) or (None, DISPATCH_ABSENT).
+
+    Three answers, deliberately kept apart rather than collapsed into
+    "got one / did not":
+
+      idle    beating now and holding nothing. The task will be handed
+              over on its next beat, which is seconds away.
+      busy    beating now and mid-scan. The task is queued against it
+              and jumps that ghost's backlog, but still waits for a
+              slot -- see PRIORITY_INTERACTIVE.
+      absent  nothing is beating. Queued against whichever ghost this
+              engagement has, which may be hours away or may be never.
+
+    `absent` is still a ghost, and that is the point: queueing against
+    a quiet ghost is a better answer than refusing, because an agent
+    whose link dropped for a minute is the common case and the
+    operator's request survives it. Having NO ghost at all is a
+    different fact, and gets None so the caller can say so plainly
+    rather than inventing a destination.
+
+    Ordered by the agent's own priority then id, the same total order
+    `_eligible_agents` uses. Two callers disagreeing about which ghost
+    is first is how the same engagement sends two packets from two
+    egress addresses and reports one.
+    """
+    rows = (await session.execute(
+        select(Agent).where(Agent.project_id == project_id,
+                            Agent.status != "disabled")
+        .order_by(Agent.priority, Agent.id))).scalars().all()
+    if not rows:
+        return None, DISPATCH_ABSENT
+    busy = {aid for (aid,) in (await session.execute(
+        select(AgentTask.agent_id).where(
+            AgentTask.project_id == project_id,
+            AgentTask.status.in_(("claimed", "running")))
+        .distinct())).all()}
+    now = datetime.now(UTC)
+
+    def beating(a: Agent) -> bool:
+        seen = _aware(a.last_seen)
+        return seen is not None and (now - seen) < OFFLINE_AFTER
+
+    live = [a for a in rows if beating(a)]
+    for a in live:
+        if a.id not in busy:
+            return a, DISPATCH_IDLE
+    if live:
+        # All of them are working. The first in the same order the rest
+        # of the router uses, so this is the one a reader can predict.
+        return live[0], DISPATCH_BUSY
+    return rows[0], DISPATCH_ABSENT
 
 
 async def _may_claim(session: AsyncSession, project: Project, agent: Agent,
@@ -2437,7 +2554,12 @@ class QueuedOut(BaseModel):
 
 def _subject(kind: str, args: dict) -> str:
     """The one phrase that says what a task is for."""
-    for key in ("domain", "url", "host"):
+    # `dest_url` is the replay kind's destination. It is not called
+    # `url` for a reason that has nothing to do with this function --
+    # see the note at the call site in routers/web.py -- so it is
+    # named here too rather than having a replay show as a bare
+    # hostname in the queue.
+    for key in ("domain", "url", "dest_url", "host"):
         if args.get(key):
             return str(args[key])
     for key in ("targets", "domains", "urls"):
@@ -3531,7 +3653,8 @@ async def submit_result(task_id: int, body: ResultIn,
         t.finished_at = now
     else:
         t.attempts = (t.attempts or 0) + 1
-        if t.attempts <= MAX_RETRIES and _retryable(body.error or ""):
+        if (t.attempts <= MAX_RETRIES and _retryable(body.error or "")
+                and t.kind not in NO_REQUEUE_KINDS):
             # Back in the queue, and back in the POOL: the agent that
             # just failed is the least likely to succeed, and leaving
             # it addressed there is how a broken host retries its own
@@ -3580,6 +3703,40 @@ async def submit_result(task_id: int, body: ResultIn,
             # ran and could not be filed is still evidence.
             t.import_result = json.dumps({"error": f"{type(e).__name__}: {e}"[:500]})
             await session.commit()
+
+    # A replayed request becomes a web row, here, for the same reason
+    # the names above become targets: the result is evidence about the
+    # client's estate and the only thing that was ever going to file it
+    # is this handler. `t.import_as` is None for this kind — there is
+    # no scan file to parse — so nothing further down would touch it.
+    #
+    # Run on `done` only. A ghost that could not reach the host reports
+    # `done` with the failure inside its payload, deliberately: "this
+    # host now refuses the connection" is a result worth keeping, and
+    # `apply_replay` writes the row for it. A `failed` here means the
+    # ghost could not carry out the instruction at all — bad arguments,
+    # a runner that is not there — and there is no exchange to record.
+    if t.status == "done" and t.kind == "replay" and (t.output or "").strip():
+        from .web import apply_replay
+        try:
+            rep = await apply_replay(session, t, actor=f"ghost:{a.name}")
+            t.import_result = json.dumps(rep)
+            await session.commit()
+            imported = {**(imported or {}), "replay": rep}
+        except Exception:                        # noqa: BLE001
+            # Never fail the submission over it: the raw exchange is on
+            # the task either way, which is the evidence. And the
+            # detail goes to the log rather than down the wire, for the
+            # reason the lookup branch below gives — this response is
+            # read by a process on somebody else's network.
+            await session.rollback()
+            log.warning("filing the replay result for task %s failed",
+                        t.id, exc_info=True)
+            t.import_result = json.dumps(
+                {"error": "could not be filed; see the server log"})
+            await session.commit()
+            imported = {**(imported or {}),
+                        "replay": {"error": "could not be filed"}}
 
     # A finished DNS lookup resolves itself, here, rather than waiting
     # for somebody to open the Targets page. Most of what one returns

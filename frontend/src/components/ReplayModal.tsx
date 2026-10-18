@@ -4,6 +4,13 @@
  * That is the whole point: the original and the edited one sit side by
  * side under the same URL, and the difference between the two
  * responses is usually the finding.
+ *
+ * **The packet leaves from a ghost, not from the Oddjob server.** That
+ * is what makes this dialog a two-step: Send queues a task against a
+ * named agent inside the client's estate, and the response appears
+ * when that agent reports. Usually seconds — the task jumps the
+ * queue — but it is a wait, and the dialog says which ghost has it and
+ * why it is waiting rather than spinning silently.
  */
 import { useEffect, useState } from 'react'
 import {
@@ -28,10 +35,9 @@ export function ReplayModal({ id, onClose, onCreated }: {
 }) {
   const qc = useQueryClient()
   const [raw, setRaw] = useState('')
-  const [busy, setBusy] = useState(false)
+  const [sending, setSending] = useState(false)
   const [err, setErr] = useState<string | null>(null)
-  const [result, setResult] = useState<ReplayResult | null>(null)
-  const [follow, setFollow] = useState(false)
+  const [queued, setQueued] = useState<ReplayResult | null>(null)
   const [verify, setVerify] = useState(false)
 
   const packet = useQuery({
@@ -40,33 +46,66 @@ export function ReplayModal({ id, onClose, onCreated }: {
     enabled: id != null,
   })
 
+  // The ghost's progress. Polled rather than awaited: the request is
+  // sent by an agent on its next heartbeat, and holding an HTTP
+  // request open for that is a wait of unbounded length on a
+  // connection nothing guarantees survives it.
+  const task = useQuery({
+    queryKey: ['replay', queued?.task_id],
+    queryFn: () => api.replayStatus(queued!.task_id),
+    enabled: queued != null,
+    // Stop asking once it has finished. `false` is react-query's "do
+    // not poll", so this has to be a function rather than a number.
+    refetchInterval: (q) => {
+      const s = q.state.data?.state
+      return s === 'done' || s === 'failed' || s === 'cancelled' ? false : 1500
+    },
+  })
+
+  // The live answer, whichever half we have. `queued` carries which
+  // ghost took it from the moment Send is pressed; `task.data`
+  // replaces it as soon as the first poll lands.
+  const result: ReplayResult | null = task.data ?? queued
+
   // Seed the editor from the captured request. Only when it arrives, so
   // typing is never overwritten by a late fetch.
   useEffect(() => {
     if (packet.data) {
       setRaw(packet.data.request || defaultRequest(packet.data.url,
                                                    packet.data.method))
-      setResult(null); setErr(null)
+      setQueued(null); setErr(null)
     }
   }, [packet.data])
 
+  // The new row only exists once the ghost has reported, so the
+  // caller is told then rather than when Send was pressed.
+  const newId = result?.web?.id
+  useEffect(() => {
+    if (newId != null) {
+      onCreated?.(newId)
+      void qc.invalidateQueries({ queryKey: ['web'] })
+    }
+    // `onCreated` is not in the deps on purpose: callers pass an
+    // inline arrow, so a new identity every render would re-fire this
+    // on every render rather than on every new row.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newId, qc])
+
   const send = async () => {
     if (id == null) return
-    setBusy(true); setErr(null); setResult(null)
+    setSending(true); setErr(null); setQueued(null)
     try {
-      const r = await api.replay(id, raw, {
-        follow_redirects: follow, verify_tls: verify,
-      })
-      setResult(r)
-      if (r.web?.id) onCreated?.(r.web.id)
-      await qc.invalidateQueries({ queryKey: ['web'] })
+      setQueued(await api.replay(id, raw, { verify_tls: verify }))
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
-      setBusy(false)
+      setSending(false)
     }
   }
 
+  const waiting = result != null
+    && !['done', 'failed', 'cancelled'].includes(result.state)
+  const busy = sending || waiting
   const original = packet.data?.request || ''
   const edited = raw !== original
 
@@ -151,10 +190,6 @@ export function ReplayModal({ id, onClose, onCreated }: {
                 alignItems: "center",
                 flexWrap: "wrap"
               }}>
-              <FormControlLabel
-                control={<Switch size="small" checked={follow}
-                  onChange={(e) => setFollow(e.target.checked)} />}
-                label={<Typography sx={{ fontSize: 11.5 }}>Follow redirects</Typography>} />
               <Tooltip title="An engagement target routinely has a certificate that
                               does not validate; refusing to talk to it is not a
                               useful default for a test tool.">
@@ -163,6 +198,14 @@ export function ReplayModal({ id, onClose, onCreated }: {
                     onChange={(e) => setVerify(e.target.checked)} />}
                   label={<Typography sx={{ fontSize: 11.5 }}>Verify TLS</Typography>} />
               </Tooltip>
+              <Box sx={{ flex: 1 }} />
+              {/* Said before Send is pressed, not only after. Where the
+                  packet will come FROM is part of the test: a request
+                  leaving the wrong egress address can be dropped at the
+                  border or, worse, accepted and attributed elsewhere. */}
+              <Typography sx={{ fontSize: 10.5, color: neon.muted }}>
+                sent from a ghost inside the estate
+              </Typography>
             </Stack>
 
             {err && (
@@ -192,14 +235,37 @@ export function ReplayModal({ id, onClose, onCreated }: {
                       bgcolor: alpha(neon.green, 0.15), color: neon.green,
                       border: `1px solid ${alpha(neon.green, 0.5)}` }} />
                   )}
-                  <Typography sx={{ fontSize: 11, color: neon.muted }}>
-                    {result.elapsed_ms} ms
-                  </Typography>
+                  {result.elapsed_ms > 0 && (
+                    <Typography sx={{ fontSize: 11, color: neon.muted }}>
+                      {result.elapsed_ms} ms
+                    </Typography>
+                  )}
+                  <Chip size="small" label={result.agent} sx={{
+                    height: 18, fontSize: 10,
+                    bgcolor: alpha(neon.purple, 0.16), color: neon.purple,
+                    border: `1px solid ${alpha(neon.purple, 0.5)}` }} />
                   <Box sx={{ flex: 1 }} />
                   <Typography sx={{ fontSize: 10.5, color: neon.muted }}>
-                    saved as a new entry under this URL
+                    {result.web
+                      ? 'saved as a new entry under this URL'
+                      : result.note}
                   </Typography>
                 </Stack>
+                {waiting && (
+                  <Stack
+                    direction="row"
+                    spacing={1}
+                    sx={{ alignItems: 'center', mb: 1 }}>
+                    <CircularProgress size={13} thickness={6}
+                      sx={{ color: neon.orange }} />
+                    {/* "Waiting for a ghost" and "sent, waiting for the
+                        answer" are different facts, and the note from
+                        the server is the one that knows which. */}
+                    <Typography sx={{ fontSize: 11.5, color: neon.muted }}>
+                      {result.note}
+                    </Typography>
+                  </Stack>
+                )}
                 {result.error && (
                   <Alert severity="warning" variant="outlined"
                     sx={{ fontSize: 11.5, mb: 1,
