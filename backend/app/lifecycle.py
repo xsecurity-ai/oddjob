@@ -50,13 +50,14 @@ finding is not something a tool gets to close.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import FindingSweep, Vuln
+from .models import FindingSweep, RunManifest, Vuln
 
 #: What a finding is doing, as of the last time anybody looked.
 #:
@@ -92,6 +93,11 @@ class Verdict:
     first_seen: datetime | None = None
     last_seen: datetime | None = None
     last_looked: datetime | None = None
+    #: The run manifests behind the comparison, so a UI can show
+    #: WHICH part of the configuration changed rather than only that
+    #: something did. See `app/manifest.differences`.
+    found_by: str | None = None
+    looked_with: str | None = None
 
 
 def _aware(d: datetime | None) -> datetime | None:
@@ -104,11 +110,31 @@ def _aware(d: datetime | None) -> datetime | None:
 
 def verdict(scanner: str | None, first_seen: datetime | None,
             last_seen: datetime | None,
-            last_looked: datetime | None) -> Verdict:
+            last_looked: datetime | None,
+            found_by: str | None = None,
+            looked_with: str | None = None) -> Verdict:
     """One finding's state. Pure, so it can be tested without a database.
 
     `last_looked` is the most recent sweep by THIS finding's scanner
     over THIS finding's target, or None if there has never been one.
+
+    `found_by` and `looked_with` are the run manifests of the scan
+    that reported it and the scan that swept afterwards — see
+    `app/manifest.py`. They close the hole in `resolved`:
+
+        nuclei -severity critical,high   found CVE-2021-44228
+        nuclei -severity critical        did not
+
+    Same tool, same host, later timestamp, and nothing about any of
+    those says the second run was configured not to look. When both
+    manifests are known and they differ, the sweep proves nothing
+    and the answer is `unconfirmed`.
+
+    When either is NULL the configuration was not recorded — every
+    scan imported before manifests existed, and every file somebody
+    uploads by hand. That is not the same as "configured
+    differently", so it still resolves; the sentence says the claim
+    is the weaker one.
     """
     first_seen, last_seen = _aware(first_seen), _aware(last_seen)
     last_looked = _aware(last_looked)
@@ -131,12 +157,30 @@ def verdict(scanner: str | None, first_seen: datetime | None,
                        f"since this was last seen", first_seen, last_seen,
                        None)
     if last_looked > last_seen:
-        return Verdict(RESOLVED,
-                       f"{scanner} looked at this host on "
-                       f"{last_looked:%Y-%m-%d %H:%M} UTC and did not "
-                       f"report it; it was last seen on "
-                       f"{last_seen:%Y-%m-%d %H:%M} UTC",
-                       first_seen, last_seen, last_looked)
+        if found_by and looked_with and found_by != looked_with:
+            # A sweep that was configured differently has not looked
+            # for this. The absence is a fact about the command line,
+            # not about the client's estate.
+            return Verdict(UNCONFIRMED,
+                           f"{scanner} did look at this host on "
+                           f"{last_looked:%Y-%m-%d %H:%M} UTC, but it was "
+                           f"configured differently from the run that "
+                           f"found this, so not reporting it proves "
+                           f"nothing", first_seen, last_seen, last_looked,
+                           found_by, looked_with)
+        same = bool(found_by and looked_with)
+        why = (f"{scanner} looked at this host on "
+               f"{last_looked:%Y-%m-%d %H:%M} UTC and did not report it; "
+               f"it was last seen on {last_seen:%Y-%m-%d %H:%M} UTC")
+        # The weaker claim, said as the weaker claim. A `resolved`
+        # established two different ways must not read identically,
+        # or the word stops meaning one thing.
+        why += (" (the sweep ran the same configuration that found it)"
+                if same else
+                " — though the configuration of one or both runs was not "
+                "recorded, so they cannot be shown to be comparable")
+        return Verdict(RESOLVED, why, first_seen, last_seen, last_looked,
+                       found_by, looked_with)
     # Seen by the most recent sweep. New if that sweep is also the
     # first time it was ever seen.
     if first_seen is not None and first_seen >= last_looked:
@@ -151,7 +195,7 @@ def verdict(scanner: str | None, first_seen: datetime | None,
 
 async def record_sweep(session: AsyncSession, project_id: int,
                        target_id: int, scanner: str,
-                       at: datetime) -> None:
+                       at: datetime, manifest: str | None = None) -> None:
     """Note that `scanner` looked at this host. Caller commits.
 
     One row per (target, scanner), carrying the LAST time rather than
@@ -167,32 +211,62 @@ async def record_sweep(session: AsyncSession, project_id: int,
         FindingSweep.scanner == scanner))).scalar_one_or_none()
     if row is None:
         session.add(FindingSweep(project_id=project_id, target_id=target_id,
-                                 scanner=scanner, at=at))
+                                 scanner=scanner, at=at, manifest=manifest))
         return
     # Never backwards. Importing a file from last week must not make
     # the tool believe nobody has looked since -- that would turn
     # every present finding on the host into `unconfirmed`.
     if _aware(row.at) is None or at > _aware(row.at):
         row.at = at
+        # The manifest travels with the timestamp. They describe one
+        # event, and a row carrying March's configuration beside
+        # May's timestamp would answer "was it comparable" about a
+        # run that never happened.
+        row.manifest = manifest
+
+
+async def remember_manifest(session: AsyncSession, scanner: str,
+                            manifest: str, detail: dict,
+                            at: datetime) -> None:
+    """Store what a manifest hash MEANS, once. Caller commits.
+
+    A hash that cannot be explained is a hash nobody will trust when
+    it says two runs differ, and "the configuration changed" is only
+    actionable if somebody can see which part.
+    """
+    if not manifest:
+        return
+    if await session.get(RunManifest, manifest) is not None:
+        return
+    session.add(RunManifest(manifest=manifest, scanner=(scanner or "")[:64],
+                            detail=json.dumps(detail, sort_keys=True),
+                            first_seen_at=at))
+
+
+#: What a sweep lookup answers with: when, and with what
+#: configuration. One tuple rather than two tables, because the two
+#: are read together every time and keeping them apart would be one
+#: more pair of things to hold in step.
+Sweep = tuple[datetime | None, str | None]
 
 
 async def sweeps_for(session: AsyncSession,
-                     project_id: int) -> dict[tuple[int, str], datetime]:
-    """(target_id, scanner) -> when it was last looked at.
+                     project_id: int) -> dict[tuple[int, str], Sweep]:
+    """(target_id, scanner) -> (when it was last looked at, with what).
 
     Loaded whole for a project rather than queried per finding: a
     report over 4,000 findings would otherwise be 4,000 queries, and
     the sweep table has one row per host per tool.
     """
     rows = (await session.execute(select(
-        FindingSweep.target_id, FindingSweep.scanner, FindingSweep.at)
+        FindingSweep.target_id, FindingSweep.scanner, FindingSweep.at,
+        FindingSweep.manifest)
         .where(FindingSweep.project_id == project_id))).all()
-    return {(t, s): _aware(a) for t, s, a in rows}
+    return {(t, s): (_aware(a), m) for t, s, a, m in rows}
 
 
 async def sweeps_for_targets(
-        session: AsyncSession,
-        target_ids) -> dict[tuple[int, str], datetime]:
+        session: AsyncSession, target_ids) -> dict[tuple[int, str], Sweep]:
     """The same table, for an arbitrary set of hosts.
 
     What a listing needs: a page of findings can span projects, and
@@ -203,15 +277,24 @@ async def sweeps_for_targets(
     if not ids:
         return {}
     rows = (await session.execute(select(
-        FindingSweep.target_id, FindingSweep.scanner, FindingSweep.at)
+        FindingSweep.target_id, FindingSweep.scanner, FindingSweep.at,
+        FindingSweep.manifest)
         .where(FindingSweep.target_id.in_(ids)))).all()
-    return {(t, s): _aware(a) for t, s, a in rows}
+    return {(t, s): (_aware(a), m) for t, s, a, m in rows}
 
 
-def verdict_for(v: Vuln, sweeps: dict[tuple[int, str], datetime]) -> Verdict:
-    """One `Vuln` row against a project's sweep table."""
-    looked = sweeps.get((v.target_id, v.scanner)) if v.scanner else None
-    return verdict(v.scanner, v.first_seen_at, v.last_seen_at, looked)
+def verdict_for(v: Vuln, sweeps: dict[tuple[int, str], tuple]) -> Verdict:
+    """One `Vuln` row against a project's sweep table.
+
+    `sweeps` maps (target, scanner) to (when, manifest). The tuple
+    rather than a bare timestamp because the two are read together
+    every time and a second lookup table would be a second thing to
+    keep in step.
+    """
+    hit = sweeps.get((v.target_id, v.scanner)) if v.scanner else None
+    at, with_ = hit if hit else (None, None)
+    return verdict(v.scanner, v.first_seen_at, v.last_seen_at, at,
+                   getattr(v, "found_by_manifest", None), with_)
 
 
 def summarise(verdicts) -> dict[str, int]:

@@ -306,6 +306,11 @@ export interface VulnDetail extends Vuln {
   occurrences: VulnOccurrence[]
   /** Whether the hosts were grouped by identifier or by title. */
   grouped_by: string
+  /** When a later scan could not clear this finding because it was
+   *  configured differently, WHICH part changed. Empty when there is
+   *  nothing to say — "the configuration changed" on its own is a
+   *  dead end for whoever reads it. */
+  configuration_changed: string[]
 }
 
 export interface Poc {
