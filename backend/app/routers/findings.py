@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import assetfetch, audit, slack
+from .. import assetfetch, audit, lifecycle, slack
 from ..db import get_session
 from ..events import broker
 from ..hosts import normalise_host
@@ -46,14 +46,40 @@ def _base(model):
             .join(Project, Project.id == Target.project_id))
 
 
-def _vuln_out(row) -> VulnOut:
+def _vuln_out(row, sweeps: dict | None = None) -> VulnOut:
+    """One finding, with its lifecycle worked out.
+
+    `sweeps` is the (target, scanner) -> last-looked table for the
+    rows being returned, loaded once for the page. Without it every
+    finding answers `unconfirmed`, which is the correct answer to
+    "has anybody looked since" when nobody has consulted the table —
+    not a silent default.
+    """
     v = row[0]
+    sweeps = sweeps if sweeps is not None else {}
+    vd = lifecycle.verdict_for(v, sweeps)
     return VulnOut(
         **{k: getattr(v, k) for k in
            ("id", "target_id", "title", "severity", "status", "triage",
             "port", "protocol", "description", "remediation",
-            "external_id", "created_at", "updated_at")},
-        host=row[1], project_code=row[2])
+            "external_id", "created_at", "updated_at",
+            "scanner", "first_seen_at", "last_seen_at")},
+        host=row[1], project_code=row[2],
+        lifecycle=vd.state, lifecycle_why=vd.why,
+        last_looked_at=vd.last_looked)
+
+
+async def _with_lifecycle(session, rows) -> list[VulnOut]:
+    """A page of finding rows, each with its lifecycle.
+
+    One query for the whole page rather than one per finding: a
+    listing of 20,000 findings would otherwise be 20,000 round trips
+    to answer a question the sweep table holds in one row per host
+    per tool.
+    """
+    sweeps = await lifecycle.sweeps_for_targets(
+        session, [r[0].target_id for r in rows])
+    return [_vuln_out(r, sweeps) for r in rows]
 
 
 def _poc_out(row) -> PocOut:
@@ -81,6 +107,12 @@ async def list_vulns(
     q: str | None = Query(None),
     host: str | None = Query(None),
     severity: str | None = Query(None),
+    state: str | None = Query(
+        None, pattern="^(new|present|resolved|unconfirmed)$",
+        description="Lifecycle: what the most recent scan said about "
+                    "this finding. Applied to the page after it is "
+                    "built, because the value is derived rather than "
+                    "stored — `total` still counts the unfiltered query."),
     sort: str | None = Query("host"),
     order: str = Query("asc", pattern="^(asc|desc)$"),
     limit: int = Query(20000, ge=0),
@@ -109,8 +141,101 @@ async def list_vulns(
         "updated_at": Vuln.updated_at,
     }).order_by(Vuln.id)
     rows, total = await paginate(session, stmt, limit, offset)
-    return Page[VulnOut](items=[_vuln_out(r) for r in rows], total=total,
+    items = await _with_lifecycle(session, rows)
+    if state:
+        # Filtered AFTER the page is built, because the lifecycle is
+        # derived and not a column — there is nothing in SQL to put a
+        # WHERE on. `total` therefore still describes the unfiltered
+        # query, and saying so here is better than reporting a count
+        # that does not match what a second page would return.
+        items = [i for i in items if i.lifecycle == state]
+    return Page[VulnOut](items=items, total=total,
                          limit=limit, offset=offset)
+
+
+class LifecycleOut(BaseModel):
+    """What changed between the last scan and the one before it.
+
+    The answer to the question recurring scanning is bought for.
+    """
+    project_code: str
+    #: state -> how many findings are in it. Every state is present
+    #: even at zero: a summary that omitted `resolved` because
+    #: nothing was resolved would read as a tool that cannot answer
+    #: the question.
+    counts: dict[str, int]
+    #: What each word means, so a report can carry the definition
+    #: next to the number. `resolved` in particular is a claim, and
+    #: a reader is entitled to know exactly what is being claimed.
+    meaning: dict[str, str]
+    #: Per scanner: when it last looked at anything on this project,
+    #: and at how many hosts. The thing that makes the rest
+    #: interpretable -- "0 resolved" from a tool that has not run in
+    #: six weeks is not good news.
+    scanners: list[dict]
+    #: Hosts carrying findings that no tool has revisited. Named
+    #: rather than counted, because the action is to go and scan
+    #: them.
+    unconfirmed_hosts: list[str]
+
+
+@router.get("/vulns/lifecycle", response_model=LifecycleOut)
+async def vuln_lifecycle(
+    project: str = Query(..., description="Engagement code."),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """New since the last scan, still present, resolved — and unknown.
+
+    Four numbers rather than three. The fourth is the one that keeps
+    the other three honest: a finding nothing has looked for since it
+    was last seen is not resolved and not confirmed present, and
+    rolling it into either would be the tool making up an answer.
+
+    Nothing here is stored. The states are derived from the sweep
+    table on every request, so a scan that finds something again
+    revives it with no column to clear first.
+    """
+    pr = await resolve_project(session, project)
+    vis = await visible_project_ids(session, user)
+    if vis is not None and pr.id not in vis:
+        raise HTTPException(404, f"no project {project!r}")
+
+    rows = (await session.execute(
+        select(Vuln, Target.host)
+        .join(Target, Target.id == Vuln.target_id)
+        .where(Target.project_id == pr.id))).all()
+    sweeps = await lifecycle.sweeps_for(session, pr.id)
+
+    counts = dict.fromkeys(lifecycle.STATES, 0)
+    unconfirmed: set[str] = set()
+    for v, host in rows:
+        vd = lifecycle.verdict_for(v, sweeps)
+        counts[vd.state] = counts.get(vd.state, 0) + 1
+        if vd.state == lifecycle.UNCONFIRMED:
+            unconfirmed.add(host)
+
+    # Per scanner, so "0 resolved" can be read correctly. A tool that
+    # has not run since March has not resolved anything and has not
+    # failed to -- it has not looked.
+    by_scanner: dict[str, dict] = {}
+    for (_tid, name), at in sweeps.items():
+        cur = by_scanner.setdefault(name, {"scanner": name, "hosts": 0,
+                                           "last_looked_at": None})
+        cur["hosts"] += 1
+        if cur["last_looked_at"] is None or at > cur["last_looked_at"]:
+            cur["last_looked_at"] = at
+
+    return LifecycleOut(
+        project_code=pr.code,
+        counts=counts,
+        meaning=dict(lifecycle.MEANING),
+        scanners=sorted(by_scanner.values(),
+                        key=lambda r: r["scanner"]),
+        # Capped: this is a prompt to go and scan, and a list of
+        # four thousand hostnames is not one.
+        unconfirmed_hosts=sorted(unconfirmed)[:200],
+    )
 
 
 class VulnOccurrence(BaseModel):
@@ -183,7 +308,8 @@ async def get_vuln(vuln_id: int,
             FindingSecret.vuln_id == vuln.id))).scalar_one_or_none() is not None
 
     return VulnDetail(
-        **_vuln_out(row).model_dump(),
+        **_vuln_out(row, await lifecycle.sweeps_for_targets(
+            session, [vuln.target_id])).model_dump(),
         grouped_by=grouped,
         has_secret=has_secret,
         # `_base` selects (Vuln, Target.host, Project.code) — the second
@@ -735,7 +861,12 @@ async def create_vuln(body: VulnCreate, project: str = Query(...),
         session, pr, severity=v.severity, host=t.host, title=v.title,
         port=v.port, protocol=v.protocol, detail=v.description)
 
-    return _vuln_out((await session.execute(_base(Vuln).where(Vuln.id == v.id))).first())
+    # A finding somebody typed in. No scanner is responsible for
+    # looking for it again, so its lifecycle reads `unconfirmed` and
+    # no sweep will ever close it -- which is the point: a person's
+    # finding is not something a tool gets to resolve.
+    return _vuln_out(
+        (await session.execute(_base(Vuln).where(Vuln.id == v.id))).first())
 
 
 @router.delete("/vulns/{vuln_id}", status_code=204)

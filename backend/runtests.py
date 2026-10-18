@@ -51,6 +51,8 @@ SUITES = [
     ("tests/audittest.py",     TMP / "ms-audit.db"),
     ("tests/vulnfeedtest.py",  TMP / "ms-vuln.db"),
     ("tests/nsetest.py",       TMP / "ms-nse.db"),
+    ("tests/roetest.py",       TMP / "ms-roe.db"),
+    ("tests/lifecycletest.py", TMP / "ms-life.db"),
     ("tests/mcptest.py",       TMP / "ms-mcp.db"),
     ("tests/eventstest.py",    TMP / "ms-events.db"),
     ("tests/automationtest.py", TMP / "ms-auto2.db"),

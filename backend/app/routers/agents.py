@@ -56,6 +56,7 @@ from .. import (
     proxyauth,
     proxyhub,
     proxytunnel,
+    roe,
     scopegate,
 )
 from ..db import get_session
@@ -1109,21 +1110,41 @@ async def _import_names(session: AsyncSession, pr: Project, t: AgentTask,
 
 async def _assert_task_in_scope(session: AsyncSession, pr: Project,
                                 kind: str, args: dict | None) -> None:
-    """Refuse a task that would reach a host this project may not touch.
+    """Refuse a task the authorisation does not cover.
 
     The point of enforcement that matters most. Everything else here
     writes rows; this one puts packets on somebody's network from a
     machine inside it, and the agent cannot be the one to decide — it
     does what it is told, which is the entire design.
+
+    Three questions, from the same document: may we touch these
+    hosts, are we inside the dates, and is this technique permitted.
+    Only the first was ever asked.
     """
     if kind not in SCOPED_KINDS:
         return
+    # Dates and technique ceiling first, because they are facts about
+    # the engagement rather than about this task's arguments: an
+    # operator told "out of scope" for a task queued after the
+    # engagement ended will go and edit the scope list.
+    why = roe.refusal(pr, kind)
+    if why is not None:
+        raise HTTPException(ROE_STATUS, f"a {kind} task on {pr.code} "
+                                        f"was refused: {why}")
     idx = await index_for(session, pr.id)
     if not idx.defined:
         return
     ruling = check_task_targets(idx, args)
     if ruling is not None:
         raise refuse(ruling, f"a {kind} task on {pr.code}")
+
+
+#: A rules-of-engagement refusal is a 403: the operator is not
+#: permitted to do this, as distinct from the 422 an out-of-allowlist
+#: host gets, which is a fact about the request that editing the scope
+#: list would fix. Editing the scope list does not make an expired
+#: engagement current.
+ROE_STATUS = 403
 
 
 #: How many known names to hand a reverse lookup. Each one costs the
@@ -2149,6 +2170,13 @@ async def queue_per_host(session: AsyncSession, pr: Project, kind: str,
     scan is a result about a moment, and declining to look again would
     be a different and much stronger claim than this knows how to make.
     """
+    # The engagement's dates and technique ceiling, once. These are
+    # facts about the engagement, not about a subject, so there is no
+    # subset of the batch that is allowed and the whole call fails.
+    _roe = roe.refusal(pr, kind)
+    if _roe is not None:
+        raise HTTPException(ROE_STATUS,
+                            f"a {kind} task on {pr.code} was refused: {_roe}")
     idx = await index_for(session, pr.id)
     # The caller's OTHER arguments, once, before anything is queued.
     #
@@ -2999,8 +3027,34 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
             hops = await scopegate.cname_hops(session, a.project_id)
         return hops
 
+    # Likewise lazy, and for the same reason: every task this agent
+    # is handed belongs to its own project, so this is one row, but a
+    # heartbeat arrives every few seconds from every ghost and most
+    # of them have nothing to dispatch.
+    engagement_row: Project | None = None
+
+    async def engagement() -> Project | None:
+        nonlocal engagement_row
+        if engagement_row is None:
+            engagement_row = await session.get(Project, a.project_id)
+        return engagement_row
+
     async def scope_refusal(task: AgentTask) -> str | None:
-        if not idx.defined or task.kind not in SCOPED_KINDS:
+        if task.kind not in SCOPED_KINDS:
+            return None
+        # Checked here as well as at queue time, for the same reason
+        # scope is: a task queued inside the window and handed out a
+        # week later runs outside it, and nothing at queue time could
+        # have seen that coming. An engagement that ends with 4,000
+        # tasks queued must stop, not drain.
+        #
+        # Before `idx.defined`, deliberately. A project with no scope
+        # list still has dates and a ceiling, and returning early on
+        # the scope index would skip both.
+        why = roe.refusal(await engagement(), task.kind)
+        if why is not None:
+            return why
+        if not idx.defined:
             return None
         try:
             args = json.loads(task.args) if task.args else {}
@@ -3034,9 +3088,16 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
     def drop(task: AgentTask, why: str) -> None:
         """Fail it rather than skip it. A task silently passed over on
         every poll is one an operator watches stay 'queued' forever
-        with nothing saying why."""
+        with nothing saying why.
+
+        The sentence does not name the scope list any more: this gate
+        now also refuses on the engagement's dates and its technique
+        ceiling, and "refused by the project's scope" sent an
+        operator whose engagement had expired to go and edit the
+        scope list.
+        """
         task.status = "failed"
-        task.error = f"refused by the project's scope at dispatch: {why}"
+        task.error = f"refused by this engagement's rules at dispatch: {why}"
         task.finished_at = datetime.now(UTC)
 
     # What this agent is already holding. Anything here means the last

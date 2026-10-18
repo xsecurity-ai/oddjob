@@ -50,6 +50,18 @@ export interface Project {
   /** What tools that send a User-Agent should call themselves. null
    *  means the agent's own attributable default. */
   user_agent: string | null
+  /** The other two sentences in the authorisation letter. The scope
+   *  list has always been enforced config; these are now too.
+   *
+   *  null at either end means UNBOUNDED — which is what every project
+   *  had before this existed, and is not the same as "starts now". */
+  engagement_starts_at: string | null
+  engagement_ends_at: string | null
+  /** The most intrusive technique this engagement permits:
+   *  read_only | state_changing | destructive. Defaults to
+   *  `destructive`, i.e. everything, because this arrived after
+   *  engagements were already running. */
+  max_impact: string
   /** The token itself is never returned — only whether an override exists. */
   slack_token_set: boolean
   /** Whether a notification posted now would reach a channel: a token
@@ -175,6 +187,39 @@ export interface Vuln {
   description: string | null; remediation: string | null
   external_id: string | null
   created_at: string; updated_at: string
+
+  /** Which tool reported it. null for a finding somebody typed in,
+   *  and for anything imported before the lifecycle existed. */
+  scanner: string | null
+  /** When a scan first reported it and when one last did. NOT
+   *  created_at/updated_at, which move when somebody edits a
+   *  severity or writes a remediation. */
+  first_seen_at: string | null
+  last_seen_at: string | null
+  /** new | present | resolved | unconfirmed.
+   *
+   *  Four, not three. `unconfirmed` means nothing that reports this
+   *  kind of finding has looked since it was last seen — it is a
+   *  real answer and not a hedged `resolved`. */
+  lifecycle: string
+  /** The sentence behind that word. `resolved` is a claim, and a
+   *  reader is entitled to see what it rests on. */
+  lifecycle_why: string | null
+  /** When a tool that reports this kind of finding last looked at
+   *  this host. null means never. */
+  last_looked_at: string | null
+}
+
+/** What changed between the last scan and the one before it. */
+export interface VulnLifecycle {
+  project_code: string
+  counts: Record<string, number>
+  meaning: Record<string, string>
+  /** Per scanner: when it last looked, and at how many hosts. Makes
+   *  the counts readable — "0 resolved" from a tool that has not run
+   *  in six weeks is not good news. */
+  scanners: { scanner: string; hosts: number; last_looked_at: string | null }[]
+  unconfirmed_hosts: string[]
 }
 
 /** One host carrying the same finding. */
@@ -1002,6 +1047,13 @@ export const api = {
   vulns: (project?: string) => req<Page<Vuln>>('/api/vulns' + qs({ project, limit: 100000 })),
   /** One finding, with its full text and every host it appears on. */
   vuln: (id: number) => req<VulnDetail>(`/api/vulns/${id}`),
+  /** New since the last scan, still present, resolved — and unknown.
+   *
+   *  Derived on the server per request from the sweep table, so a
+   *  scan that finds something again revives it with nothing to
+   *  clear first. */
+  vulnLifecycle: (project: string) =>
+    req<VulnLifecycle>('/api/vulns/lifecycle' + qs({ project })),
   /** Exact-match service lookup — distinct from `q`, which is a substring
    *  search across every column and would also match a banner. */
   servicesWhere: (o: { project?: string; port?: number; name?: string }) =>
@@ -1835,9 +1887,29 @@ export const api = {
     auto_reverse_dns?: boolean; auto_nmap?: string; auto_web?: string;
     auto_nuclei?: string
     url_wordlist?: string | null; user_agent?: string | null
+    /** The rules of engagement. ISO-8601 UTC for the dates.
+     *
+     *  `null` here means LEAVE ALONE, not clear — the server skips
+     *  it deliberately, so a form that posts every field cannot
+     *  remove an engagement's expiry on the way past while saving
+     *  something else. Use `clearEngagementWindow`. */
+    engagement_starts_at?: string | null
+    engagement_ends_at?: string | null
+    /** read_only | state_changing | destructive. */
+    max_impact?: string
   }) =>
     req<Project>(`/api/projects/${encodeURIComponent(project)}`,
       { method: 'PATCH', body: JSON.stringify(body) }),
+
+  /** Remove both engagement dates, leaving testing unbounded by date.
+   *
+   *  Its own call because a PATCH cannot do it: taking the bound off
+   *  an authorisation has to be something somebody meant, and the
+   *  server audits who did. */
+  clearEngagementWindow: (project: string) =>
+    req<void>(
+      `/api/projects/${encodeURIComponent(project)}/engagement-window`,
+      { method: 'DELETE' }),
 
   /** Append entries. `included` picks the list; a line's own leading `!`
    *  still wins, because that is how scope documents are pasted.

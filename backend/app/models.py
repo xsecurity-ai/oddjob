@@ -89,6 +89,15 @@ WEB_CHOICES = ("off", "crawl", "gobuster", "both")
 #: stay in automation.py, which is behaviour rather than vocabulary.
 NMAP_CHOICES = ("off", "top100", "full")
 
+#: What `Project.max_impact` may be, here for the same reason: the
+#: schemas validate against it, and importing `app/roe.py` into the
+#: schemas to read one tuple is how an import cycle starts. What each
+#: value MEANS, and which task kinds fall under it, stays in roe.py —
+#: that is behaviour rather than vocabulary.
+#:
+#: Ordered least to most permissive, which is what "at most" means.
+IMPACT_CHOICES = ("read_only", "state_changing", "destructive")
+
 #: What `Project.auto_nuclei` may be, for the same reason as above.
 #:
 #: Two runs rather than one, because the filters that make each
@@ -253,6 +262,43 @@ class Project(Base, TimestampMixin):
     #: some WAFs block outright, and it would be an odd thing to arrive
     #: at by leaving a box blank.
     user_agent: Mapped[str | None] = mapped_column(String(200))
+
+    # ---- the rest of the authorisation letter -----------------------
+    #
+    # The scope list has been enforced config since the beginning.
+    # These two sentences were in the same document and the tool could
+    # not read them, so an engagement that ended on the 14th went on
+    # scanning on the 20th. See `app/roe.py`.
+    #
+    #: When testing is authorised from, and until. NULL at either end
+    #: means unbounded, which is what every project had before these
+    #: existed -- and is why they are nullable rather than defaulted
+    #: to anything.
+    #:
+    #: UTC, like every other timestamp here. A window written in the
+    #: client's local time is a conversion the operator makes once
+    #: when they type it, not one re-derived per task from a timezone
+    #: nobody recorded.
+    engagement_starts_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    engagement_ends_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    #: The most intrusive thing this engagement permits:
+    #: `read_only`, `state_changing` or `destructive`. "No intrusive
+    #: testing" in a letter becomes `read_only` here and the gate
+    #: enforces it, including against the operator who forgot.
+    #:
+    #: server_default, not just default=: a Python-side default
+    #: produces `ADD COLUMN ... NOT NULL` with no DDL default, which
+    #: neither SQLite nor Postgres accepts against a populated table.
+    #:
+    #: Defaults to `destructive` -- everything permitted. That is a
+    #: decision, not an oversight: this arrived after engagements were
+    #: already running, and a default that silently stopped a live
+    #: scan would be a worse failure than the one it prevents.
+    max_impact: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="destructive",
+        default="destructive")
 
     name: Mapped[str] = mapped_column(String(255))
     client: Mapped[str | None] = mapped_column(String(255))
@@ -735,7 +781,69 @@ class Vuln(Base, TimestampMixin):
     # than forking a duplicate. Unique per project, not globally.
     external_id: Mapped[str | None] = mapped_column(String(128), index=True)
 
+    # ---- lifecycle: what happened to this between scans -------------
+    #
+    # See `app/lifecycle.py`. These three answer "is it still there",
+    # which a row that only ever had `created_at` could not: a finding
+    # written in March sat at `open` for ever, through nine re-scans
+    # that no longer saw it.
+    #
+    #: Which tool reported it -- the import format (`nmap`, `nuclei`,
+    #: `burp`), or the in-process scanner's own name. Matched against
+    #: `finding_sweeps.scanner`, so an nmap run cannot resolve a Burp
+    #: finding.
+    #:
+    #: NULL means nobody is responsible for looking again: a finding
+    #: somebody typed in, or one from before this existed. Those are
+    #: never resolved by a sweep — a person's finding is not something
+    #: a tool gets to close.
+    scanner: Mapped[str | None] = mapped_column(String(64), index=True)
+    #: When a scan first reported it, and when one last did. Distinct
+    #: from `created_at`/`updated_at`, which move for reasons that have
+    #: nothing to do with observation — a triage change, a remediation
+    #: being written, a severity edit.
+    first_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True)
+
     target: Mapped[Target] = relationship(back_populates="vulns")
+
+
+class FindingSweep(Base):
+    """One tool looked at one host, and this is when it last did.
+
+    The positive record that makes `resolved` sayable. Without it,
+    the absence of a finding from a new scan means nothing: a nuclei
+    run with a narrower template set, a scan that errored half way
+    and a host that was down all produce the same silence, and none
+    of them is a remediation.
+
+    One row per (target, scanner), holding the LAST time rather than
+    every time. An append log over months of recurring scanning
+    would be enormous and would answer no question this does not --
+    nothing asks "how many times", only "when last".
+    """
+    __tablename__ = "finding_sweeps"
+    __table_args__ = (
+        # The lookup is always (target, scanner), and it is also the
+        # uniqueness: two rows for one pair would mean two answers to
+        # "when did nmap last look at this host".
+        Index("ix_finding_sweeps_target_scanner", "target_id", "scanner",
+              unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Denormalised from the target so a project's whole sweep table
+    #: loads in one query. A report over 4,000 findings would
+    #: otherwise join per finding.
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), index=True)
+    scanner: Mapped[str] = mapped_column(String(64))
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True),
+                                         nullable=False)
 
 
 class FindingSecret(Base, TimestampMixin):

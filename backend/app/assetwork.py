@@ -36,13 +36,14 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import assetfetch, assetlinks, assetscan
+from . import assetfetch, assetlinks, assetscan, lifecycle
 from .hosts import InvalidHost, normalise_host
 from .models import (
     FindingSecret,
@@ -434,22 +435,42 @@ async def scan_project(session: AsyncSession, project_id: int, *,
         out.notes.append(
             "a scanner did not complete, so this batch is NOT marked "
             "scanned and will be retried. Nothing here is a clean result.")
+    # Hosts whose files this batch actually read. Collected even when
+    # a file produced nothing, because that is precisely the case
+    # that lets a finding be called resolved: the scanner ran, the
+    # key is no longer in the bundle, and only a recorded look can
+    # tell that apart from nobody having checked.
+    swept: set[int] = set()
     for f in rows:
         out.scanned += 1
         if ok:
             f.scanned_at = assetfetch.now()
-        findings = found.get(f.id) or []
-        if not findings:
-            continue
         asset = (await session.execute(
             select(WebAsset).where(WebAsset.id == f.asset_id))).scalar_one()
         tid = await _target_for(session, asset)
+        findings = found.get(f.id) or []
         if tid is None:
             out.unattributable += len(findings)
             continue
+        if ok:
+            swept.add(tid)
         for fi in findings:
             if await _file_vuln(session, tid, fi, asset.url):
                 out.findings += 1
+
+    # Only the scanners that were actually PRESENT, and only when the
+    # run completed. A sweep recorded for a scanner that is missing
+    # from the image would resolve findings nothing looked for --
+    # which is not hypothetical here: trufflehog was deleted from the
+    # running container by something outside this codebase and
+    # `available()` answered False for weeks.
+    if ok and swept:
+        now = datetime.now(UTC)
+        live = [n for n, present in assetscan.available().items() if present]
+        for tid in swept:
+            for name in live:
+                await lifecycle.record_sweep(session, project_id, tid,
+                                             name, now)
     # Committed here, after one scanner run rather than one per file:
     # the batch IS the unit of work now, so a partial commit would
     # record files as scanned that the single invocation covered
@@ -656,14 +677,26 @@ async def _file_vuln(session: AsyncSession, target_id: int,
             row.secret, row.detector = f.secret[:8000], f.rule[:128]
             row.asset_url, row.path, row.line = url, where, line
     body = f"{f.detail}\n\n{origin_block(asset_url, f.path, f.line)}"
+    # Seen again, whether or not a field moved. The scanner is the
+    # one that found it (`trufflehog`, `semgrep`), not "assets": a
+    # secret scanner reporting nothing says nothing about whether a
+    # static-analysis finding is still there, and a shared name would
+    # let either resolve the other's work.
+    now = datetime.now(UTC)
     if existing is not None:
         existing.description = body[:8000]
         existing.severity = _severity_floor(f.severity)
+        existing.last_seen_at = now
+        if existing.first_seen_at is None:
+            existing.first_seen_at = now
+        if not existing.scanner:
+            existing.scanner = f.scanner[:64]
         await _keep_secret(existing.id)
         return False
     v = Vuln(target_id=target_id, title=f.title[:1000],
              severity=_severity_floor(f.severity), status="open",
-             description=body[:8000], external_id=eid[:128])
+             description=body[:8000], external_id=eid[:128],
+             scanner=f.scanner[:64], first_seen_at=now, last_seen_at=now)
     session.add(v)
     # Flushed so the row has an id to hang the secret off.
     await session.flush()

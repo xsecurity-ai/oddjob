@@ -44,11 +44,20 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import lifecycle
 from .models import Service, Target, Vuln
+
+#: How these findings are attributed, and what a sweep of them is
+#: matched against. NOT `nmap`: a run without the script arguments
+#: reports no NSE output at all, and counting it as a look would
+#: resolve every finding here the first time somebody ran a plain
+#: port sweep.
+SCANNER = "nse"
 
 
 @dataclass(frozen=True)
@@ -251,13 +260,20 @@ def external_id(port: int | None, protocol: str | None, script: str) -> str:
 
 
 async def record(session: AsyncSession, target_id: int, port: int | None,
-                 protocol: str | None, f: NseFinding) -> bool:
+                 protocol: str | None, f: NseFinding,
+                 seen_at: datetime | None = None) -> bool:
     """Write one finding. -> True if it is new.
 
     The severity is re-asserted on an existing row but the triage is
     not: a person who marked this a false positive has made a
     judgement that a re-run of the same parser does not get to undo.
+
+    `scanner` is `nse` and not `nmap`: an nmap run WITHOUT the script
+    arguments reports no NSE output at all, and letting it count as a
+    look would resolve every anonymous-FTP finding in the estate the
+    first time somebody ran a plain port sweep.
     """
+    seen_at = seen_at or datetime.now(UTC)
     eid = external_id(port, protocol, f.script)
     row = (await session.execute(select(Vuln).where(
         Vuln.target_id == target_id,
@@ -268,23 +284,48 @@ async def record(session: AsyncSession, target_id: int, port: int | None,
     if row is not None:
         row.title, row.severity, row.description = (
             f.title[:1000], f.severity, body[:8000])
+        row.last_seen_at = seen_at
+        if row.first_seen_at is None:
+            row.first_seen_at = seen_at
+        if not row.scanner:
+            row.scanner = SCANNER
         return False
     session.add(Vuln(
         target_id=target_id, title=f.title[:1000], severity=f.severity,
         status="open", port=port, protocol=protocol,
-        description=body[:8000], external_id=eid))
+        description=body[:8000], external_id=eid,
+        scanner=SCANNER, first_seen_at=seen_at, last_seen_at=seen_at))
     return True
 
 
 async def record_service(session: AsyncSession, target_id: int,
                          port: int | None, protocol: str | None,
-                         scripts: dict[str, str] | str | None) -> int:
-    """Every finding in one service's script output. -> how many are new."""
+                         scripts: dict[str, str] | str | None,
+                         seen_at: datetime | None = None) -> int:
+    """Every finding in one service's script output. -> how many are new.
+
+    A service that HAS script output is a service nmap ran scripts
+    against, so this also records the sweep -- including when the
+    output holds nothing worth filing. That is the case that makes
+    `resolved` possible: the scripts ran, the anonymous FTP is gone,
+    and nothing but a recorded look can tell that apart from nobody
+    having checked.
+    """
     blob = scripts if isinstance(scripts, str) else json.dumps(scripts or {})
+    try:
+        looked = bool(json.loads(blob)) if blob else False
+    except (ValueError, TypeError):
+        looked = False
     new = 0
+    seen_at = seen_at or datetime.now(UTC)
     for f in findings_for(blob):
-        if await record(session, target_id, port, protocol, f):
+        if await record(session, target_id, port, protocol, f, seen_at):
             new += 1
+    if looked:
+        t = await session.get(Target, target_id)
+        if t is not None:
+            await lifecycle.record_sweep(session, t.project_id, target_id,
+                                         SCANNER, seen_at)
     return new
 
 

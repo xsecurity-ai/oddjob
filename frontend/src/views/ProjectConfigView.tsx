@@ -13,6 +13,7 @@ import { api, type ScopeApplyResult } from '../lib/api'
 import { DeleteProjectCard } from '../components/DeleteProjectCard'
 import { PillInput } from '../components/PillInput'
 import { ProjectSlackCard } from '../components/ProjectSlackCard'
+import { RulesOfEngagementCard } from '../components/RulesOfEngagementCard'
 import { makeScopePills } from '../components/scopePills'
 import { neon, glow } from '../theme'
 import { ConfigSections } from '../components/ConfigSections'
@@ -407,6 +408,13 @@ export function ProjectConfigView({ project }: { project: string | null }) {
 
       <ProjectSlackCard project={data.project.code} />
         </>) },
+        /* Its own section, next to Scope, because they are the two
+           halves of one document: the scope list says which hosts,
+           this says when and how far. Both are enforced at the same
+           two gates. */
+        { key: 'roe', label: 'Rules of engagement', node: (
+          <RulesOfEngagementCard project={data.project} />
+        ) },
         { key: 'scope', label: 'Scope', node: (<>
       {/* ------------------------------------------------------ scope */}
       <Typography sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 12,

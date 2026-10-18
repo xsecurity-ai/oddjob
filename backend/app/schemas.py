@@ -27,6 +27,7 @@ from pydantic import (
 from . import cloudnames
 from .hosts import InvalidHost, validate_cloud_id, validate_host
 from .models import (
+    IMPACT_CHOICES,
     NMAP_CHOICES,
     NUCLEI_CHOICES,
     PROJECT_STATUSES,
@@ -162,6 +163,33 @@ class ProjectUpdate(BaseModel):
     #: None or "" leaves the agent's own attributable default alone.
     user_agent: str | None = None
 
+    #: The rules of engagement. None means "leave it alone", like
+    #: every other field here, so there is no way to CLEAR a date
+    #: through this -- which is deliberate: removing the end date of
+    #: a live engagement is not something a partial update should do
+    #: by accident. `DELETE /projects/{code}/engagement-window`
+    #: clears them explicitly.
+    engagement_starts_at: datetime | None = None
+    engagement_ends_at: datetime | None = None
+    max_impact: str | None = None
+
+    @field_validator("max_impact")
+    @classmethod
+    def _max_impact(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = (v or "").strip().lower()
+        # Refused rather than coerced. The coercion that would feel
+        # natural here is "unknown means strictest", and it is the
+        # wrong one: an operator who typed `readonly` and got a
+        # project that refuses every scan has no idea why, while an
+        # operator who gets a 422 naming the three values does.
+        if v not in IMPACT_CHOICES:
+            raise ValueError(
+                f"max_impact must be one of {', '.join(IMPACT_CHOICES)} — "
+                f"{v!r} is not a technique ceiling this tool knows")
+        return v
+
     @field_validator("auto_nmap")
     @classmethod
     def _nmap(cls, v: str | None) -> str | None:
@@ -268,6 +296,14 @@ class ProjectOut(ProjectBase):
     auto_web: str = "off"
     url_wordlist: str | None = None
     user_agent: str | None = None
+    #: The authorisation letter's other two sentences. See app/roe.py.
+    #: NULL dates mean unbounded, which is what every project had
+    #: before these existed -- not "starts now".
+    engagement_starts_at: datetime | None = None
+    engagement_ends_at: datetime | None = None
+    #: read_only | state_changing | destructive. The most intrusive
+    #: technique this engagement permits.
+    max_impact: str = "destructive"
     # The token itself is never returned — only whether an override exists.
     slack_token_set: bool = False
     # Whether a notification posted now would reach a channel: a token
@@ -647,6 +683,31 @@ class VulnOut(_VulnFields):
     project_code: str
     created_at: datetime
     updated_at: datetime
+
+    # ---- lifecycle. See app/lifecycle.py ----------------------------
+    #: Which tool reported it. NULL for a finding somebody typed in,
+    #: and for anything imported before this existed.
+    scanner: str | None = None
+    #: When a scan first reported it and when one last did. NOT
+    #: `created_at`/`updated_at`, which move when somebody edits a
+    #: severity or writes a remediation.
+    first_seen_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    #: new | present | resolved | unconfirmed.
+    #:
+    #: Derived per request rather than stored, so a re-scan that finds
+    #: a thing again revives it without anything having to clear a
+    #: column first. `unconfirmed` is a real answer and not a hedge:
+    #: it means nothing that reports this kind of finding has looked
+    #: since it was last seen.
+    lifecycle: str = "unconfirmed"
+    #: The sentence behind that word. A `resolved` shown without one
+    #: is a claim the reader has to take on trust, and it is the
+    #: claim that most deserves not to be.
+    lifecycle_why: str | None = None
+    #: When a tool that reports this kind of finding last looked at
+    #: this host. None means never.
+    last_looked_at: datetime | None = None
 
 
 # ------------------------------------------------------------------ pocs
