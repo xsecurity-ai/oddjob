@@ -1089,5 +1089,147 @@ check("both gates read the kind list from scopegate, not a local copy",
       and "scopegate.RESOLVE_ONLY_KINDS" in _hb)
 
 
+# ============================================================
+# The gate's reach: every argument, not six names
+# ============================================================
+#
+# These are regression tests for a hole, so they are written as the
+# attack rather than as the feature. Each one queued a scan of
+# somebody else's network with every gate reporting "in scope".
+
+print("\n== what the task gate looks at ==")
+from app.scope import classify as _cl  # noqa: E402
+from app.scopegate import (  # noqa: E402
+    TARGET_KEYS,
+    as_host,
+    check_task_targets,
+    targetish,
+    task_hosts,
+)
+
+_out = ScopeIndex([_cl("!203.0.113.0/24", False), _cl("!192.0.2.1", False),
+                   _cl("!2001:db8::/32", False)])
+
+# 1. `extra` is split on whitespace and spliced into argv AHEAD of the
+#    targets, and nmap and masscan take bare targets anywhere on their
+#    command line. A decoy in `targets` used to be the whole check.
+_decoy = {"targets": ["in-scope.acme.example"], "extra": "203.0.113.5"}
+check("a barred host hidden in `extra` is found",
+      "203.0.113.5" in task_hosts(_decoy), task_hosts(_decoy))
+check("...and refuses the task", check_task_targets(_out, _decoy) is not None)
+check("a barred RANGE in `extra` is found too",
+      check_task_targets(
+          _out, {"targets": ["ok.acme.example"],
+                 "extra": "203.0.113.0/24"}) is not None)
+
+# 2. Every runner takes its own native argument name as well as
+#    `targets`, and none of those names were in the old list.
+for _key, _val in (("domains", "203.0.113.5"),       # amass
+                   ("sites", "https://203.0.113.5/"),  # katana
+                   ("queries", "203.0.113.5"),        # nslookup
+                   ("ips", "203.0.113.5"),            # reverse_ip
+                   ("resolvers", "203.0.113.5")):     # amass resolvers
+    check(f"a barred host under `{_key}` is refused",
+          check_task_targets(_out, {_key: [_val]}) is not None, _key)
+
+# A key nobody has thought of yet. The point of inverting the rule is
+# that the next runner is gated the day it is added.
+check("a key that does not exist yet is gated anyway",
+      check_task_targets(
+          _out, {"some_future_arg": "203.0.113.5"}) is not None)
+
+# 3. ...without refusing the flags, ports, rates and template paths
+#    that share the same dict. A gate that barred `-sV` would be
+#    turned off, which is the same as not having one.
+for _ok in ({"extra": "-sV -T4 --top-ports 1000"},
+            {"extra": "-p 80,443,8080-8090"},
+            {"rate": "10000", "timeout": "30"},
+            {"templates": "cves/2021/CVE-2021-44228.yaml"},
+            {"wordlist": "/usr/share/wordlists/common.txt"},
+            {"extra": "-oX - --max-rtt-timeout 200ms"}):
+    check(f"ordinary arguments still pass: {list(_ok.values())[0][:28]}",
+          check_task_targets(_out, _ok) is None, (_ok, task_hosts(_ok)))
+
+check("a flag is not a target", not targetish("-sV"))
+check("a port list is not a target", not targetish("80,443"))
+check("a version is not a target", not targetish("2.4.52"))
+check("a template path is not a target",
+      not targetish("cves/2021/CVE-2021-44228.yaml"))
+check("an address is", targetish("203.0.113.5"))
+check("a CIDR is", targetish("203.0.113.0/24"))
+check("a URL is", targetish("https://acme.example/x"))
+check("a dotted name is", targetish("www.acme.example"))
+
+# Under a declared target key the token counts whatever it looks
+# like: `localhost` is a host even though nothing about the string
+# says so.
+check("a bare name under `targets` is still a target",
+      task_hosts({"targets": ["localhost"]}) == ["localhost"])
+check("...but not under an arbitrary key, where it is just a word",
+      task_hosts({"mode": "localhost"}) == [])
+check("every declared key is still read",
+      all(task_hosts({k: "x.acme.example"}) == ["x.acme.example"]
+          for k in TARGET_KEYS))
+
+# 4. Nested objects. No runner uses this shape today; a gate that
+#    stops at the first level is a gate with a documented way round.
+check("a host nested one level down is found",
+      check_task_targets(_out, {"opts": {"host": "203.0.113.5"}}) is not None)
+
+print("\n== addresses written the other way ==")
+# An IPv4 address spelled as IPv6 is the same machine and the same
+# socket -- Go's net.Dial opens the identical TCP connection -- but
+# `ipaddress` calls it version 6, and the index buckets by version.
+# The out-list entry never met it.
+for _mapped, _plain in (("::ffff:192.0.2.1", "192.0.2.1"),
+                        ("::ffff:c000:201", "192.0.2.1"),
+                        ("[::ffff:192.0.2.1]", "192.0.2.1")):
+    _r = _out.check(_mapped)
+    check(f"{_mapped} is barred, same as {_plain}", not _r.allowed, _r.reason)
+check("...and the refusal names the entry that did it",
+      "192.0.2.1" in (_out.check("::ffff:192.0.2.1").reason or ""))
+# 6to4 and Teredo carry a v4 address but are NOT the same socket, so
+# they are deliberately left as what they are.
+check("a 6to4 address is not unwrapped into its v4 payload",
+      _out.check("2002:c000:0201::1").allowed)
+
+# A bracketed v6 literal carrying a port. `strip("[]")` only touches
+# the ends, so stripping last left `2001:db8::1]:443` -- which parses
+# as no address at all, so the ADDRESS list was never consulted and a
+# barred host walked through as an unknown name.
+for _form in ("[2001:db8::1]:443", "https://[2001:db8::1]:8443/",
+              "[2001:db8::1]", "2001:db8::1"):
+    check(f"{_form} reaches the out-of-scope list",
+          check_task_targets(_out, {"targets": [_form]}) is not None, _form)
+check("a bracketed literal keeps its address",
+      as_host("[2001:db8::1]:443") == "2001:db8::1")
+check("userinfo does not hide the host",
+      as_host("https://user@203.0.113.5/x") == "203.0.113.5")
+check("...so it does not get past the gate either",
+      check_task_targets(
+          _out, {"targets": ["https://user@203.0.113.5/x"]}) is not None)
+
+print("\n== the carve-out answers for every argument ==")
+# The heartbeat carve-out re-admits an nslookup of a CNAME hop. It
+# read `targets` while the refusal it was overriding could have come
+# from any key, so a task with one genuine hop there and anything at
+# all under `host` was re-admitted on the strength of the hop -- a
+# lookup of a name the carve-out never looked at.
+_hb2 = _inspect.getsource(_ag.heartbeat)
+check("the carve-out reads the same keys the refusal came from",
+      "scopegate.task_hosts(args" in _hb2,
+      "carve-out still reads args['targets'] alone")
+check("...and not `targets` alone",
+      'args.get("targets") or []' not in _hb2)
+
+# The bulk queue path checked the subject and nothing else: every
+# other key the caller sent survived into the stored args unexamined.
+_q2 = _inspect.getsource(_ag.queue_per_host)
+check("the bulk queue path checks the caller's other arguments",
+      "check_task_targets" in _q2, "queue_per_host never calls it")
+check("...before anything is queued", _q2.index("check_task_targets")
+      < _q2.index("for raw in subjects:"))
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 raise SystemExit(1 if fail else 0)

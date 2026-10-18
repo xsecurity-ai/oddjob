@@ -2143,6 +2143,26 @@ async def queue_per_host(session: AsyncSession, pr: Project, kind: str,
     be a different and much stronger claim than this knows how to make.
     """
     idx = await index_for(session, pr.id)
+    # The caller's OTHER arguments, once, before anything is queued.
+    #
+    # The loop below checks each subject and nothing else, and the
+    # subject only ever replaces `targets` in the stored args --
+    # `{**args, "targets": [subject]}`. Everything else the caller
+    # sent went through untouched and unexamined, and `extra` is
+    # spliced onto the scanner's command line ahead of the targets,
+    # where nmap and masscan accept bare targets perfectly happily.
+    # A decoy under `targets` and a range under `extra` was a full
+    # scan of anything on the internet with every gate reporting
+    # "in scope".
+    #
+    # The whole call fails rather than a subject: these arguments
+    # apply to every task the batch would create, so there is no
+    # subset of it that is allowed.
+    _rest = {k: v for k, v in (args or {}).items()
+             if k not in scopegate.TARGET_KEYS}
+    _bad = scopegate.check_task_targets(idx, _rest) if idx.defined else None
+    if _bad is not None:
+        raise scopegate.refuse(_bad, "a task argument")
     # Loaded once for the batch, and only for the kind that can use
     # it. See the carve-out at the foot of scopegate.py: a DNS
     # lookup of a hop an in-scope host's own CNAME points at is
@@ -2986,8 +3006,17 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
         # DNS lookup of a name an in-scope host's own CNAME points
         # at -- same rule, same single kind, same closed candidate
         # set as at queue time.
+        #
+        # The carve-out must answer for EVERY host in the args, not
+        # only the ones under `targets`. It used to read `targets`
+        # alone while the refusal it was overriding could have come
+        # from any key, so a task carrying one genuine hop there and
+        # anything at all under `host` was re-admitted on the
+        # strength of the hop -- a lookup of a name the carve-out
+        # never examined. `task_hosts` is the same reader the refusal
+        # came out of, which is the property that makes the two agree.
         if task.kind in scopegate.RESOLVE_ONLY_KINDS:
-            subjects = (args.get("targets") or []) if isinstance(args, dict) else []
+            subjects = scopegate.task_hosts(args if isinstance(args, dict) else {})
             known = await hop_set()
             if subjects and all(
                     scopegate.resolvable_hop(task.kind, str(t), known)
@@ -3816,11 +3845,17 @@ async def revoke_grant(agent_id: int, grant_id: int,
                        pr: Project = Depends(require_project("admin")),
                        user: User = Depends(get_current_user),
                        session: AsyncSession = Depends(get_session)):
-    """Revoke a credential. It stops working on the next connection.
+    """Revoke a credential, and cut what it is already holding.
 
     A timestamp rather than a delete, so the audit trail still has
     something to point at when somebody asks what that credential
     reached.
+
+    `decide` runs once per CONNECT, so a timestamp alone only stops
+    the NEXT connection. A credential revoked because it leaked would
+    have gone on relaying over every tunnel it had already
+    established -- indefinitely, since a CONNECT has no expiry of its
+    own. The live streams go too.
     """
     g = (await session.execute(
         select(ProxyGrant)
@@ -3831,9 +3866,15 @@ async def revoke_grant(agent_id: int, grant_id: int,
         raise HTTPException(404, "no such credential")
     if g.revoked_at is None:
         g.revoked_at = datetime.now(UTC)
+        # Counted and said, because "revoked" and "revoked, and three
+        # connections were cut" are different facts and the second is
+        # the one that answers "was it still being used".
+        cut = proxyhub.hub.drop_grant(g.agent_id, g.id)
         await audit.record(session, "ui", "ghost.proxy.revoke", user=user,
                            project_code=pr.code,
-                           detail=f"revoked proxy credential {g.username}")
+                           detail=f"revoked proxy credential {g.username}"
+                                  + (f"; cut {cut} live connection(s)"
+                                     if cut else ""))
     await session.commit()
     await session.refresh(g)
     return _grant_out(g)

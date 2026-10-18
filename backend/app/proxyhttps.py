@@ -104,7 +104,7 @@ async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
             await w.drain()
             return
 
-        stream, why = await tunnel.open(req.host, req.port)
+        stream, why = await tunnel.open(req.host, req.port, grant_id=d.grant_id)
         if stream is None:
             w.write(connect.refused(
                 f"the Ghost could not reach {req.host}:{req.port} — {why}",

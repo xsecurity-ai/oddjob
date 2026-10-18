@@ -99,7 +99,19 @@ async def decide(session: AsyncSession, username: str, password: str,
     """
     grant, why = await resolve(session, username, password)
     if grant is None:
-        return Decision(False, NOT_ALLOWED, "refused_auth", why)
+        # The username tried goes in the reason; the password never
+        # does. Without the username "somebody failed to authenticate"
+        # cannot be told apart from "somebody is working through
+        # guesses" or "a real issued credential is being hammered",
+        # and those three call for three different responses. The
+        # username is already written in the audit line that issued
+        # it, so it is not the half being protected here.
+        #
+        # Attacker-controlled, so it is clipped and quoted rather
+        # than pasted into a sentence that reads as our own.
+        u = (username or "").strip()[:64]
+        return Decision(False, NOT_ALLOWED, "refused_auth",
+                        f"{why} (tried {u!r})" if u else why)
 
     agent = await session.get(Agent, grant.agent_id)
     if agent is None:
@@ -138,11 +150,18 @@ async def record(session: AsyncSession, d: Decision, host: str,
     asked for it and no body or byte content is kept -- the traffic is
     the client's and does not belong in this database.
     """
-    if d.project_id is None:
-        # A credential nobody could resolve has no engagement to file
-        # the attempt against. Deliberately not invented: a row on the
-        # wrong project is worse than no row.
-        return
+    # A credential nobody could resolve has no engagement to file the
+    # attempt against, and the project stays NULL rather than being
+    # invented -- a row on the wrong project is worse than no row.
+    #
+    # But the row is written. This used to return here, which meant
+    # every failed credential attempt against the internet-facing TLS
+    # port left nothing behind at all: a sustained brute force
+    # produced zero rows in the one table somebody asking "did
+    # anybody try" would look in, while this module's own docstring
+    # said refusals were the more interesting half. `refused_command`
+    # went the same way, so an unauthenticated client probing BIND
+    # and UDP-ASSOCIATE was invisible too.
     session.add(ProxyConnection(
         project_id=d.project_id, agent_id=d.agent_id, grant_id=d.grant_id,
         host=host[:253], port=port, outcome=d.outcome,
