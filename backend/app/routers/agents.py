@@ -3561,6 +3561,15 @@ async def submit_result(task_id: int, body: ResultIn,
             res = await _run(session, pr, t.output, t.import_as,
                              f"ghost:{a.name}", mode="strict", decisions={})
             imported = json.loads(res.model_dump_json())
+            # Said in the log as well as carried in the result. This
+            # is the unattended path -- a nuclei template release
+            # changes the JSON shape, the tool still exits 0, the
+            # import still succeeds, and the standing order goes on
+            # reporting a clean estate to nobody in particular. The
+            # result object is only read by somebody who opens that
+            # task.
+            if res.parsed_nothing:
+                log.warning("task %s: %s", t.id, res.parsed_nothing)
             t.import_result = json.dumps(imported)
             await session.commit()
         except HTTPException as e:

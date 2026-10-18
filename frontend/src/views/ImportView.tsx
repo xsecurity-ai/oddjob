@@ -476,7 +476,11 @@ function Summary({ r }: { r: ImportResult }) {
       <Stack direction="row" spacing={1} useFlexGap sx={{
         flexWrap: "wrap"
       }}>
-        {shown.length === 0 && (
+        {/* Only when the file was actually read. "Everything here
+            was already recorded" is a claim about the contents, and
+            an importer that understood none of them is in no
+            position to make it. */}
+        {shown.length === 0 && !r.parsed_nothing && (
           <Typography sx={{ fontSize: 11.5, color: neon.muted }}>
             Nothing new — everything in this file was already recorded.
           </Typography>
@@ -495,6 +499,11 @@ function Summary({ r }: { r: ImportResult }) {
           {mapped > 0 && Object.entries(r.mapped_hosts)
             .map(([from, to]) => `${from} → ${to}`).join(', ') + '.'}
         </Typography>
+      )}
+      {r.parsed_nothing && (
+        <Alert severity="error" variant="outlined" sx={{ mt: 1.2, fontSize: 11 }}>
+          {r.parsed_nothing}
+        </Alert>
       )}
       {r.errors.length > 0 && (
         <Alert severity="warning" variant="outlined" sx={{ mt: 1.2, fontSize: 11 }}>
