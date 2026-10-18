@@ -28,6 +28,44 @@ var kindMemMB = map[string]int{
 	// Measured at 438 MB resident on one of our ghosts, which is
 	// where `taskMemMB`'s "safe side of amass" figure came from.
 	"amass": 512,
+	// A headless Chromium, which is the heaviest thing this agent
+	// can be asked to do.
+	//
+	// Measured, and the measurement is a FLOOR rather than the
+	// figure. This agent's own runner, capturing a page inside the
+	// ghost image with the same `--cap-drop=ALL` the fleet runs
+	// with, read from the container's `memory.peak`:
+	//
+	//	1 GB limit   430 MB peak
+	//	384 MB limit 204 MB peak, capture fine
+	//	256 MB limit 204 MB peak, capture fine
+	//
+	// The first number is mostly reclaimable page cache -- chromium
+	// is 376 MB of files and the cgroup counts them as they are read
+	// -- which is why squeezing the limit does not break the
+	// capture. The working set for that page is about 200 MB.
+	//
+	// The figure is 512 because 200 MB is the cheapest possible case
+	// and a real engagement is not it. The page in that test loaded
+	// nothing: no images, no fonts, no third-party scripts, no
+	// video, and a renderer's memory is almost entirely the page's.
+	// A single-page application on a client's estate routinely costs
+	// several times a static page, and the agent is holding up to
+	// 24 MB of PNG on top of it, which the JSON encode before
+	// posting transiently doubles.
+	//
+	// Erring high is the cheap direction here. Too high and a 1 GB
+	// box is not offered screenshots it could probably have taken;
+	// too low and the OOM killer takes the agent, with it the scan
+	// it was running, and -- as this fleet has already seen once --
+	// the host's ability to complete an SSH banner exchange.
+	//
+	// So: measured on a page built to be cheap, and sized for one
+	// that is not. What would replace the estimate with a figure is
+	// the same thing that produced the nuclei and amass numbers --
+	// a capture of a real client-estate page on a real ghost, watched
+	// while it runs.
+	"screenshot": 512,
 }
 
 // Unaffordable lists the task kinds this host cannot currently hold.

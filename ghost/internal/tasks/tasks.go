@@ -61,7 +61,12 @@ var Runners = map[string]Runner{
 	// name nothing has ever used is how a tool nobody can run stays
 	// installed on every agent.
 	"katana": runKatana,
-	"nuclei": runNuclei,
+	// A picture of the page, in a real browser. The only task here
+	// that reports what a page LOOKS like rather than what it said,
+	// and the heaviest thing this agent runs -- see screenshot.go for
+	// both, and capacity.kindMemMB for what it costs.
+	"screenshot": runScreenshot,
+	"nuclei":     runNuclei,
 	// Same runner, same binary. A separate KIND so that the server
 	// can tell "this URL has had the CVE templates" apart from "this
 	// URL has been fingerprinted" -- it dedupes on (kind, subject),

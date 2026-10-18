@@ -255,6 +255,14 @@ TASK_KINDS: dict[str, str | None] = {
     #: reads `web_addresses` and nothing wrote there. It failed
     #: silently because nothing was asked to do anything.
     "katana": "crawl",
+    #: A picture of the page, taken by chromium on the ghost.
+    #:
+    #: Imported as `screenshot`, which is the only importer that
+    #: writes bytes rather than text: the agent sends base64 and the
+    #: importer decodes it once. A `None` here would mean the images
+    #: were carried across the network and then thrown away, which is
+    #: the exact failure `katana` and `gobuster` had above.
+    "screenshot": "screenshot",
     "nuclei": "nuclei",
     #: The same binary and the same importer, as its own kind.
     #:
@@ -931,7 +939,7 @@ _UNSET = object()
 #: nslookup and reverse_ip are DNS. Listing them would mean passing an
 #: argument the runner ignores, which reads to anyone later as though
 #: the setting applies there when it does not.
-UA_KINDS = ("nmap", "gobuster", "katana", "nuclei", "httpx")
+UA_KINDS = ("nmap", "gobuster", "katana", "nuclei", "httpx", "screenshot")
 
 
 async def _project_ua(session: AsyncSession, project_id: int) -> str | None:
@@ -3789,6 +3797,20 @@ async def submit_result(task_id: int, body: ResultIn,
             if res.parsed_nothing:
                 log.warning("task %s: %s", t.id, res.parsed_nothing)
             t.import_result = json.dumps(imported)
+            if t.import_as == "screenshot":
+                # The pictures are in `web_screenshots` now, so the
+                # base64 copy sitting on this row is a SECOND copy of
+                # every one of them -- the larger one, because base64
+                # is 4/3 of the bytes, and the one nothing reads.
+                # Across an estate photographed a page at a time it
+                # would be the biggest thing in the database.
+                #
+                # Only the payload goes. The URLs, statuses, titles,
+                # digests and the list of pages that could not be
+                # photographed all stay, so the task still says
+                # exactly what it did.
+                from ..importers import screenshot as _shot
+                t.output = _shot.without_images(t.output)
             await session.commit()
         except HTTPException as e:
             # The result is kept either way. A scan that ran and could

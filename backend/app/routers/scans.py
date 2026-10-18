@@ -45,6 +45,7 @@ from ..importers.model import (
     ParsedHost,
     ParsedImplant,
     ParsedScan,
+    ParsedScreenshot,
     ParsedService,
     ParsedVuln,
     ParsedWebAddress,
@@ -61,6 +62,7 @@ from ..models import (
     User,
     Vuln,
     WebAddress,
+    WebScreenshot,
     implies_alive,
 )
 from ..portcoverage import parse_ports
@@ -140,6 +142,12 @@ class ImportResult(BaseModel):
     implants_updated: int = 0
     urls_created: int = 0
     urls_updated: int = 0
+    #: Pictures of pages, stored and replaced. Counted apart from the
+    #: URLs because a screenshot is one per URL and a URL row is one
+    #: per exchange -- the two numbers do not line up and showing
+    #: them as one would invite the reader to think they should.
+    screenshots_created: int = 0
+    screenshots_updated: int = 0
     hosts_flagged: int = Field(0, description="Targets newly marked compromised")
     #: Ports dropped because their host answers indiscriminately. Not
     #: an error and not silence: the number is what tells an operator
@@ -714,6 +722,72 @@ async def _weburl(session: AsyncSession, target: Target, pw: ParsedWebAddress,
     return None
 
 
+async def _screenshot(session: AsyncSession, target: Target,
+                      ps: ParsedScreenshot, scan: ParsedScan,
+                      res: ImportResult) -> bool:
+    """One picture of one URL. -> whether it was stored.
+
+    Keyed on `(target, url_hash)`, which is NOT how `web_addresses` is
+    keyed, and the difference is the point. A URL row is one captured
+    exchange, because the same endpoint probed ten ways is ten pieces
+    of evidence. A picture is not evidence of that kind: ten pictures
+    of one URL are ten copies of one page, and across an estate that
+    has reached 51,000 URLs that is the difference between a database
+    and a problem. So a re-shoot REPLACES, and `captured_at` says how
+    old the one on file is.
+    """
+    try:
+        u = parse_url(ps.url, base_host=ps.host or target.host)
+    except BadUrl as e:
+        res.errors.append(str(e))
+        return False
+    key = url_key(u.url)
+
+    # The address row this is a picture of, when there is one. The
+    # oldest matching row rather than the newest: `web_addresses` is
+    # keyed on the exchange, so one URL can have many, and the first
+    # is the one the rest were found beside. It is a convenience for
+    # the viewer, never the identity -- a screenshot of a URL this
+    # project has never otherwise recorded is still worth keeping.
+    wa_id = (await session.execute(
+        select(WebAddress.id)
+        .where(WebAddress.target_id == target.id,
+               WebAddress.url_hash == key)
+        .order_by(WebAddress.id.asc()).limit(1))).scalar_one_or_none()
+
+    row = (await session.execute(
+        select(WebScreenshot).where(
+            WebScreenshot.target_id == target.id,
+            WebScreenshot.url_hash == key))).scalar_one_or_none()
+    if row is None:
+        session.add(WebScreenshot(
+            target_id=target.id, web_address_id=wa_id,
+            url=u.url, url_hash=key, final_url=ps.final_url,
+            status_code=ps.status_code, title=ps.title,
+            content_type=ps.content_type or "image/png",
+            image=ps.image, bytes=len(ps.image), sha256=ps.sha256,
+            width=ps.width, height=ps.height,
+            captured_at=ps.captured_at, sources=scan.tool))
+        res.screenshots_created += 1
+        return True
+
+    row.image = ps.image
+    row.bytes = len(ps.image)
+    row.sha256 = ps.sha256
+    row.content_type = ps.content_type or "image/png"
+    row.captured_at = ps.captured_at
+    row.web_address_id = wa_id or row.web_address_id
+    # The metadata is replaced rather than merged, unlike a URL row.
+    # It describes THIS picture: keeping the old title beside the new
+    # image would describe neither.
+    row.final_url, row.status_code, row.title = (
+        ps.final_url, ps.status_code, ps.title)
+    row.width, row.height = ps.width, ps.height
+    row.sources = merge_sources(row.sources, scan.tool)
+    res.screenshots_updated += 1
+    return True
+
+
 # ------------------------------------------------------- co-tenancy
 #: Most co-tenants one address may propagate to in a single import.
 #:
@@ -966,6 +1040,25 @@ async def ingest(session: AsyncSession, project: Project, scan: ParsedScan,
     # not become an address in the estate.
     if scan.assets:
         await _assets(session, project, scan, res, resolve)
+
+    # Pictures of pages. After the web addresses deliberately: the row
+    # a picture belongs to may have been created three lines ago, and
+    # linking it needs an id, which needs a flush.
+    if scan.screenshots:
+        await session.flush()
+        shot_hosts: dict[str, int] = {}
+        for ps in scan.screenshots:
+            t = await resolve(ps.host) if ps.host else None
+            if t is None:
+                continue
+            if await _screenshot(session, t, ps, scan, res):
+                shot_hosts[t.host] = shot_hosts.get(t.host, 0) + 1
+        for hostname, n in shot_hosts.items():
+            t = targets.get(hostname)
+            if t is not None:
+                await record(session, t.id, "web",
+                             f"{scan.label}: {n} page(s) photographed",
+                             actor=scan.tool, source=source)
 
     for pn in scan.notes:
         t = await resolve(pn.host)
