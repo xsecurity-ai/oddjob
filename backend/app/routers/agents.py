@@ -263,6 +263,12 @@ TASK_KINDS: dict[str, str | None] = {
     #: was never queued for it at all. Two kinds dedupe
     #: independently, which is what `auto_nuclei: both` needs.
     "nuclei_tech": "nuclei",
+    #: nuclei again, with `-id` naming only the CVEs the local corpus
+    #: already matched to a service on that host. Its own kind for the
+    #: same reason `nuclei_tech` is: dedupe is per (kind, subject), so
+    #: sharing one would mean a confirmation run marked the URL done
+    #: and the discovery run never happened.
+    "nuclei_confirm": "nuclei",
     "httpx": "httpx",
     "nslookup": None,
     "reverse_ip": None,
@@ -845,6 +851,7 @@ KIND_TOOL: dict[str, str] = {
     # which is exactly what the note above this map warns against.
     "nuclei": "nuclei",
     "nuclei_tech": "nuclei",
+    "nuclei_confirm": "nuclei",
     "httpx": "httpx",
 }
 
