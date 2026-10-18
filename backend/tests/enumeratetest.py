@@ -1284,6 +1284,82 @@ st, r = call("/api/domains/candidates/ct?project=CTP", "POST",
              {"roots": []}, token=admin)
 check("naming no root is a 400, not a silent empty pass", st == 400, st)
 
+# =============================== archived URLs, the same gate
+# The same decision as CT and so the same shape: with
+# `archive.enabled` off -- the default, and the state every test
+# database is in -- `lookup` raises before it can reach a third
+# party. That property is the whole point of the module.
+print("\n== archived-URL lookups refuse before they reach the wire ==")
+st, r = call("/api/domains/candidates/archived-urls?project=CTP", "POST",
+             {"roots": ["acme.example"]}, token=admin)
+check("a lookup with the gate shut is refused, not attempted",
+      st == 409, f"{st} {r}")
+check("...and says what enabling it would send",
+      "third party" in json.dumps(r), r)
+st, r = call("/api/domains/candidates/archived-urls?project=CTP", "POST",
+             {"roots": []}, token=admin)
+check("naming no root is a 400, not a silent empty pass", st == 400, st)
+
+from app import archived as _ar  # noqa: E402
+
+check("archive lookups are off in a database nobody configured",
+      not _ar.enabled({}))
+check("...and stay off when only a source is named",
+      not _ar.enabled({"archive.source": "web.archive.org"}))
+check("a source is not defaulted: choosing it IS the decision",
+      _ar.source_url({"archive.enabled": True}) is None)
+check("...and an unknown source is not accepted",
+      _ar.source_url({"archive.enabled": True,
+                      "archive.source": "example.invalid"}) is None)
+
+# What comes back is a proposal and is filtered before it is one.
+_CDX = [["original"],
+        ["https://app.acme.example/admin/"],
+        ["https://app.acme.example/api/v1/users?id=1"],
+        ["https://app.acme.example/logo.png"],
+        ["https://evil.example/pwn"],
+        ["not a url at all"]]
+_urls, _skipped, _trunc = _ar.clean(_CDX, "acme.example")
+check("the CDX header row is not a result",
+      "original" not in json.dumps(_urls), _urls)
+check("a path on the domain asked about is kept",
+      "https://app.acme.example/admin/" in _urls, _urls)
+# `?id=1` and `?id=2` are the same endpoint reached two ways, and
+# the parameter names are the point.
+check("...including its query string",
+      any("?id=1" in u for u in _urls), _urls)
+# An archive answering with somebody else's host must not become a
+# target proposal.
+check("a host that is not under the domain asked about is dropped",
+      not any("evil.example" in u for u in _urls), _urls)
+check("a static asset is dropped, so the useful path is not buried",
+      not any("logo.png" in u for u in _urls), _urls)
+check("...and the drops are counted rather than hidden",
+      _skipped == 3, _skipped)
+check("nothing was truncated at this size", _trunc is False)
+
+_US = {"results": [{"page": {"url": "https://api.acme.example/v1/x"}},
+                   {"page": {"url": "https://other.example/y"}}]}
+check("urlscan's own shape is read too",
+      _ar.clean(_US, "acme.example")[0] == ["https://api.acme.example/v1/x"],
+      _ar.clean(_US, "acme.example"))
+check("an answer that is neither shape yields nothing, not a crash",
+      _ar.clean("garbage", "acme.example") == ([], 0, False))
+
+# These must never restart the crawl cycle. `crawl_seeds` keys on
+# `sources ILIKE '%gobuster%'`, so `archive` is outside it by
+# construction -- asserted because the cost of getting it wrong was
+# 1,109 queued tasks becoming 97,959.
+import inspect as _in2  # noqa: E402
+
+from app.routers import domains as _dm  # noqa: E402
+
+_src = _in2.getsource(_dm.from_archive)
+check("an archived URL is recorded with no status, because nothing "
+      "fetched it", "status_code=None" in _src)
+check("...and is sourced as `archive`, which no crawl seed matches",
+      'sources=f"archive:' in _src, )
+
 # The shape that produced a 500 on a live engagement. `Ruling` carries
 # `reason`; the handler read `.why`, which only executes when a name
 # is actually REFUSED -- so every lookup that proposed nothing out of

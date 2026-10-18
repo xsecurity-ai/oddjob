@@ -174,6 +174,29 @@ SPEC = [
              "are never turned into targets on their own — a shared or "
              "wildcard certificate names other people's hosts, and a name "
              "in a log is not evidence anybody agreed to be scanned."},
+    {"key": "archive.enabled", "group": "Site",
+     "label": "Archived-URL lookups", "type": "bool",
+     "default": False,
+     "help": "Finds paths a site used to serve, from public web archives — "
+             "the admin panel that was unlinked rather than deleted, the "
+             "API version nobody retired. gobuster guesses paths, katana "
+             "follows links and httpx confirms them; all three need the "
+             "path to be reachable now, so none of them can see these. "
+             "READ THIS BEFORE ENABLING: like Certificate Transparency, a "
+             "lookup SENDS THE CLIENT'S DOMAIN NAME to a third party, "
+             "which logs it. That is customer data leaving for an external "
+             "service and needs the same approval any other vendor would — "
+             "an engagement signoff covers testing the client, not "
+             "onboarding a supplier. Off until somebody decides "
+             "otherwise."},
+    {"key": "archive.source", "group": "Site",
+     "label": "Archive source", "type": "text", "default": "",
+     "help": "Which third party the domain is sent to. Deliberately has no "
+             "default: choosing it IS the decision. Currently supported: "
+             "web.archive.org, urlscan.io. URLs found are reported for a "
+             "person to rule on and are never crawled on their own — an "
+             "archive records what a crawler saw, not what anybody "
+             "authorised, and a path that existed in 2019 may be gone."},
     {"key": "audit.retain_days", "group": "Site",
      "label": "Audit retention (days)", "type": "number", "default": 7,
      "help": "How long /audit/<type>/<format> keeps entries, where type is "
