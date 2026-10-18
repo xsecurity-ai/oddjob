@@ -43,6 +43,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Table,
     Text,
@@ -1841,6 +1842,44 @@ class DomainCandidate(Base, TimestampMixin):
 #: queued -> running -> ready | failed. Nothing moves backwards.
 REPORT_STATUSES = ("queued", "running", "ready", "failed")
 REPORT_KINDS = ("executive", "findings", "full")
+
+
+class ReportRender(Base):
+    """One report, rendered to one format, kept.
+
+    Rendering a report is seconds of work over a document that can
+    run to twelve megabytes, and the download endpoint used to do it
+    on EVERY request -- so the same bytes were built again for every
+    click, every retry and every person who opened the link.
+
+    The generator was already rendering the PDF to measure
+    `size_bytes` and throwing the result away. This keeps it, and
+    renders the other format beside it, so a download is a byte read
+    rather than a build.
+
+    `data` is LargeBinary and not Text on purpose: a PDF is binary,
+    it contains NUL, and Postgres rejects NUL in a text column while
+    SQLite accepts it happily. That difference has bitten this
+    project before.
+
+    Rows are disposable. Deleting one costs a re-render on the next
+    download and nothing else, which is why there is no migration
+    backfilling them -- an old report renders once more, the first
+    time somebody asks for it, and is fast from then on.
+    """
+    __tablename__ = "report_renders"
+    __table_args__ = (
+        UniqueConstraint("report_id", "fmt", name="uq_report_render"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_id: Mapped[int] = mapped_column(
+        ForeignKey("reports.id", ondelete="CASCADE"), index=True)
+    fmt: Mapped[str] = mapped_column(String(8))
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    bytes: Mapped[int] = mapped_column(Integer)
+    rendered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False)
 
 
 class Report(Base, TimestampMixin):
