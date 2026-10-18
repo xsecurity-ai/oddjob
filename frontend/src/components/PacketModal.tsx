@@ -9,7 +9,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy'
 import LaunchIcon from '@mui/icons-material/Launch'
 import WrapIcon from '@mui/icons-material/WrapText'
 import SendIcon from '@mui/icons-material/Send'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { neon, glow } from '../theme'
 
@@ -135,6 +135,60 @@ function Rendered({ raw }: { raw: string | null | undefined }) {
   )
 }
 
+/** The request, open for editing, in the pane it already lived in.
+ *
+ *  Reaching the editor used to mean closing this, finding the row
+ *  again and using its context menu — a lot of steps between reading
+ *  a response and the thought it just gave you.
+ *
+ *  Raw text and not a form. A replay whose request was reassembled
+ *  from parsed fields is a different request: header order, casing,
+ *  duplicate headers and a deliberately malformed line are all
+ *  things somebody resends a packet IN ORDER to test, and a form
+ *  would normalise every one of them away.
+ */
+function EditablePane({ value, onChange, error }: {
+  value: string
+  onChange: (v: string) => void
+  error: Error | null
+}) {
+  return (
+    <Box sx={{
+      flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column',
+      border: `1px solid ${alpha(neon.pink, 0.6)}`, borderRadius: 1,
+      background: alpha(neon.bgDeep, 0.55), overflow: 'hidden',
+    }}>
+      <Stack direction="row" spacing={1}
+        sx={{ alignItems: 'center', px: 1, py: 0.5,
+              borderBottom: `1px solid ${alpha(neon.pink, 0.35)}` }}>
+        <Typography sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 10,
+                          letterSpacing: '0.14em', color: neon.pink }}>
+          REQUEST · EDITING
+        </Typography>
+        <Typography sx={{ fontSize: 10, color: alpha(neon.muted, 0.85) }}>
+          sent exactly as written
+        </Typography>
+      </Stack>
+      <Box component="textarea" value={value} spellCheck={false}
+        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) =>
+          onChange(e.target.value)}
+        sx={{
+          flex: 1, minHeight: 0, width: '100%', resize: 'none',
+          background: 'transparent', color: neon.text, border: 0,
+          outline: 'none', p: 1,
+          fontFamily: `'Share Tech Mono', monospace`, fontSize: 11.5,
+          lineHeight: 1.5, whiteSpace: 'pre', overflow: 'auto',
+        }} />
+      {error && (
+        <Alert severity="error" variant="outlined"
+          sx={{ m: 0.8, fontSize: 11, py: 0 }}>
+          {error.message}
+        </Alert>
+      )}
+    </Box>
+  )
+}
+
 function Pane({ title, colour, raw, wrap }: {
   title: string; colour: string; raw: string | null | undefined; wrap: boolean
 }) {
@@ -230,10 +284,39 @@ export function PacketModal({ id, onClose, onReplay }: {
   onReplay?: (id: number) => void
 }) {
   const [wrap, setWrap] = useState(true)
+  // Which exchange is on screen. Starts as the one that was opened
+  // and MOVES when a resend produces a new row, so the response and
+  // the rendering below are the answer to what was just sent rather
+  // than to what was there before.
+  const [showing, setShowing] = useState(id)
+  const [draft, setDraft] = useState<string | null>(null)
+  const [sent, setSent] = useState<{ ms: number; code: number | null } | null>(null)
+  const qc = useQueryClient()
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ['packet', id],
-    queryFn: () => api.packet(id),
+    queryKey: ['packet', showing],
+    queryFn: () => api.packet(showing),
   })
+
+  const send = useMutation({
+    mutationFn: (raw: string) => api.replay(showing, raw),
+    onSuccess: (r) => {
+      // A NEW row, which is the point: the original and the edit sit
+      // side by side under the same URL and neither is overwritten.
+      // The modal follows the new one so the pane on the right is
+      // showing what came back, not what used to.
+      setSent({ ms: r.elapsed_ms, code: r.status_code })
+      setDraft(null)
+      setShowing(r.web.id)
+      void qc.invalidateQueries({ queryKey: ['web'] })
+    },
+  })
+
+  // The draft is seeded from whatever is on screen, so editing after
+  // a resend starts from the request that was actually sent rather
+  // than from the one the modal was opened on.
+  const editing = draft !== null
+  const startEditing = () => setDraft(data?.request ?? '')
 
   return (
     <Dialog open onClose={onClose} maxWidth={false} fullWidth
@@ -284,18 +367,47 @@ export function PacketModal({ id, onClose, onReplay }: {
               </IconButton>
             </Tooltip>
           )}
-          {onReplay && data?.request && (
-            <Tooltip title="Edit this request and send it again. The
-                            original is kept; sending files the answer
-                            as a new exchange beside it.">
+          {data?.request && !editing && (
+            <Tooltip title="Edit this request and send it again, here.
+                            The original is kept; sending files the
+                            answer as a new exchange beside it and
+                            this modal follows it.">
               <Button size="small" variant="outlined"
                 startIcon={<SendIcon sx={{ fontSize: 15 }} />}
-                onClick={() => onReplay(id)}
+                onClick={startEditing}
                 sx={{ fontSize: 11, py: 0.1, color: neon.pink,
                       borderColor: alpha(neon.pink, 0.5),
                       '&:hover': { borderColor: neon.pink } }}>
                 Edit &amp; resend
               </Button>
+            </Tooltip>
+          )}
+          {editing && (
+            <Stack direction="row" spacing={0.8} sx={{ alignItems: 'center' }}>
+              <Button size="small" variant="contained" disabled={send.isPending}
+                startIcon={send.isPending
+                  ? <CircularProgress size={12} />
+                  : <SendIcon sx={{ fontSize: 15 }} />}
+                onClick={() => send.mutate(draft ?? '')}
+                sx={{ fontSize: 11, py: 0.1 }}>
+                Send
+              </Button>
+              <Button size="small" onClick={() => setDraft(null)}
+                disabled={send.isPending}
+                sx={{ fontSize: 11, py: 0.1, color: neon.muted }}>
+                Cancel
+              </Button>
+            </Stack>
+          )}
+          {/* Kept so the fuller editor is still reachable — it has
+              the redirect and TLS switches this does not. */}
+          {onReplay && data?.request && !editing && (
+            <Tooltip title="Open the full editor, with the redirect and
+                            certificate options.">
+              <IconButton size="small" onClick={() => onReplay(showing)}
+                sx={{ color: neon.muted, '&:hover': { color: neon.pink } }}>
+                <LaunchIcon sx={{ fontSize: 15, transform: 'rotate(90deg)' }} />
+              </IconButton>
             </Tooltip>
           )}
           <Tooltip title={wrap ? 'Stop wrapping lines' : 'Wrap long lines'}>
@@ -338,7 +450,13 @@ export function PacketModal({ id, onClose, onReplay }: {
             {/* Side by side, because the point is comparing them. */}
             <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.2}
                    sx={{ flex: 1, minHeight: 0 }}>
-              <Pane title="REQUEST" colour={neon.pink} raw={data.request} wrap={wrap} />
+              {editing ? (
+                <EditablePane value={draft ?? ''} onChange={setDraft}
+                  error={send.error as Error | null} />
+              ) : (
+                <Pane title="REQUEST" colour={neon.pink} raw={data.request}
+                  wrap={wrap} />
+              )}
               <Pane title="RESPONSE" colour={neon.green} raw={data.response} wrap={wrap} />
               {/* Far right, and for every packet that has a body —
                   no button, nothing to ask for. The rendering IS the
@@ -348,6 +466,17 @@ export function PacketModal({ id, onClose, onReplay }: {
                   it belongs to. */}
               <Rendered raw={data.response} />
             </Stack>
+            {/* What the send actually did. Said as a fact with a
+                number on it: "sent" with no status is indistinguishable
+                from "the button worked". */}
+            {sent && (
+              <Alert severity={sent.code && sent.code < 400 ? 'success' : 'warning'}
+                variant="outlined" sx={{ fontSize: 11.5, py: 0.3 }}>
+                Sent — {sent.code ?? 'no status'} in {sent.ms} ms. Saved as a
+                new exchange beside the original, which is unchanged; this
+                modal is now showing the new one.
+              </Alert>
+            )}
             {(data.sources || data.notes) && (
               <Stack direction="row" spacing={1} useFlexGap sx={{
                 flexWrap: "wrap"
