@@ -359,7 +359,8 @@ class Candidate:
 
 
 def decide(hostname: str, cnames, bodies: list[str] | None = None,
-           unresolved: set[str] | None = None) -> Candidate | None:
+           unresolved: set[str] | None = None,
+           resolved: set[str] | None = None) -> Candidate | None:
     """Rule on one host's CNAME chain.
 
     Pure. `bodies` are responses already captured from this host and
@@ -376,6 +377,7 @@ def decide(hostname: str, cnames, bodies: list[str] | None = None,
     if not hops:
         return None
     unresolved = unresolved or set()
+    resolved = resolved or set()
     caps = captures(bodies)
 
     for hop in hops:
@@ -418,11 +420,13 @@ def decide(hostname: str, cnames, bodies: list[str] | None = None,
                 f"{p.name} served {lv!r}, which only a resource that "
                 f"exists can serve. The name is claimed.")
         return Candidate(hostname, hop, hops, p.name, p.claimable,
-                         "candidate", undetermined(p, hop, caps))
+                         "candidate", undetermined(p, hop, caps,
+                                                   hop in resolved))
     return None
 
 
-def undetermined(p: Provider, hop: str, caps: list[Capture]) -> str:
+def undetermined(p: Provider, hop: str, caps: list[Capture],
+                 hop_resolves: bool = False) -> str:
     """Why neither check could convict, in terms of what is missing.
 
     "Could not determine" on its own tells a reader that a
@@ -432,6 +436,22 @@ def undetermined(p: Provider, hop: str, caps: list[Capture]) -> str:
     genuinely different situations rather than shades of one.
     """
     had_bodies = bool(caps)
+    # What the DNS half actually knows, in the reader's words.
+    #
+    # Three states, and the middle one used to be written as the
+    # first: "no lookup has reported this as empty" is true BOTH of a
+    # name nobody has looked up and of a name that resolved an hour
+    # ago. Telling a reader the check has not happened when it has is
+    # the same mistake this whole file exists to avoid.
+    #
+    # A hop that resolves is not proof the resource is claimed --
+    # several of these providers answer for names nobody has taken,
+    # which is the entire reason subdomain takeover works -- so this
+    # says what was observed and stops there.
+    dns = (f"a DNS lookup of {hop} answered with addresses, so the "
+           f"chain does not end in a name that fails to resolve"
+           if hop_resolves else
+           f"no lookup has reported {hop} as empty")
     # The case `tls_only` created: we hold pages from this host, but
     # every one of them came over plaintext and plaintext cannot
     # settle a provider that routes on SNI. Saying "nothing was
@@ -449,20 +469,23 @@ def undetermined(p: Provider, hop: str, caps: list[Capture]) -> str:
         # -- so no amount of fetching the page will decide this one
         # and only the resolver can.
         return (f"{p.name} serves no distinctive unclaimed page, so only a "
-                f"chain that fails to resolve can settle this — and no "
-                f"lookup has reported {hop} as empty. Run a DNS lookup "
-                f"against {hop}.")
+                f"chain that fails to resolve can settle this — and {dns}."
+                + ("" if hop_resolves else
+                   f" Run a DNS lookup against {hop}."))
     if not had_bodies:
         return (f"nothing has been fetched from this host, so there is no "
-                f"page to match against {p.name}'s unclaimed one, and no "
-                f"lookup has reported {hop} as empty. Run httpx or a DNS "
-                f"lookup against it.")
+                f"page to match against {p.name}'s unclaimed one, and "
+                f"{dns}. Run httpx against it"
+                + ("." if hop_resolves else " or a DNS lookup."))
     # We looked at a page and it was not the provider's "nothing is
     # here" page. Weak evidence the resource IS claimed and live,
     # which is worth saying rather than leaving as silence.
     return (f"the page fetched from this host is not {p.name}'s unclaimed "
-            f"one, which suggests the resource is live — but no lookup has "
-            f"reported {hop} as empty, so it is not proven either way.")
+            f"one, which suggests the resource is live, and {dns}"
+            + (". Both point the same way without proving it: a name that "
+               "resolves can still belong to somebody else."
+               if hop_resolves else
+               ", so it is not proven either way."))
 
 
 #: Which rows become a finding, and at what severity.
@@ -686,7 +709,7 @@ async def refresh(session, project_id: int) -> Refreshed:
     from sqlalchemy import delete as _delete
     from sqlalchemy import select as _select
 
-    from .lookuphistory import answered_empty
+    from .lookuphistory import answered_empty, answered_with_data
     from .models import Takeover, Target, WebAddress
 
     rows = (await session.execute(
@@ -724,6 +747,11 @@ async def refresh(session, project_id: int) -> Refreshed:
     every_hop = sorted({h for _, _, hops in interesting for h in hops})
     empty = await answered_empty(session, project_id, "nslookup", every_hop)
     unresolved = set(empty)
+    # The other half. Without it a row cannot tell "nobody looked" from
+    # "it was looked up and it resolves", and says the first when the
+    # second is true.
+    resolved = await answered_with_data(session, project_id, "nslookup",
+                                        every_hop)
 
     tids = [t for t, _, _ in interesting]
     bodies: dict[int, list[Capture]] = {}
@@ -744,7 +772,7 @@ async def refresh(session, project_id: int) -> Refreshed:
 
     decided: dict[str, tuple[int, Candidate]] = {}
     for tid, host, hops in interesting:
-        c = decide(host, hops, bodies.get(tid), unresolved)
+        c = decide(host, hops, bodies.get(tid), unresolved, resolved)
         if c is not None:
             decided[host] = (tid, c)
 

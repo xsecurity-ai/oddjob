@@ -86,6 +86,44 @@ async def answered_empty(session: AsyncSession, project_id: int, kind: str,
     return {s: tid for s, tid in verdict.items() if s in wanted}
 
 
+async def answered_with_data(session: AsyncSession, project_id: int,
+                             kind: str, subjects: list[str]) -> set[str]:
+    """Of `subjects`, those a finished run answered with SOMETHING.
+
+    The other half of `answered_empty`, and it exists because the
+    absence of an empty answer is not the presence of a full one.
+    "Nothing has reported this name as empty" is true both of a name
+    nobody has looked up and of a name that resolved an hour ago, and
+    a reader told the first when the second is true is being told the
+    check has not happened when it has.
+
+    Same fold, same precedence: a later run wins, so a name that
+    answered in March and went quiet in April is not in here.
+    """
+    if kind not in LOOKUP_KINDS or not subjects:
+        return set()
+    wanted = {s.strip() for s in subjects if s and s.strip()}
+    if not wanted:
+        return set()
+
+    rows = (await session.execute(
+        select(AgentTask.id, AgentTask.output)
+        .where(AgentTask.project_id == project_id,
+               AgentTask.kind == kind,
+               AgentTask.status == "done")
+        .order_by(AgentTask.id.asc()).limit(SCAN_LIMIT))).all()
+
+    answered: set[str] = set()
+    for _task_id, output in rows:
+        empty = answered_nothing(kind, output)
+        for subject in _subjects_in(kind, output):
+            if subject in empty:
+                answered.discard(subject)
+            else:
+                answered.add(subject)
+    return answered & wanted
+
+
 def _subjects_in(kind: str, blob: str | None) -> set[str]:
     """Every subject this output speaks about, empty or not.
 
