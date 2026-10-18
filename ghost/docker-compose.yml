@@ -29,17 +29,32 @@ services:
     container_name: ghost
     restart: unless-stopped
 
-    # Everything dropped, two added back. SYN scanning, OS detection
+    # Everything dropped, three added back. SYN scanning, OS detection
     # and masscan need CAP_NET_RAW; without it masscan refuses and nmap
     # quietly falls back to a connect scan, which is a different scan
     # from the one the report will say was run. The agent checks what
     # it actually holds and tells the server, so a missing capability
     # shows up in the UI rather than in a misleading report — but it is
     # still better to grant it than to discover the gap later.
+    #
+    # NET_BIND_SERVICE is not for binding a port. It is here because
+    # the nmap PACKAGE ships the binary with file capabilities --
+    # cap_net_bind_service among them -- and the kernel refuses to
+    # exec a file whose capabilities it cannot grant from the
+    # bounding set. With it missing, `fork/exec /usr/bin/nmap:
+    # operation not permitted`, as root, with AppArmor and seccomp
+    # both off. Nothing about that message says "capability", which
+    # is why it cost an afternoon.
+    #
+    # This file's own comment used to say the image carries no file
+    # capabilities, and that was true of OUR setcap -- it was removed
+    # deliberately. The package's were never ours to remove and
+    # nobody looked again.
     cap_drop: [ALL]
     cap_add:
       - NET_RAW
       - NET_ADMIN
+      - NET_BIND_SERVICE
 
     # Host networking, deliberately. On a bridge the container's
     # traffic is NATed through the Docker host, so every packet the
