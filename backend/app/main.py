@@ -179,6 +179,34 @@ async def lifespan(app: FastAPI):
 
     vulnfeed_task = asyncio.create_task(_vulnfeeds())
 
+    # The NSE output already in the database. Every `-sV` the fleet
+    # runs carries `--script default,safe,vuln,ssl-cert` and the
+    # importer has always stored what came back; nothing read it, so
+    # the backlog is not an edge case but most of the data. The
+    # import path raises findings from here on -- this is the catch-up,
+    # and it is idempotent, so running it every start is the design
+    # rather than a cost.
+    async def _nse_backlog():
+        from . import nsefindings
+        # After the readiness window, because this touches every
+        # service row and a restart should answer requests first.
+        await asyncio.sleep(30)
+        try:
+            async with _Sess() as s:
+                seen, new = await nsefindings.sweep(s)
+                await s.commit()
+            # Said even when it is zero: "no finding" and "did not
+            # look" are different answers and a silent sweep is
+            # indistinguishable from one that never ran.
+            print(f"nse: read {seen} service(s) of stored script output, "
+                  f"{new} new finding(s)")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:                       # noqa: BLE001
+            print(f"nse: backlog sweep failed: {e}")
+
+    nse_task = asyncio.create_task(_nse_backlog())
+
     # A restart is the explanation for a lot of things an operator will
     # otherwise spend an hour on — a gap in the log, an agent that went
     # quiet, a setting that reverted. One line costs nothing.
@@ -246,6 +274,7 @@ async def lifespan(app: FastAPI):
                 await srv.wait_closed()
     audit_task.cancel()
     vulnfeed_task.cancel()
+    nse_task.cancel()
     await worker.stop()
     await slack_worker.stop()
     await slack_digest.stop()
