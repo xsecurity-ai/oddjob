@@ -906,6 +906,10 @@ class SweepOut(BaseModel):
     #: client's servers refuse us" until it is named.
     blocked: int = 0
     blocked_by: dict[str, int] = {}
+    #: Entropy-only matches dropped from page results — see
+    #: assetwork.scan_pages. Visible so "we found nothing" and "we
+    #: discarded 118 of them on purpose" are different answers.
+    entropy_skipped: int = 0
     notes: list[str] = []
     unfetched: int = 0
     unscanned: int = 0

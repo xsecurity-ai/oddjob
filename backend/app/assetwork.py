@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
@@ -127,6 +128,11 @@ class Swept:
     #: Which products did the refusing, so the number above can be
     #: read without opening a row. {"Cloudflare": 9}.
     blocked_by: dict[str, int] = field(default_factory=dict)
+    #: Entropy-only matches dropped from page results. Counted
+    #: rather than silent: a suppression nobody can see is
+    #: indistinguishable from a scanner that found nothing, which is
+    #: the mistake trufflehog made here for weeks.
+    entropy_skipped: int = 0
     notes: list[str] = field(default_factory=list)
 
 
@@ -718,7 +724,8 @@ _PAGE_TYPES = {
 PAGE_BODY_CAP = 400_000
 
 
-def page_ext(url: str, content_type: str | None) -> str | None:
+def page_ext(url: str, content_type: str | None,
+             body: str | None = None) -> str | None:
     """Which ruleset this response should be read against, or None.
 
     The URL's own extension first, because `/app.js` is JavaScript
@@ -734,11 +741,114 @@ def page_ext(url: str, content_type: str | None) -> str | None:
     ct = (content_type or "").split(";")[0].strip().lower()
     if ct in _PAGE_TYPES:
         return _PAGE_TYPES[ct]
-    # No extension and no type at all is the common shape for a
-    # route like `/api/session`, and those are worth reading.
+    # No extension and no type at all is not the edge case it looks
+    # like: on the engagement this was built against, 48,990 of the
+    # 51,059 eligible responses declared no content type -- 96%. So
+    # whatever this branch returns is what the sweep actually does,
+    # and `.txt` sent nearly every page to the `generic` ruleset,
+    # whose `gitleaks.generic-api-key` rule then supplied 54% of
+    # everything the first 300 pages produced.
+    #
+    # The body is the evidence and it is already in hand, so it
+    # decides. `None` only when there is nothing to go on.
     if not ext and not ct:
-        return ".txt"
+        return sniff_ext(body) if body else None
     return None
+
+
+def sniff_ext(body: str) -> str | None:
+    """What a response body is, or None when we cannot tell.
+
+    **None means "do not scan this", and that is the point.** The
+    first version of this fell back to `.txt`, which selects the
+    `generic` ruleset, whose `gitleaks.generic-api-key` rule then
+    supplied 54% of everything the first 300 pages of the live sweep
+    produced. A classifier that always answers is a classifier whose
+    answer means nothing -- the same rule as everywhere else here:
+    "could not determine" is its own answer and must not collapse
+    into a guess.
+
+    What the live corpus actually holds, for the 48,990 responses
+    that declared no content type at all:
+
+        8,299  HTML behind a newline or a BOM
+        5,748  HTML, plainly
+        1,100  JavaScript -- licence banner, IIFE, jQuery ready
+          291  CSS
+          161  JSON
+          150  HTML behind a chunked-transfer size line
+          131  PDF
+           65  XML
+
+    Each of those wants different rules, and the PDFs want none:
+    reading a binary as text is how an entropy detector finds a
+    credential in a compression stream.
+    """
+    head = _text_head(body)
+    if not head:
+        return None
+    low = head.lower()
+
+    # Binary first, because everything below assumes text. These are
+    # magic numbers, not guesses.
+    for magic in ("%pdf-", "\x89png", "gif8", "\xff\xd8\xff", "pk\x03\x04",
+                  "\x7felf", "rar!", "\x1f\x8b"):
+        if low.startswith(magic):
+            return None
+    if "\x00" in head[:256]:
+        # A NUL in the first screenful is not a page. SQLite stores
+        # these happily and Postgres does not, which is its own
+        # entry in this repo's list of things that bite.
+        return None
+
+    if low.startswith("<?xml"):
+        return ".xml"
+    if low.startswith("<!doctype") or low.startswith("<html") or low.startswith("<"):
+        return ".html"
+    if head[0] in "{[":
+        return ".json"
+
+    # JavaScript served at a web address rather than as an asset.
+    # 1,100 of them on the live corpus, and they are the bodies most
+    # worth reading properly -- the javascript rules are where the
+    # findings that matter come from.
+    if (low.startswith(("/*", "//", "(function", "function(", "function ",
+                        "!function", "+function", "$(", "import ", "export ",
+                        "'use strict'", '"use strict"', "var ", "const ",
+                        "let ", "window.", "document."))):
+        return ".js"
+    # CSS: a selector or an at-rule. Checked after JavaScript because
+    # `.foo{` and a member access both start with a dot.
+    if low.startswith(("@media", "@import", "@charset", "@font-face")):
+        return ".css"
+    if re.match(r"^[.#]?[a-z][\w .#>:,\[\]=\"'-]{0,120}\{", low):
+        return ".css"
+
+    # Text we hold and cannot name. NOT `.txt`: see the docstring.
+    return None
+
+
+#: Leading bytes that are not the body, stripped before anything
+#: looks at it.
+#:
+#: A BOM is not whitespace to `str.lstrip`, so 148 responses that
+#: are plainly HTML were being classified as something else by the
+#: first version of this. A chunked-transfer size line is not part
+#: of the body at all -- the capture stored the wire bytes without
+#: de-chunking, so 150 more opened with `14e27` before their
+#: doctype.
+_CHUNK_SIZE_LINE = re.compile(r"^[0-9a-fA-F]{1,8}(;[^\r\n]*)?\r?\n")
+
+
+def _text_head(body: str) -> str:
+    """The start of a body, with what is not the body taken off."""
+    if not body:
+        return ""
+    head = body.lstrip("\ufeff\r\n\t ")
+    m = _CHUNK_SIZE_LINE.match(head)
+    if m:
+        head = head[m.end():].lstrip("\ufeff\r\n\t ")
+    return head[:512]
 
 
 def response_body(raw: str) -> str:
@@ -796,8 +906,8 @@ async def scan_pages(session: AsyncSession, project_id: int, *,
     items: list[tuple[int, str, str]] = []
     skipped: set[int] = set()
     for w in rows:
-        ext = page_ext(w.url or "", w.content_type)
         body = response_body(w.response or "")[:PAGE_BODY_CAP]
+        ext = page_ext(w.url or "", w.content_type, body)
         if ext is None or not body.strip():
             # Nothing a scanner can read. Marked scanned so it does
             # not sit at the head of the queue for ever -- unlike a
@@ -827,6 +937,30 @@ async def scan_pages(session: AsyncSession, project_id: int, *,
         if ok:
             w.scanned_at = assetfetch.now()
         for fi in (found.get(w.id) or []):
+            # Entropy is not a finding on a page.
+            #
+            # `assetscan` already says why for a bundle -- "a
+            # high-entropy string in minified JavaScript is very
+            # often a hash" -- and on markup it is worse: SRI
+            # digests, CSP nonces, inline data URIs and analytics
+            # ids are all high-entropy and none of them is a
+            # credential. Measured on the first 300 pages of the
+            # live sweep, 39% of everything raised was one of these
+            # two detectors.
+            #
+            # Named vendor shapes still count. Dropping "it looked
+            # random" is not the same as dropping "this is a Google
+            # API key", and the second is the reason to read pages
+            # at all.
+            if fi.rule in assetscan._ENTROPY_TYPES:
+                out.entropy_skipped += 1
+                continue
+            # The title has to name the PAGE. `scan_batch` saw a
+            # temporary file, so without this every finding reads
+            # "... in index.txt" -- which is the synthetic name this
+            # function invented, tells a reader nothing, and is
+            # identical across thousands of different pages.
+            fi = _reseat(fi, w.url or "")
             # The URL is the origin, and a page always has a target:
             # `WebAddress.target_id` is NOT NULL, which is why there
             # is no `unattributable` count here as there is for
