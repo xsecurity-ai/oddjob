@@ -1191,7 +1191,8 @@ def _takeover_out(t) -> TakeoverOut:
 
 @router.get("/takeovers", response_model=Page[TakeoverOut])
 async def list_takeovers(
-    verdict: str | None = Query(None, pattern="^(dangling|fingerprint|candidate)$"),
+    verdict: str | None = Query(
+        None, pattern="^(dangling|fingerprint|live|candidate)$"),
     state: str | None = Query(None),
     q: str | None = Query(None, description="search hostname, cname, provider"),
     sort: str = Query("verdict"), order: str = Query("asc"),
@@ -1223,8 +1224,13 @@ async def list_takeovers(
     # sorting above "dangling" would put the rows that prove nothing
     # at the top of a findings table.
     if sort == "verdict":
-        col = case({"dangling": 0, "fingerprint": 1, "candidate": 2},
-                   value=Takeover.verdict, else_=3)
+        # `live` sorts BELOW `candidate`, which is not a typo: it is
+        # the only verdict that is a finished answer in the "nothing
+        # here" direction, so it is the one row an operator working
+        # down this table never needs to reach.
+        col = case({"dangling": 0, "fingerprint": 1, "candidate": 2,
+                    "live": 3},
+                   value=Takeover.verdict, else_=4)
     else:
         col = {"hostname": Takeover.hostname, "provider": Takeover.provider,
                "state": Takeover.state,

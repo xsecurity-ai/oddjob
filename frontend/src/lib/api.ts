@@ -353,10 +353,12 @@ export interface SettingsBundle {
 /** A name pointing at a service that hands out subdomains to whoever
  *  asks first.
  *
- *  `verdict` is not a severity. `dangling` and `fingerprint` are two
- *  kinds of evidence; `candidate` is the absence of either, kept
- *  visible because "points at Heroku, could not check" is a real
- *  state and not a finding. See backend/app/takeover.py. */
+ *  `verdict` is not a severity, and the four values do not point the
+ *  same way. `dangling` and `fingerprint` are evidence the name is
+ *  unclaimed; `live` is evidence it is claimed and serving, which is
+ *  the answer most of the time; `candidate` is the absence of all
+ *  three, kept visible because "points at Heroku, could not check"
+ *  is a real state and not a finding. See backend/app/takeover.py. */
 export interface Takeover {
   id: number
   hostname: string
@@ -366,7 +368,7 @@ export interface Takeover {
   /** False when the name is not freely re-registerable — the record
    *  still dangles, but it is hygiene rather than a hostile takeover. */
   claimable: boolean
-  verdict: 'dangling' | 'fingerprint' | 'candidate'
+  verdict: 'dangling' | 'fingerprint' | 'live' | 'candidate'
   evidence: string | null
   state: string
   note: string | null
