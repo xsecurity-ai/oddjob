@@ -9,7 +9,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy'
 import LaunchIcon from '@mui/icons-material/Launch'
 import WrapIcon from '@mui/icons-material/WrapText'
 import SendIcon from '@mui/icons-material/Send'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { neon, glow } from '../theme'
 
@@ -39,6 +39,154 @@ function split(raw: string | null | undefined): [string, string] {
   if (i === -1) return [raw, '']
   const gap = raw.slice(i).match(/^\r?\n\r?\n/)?.[0].length ?? 2
   return [raw.slice(0, i), raw.slice(i + gap)]
+}
+
+/** Is this response something a browser would have drawn? */
+function renderable(headers: string, body: string): boolean {
+  if (!body.trim()) return false
+  const ct = headers.match(/^content-type:\s*(.*)$/im)?.[1] ?? ''
+  if (ct) return /\b(?:text\/html|application\/xhtml\+xml)\b/i.test(ct)
+  // A capture whose headers were not kept. Judged on the bytes
+  // instead, because "we did not store the content type" is not a
+  // reason to refuse to show somebody their own evidence.
+  return /^\s*(?:<!doctype html|<html|<head|<body)/i.test(body)
+}
+
+/** The captured response, drawn.
+ *
+ *  **It renders the PACKET, not the site.** The bytes in this pane
+ *  are the ones that were captured; re-fetching the URL would show
+ *  what the server returns today, which is a different thing and is
+ *  exactly the mistake that made the secret-source viewer useless —
+ *  it re-read a file that had changed and then announced the value
+ *  was missing.
+ *
+ *  **Nothing is fetched and nothing executes.** Two separate locks,
+ *  because either alone is not enough:
+ *
+ *  `sandbox` with no `allow-scripts` and no `allow-same-origin`
+ *  means the client's JavaScript does not run in an operator's
+ *  browser, and the frame has no access to this origin if it did.
+ *
+ *  A `default-src 'none'` CSP means its images, fonts, stylesheets
+ *  and frames are not fetched either. That one matters more than it
+ *  looks: without it, opening this modal would make the OPERATOR'S
+ *  browser connect to the client's server directly — out of band,
+ *  from the wrong address, outside the proxy, and outside everything
+ *  Oddjob records. A viewer that quietly sends traffic at a client
+ *  is not a viewer.
+ *
+ *  The cost is that a page needing its stylesheet looks unstyled and
+ *  a page needing JavaScript looks empty. That is said on the pane
+ *  rather than left to be inferred from a blank rectangle.
+ */
+function Rendered({ raw }: { raw: string | null | undefined }) {
+  const [headers, body] = useMemo(() => split(raw), [raw])
+  const ok = useMemo(() => renderable(headers, body), [headers, body])
+
+  const doc = useMemo(() => {
+    if (!ok) return ''
+    // Prepended rather than merged into the document's own head: the
+    // capture may have no head at all, and a CSP that depends on the
+    // page being well formed is a CSP that fails on exactly the
+    // malformed pages worth looking at.
+    return '<meta http-equiv="Content-Security-Policy" '
+      + `content="default-src 'none'; style-src 'unsafe-inline'; `
+      + `img-src data:">`
+      + body
+  }, [ok, body])
+
+  return (
+    <Box sx={{
+      flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column',
+      border: `1px solid ${alpha(neon.cyan, 0.35)}`, borderRadius: 1,
+      background: alpha(neon.bgDeep, 0.55), overflow: 'hidden',
+    }}>
+      <Stack direction="row" spacing={1}
+        sx={{ alignItems: 'center', px: 1, py: 0.5,
+              borderBottom: `1px solid ${alpha(neon.cyan, 0.25)}` }}>
+        <Typography sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 10,
+                          letterSpacing: '0.14em', color: neon.cyan }}>
+          AS DRAWN
+        </Typography>
+        <Typography sx={{ fontSize: 10, color: alpha(neon.muted, 0.85) }}>
+          from the captured bytes · nothing fetched, nothing executed
+        </Typography>
+      </Stack>
+      {ok ? (
+        <Box
+          component="iframe"
+          title="The captured response, rendered"
+          srcDoc={doc}
+          sandbox=""
+          referrerPolicy="no-referrer"
+          sx={{ flex: 1, minHeight: 0, width: '100%', border: 0,
+                background: '#fff' }} />
+      ) : (
+        <Box sx={{ p: 1.5, fontSize: 11.5, color: alpha(neon.muted, 0.9) }}>
+          {body.trim()
+            ? 'This response is not HTML, so there is nothing to draw. '
+              + 'The bytes are in the pane to the left.'
+            : 'No response body was captured, so there is nothing to draw. '
+              + 'That is a fact about the capture, not about the page.'}
+        </Box>
+      )}
+    </Box>
+  )
+}
+
+/** The request, open for editing, in the pane it already lived in.
+ *
+ *  Reaching the editor used to mean closing this, finding the row
+ *  again and using its context menu — a lot of steps between reading
+ *  a response and the thought it just gave you.
+ *
+ *  Raw text and not a form. A replay whose request was reassembled
+ *  from parsed fields is a different request: header order, casing,
+ *  duplicate headers and a deliberately malformed line are all
+ *  things somebody resends a packet IN ORDER to test, and a form
+ *  would normalise every one of them away.
+ */
+function EditablePane({ value, onChange, error }: {
+  value: string
+  onChange: (v: string) => void
+  error: Error | null
+}) {
+  return (
+    <Box sx={{
+      flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column',
+      border: `1px solid ${alpha(neon.pink, 0.6)}`, borderRadius: 1,
+      background: alpha(neon.bgDeep, 0.55), overflow: 'hidden',
+    }}>
+      <Stack direction="row" spacing={1}
+        sx={{ alignItems: 'center', px: 1, py: 0.5,
+              borderBottom: `1px solid ${alpha(neon.pink, 0.35)}` }}>
+        <Typography sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 10,
+                          letterSpacing: '0.14em', color: neon.pink }}>
+          REQUEST · EDITING
+        </Typography>
+        <Typography sx={{ fontSize: 10, color: alpha(neon.muted, 0.85) }}>
+          sent exactly as written
+        </Typography>
+      </Stack>
+      <Box component="textarea" value={value} spellCheck={false}
+        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) =>
+          onChange(e.target.value)}
+        sx={{
+          flex: 1, minHeight: 0, width: '100%', resize: 'none',
+          background: 'transparent', color: neon.text, border: 0,
+          outline: 'none', p: 1,
+          fontFamily: `'Share Tech Mono', monospace`, fontSize: 11.5,
+          lineHeight: 1.5, whiteSpace: 'pre', overflow: 'auto',
+        }} />
+      {error && (
+        <Alert severity="error" variant="outlined"
+          sx={{ m: 0.8, fontSize: 11, py: 0 }}>
+          {error.message}
+        </Alert>
+      )}
+    </Box>
+  )
 }
 
 function Pane({ title, colour, raw, wrap }: {
@@ -136,10 +284,39 @@ export function PacketModal({ id, onClose, onReplay }: {
   onReplay?: (id: number) => void
 }) {
   const [wrap, setWrap] = useState(true)
+  // Which exchange is on screen. Starts as the one that was opened
+  // and MOVES when a resend produces a new row, so the response and
+  // the rendering below are the answer to what was just sent rather
+  // than to what was there before.
+  const [showing, setShowing] = useState(id)
+  const [draft, setDraft] = useState<string | null>(null)
+  const [sent, setSent] = useState<{ ms: number; code: number | null } | null>(null)
+  const qc = useQueryClient()
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ['packet', id],
-    queryFn: () => api.packet(id),
+    queryKey: ['packet', showing],
+    queryFn: () => api.packet(showing),
   })
+
+  const send = useMutation({
+    mutationFn: (raw: string) => api.replay(showing, raw),
+    onSuccess: (r) => {
+      // A NEW row, which is the point: the original and the edit sit
+      // side by side under the same URL and neither is overwritten.
+      // The modal follows the new one so the pane on the right is
+      // showing what came back, not what used to.
+      setSent({ ms: r.elapsed_ms, code: r.status_code })
+      setDraft(null)
+      setShowing(r.web.id)
+      void qc.invalidateQueries({ queryKey: ['web'] })
+    },
+  })
+
+  // The draft is seeded from whatever is on screen, so editing after
+  // a resend starts from the request that was actually sent rather
+  // than from the one the modal was opened on.
+  const editing = draft !== null
+  const startEditing = () => setDraft(data?.request ?? '')
 
   return (
     <Dialog open onClose={onClose} maxWidth={false} fullWidth
@@ -147,7 +324,9 @@ export function PacketModal({ id, onClose, onReplay }: {
         backgroundColor: alpha(neon.paper, 0.98), backgroundImage: 'none',
         border: `1px solid ${alpha(neon.cyan, 0.45)}`,
         boxShadow: `0 0 44px ${alpha(neon.cyan, 0.2)}`,
-        width: '96vw', maxWidth: 1500, height: '88vh',
+        // Three panes now, not two. 1500 was comfortable for request
+        // and response and leaves the rendering a letterbox.
+        width: '97vw', maxWidth: 2000, height: '90vh',
       } } }}>
       <DialogTitle sx={{
         py: 1.2, borderBottom: `1px solid ${alpha(neon.cyan, 0.28)}`,
@@ -188,18 +367,47 @@ export function PacketModal({ id, onClose, onReplay }: {
               </IconButton>
             </Tooltip>
           )}
-          {onReplay && data?.request && (
-            <Tooltip title="Edit this request and send it again. The
-                            original is kept; sending files the answer
-                            as a new exchange beside it.">
+          {data?.request && !editing && (
+            <Tooltip title="Edit this request and send it again, here.
+                            The original is kept; sending files the
+                            answer as a new exchange beside it and
+                            this modal follows it.">
               <Button size="small" variant="outlined"
                 startIcon={<SendIcon sx={{ fontSize: 15 }} />}
-                onClick={() => onReplay(id)}
+                onClick={startEditing}
                 sx={{ fontSize: 11, py: 0.1, color: neon.pink,
                       borderColor: alpha(neon.pink, 0.5),
                       '&:hover': { borderColor: neon.pink } }}>
                 Edit &amp; resend
               </Button>
+            </Tooltip>
+          )}
+          {editing && (
+            <Stack direction="row" spacing={0.8} sx={{ alignItems: 'center' }}>
+              <Button size="small" variant="contained" disabled={send.isPending}
+                startIcon={send.isPending
+                  ? <CircularProgress size={12} />
+                  : <SendIcon sx={{ fontSize: 15 }} />}
+                onClick={() => send.mutate(draft ?? '')}
+                sx={{ fontSize: 11, py: 0.1 }}>
+                Send
+              </Button>
+              <Button size="small" onClick={() => setDraft(null)}
+                disabled={send.isPending}
+                sx={{ fontSize: 11, py: 0.1, color: neon.muted }}>
+                Cancel
+              </Button>
+            </Stack>
+          )}
+          {/* Kept so the fuller editor is still reachable — it has
+              the redirect and TLS switches this does not. */}
+          {onReplay && data?.request && !editing && (
+            <Tooltip title="Open the full editor, with the redirect and
+                            certificate options.">
+              <IconButton size="small" onClick={() => onReplay(showing)}
+                sx={{ color: neon.muted, '&:hover': { color: neon.pink } }}>
+                <LaunchIcon sx={{ fontSize: 15, transform: 'rotate(90deg)' }} />
+              </IconButton>
             </Tooltip>
           )}
           <Tooltip title={wrap ? 'Stop wrapping lines' : 'Wrap long lines'}>
@@ -242,9 +450,33 @@ export function PacketModal({ id, onClose, onReplay }: {
             {/* Side by side, because the point is comparing them. */}
             <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.2}
                    sx={{ flex: 1, minHeight: 0 }}>
-              <Pane title="REQUEST" colour={neon.pink} raw={data.request} wrap={wrap} />
+              {editing ? (
+                <EditablePane value={draft ?? ''} onChange={setDraft}
+                  error={send.error as Error | null} />
+              ) : (
+                <Pane title="REQUEST" colour={neon.pink} raw={data.request}
+                  wrap={wrap} />
+              )}
               <Pane title="RESPONSE" colour={neon.green} raw={data.response} wrap={wrap} />
+              {/* Far right, and for every packet that has a body —
+                  no button, nothing to ask for. The rendering IS the
+                  screenshot: it is produced from the bytes already
+                  stored, so there is nothing to generate in advance
+                  and nothing that can go stale against the capture
+                  it belongs to. */}
+              <Rendered raw={data.response} />
             </Stack>
+            {/* What the send actually did. Said as a fact with a
+                number on it: "sent" with no status is indistinguishable
+                from "the button worked". */}
+            {sent && (
+              <Alert severity={sent.code && sent.code < 400 ? 'success' : 'warning'}
+                variant="outlined" sx={{ fontSize: 11.5, py: 0.3 }}>
+                Sent — {sent.code ?? 'no status'} in {sent.ms} ms. Saved as a
+                new exchange beside the original, which is unchanged; this
+                modal is now showing the new one.
+              </Alert>
+            )}
             {(data.sources || data.notes) && (
               <Stack direction="row" spacing={1} useFlexGap sx={{
                 flexWrap: "wrap"

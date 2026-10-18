@@ -462,7 +462,7 @@ async def scan_project(session: AsyncSession, project_id: int, *,
         if ok:
             swept.add(tid)
         for fi in findings:
-            if await _file_vuln(session, tid, fi, asset.url):
+            if await _file_vuln(session, tid, fi, asset.url, asset.id):
                 out.findings += 1
 
     # Only the scanners that were actually PRESENT, and only when the
@@ -724,7 +724,8 @@ def origin_block(asset_url: str, path: str, line: int | None) -> str:
 
 
 async def _file_vuln(session: AsyncSession, target_id: int,
-                     f: assetscan.Finding, asset_url: str) -> bool:
+                     f: assetscan.Finding, asset_url: str,
+                     asset_id: int | None = None) -> bool:
     """Record one finding. -> True if it is new.
 
     Keyed on the scanner fingerprint via `external_id`, which is the
@@ -775,13 +776,20 @@ async def _file_vuln(session: AsyncSession, target_id: int,
         if not existing.scanner:
             existing.scanner = f.scanner[:64]
         existing.found_by_manifest = manifest.build(f.scanner)[0]
+        if asset_id and not existing.asset_id:
+            existing.asset_id = asset_id
         await _keep_secret(existing.id)
         return False
     v = Vuln(target_id=target_id, title=f.title[:1000],
              severity=_severity_floor(f.severity), status="open",
              description=body[:8000], external_id=eid[:128],
              scanner=f.scanner[:64], first_seen_at=now, last_seen_at=now,
-             found_by_manifest=manifest.build(f.scanner)[0])
+             found_by_manifest=manifest.build(f.scanner)[0],
+             # Which bundle it came out of, where there is one. NULL
+             # for a page finding: a page is not an asset, and the
+             # two being indistinguishable is what made the secret
+             # source viewer claim deleted evidence.
+             asset_id=asset_id)
     session.add(v)
     # Flushed so the row has an id to hang the secret off.
     await session.flush()

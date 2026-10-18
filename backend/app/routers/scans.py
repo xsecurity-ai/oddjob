@@ -141,6 +141,11 @@ class ImportResult(BaseModel):
     urls_created: int = 0
     urls_updated: int = 0
     hosts_flagged: int = Field(0, description="Targets newly marked compromised")
+    #: Ports dropped because their host answers indiscriminately. Not
+    #: an error and not silence: the number is what tells an operator
+    #: that a host's open ports mean nothing, which is a finding about
+    #: the host rather than about the ports.
+    ports_indiscriminate: int = 0
     scripts_captured: int = 0
     notes_recorded: int = 0
     #: Set when a document with real size in it parsed to nothing at
@@ -196,6 +201,17 @@ class ImportBody(BaseModel):
 class FormatOut(BaseModel):
     name: str
     label: str
+
+
+#: How many `tcpwrapped` ports on one host make it indiscriminate.
+#:
+#: Measured, not guessed. On the estate that produced this, 53 hosts
+#: carried 917,402 of them -- an average of 17,300 each -- while a
+#: host with a genuine tcpwrapper in front of a handful of services
+#: has a handful. There is no real configuration between "a few" and
+#: "most of the port range", so the threshold sits well clear of
+#: both.
+TCPWRAPPED_FLOOD = 100
 
 
 def _j(v) -> str | None:
@@ -359,8 +375,50 @@ async def _host(session: AsyncSession, project: Project, ph: ParsedHost,
         session, nsefindings.SCANNER, nse_manifest,
         nsefindings.manifest_detail(scan.args), datetime.now(UTC))
 
+    # A host that answers EVERY port is not a host with ten thousand
+    # services on it.
+    #
+    # `tcpwrapped` is nmap saying the handshake completed and the far
+    # end closed the connection without a word. A handful of those is
+    # ordinary. Seventeen thousand on one host is a firewall or a load
+    # balancer SYN-ACKing indiscriminately, and recording each as a
+    # service is the same mistake this project already made once with
+    # `open|filtered` -- 42,890 rows against 13 genuinely open ports.
+    #
+    # On the estate this was found on it was 917,402 rows across 53
+    # hosts: 99.7% of every service record in the database, none of
+    # them carrying a product, a version or a banner, because a port
+    # that said nothing has nothing to carry. They buried the 2,348
+    # real ones.
+    #
+    # So above the threshold the ports are not recorded individually.
+    # The FACT is -- once, on the target, where it belongs: this host
+    # answers everything, so a port being open here means nothing.
+    # Coverage is still written, because the ports were still looked
+    # at and a later scan must not think otherwise.
+    wrapped = [x for x in ph.services if (x.name or "") == "tcpwrapped"]
+    indiscriminate = len(wrapped) >= TCPWRAPPED_FLOOD
+    if indiscriminate:
+        res.ports_indiscriminate += len(wrapped)
+        await record(
+            session, target.id, "scan",
+            f"answers on {len(wrapped)} ports without responding on any "
+            f"of them",
+            detail="Every one of these completed a TCP handshake and then "
+                   "closed the connection without sending a byte "
+                   "(nmap calls it `tcpwrapped`). A host that does this "
+                   "on thousands of ports is a firewall or load balancer "
+                   "answering indiscriminately, not a host running "
+                   "thousands of services — so an open port here is not "
+                   "evidence of anything listening. The individual ports "
+                   "were NOT recorded as services; they would bury the "
+                   "ones that are real.",
+            actor=actor, source=source)
+
     svc_changes: list[str] = []
     for ps in ph.services:
+        if indiscriminate and (ps.name or "") == "tcpwrapped":
+            continue
         svc_changes += await _service(session, target, ps, res, nse_manifest)
         if ps.scripts:
             await record(

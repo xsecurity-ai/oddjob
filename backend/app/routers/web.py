@@ -29,11 +29,13 @@ from ..hosts import InvalidHost, validate_host
 #: same terms as a captured one.
 from ..importers.burphistory import REQ_CAP, RESP_CAP
 from ..models import (
+    FindingSecret,
     Project,
     Service,
     Takeover,
     Target,
     User,
+    Vuln,
     WebAddress,
     WebAsset,
     WebAssetRef,
@@ -724,6 +726,36 @@ async def assets(project: str = Query(...),
         q.order_by(WebAsset.third_party.desc(), WebAsset.seen_on.desc(),
                    WebAsset.url))).scalars().all()
 
+    # What each asset is CARRYING. One grouped query rather than a
+    # count per row: an estate with four thousand assets would
+    # otherwise be four thousand round trips to answer a question
+    # that is four columns wide.
+    #
+    # Severity is counted alongside the total rather than instead of
+    # it. "14 findings" and "14 findings, 3 of them critical" are
+    # different sentences and only the second tells somebody where
+    # to start.
+    counts = (await session.execute(
+        select(Vuln.asset_id,
+               func.count(Vuln.id),
+               func.count(Vuln.id).filter(Vuln.severity == "critical"),
+               func.count(Vuln.id).filter(Vuln.severity == "high"))
+        .join(Target, Target.id == Vuln.target_id)
+        .where(Target.project_id == pr.id, Vuln.asset_id.is_not(None))
+        .group_by(Vuln.asset_id))).all()
+    by_id = {aid: (n, c, h) for aid, n, c, h in counts}
+
+    # Secrets separately, because a stored credential is not a
+    # severity -- it is the one finding somebody goes looking for
+    # by name, and burying it in a total is how it gets missed.
+    secret_rows = (await session.execute(
+        select(Vuln.asset_id, func.count(FindingSecret.id))
+        .join(FindingSecret, FindingSecret.vuln_id == Vuln.id)
+        .join(Target, Target.id == Vuln.target_id)
+        .where(Target.project_id == pr.id, Vuln.asset_id.is_not(None))
+        .group_by(Vuln.asset_id))).all()
+    secrets_by_id = dict(secret_rows)
+
     # Which pages load what. Sent alongside rather than as a second
     # request, because the two views of this are the same data read
     # from either end -- by library, or by page -- and fetching it
@@ -749,10 +781,16 @@ async def assets(project: str = Query(...),
             "fetched": a.sha256 is not None,
             "first_page": a.first_page,
             "loaded_by": by_asset.get(a.id, []),
+            "vulns": by_id.get(a.id, (0, 0, 0))[0],
+            "criticals": by_id.get(a.id, (0, 0, 0))[1],
+            "highs": by_id.get(a.id, (0, 0, 0))[2],
+            "secrets": secrets_by_id.get(a.id, 0),
         } for a in rows],
         "total": len(rows),
         "third_party": sum(1 for a in rows if a.third_party),
         "versioned": sum(1 for a in rows if a.version),
+        "findings": sum(n for n, _, _ in by_id.values()),
+        "secrets": sum(secrets_by_id.values()),
         "hosts": len({a.host for a in rows if a.host}),
     }
 
