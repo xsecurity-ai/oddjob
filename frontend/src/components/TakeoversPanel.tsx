@@ -222,7 +222,13 @@ export function TakeoversPanel({ project }: { project: string | null }) {
         sx={{ alignItems: 'center', px: 2, py: 1 }}>
         {/* The counts, strongest first, so the shape of the list is
             readable before anything is clicked. */}
-        {(['dangling', 'fingerprint', 'candidate'] as const).map((v) => (
+        {/* All four, `live` included. It is the verdict most rows
+            land on once the detector can tell a serving resource
+            from an unclaimed one, and leaving it out of the summary
+            meant a table of thirty rows whose counts added up to
+            eighteen — which reads as a bug in the table rather than
+            as the answer it is. */}
+        {(['dangling', 'fingerprint', 'candidate', 'live'] as const).map((v) => (
           <Tooltip key={v} title={VERDICT[v].why} enterDelay={300}>
             <Box sx={{ fontSize: 11, letterSpacing: '0.07em',
                        textTransform: 'uppercase', cursor: 'help',
