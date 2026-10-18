@@ -43,7 +43,14 @@ import httpx
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import assetfetch, assetlinks, assetscan, lifecycle, manifest
+from . import (
+    assetfetch,
+    assetlinks,
+    assetscan,
+    lifecycle,
+    lockfiles,
+    manifest,
+)
 from .hosts import InvalidHost, normalise_host
 from .models import (
     FindingSecret,
@@ -1167,6 +1174,29 @@ class AssetWorker:
                     did.append(
                         f"{pr.code}: {lib['unattributable']} library "
                         f"finding(s) could not be attributed to a host")
+                # And the manifests that say what went INTO the
+                # build, which turn up on web servers more often than
+                # anybody intends. Last in the cycle: it is the
+                # cheapest thing here when there are no manifests,
+                # and the most expensive when there are.
+                lk = await lockfile_leads(session, pr.id)
+                if lk["exposed"]:
+                    did.append(
+                        f"{pr.code}: {lk['exposed']} dependency "
+                        f"manifest(s) readable from outside")
+                if lk["findings"]:
+                    did.append(
+                        f"{pr.code}: {lk['findings']} CVE(s) pinned by "
+                        f"{lk['manifests']} manifest(s)")
+                # Said rather than silently dropped: a manifest with
+                # nine hundred entries is read as far as the ceiling
+                # and no further, and a reader must not take the
+                # result for the whole file.
+                if lk["truncated"]:
+                    did.append(
+                        f"{pr.code}: {lk['truncated']} manifest(s) pin more "
+                        f"than {LOCKFILE_PACKAGES} packages; only the first "
+                        f"{LOCKFILE_PACKAGES} were looked up")
             self.last = "; ".join(did) if did else "nothing outstanding"
 
     async def _loop(self) -> None:
@@ -1457,3 +1487,205 @@ async def record_endpoint_urls(session: AsyncSession, project_id: int,
         out["added"] += 1
     await session.commit()
     return out
+
+
+# ------------------------- dependency manifests served to the world
+#
+# `library_leads` above asks the CVE corpus about every library a
+# page SHIPS. This is the other half: the manifests that say what
+# went INTO the build, which turn up on web servers far more often
+# than anybody intends.
+#
+# A `package-lock.json` at a web root is two findings and they are
+# not the same size. That the file is there at all is certain and is
+# a fact about the deployment. What is in it is a dependency
+# inventory, and the CVEs it implies are a WEAKER claim than the
+# ones `library_leads` raises -- a lockfile lists what the build
+# resolved, much of which is devDependencies, much of the rest is
+# tree-shaken out, and a good deal never reaches a browser.
+#
+# The finding says which one it is. Collapsing them would put a
+# build-time dependency and a running one at the same severity, and
+# the first one an operator checked by hand and found unreachable
+# would teach them to distrust the rest.
+
+#: How many manifests one sweep reads. Each costs a parse and a
+#: corpus query per pinned package, and a lockfile can pin nine
+#: hundred of them.
+LOCKFILE_BATCH = 40
+
+#: Pinned packages per manifest that get asked about. A lockfile with
+#: 900 entries is 900 corpus queries, and the ones that matter are
+#: not evenly spread through it -- but nor are they at the top, so
+#: this is a ceiling on cost rather than a judgement about which
+#: entries deserve looking at. The finding says when it was hit.
+LOCKFILE_PACKAGES = 300
+
+
+def lockfile_external_id(path: str, name: str, version: str,
+                         cve: str) -> str:
+    """The upsert key. Carries the path: the same package pinned by
+    two different manifests on one host is two pieces of evidence
+    about two deployments."""
+    base = (path or "").rsplit("/", 1)[-1].lower()
+    return f"lockfile:{base}:{name.lower()}:{version.lower()}:{cve}"[:128]
+
+
+def exposed_manifest_id(url: str) -> str:
+    return f"lockfile-exposed:{url}"[:128]
+
+
+async def lockfile_leads(session: AsyncSession, project_id: int,
+                         limit: int = LOCKFILE_BATCH) -> dict[str, int]:
+    """Read served dependency manifests. -> counts.
+
+    Two kinds of finding per manifest: that it is reachable, and
+    what it pins. The first is raised whether or not the second
+    produces anything -- an exposed lockfile is a finding on its own
+    and waiting for a CVE to justify saying so would be the wrong
+    way round.
+    """
+    from .models import Vuln
+    from .vulnfeed import leads_for_service, triage_order
+
+    rows = (await session.execute(
+        select(WebAssetFile.id, WebAssetFile.path, WebAssetFile.body,
+               WebAssetFile.asset_id)
+        .join(WebAsset, WebAsset.id == WebAssetFile.asset_id)
+        .where(WebAsset.project_id == project_id,
+               WebAssetFile.body.is_not(None))
+        .order_by(WebAssetFile.id))).all()
+
+    out = {"manifests": 0, "packages": 0, "with_cves": 0, "findings": 0,
+           "exposed": 0, "unattributable": 0, "truncated": 0}
+    seen = 0
+    for _fid, path, body, asset_id in rows:
+        if lockfiles.format_of(path) is None:
+            continue
+        seen += 1
+        if seen > limit:
+            break
+        pairs = lockfiles.parse(path, body or "")
+        out["manifests"] += 1
+
+        asset = await session.get(WebAsset, asset_id)
+        if asset is None:
+            out["unattributable"] += 1
+            continue
+        tid = await _target_for(session, asset)
+        if tid is None:
+            out["unattributable"] += 1
+            continue
+
+        # 1. The file is reachable. Certain, and said first.
+        eid = exposed_manifest_id(asset.url)
+        if (await session.execute(select(Vuln).where(
+                Vuln.target_id == tid,
+                Vuln.external_id == eid))).scalar_one_or_none() is None:
+            session.add(Vuln(
+                target_id=tid,
+                title=f"Dependency manifest served to the internet: "
+                      f"{path.rsplit('/', 1)[-1]}"[:1000],
+                severity="low", status="open", external_id=eid,
+                scanner=LOCKFILE_SCANNER,
+                first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+                description=_exposed_body(asset.url, path, pairs)[:8000]))
+            out["exposed"] += 1
+
+        # 2. What it pins.
+        if len(pairs) > LOCKFILE_PACKAGES:
+            out["truncated"] += 1
+        for name, version in pairs[:LOCKFILE_PACKAGES]:
+            out["packages"] += 1
+            leads = await leads_for_service(session, name, version, limit=10)
+            # Exact version matches only, for the same reason
+            # `library_leads` insists on them: "product only" covers
+            # every release and says nothing about this one.
+            cves = [c for c in (leads.get("cves") or [])
+                    if str(c.get("version_match", "")).startswith("exact")]
+            if not cves:
+                continue
+            out["with_cves"] += 1
+            for c in triage_order(cves):
+                cid = lockfile_external_id(path, name, version, c["cve"])
+                dup = (await session.execute(select(Vuln).where(
+                    Vuln.target_id == tid,
+                    Vuln.external_id == cid))).scalar_one_or_none()
+                b = _lockfile_body(name, version, c, asset.url, path)
+                if dup is not None:
+                    dup.description = b[:8000]
+                    continue
+                session.add(Vuln(
+                    target_id=tid,
+                    title=f"{name} {version} pinned by "
+                          f"{path.rsplit('/', 1)[-1]} — {c['cve']}"[:1000],
+                    # One step below what `library_leads` would give
+                    # the same CVE. A build-time dependency is not a
+                    # running one, and the body says so.
+                    severity=_one_below(c.get("severity") or "info"),
+                    status="open", external_id=cid,
+                    scanner=LOCKFILE_SCANNER,
+                    first_seen_at=datetime.now(UTC),
+                    last_seen_at=datetime.now(UTC),
+                    description=b[:8000]))
+                out["findings"] += 1
+    await session.commit()
+    return out
+
+
+#: Attributed separately from the page scanners. A secret scanner
+#: finding nothing says nothing about whether a lockfile CVE is
+#: still there, and a shared name would let either resolve the
+#: other's work. See app/lifecycle.py.
+LOCKFILE_SCANNER = "lockfile"
+
+#: One step down the ladder, for a dependency that was built with
+#: rather than demonstrably served.
+_LOWER = {"critical": "high", "high": "medium", "medium": "low",
+          "low": "info", "info": "info"}
+
+
+def _one_below(severity: str) -> str:
+    return _LOWER.get(_severity_floor(severity), "info")
+
+
+def _exposed_body(url: str, path: str, pairs: list) -> str:
+    return "\n".join([
+        f"{path.rsplit('/', 1)[-1]} is readable at {url}.",
+        "",
+        "A dependency manifest names every package and exact version "
+        "the application was built with, which is an inventory of what "
+        "to look up next. It is not supposed to be reachable from "
+        "outside.",
+        "",
+        f"It pins {len(pairs)} package(s) at an exact version."
+        if pairs else
+        "Nothing in it parsed as a pinned package — which may mean the "
+        "format is one this does not read, rather than that the file is "
+        "empty.",
+    ])
+
+
+def _lockfile_body(name: str, version: str, cve: dict, url: str,
+                   path: str) -> str:
+    """What the finding says, kept to what the evidence supports."""
+    bits = [
+        f"{path.rsplit('/', 1)[-1]} at {url} pins {name} {version}, and "
+        f"{cve['cve']} names that exact version.",
+        "",
+        (cve.get("summary") or "").strip()[:600],
+        "",
+        "**This is a build-time dependency, not a library this site has "
+        "been seen to serve.** A lockfile lists what the build resolved: "
+        "some of it is devDependencies, some is removed by tree-shaking, "
+        "and some never reaches a browser. Whether this package is "
+        "reachable in the running application has not been established "
+        "here — that is the check to do next, and it is why this is "
+        "filed one severity below the same CVE found in a library the "
+        "page actually loads.",
+    ]
+    if cve.get("kev"):
+        bits.append("")
+        bits.append("On CISA's Known Exploited Vulnerabilities list: this "
+                    "has been observed being used against somebody.")
+    return "\n".join(b for b in bits if b is not None)

@@ -1858,6 +1858,135 @@ else:
     check("skipped: no asset seeded to hang endpoints off", True)
 
 
+print("\n== dependency manifests served to the world ==")
+# `library_leads` asks the CVE corpus about every library a page
+# SHIPS. This is the other half: the manifests that say what went
+# INTO the build, which turn up on web servers more often than
+# anybody intends.
+from app import lockfiles as _lk  # noqa: E402
+
+check("a lockfile is recognised by its basename, wherever it is served",
+      _lk.format_of("/static/vendor/package-lock.json") == "npm"
+      and _lk.format_of("package-lock.json") == "npm")
+check("an ordinary script is not a manifest",
+      _lk.format_of("/static/app.js") is None)
+
+_NPM3 = json.dumps({"lockfileVersion": 3, "packages": {
+    "": {"name": "app"},
+    "node_modules/lodash": {"version": "4.17.15"},
+    "node_modules/@scope/thing": {"version": "1.2.3"}}})
+check("npm lockfileVersion 3 is read from `packages`",
+      _lk.parse("package-lock.json", _NPM3)
+      == [("@scope/thing", "1.2.3"), ("lodash", "4.17.15")],
+      _lk.parse("package-lock.json", _NPM3))
+_NPM1 = json.dumps({"lockfileVersion": 1, "dependencies": {
+    "lodash": {"version": "4.17.15",
+               "dependencies": {"minimist": {"version": "1.2.0"}}}}})
+check("...and version 1 is read from the nested `dependencies`",
+      ("minimist", "1.2.0") in _lk.parse("package-lock.json", _NPM1))
+
+check("yarn.lock keeps a scoped name whole",
+      ("@scope/x", "1.2.3") in _lk.parse(
+          "yarn.lock",
+          'lodash@^4.17.0, lodash@^4.17.15:\n  version "4.17.15"\n\n'
+          '"@scope/x@^1.0.0":\n  version "1.2.3"\n'))
+check("Gemfile.lock reads only the specs block",
+      _lk.parse("Gemfile.lock",
+                "GEM\n  remote: https://rubygems.org/\n  specs:\n"
+                "    rails (6.0.3)\n\nPLATFORMS\n  ruby\n")
+      == [("rails", "6.0.3")])
+check("Cargo.lock is read without a TOML dependency",
+      _lk.parse("Cargo.lock",
+                '[[package]]\nname = "serde"\nversion = "1.0.104"\n')
+      == [("serde", "1.0.104")])
+check("go.mod require lines are read",
+      _lk.parse("go.mod",
+                "module x\n\nrequire github.com/gin-gonic/gin v1.7.2\n")
+      == [("github.com/gin-gonic/gin", "1.7.2")])
+
+# A constraint is not a version. Matching a CVE against `^4.17.0`
+# would be matching against something nobody is running.
+check("requirements.txt takes == and refuses >=",
+      _lk.parse("requirements.txt", "Django==2.2.10\nrequests>=2.0\n")
+      == [("django", "2.2.10")])
+check("a caret range is not treated as an installed version",
+      _lk.parse("package-lock.json", json.dumps(
+          {"dependencies": {"lodash": {"version": "^4.17.0"}}})) == [])
+check("a git ref is not a release",
+      _lk.parse("package-lock.json", json.dumps(
+          {"dependencies": {"x": {"version": "git+ssh://a/b#c0ffee"}}})) == [])
+
+# A malformed manifest is a file that did not parse, which the
+# caller reports as nothing found rather than as a clean result.
+check("malformed JSON yields nothing rather than raising",
+      _lk.parse("package-lock.json", "{not json") == [])
+check("an empty file likewise", _lk.parse("yarn.lock", "") == [])
+# Two reads of an unchanged file must produce an identical list, or
+# the findings it raises are not idempotent.
+check("parsing is stable and deduplicated",
+      _lk.parse("package-lock.json", _NPM3)
+      == _lk.parse("package-lock.json", _NPM3))
+
+print("\n-- the findings a served manifest raises --")
+
+
+async def _plant_lockfile(body):
+    async with SessionLocal() as s:
+        pr = (await s.execute(select(Project).where(
+            Project.code == "ASSET"))).scalar_one()
+        t = (await s.execute(select(Target).where(
+            Target.project_id == pr.id))).scalars().first()
+        a = WebAsset(project_id=pr.id, target_id=t.id,
+                     url="https://app.acme.example/package-lock.json",
+                     kind="script", host="app.acme.example")
+        s.add(a)
+        await s.flush()
+        s.add(WebAssetFile(asset_id=a.id, project_id=pr.id, origin="raw",
+                           path="package-lock.json", body=body,
+                           bytes=len(body)))
+        await s.commit()
+        return pr.id
+
+
+async def _run_lockfiles(pid):
+    async with SessionLocal() as s:
+        return await _aw.lockfile_leads(s, pid)
+
+
+_pid = asyncio.run(_plant_lockfile(_NPM3))
+_res = asyncio.run(_run_lockfiles(_pid))
+check("the manifest was read", _res["manifests"] == 1, _res)
+check("...and its packages counted", _res["packages"] == 2, _res)
+# An exposed lockfile is a finding on its own. Waiting for a CVE to
+# justify saying so would be the wrong way round.
+check("the file being reachable is a finding by itself",
+      _res["exposed"] == 1, _res)
+
+st, v = call("/api/vulns?project=ASSET&limit=200", token=admin)
+_lkv = [x for x in ((v or {}).get("items") or [])
+        if (x.get("external_id") or "").startswith("lockfile")]
+_exp = [x for x in _lkv if x["external_id"].startswith("lockfile-exposed")]
+check("...and it is filed", len(_exp) == 1, [x["title"] for x in _lkv])
+if _exp:
+    check("...at low, because it is disclosure and not a breach",
+          _exp[0]["severity"] == "low", _exp[0]["severity"])
+    check("...saying what a manifest discloses",
+          "inventory" in (_exp[0].get("description") or ""))
+    # A secret sweep finding nothing says nothing about whether a
+    # lockfile CVE is still there. See app/lifecycle.py.
+    check("...attributed to its own scanner",
+          _exp[0].get("scanner") == "lockfile", _exp[0].get("scanner"))
+
+_again = asyncio.run(_run_lockfiles(_pid))
+check("a second sweep raises no second exposure finding",
+      _again["exposed"] == 0, _again)
+st, v2 = call("/api/vulns?project=ASSET&limit=200", token=admin)
+check("...and the count is unchanged",
+      len([x for x in ((v2 or {}).get("items") or [])
+           if (x.get("external_id") or "").startswith("lockfile-exposed")])
+      == 1)
+
+
 srv.shutdown()
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
