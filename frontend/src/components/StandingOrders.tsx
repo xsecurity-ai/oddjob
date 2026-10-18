@@ -1,4 +1,4 @@
-/** Four policies a project can leave running, above the Targets table.
+/** Four policies a project can leave running, and the button that opens them.
  *
  *  Each one queues scans against a client's estate with nobody
  *  watching, so the bar is written to make that obvious rather than to
@@ -15,21 +15,38 @@
  *   - **nmap is a choice, not a switch.** The hundred commonest ports
  *     and all 65,535 are hours apart in traffic at the far end.
  *
+ *  These used to be a strip of controls wedged above the Targets
+ *  table: seven switches and selects on one wrapping row, each with
+ *  its explanation hidden in a tooltip, and the whole thing eating the
+ *  height the table needed. A dialog gives every policy room for the
+ *  sentence that says what it will actually do, and it moves the
+ *  controls next to the project they belong to rather than onto one
+ *  view that happens to show hosts.
+ *
+ *  What does NOT change is that the state stays visible without
+ *  opening anything — the trigger carries the running count, because
+ *  "the estate is being scanned right now" must not be a fact you have
+ *  to click to learn.
+ *
  *  Only with a single project in view: these are per-engagement
  *  settings and there is no sensible "all projects" meaning for them.
  */
+import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Box, Chip, CircularProgress, FormControlLabel, MenuItem, Select, Stack,
-  Switch, Tooltip, Typography, alpha,
+  Box, Button, Chip, CircularProgress, Dialog, DialogContent, DialogTitle,
+  FormControlLabel, IconButton, MenuItem, Select, Stack, Switch, Tooltip,
+  Typography, alpha,
 } from '@mui/material'
+import CloseIcon from '@mui/icons-material/Close'
+import PolicyIcon from '@mui/icons-material/Policy'
 import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { neon } from '../theme'
 
 /** What each switch is for, in the words the operator needs rather than
- *  the column name. The description is the tooltip and says what will
- *  actually happen — "queues", not "enables". */
+ *  the column name. The description says what will actually happen —
+ *  "queues", not "enables". */
 const SWITCHES = [
   {
     field: 'auto_amass' as const,
@@ -82,10 +99,11 @@ const NMAP = [
   { value: 'full', label: 'Full TCP' },
 ]
 
-export function StandingOrders({ project }: { project: string }) {
+/** Everything the project does on its own, and what it costs the
+ *  client when it does. */
+function useStandingOrders(project: string) {
   const qc = useQueryClient()
   const { roleOn } = useAuth()
-  const admin = roleOn(project) === 'admin'
 
   const pr = useQuery({
     queryKey: ['project', project],
@@ -102,8 +120,10 @@ export function StandingOrders({ project }: { project: string }) {
     onSettled: () => qc.invalidateQueries({ queryKey: ['project', project] }),
   })
 
-  const on = (f: string) => Boolean((pr.data as Record<string, unknown> | undefined)?.[f])
-  const nmap = String((pr.data as { auto_nmap?: string } | undefined)?.auto_nmap ?? 'off')
+  const on = (f: string) =>
+    Boolean((pr.data as Record<string, unknown> | undefined)?.[f])
+  const nmap = String(
+    (pr.data as { auto_nmap?: string } | undefined)?.auto_nmap ?? 'off')
   // Read off the typed Project, not through a cast. The cast that was
   // here is why nothing caught `auto_web` being missing from the API
   // response for as long as it was: asserting a shape the type did not
@@ -112,143 +132,187 @@ export function StandingOrders({ project }: { project: string }) {
   // refetch while the database held the operator's choice.
   const web = String(pr.data?.auto_web ?? 'off')
   const nuclei = String(pr.data?.auto_nuclei ?? 'off')
-  const busy = pr.isLoading || save.isPending
   const live = SWITCHES.filter((s) => on(s.field)).length
     + (nmap !== 'off' ? 1 : 0) + (web !== 'off' ? 1 : 0)
     + (nuclei !== 'off' ? 1 : 0)
 
-  return (
-    <Stack
-      direction="row"
-      spacing={1.4}
-      useFlexGap
-      sx={{
-        alignItems: "center",
-        flexWrap: 'wrap',
-        px: 1.2,
-        py: 0.7,
-        mb: 1,
-        border: `1px solid ${alpha(live ? neon.yellow : neon.muted, 0.28)}`,
-        borderRadius: 1,
-        bgcolor: alpha(live ? neon.yellow : neon.muted, 0.05)
-      }}>
-      <Tooltip title={admin
-        ? 'Work the project does on its own as hosts arrive. Every '
-          + 'candidate is checked against the scope list before anything '
-          + 'is queued.'
-        : 'Only a project admin can change these.'}>
-        <Typography sx={{ fontSize: 11, letterSpacing: 0.6, color: neon.muted,
-                          textTransform: 'uppercase' }}>
-          Standing orders
-        </Typography>
-      </Tooltip>
+  return {
+    admin: roleOn(project) === 'admin',
+    busy: pr.isLoading || save.isPending,
+    save, on, nmap, web, nuclei, live,
+  }
+}
 
-      {/* Said out loud. Someone opening this view should not have to
-          read four controls to learn the estate is being scanned. */}
-      {live > 0 && (
-        <Chip size="small" label={`${live} running`} sx={{
-          height: 18, fontSize: 10, color: neon.yellow,
-          bgcolor: alpha(neon.yellow, 0.14) }} />
+/** One policy: its name, the sentence that says what it will do, and
+ *  the control. The explanation is on the row rather than in a
+ *  tooltip — in a dialog there is room for it, and a policy that
+ *  queues traffic at a client should not have to be hovered to be
+ *  understood. */
+function Row({ label, help, children }: {
+  label: string; help: string; children: React.ReactNode
+}) {
+  return (
+    <Stack direction="row" spacing={2}
+      sx={{ alignItems: 'flex-start', py: 1.1,
+            borderBottom: `1px solid ${alpha(neon.purple, 0.14)}` }}>
+      <Stack spacing={0.3} sx={{ flex: 1, minWidth: 0 }}>
+        <Box sx={{ fontSize: 12.5, color: neon.text }}>{label}</Box>
+        <Box sx={{ fontSize: 11, color: alpha(neon.muted, 0.95),
+                   lineHeight: 1.45 }}>
+          {help}
+        </Box>
+      </Stack>
+      <Box sx={{ pt: 0.2, flexShrink: 0 }}>{children}</Box>
+    </Stack>
+  )
+}
+
+/** The controls themselves. Separate from the dialog so the shape can
+ *  be read without the chrome around it. */
+export function StandingOrdersControls({ project }: { project: string }) {
+  const { admin, busy, save, on, nmap, web, nuclei } =
+    useStandingOrders(project)
+
+  const pick = (value: string, options: { value: string; label: string }[],
+                onChange: (v: string) => void) => (
+    <Select size="small" value={value} disabled={!admin || busy}
+      onChange={(e) => onChange(e.target.value)}
+      sx={{ fontSize: 11.5, height: 28, minWidth: 170,
+            color: value === 'off' ? neon.muted : neon.yellow }}>
+      {options.map((o) => (
+        <MenuItem key={o.value} value={o.value} sx={{ fontSize: 11.5 }}>
+          {o.label}
+        </MenuItem>
+      ))}
+    </Select>
+  )
+
+  return (
+    <Stack>
+      {!admin && (
+        <Box sx={{ fontSize: 11.5, color: neon.yellow, pb: 1 }}>
+          Only a project admin can change these. Shown because knowing
+          the estate is being scanned matters to anyone working on it.
+        </Box>
       )}
 
       {SWITCHES.map((s) => (
-        <Tooltip key={s.field} title={s.help}>
+        <Row key={s.field} label={s.label} help={s.help}>
           <FormControlLabel
             sx={{ m: 0 }}
             control={
-              <Switch size="small" checked={on(s.field)} disabled={!admin || busy}
+              <Switch size="small" checked={on(s.field)}
+                disabled={!admin || busy}
                 onChange={(e) => save.mutate({ [s.field]: e.target.checked })} />
             }
-            label={<Box sx={{ fontSize: 11.5, color: neon.text }}>{s.label}</Box>}
-          />
-        </Tooltip>
+            label="" />
+        </Row>
       ))}
 
-      {/* The tooltip is on the LABEL, not around the whole control.
-          Wrapping the Select meant the balloon was still open when the
-          menu dropped, and it covered the options you were trying to
-          pick — the explanation obscuring the thing it explains. */}
-      <Stack direction="row" spacing={0.7} sx={{
-        alignItems: "center"
-      }}>
-        <Tooltip title={'Scans hosts that have never been scanned. Top 100 is '
-          + "nmap's own fast list; Full TCP is all 65,535 ports and is hours "
-          + 'of traffic at the far end.'}>
-          <Box sx={{ fontSize: 11.5, color: neon.text, cursor: 'help' }}>
-            nmap new hosts
-          </Box>
-        </Tooltip>
-        <Select size="small" value={nmap} disabled={!admin || busy}
-          onChange={(e) => save.mutate({ auto_nmap: e.target.value })}
-          sx={{ fontSize: 11.5, height: 26,
-                color: nmap === 'off' ? neon.muted : neon.yellow }}>
-          {NMAP.map((o) => (
-            <MenuItem key={o.value} value={o.value} sx={{ fontSize: 11.5 }}>
-              {o.label}
-            </MenuItem>
-          ))}
-        </Select>
-      </Stack>
+      <Row label="nmap new hosts"
+        help={'Scans hosts that have never been scanned. Top 100 is '
+          + "nmap's own fast list; Full TCP is all 65,535 ports and is "
+          + 'hours of traffic at the far end.'}>
+        {pick(nmap, NMAP, (v) => save.mutate({ auto_nmap: v }))}
+      </Row>
 
-      {/* Tooltip on the label, not around the control — see the note
-          on the nmap select above. */}
-      <Stack direction="row" spacing={0.7} sx={{
-        alignItems: "center"
-      }}>
-        <Tooltip title={'Crawls each web address this project knows, asks for '
-          + 'paths nothing links to, or both. A crawl follows the '
-          + "application's own links; brute forcing asks for 4,751 paths "
-          + 'it does not. Both against a large estate is a great deal of '
-          + 'traffic at the far end.'}>
-          <Box sx={{ fontSize: 11.5, color: neon.text, cursor: 'help' }}>
-            web discovery
-          </Box>
-        </Tooltip>
-        <Select size="small" value={web} disabled={!admin || busy}
-          onChange={(e) => save.mutate({ auto_web: e.target.value })}
-          sx={{ fontSize: 11.5, height: 26,
-                color: web === 'off' ? neon.muted : neon.yellow }}>
-          {WEB.map((o) => (
-            <MenuItem key={o.value} value={o.value} sx={{ fontSize: 11.5 }}>
-              {o.label}
-            </MenuItem>
-          ))}
-        </Select>
-      </Stack>
+      <Row label="Web discovery"
+        help={'Crawls each web address this project knows, asks for paths '
+          + 'nothing links to, or both. A crawl follows the application’s '
+          + 'own links; brute forcing asks for 4,751 paths it does not. '
+          + 'Both against a large estate is a great deal of traffic at '
+          + 'the far end.'}>
+        {pick(web, WEB, (v) => save.mutate({ auto_web: v }))}
+      </Row>
 
-      {/* Tooltip on the label — see the note on the nmap select. */}
-      <Stack direction="row" spacing={0.7} sx={{
-        alignItems: "center"
-      }}>
-        <Tooltip title={'Runs nuclei against every web address this project '
-          + 'knows. CVE templates are critical and high only, and exclude '
-          + 'anything needing a login. Fingerprinting records what the '
-          + 'service IS against the service itself rather than filing '
-          + 'hundreds of informational findings. CVE templates send a known '
-          + "exploit's request at a production system — the engagement has "
-          + 'to have authorised that.'}>
-          <Box sx={{ fontSize: 11.5, color: neon.text, cursor: 'help' }}>
-            nuclei
-          </Box>
-        </Tooltip>
-        <Select size="small" value={nuclei} disabled={!admin || busy}
-          onChange={(e) => save.mutate({ auto_nuclei: e.target.value })}
-          sx={{ fontSize: 11.5, height: 26,
-                color: nuclei === 'off' ? neon.muted : neon.yellow }}>
-          {NUCLEI.map((o) => (
-            <MenuItem key={o.value} value={o.value} sx={{ fontSize: 11.5 }}>
-              {o.label}
-            </MenuItem>
-          ))}
-        </Select>
-      </Stack>
+      <Row label="nuclei"
+        help={'Runs nuclei against every web address this project knows. '
+          + 'CVE templates are critical and high only, and exclude anything '
+          + 'needing a login. Fingerprinting records what the service IS '
+          + 'against the service itself rather than filing hundreds of '
+          + 'informational findings. CVE templates send a known exploit’s '
+          + 'request at a production system — the engagement has to have '
+          + 'authorised that.'}>
+        {pick(nuclei, NUCLEI, (v) => save.mutate({ auto_nuclei: v }))}
+      </Row>
 
-      {busy && <CircularProgress size={13} sx={{ color: neon.muted }} />}
-      {save.isError && (
-        <Box sx={{ fontSize: 11, color: neon.pink }}>
-          {(save.error as Error).message || 'could not save'}
-        </Box>
-      )}
+      <Stack direction="row" spacing={1}
+        sx={{ alignItems: 'center', pt: 1.2, minHeight: 24 }}>
+        {busy && <CircularProgress size={13} sx={{ color: neon.muted }} />}
+        {save.isError && (
+          <Box sx={{ fontSize: 11.5, color: neon.pink }}>
+            {(save.error as Error).message || 'could not save'}
+          </Box>
+        )}
+      </Stack>
     </Stack>
-  );
+  )
+}
+
+/** The trigger, for the header beside the project's own configuration.
+ *
+ *  It carries the running count rather than hiding it behind the
+ *  click: these policies scan a client's estate unattended, and
+ *  "three running" is the one thing about them that has to be true on
+ *  screen without being asked for.
+ */
+export function StandingOrdersButton({ project }: { project: string }) {
+  const [open, setOpen] = useState(false)
+  const { live, admin } = useStandingOrders(project)
+
+  return (
+    <>
+      <Tooltip title={admin
+        ? 'Work this project does on its own as hosts arrive. Every '
+          + 'candidate is checked against the scope list before anything '
+          + 'is queued.'
+        : 'Work this project does on its own. Only a project admin can '
+          + 'change it.'}>
+        <Button size="small" startIcon={<PolicyIcon fontSize="small" />}
+          onClick={() => setOpen(true)}
+          sx={{
+            textTransform: 'none', fontSize: 12.5, minWidth: 0,
+            py: 0.25, px: 1,
+            color: live ? neon.yellow : neon.muted,
+            '&:hover': { color: live ? neon.yellow : neon.cyan,
+                         background: alpha(live ? neon.yellow : neon.cyan, 0.08) },
+          }}>
+          <Box component="span" sx={{ display: { xs: 'none', md: 'inline' } }}>
+            Standing orders
+          </Box>
+          {live > 0 && (
+            <Chip size="small" label={live} sx={{
+              ml: 0.7, height: 17, fontSize: 10, color: neon.yellow,
+              bgcolor: alpha(neon.yellow, 0.16),
+              '& .MuiChip-label': { px: 0.7 } }} />
+          )}
+        </Button>
+      </Tooltip>
+
+      <Dialog open={open} onClose={() => setOpen(false)}
+        maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ pb: 0.5 }}>
+          <Stack direction="row" sx={{ alignItems: 'center' }}>
+            <Stack spacing={0.3} sx={{ flex: 1 }}>
+              <Typography sx={{ fontSize: 14, letterSpacing: 0.6,
+                                textTransform: 'uppercase', color: neon.cyan }}>
+                Standing orders · {project}
+              </Typography>
+              <Box sx={{ fontSize: 11, color: neon.muted }}>
+                What this engagement does on its own, with nobody watching.
+                Every candidate is checked against the scope list before
+                anything is queued.
+              </Box>
+            </Stack>
+            <IconButton size="small" onClick={() => setOpen(false)}>
+              <CloseIcon fontSize="small" sx={{ color: neon.muted }} />
+            </IconButton>
+          </Stack>
+        </DialogTitle>
+        <DialogContent>
+          <StandingOrdersControls project={project} />
+        </DialogContent>
+      </Dialog>
+    </>
+  )
 }

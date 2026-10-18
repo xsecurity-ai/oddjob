@@ -44,6 +44,7 @@ import { ImportView } from './views/ImportView'
 import { ReportsView } from './views/ReportsView'
 import { GhostsView } from './views/GhostsView'
 import { ProjectConfigView } from './views/ProjectConfigView'
+import { StandingOrdersButton } from './components/StandingOrders'
 import { useHostModal } from './components/HostModal'
 import { AgentPanel } from './components/AgentPanel'
 import { UsersView } from './views/UsersView'
@@ -574,6 +575,18 @@ export default function App() {
                 </Button>
               </Tooltip>
             )}
+
+            {/* Beside the project's own configuration, because that is
+                what these are: settings on the engagement, not a
+                property of the Targets table they used to sit above.
+                They moved here from a strip of seven controls wedged
+                over that table, where they ate the height the table
+                needed and explained themselves only on hover.
+
+                The running count stays on the button. These policies
+                scan a client's estate unattended, so "three running"
+                has to be readable without opening anything. */}
+            {scope && <StandingOrdersButton project={scope} />}
 
             <Box sx={{ flex: 1 }} />
 
