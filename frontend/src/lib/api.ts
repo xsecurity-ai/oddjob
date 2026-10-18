@@ -50,6 +50,18 @@ export interface Project {
   /** What tools that send a User-Agent should call themselves. null
    *  means the agent's own attributable default. */
   user_agent: string | null
+  /** The other two sentences in the authorisation letter. The scope
+   *  list has always been enforced config; these are now too.
+   *
+   *  null at either end means UNBOUNDED — which is what every project
+   *  had before this existed, and is not the same as "starts now". */
+  engagement_starts_at: string | null
+  engagement_ends_at: string | null
+  /** The most intrusive technique this engagement permits:
+   *  read_only | state_changing | destructive. Defaults to
+   *  `destructive`, i.e. everything, because this arrived after
+   *  engagements were already running. */
+  max_impact: string
   /** The token itself is never returned — only whether an override exists. */
   slack_token_set: boolean
   /** Whether a notification posted now would reach a channel: a token
@@ -1828,9 +1840,29 @@ export const api = {
     auto_reverse_dns?: boolean; auto_nmap?: string; auto_web?: string;
     auto_nuclei?: string
     url_wordlist?: string | null; user_agent?: string | null
+    /** The rules of engagement. ISO-8601 UTC for the dates.
+     *
+     *  `null` here means LEAVE ALONE, not clear — the server skips
+     *  it deliberately, so a form that posts every field cannot
+     *  remove an engagement's expiry on the way past while saving
+     *  something else. Use `clearEngagementWindow`. */
+    engagement_starts_at?: string | null
+    engagement_ends_at?: string | null
+    /** read_only | state_changing | destructive. */
+    max_impact?: string
   }) =>
     req<Project>(`/api/projects/${encodeURIComponent(project)}`,
       { method: 'PATCH', body: JSON.stringify(body) }),
+
+  /** Remove both engagement dates, leaving testing unbounded by date.
+   *
+   *  Its own call because a PATCH cannot do it: taking the bound off
+   *  an authorisation has to be something somebody meant, and the
+   *  server audits who did. */
+  clearEngagementWindow: (project: string) =>
+    req<void>(
+      `/api/projects/${encodeURIComponent(project)}/engagement-window`,
+      { method: 'DELETE' }),
 
   /** Append entries. `included` picks the list; a line's own leading `!`
    *  still wins, because that is how scope documents are pasted.
