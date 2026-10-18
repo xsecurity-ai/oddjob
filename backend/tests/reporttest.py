@@ -312,4 +312,71 @@ check("a readonly member cannot delete",
       call(f"/api/reports/{full['id']}", "DELETE", token=ne)[0] == 403)
 check("an admin can", call(f"/api/reports/{ex['id']}", "DELETE", token=admin)[0] == 204)
 
+print("\n== listing reports must not read the documents ==")
+# `content` is the whole report as JSON -- twelve megabytes on a real
+# engagement. The list used to load it with the ORM object AND parse
+# it per row to pull out one optional string.
+#
+# Two reports made listing them a sixty-second request. It timed out,
+# the page got nothing, and it rendered as "there are no reports" --
+# the worst way for a slow query to fail, because it looks like data
+# loss rather than slowness.
+import asyncio as _a9  # noqa: E402
+import time as _t9  # noqa: E402
+
+from sqlalchemy import select as _s9  # noqa: E402
+
+from app.db import SessionLocal as _S9  # noqa: E402
+from app.models import Project as _P9  # noqa: E402
+from app.models import Report as _R9  # noqa: E402
+
+# A document big enough that loading it per row is unmistakable, and
+# small enough not to make the suite slow. The real one was 12 MB.
+_BIG = json.dumps({"kind": "full", "title": "big",
+                   "sections": [{"heading": "h", "body": "x" * 200_000}]})
+
+
+async def _plant_big(n):
+    async with _S9() as s:
+        pr = (await s.execute(_s9(_P9).where(
+            _P9.code == "REP"))).scalar_one_or_none()
+        if pr is None:
+            return None
+        for i in range(n):
+            s.add(_R9(project_id=pr.id, kind="full", fmt="pdf",
+                      title=f"big report {i}", status="ready",
+                      content=_BIG, size_bytes=len(_BIG),
+                      summary=json.dumps({"kind": "full", "stats": {},
+                                          "agent_edited": True,
+                                          "agent_note": "a note"})))
+        await s.commit()
+        return pr.id
+
+
+if _a9.run(_plant_big(6)) is not None:
+    _t0 = _t9.monotonic()
+    st, rows = call("/api/reports?project=REP", token=admin)
+    _took = _t9.monotonic() - _t0
+    check("the list answers at all", st == 200, st)
+    _big = [r for r in (rows or []) if str(r.get("title","")).startswith("big")]
+    check("...and returns every report", len(_big) == 6, len(_big))
+    # 1.2 MB of documents behind six rows. If the list is loading
+    # them this is seconds; if it is not, it is milliseconds.
+    check(f"...without reading the documents ({_took:.2f}s)",
+          _took < 2.0, f"{_took:.2f}s")
+    # The note still arrives -- from `summary`, which is a few
+    # hundred bytes, rather than from the document.
+    check("the agent note survives the change",
+          any(r.get("agent_note") == "a note" for r in _big),
+          [r.get("agent_note") for r in _big[:2]])
+    check("...and so does agent_edited",
+          all(r.get("agent_edited") for r in _big))
+    # The thing that makes the fix stick: `content` must not be in
+    # the response at all, and must not be needed to build it.
+    check("the document itself is never sent to the browser",
+          all("content" not in r for r in _big), list(_big[0])[:6])
+else:
+    check("skipped: no REP project to plant against", True)
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
