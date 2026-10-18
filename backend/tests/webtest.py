@@ -982,6 +982,46 @@ check("a live row still has a severity, so the table has no hole",
                                      False, "live", "served x")) == "low")
 
 
+print("\n== 'nobody looked' and 'it resolves' are different answers ==")
+# The gap this closes, found by actually running the lookups: 35 hops
+# were resolved on the live engagement and every row still read "no
+# lookup has reported this as empty" -- which is true of a name
+# nobody has looked up AND of one that answered an hour ago. A reader
+# told the first when the second is true is being told the check has
+# not happened when it has.
+_never = _tk.decide("a.corp.com", ["x.elb.eu-west-1.amazonaws.com"])
+_does = _tk.decide("b.corp.com", ["x.elb.eu-west-1.amazonaws.com"],
+                   resolved={"x.elb.eu-west-1.amazonaws.com"})
+check("with no lookup, it asks for one",
+      "Run a DNS lookup" in (_never.evidence or ""), _never.evidence)
+check("once it has resolved, it says so instead",
+      "answered with addresses" in (_does.evidence or ""), _does.evidence)
+check("...and stops asking for a lookup that has happened",
+      "Run a DNS lookup" not in (_does.evidence or ""), _does.evidence)
+check("the two are genuinely different sentences",
+      _never.evidence != _does.evidence)
+
+# A resolving hop does NOT prove the resource is claimed. Several of
+# these providers answer for names nobody has taken -- that is the
+# entire reason subdomain takeover works -- so the text must not
+# upgrade an observation into a conclusion.
+check("a resolving hop is not claimed to prove anything more",
+      _does.verdict == "candidate", _does.verdict)
+_live = _tk.decide("c.corp.com", ["c.s3.amazonaws.com"],
+                   bodies=["<html>a perfectly live bucket</html>"],
+                   resolved={"c.s3.amazonaws.com"})
+check("...and with a live-looking page too, it still says 'without proving'",
+      "without proving" in (_live.evidence or ""), _live.evidence)
+
+# An EMPTY answer still outranks everything: that is the one case
+# where the record is provably pointing at nothing.
+_gone = _tk.decide("d.corp.com", ["d.herokuapp.com"],
+                   unresolved={"d.herokuapp.com"},
+                   resolved={"d.herokuapp.com"})
+check("an empty answer still wins over a stale resolving one",
+      _gone.verdict == "dangling", _gone.verdict)
+
+
 print("\n== not every dangling record is an exploitable takeover ==")
 d = _tk.decide("g.corp.com", ["g.elasticbeanstalk.com"],
                unresolved={"g.elasticbeanstalk.com"})
