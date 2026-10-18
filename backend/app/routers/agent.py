@@ -3,12 +3,31 @@
 Credentials resolve project-first, site-second: an engagement can run on the
 customer's own account without moving every other project with it.
 
-The conversation is held by the client and posted back each turn. That is
-deliberate — a server-side session store would be a second place for
-engagement data to live and a second thing to expire, and the transcript is
-already in front of the person who owns it.
+The conversation is held BY THE ENGAGEMENT, in `agent_sessions` and
+`agent_turns`, and every member of the project reads the same thread.
+
+It used to be held by the client and posted back each turn, on the
+reasoning that a server-side store would be a second place for
+engagement data to live. What that missed is that an engagement is
+worked by several people: "what have we already asked" is a fact about
+the engagement, not about whoever has the tab open, and two testers
+asking the same question — or an answer lost when a tab closes — costs
+more than the extra store. Switching project starts a new thread
+rather than carrying one across, because a transcript spanning two
+clients is the one thing this application exists to prevent.
+
+**A credential never lands in a turn.** `get_finding_secret` returns a
+value that `reveal_secret` releases only to a `user` role and only with
+an audit entry naming who asked. A transcript readable by everyone on
+the project — `readonly` included, which exists precisely to be handed
+out more freely — would be a way around both guards, so that one tool's
+result is replaced with a note before anything is written. See
+`_redact_steps`.
 """
 from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -18,11 +37,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..agent import AgentError, build, run, token_kind
 from ..agent.providers import anthropic_chat, openai_chat
 from ..db import get_session
-from ..models import Project, User
-from ..security import effective_role, get_current_user, visible_project_ids
+from ..models import AgentSession, AgentTurn, Project, User
+from ..security import (
+    effective_role,
+    get_current_user,
+    require_project,
+    visible_project_ids,
+)
 from .settings import load_all
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
+
+#: Tools whose RESULT must not be written to a shared transcript.
+#:
+#: One entry, and it should stay hard to add to: everything here is a
+#: capability the agent has that the transcript then cannot show, which
+#: makes the record less complete. `get_finding_secret` earns it
+#: because the value it returns is gated on a role the transcript's
+#: readers do not all hold, and on an audit entry naming the reader.
+SECRET_TOOLS = frozenset({"get_finding_secret"})
+
+#: What stands in for it. Says where the value really is, so the note
+#: is a route to the data rather than a dead end.
+WITHHELD = ("[credential withheld from the shared transcript. Read it on "
+            "the finding itself, which checks your role and records who "
+            "asked.]")
 
 SYSTEM = """You are an assistant embedded in Oddjob, a penetration-testing
 engagement database. You are working on engagement {code}{client}.
@@ -157,6 +196,10 @@ class ChatResponse(BaseModel):
     stop_reason: str
     usage: dict = {}
     history: list = []
+    #: Which shared thread this landed in. Null in the
+    #: all-engagements mode, which has no single project to belong
+    #: to and therefore no thread.
+    session_id: int | None = None
 
 
 class AgentStatus(BaseModel):
@@ -284,6 +327,137 @@ async def status(project: str = Query(...),
             f"for this project in its settings."))
 
 
+# ------------------------------------------------- the shared session
+class TurnOut(BaseModel):
+    id: int
+    seq: int
+    role: str
+    text: str = ""
+    steps: list[StepOut] = []
+    author: str | None = None
+    at: str | None = None
+
+
+class SessionOut(BaseModel):
+    id: int
+    project_code: str
+    title: str | None = None
+    opened_by: str | None = None
+    closed: bool = False
+    at: str | None = None
+    turns: list[TurnOut] = []
+
+
+def _redact_steps(steps) -> list[dict]:
+    """Tool calls, with the one result that must not be stored removed.
+
+    Operates on the step list rather than the message history because
+    the history is what goes BACK to the model -- the agent is
+    entitled to what it already read in its own context window. What
+    is being protected is the database, which has different readers.
+    """
+    out = []
+    for st in steps:
+        d = {"kind": st.kind, "text": st.text, "tool": st.tool,
+             "args": dict(st.args or {}),
+             "result": (st.result or "")[:4000] if st.result else None}
+        if st.tool in SECRET_TOOLS and d["result"]:
+            d["result"] = WITHHELD
+        out.append(d)
+    return out
+
+
+def _turn_out(t, who: dict[int, str]) -> TurnOut:
+    try:
+        steps = [StepOut(**x) for x in json.loads(t.steps or "[]")]
+    except (ValueError, TypeError):
+        steps = []
+    return TurnOut(
+        id=t.id, seq=t.seq, role=t.role, text=t.text or "", steps=steps,
+        author=who.get(t.author_id or -1),
+        at=t.created_at.isoformat() if t.created_at else None)
+
+
+async def _session_out(session: AsyncSession, sess, code: str) -> SessionOut:
+    ids = {t.author_id for t in sess.turns if t.author_id}
+    if sess.opened_by_id:
+        ids.add(sess.opened_by_id)
+    who: dict[int, str] = {}
+    if ids:
+        who = {u.id: u.username for u in (await session.execute(
+            select(User).where(User.id.in_(ids)))).scalars().all()}
+    return SessionOut(
+        id=sess.id, project_code=code, title=sess.title,
+        opened_by=who.get(sess.opened_by_id or -1), closed=bool(sess.closed),
+        at=(sess.last_at or sess.created_at).isoformat()
+        if (sess.last_at or sess.created_at) else None,
+        turns=[_turn_out(t, who) for t in sess.turns])
+
+
+async def _current(session: AsyncSession, pr: Project, user: User,
+                   create: bool = True):
+    """The project's open thread, started if there is not one.
+
+    Per PROJECT. Switching engagement therefore lands on that
+    engagement's thread, or opens a fresh one -- never carries the
+    previous client's conversation across.
+    """
+    sess = (await session.execute(
+        select(AgentSession)
+        .where(AgentSession.project_id == pr.id,
+               AgentSession.closed.is_(False))
+        .order_by(AgentSession.last_at.desc().nullslast(),
+                  AgentSession.id.desc())
+        .limit(1))).scalars().first()
+    if sess is None and create:
+        sess = AgentSession(project_id=pr.id, opened_by_id=user.id,
+                            last_at=datetime.now(UTC))
+        session.add(sess)
+        await session.flush()
+    return sess
+
+
+@router.get("/session", response_model=SessionOut | None)
+async def get_session_(project: str = Query(...),
+                       pr: Project = Depends(require_project("readonly")),
+                       user: User = Depends(get_current_user),
+                       session: AsyncSession = Depends(get_session)):
+    """This engagement's agent thread, as everyone on it sees it.
+
+    `readonly` is enough to READ. Chatting is already open to
+    readonly, so the transcript of those chats has to be, or the
+    record would be visible to fewer people than the conversation
+    that produced it. The credential case is handled by not storing
+    the value -- see `_redact_steps`.
+    """
+    sess = await _current(session, pr, user, create=False)
+    if sess is None:
+        return None
+    await session.refresh(sess, ["turns"])
+    return await _session_out(session, sess, pr.code)
+
+
+@router.post("/session/new", response_model=SessionOut)
+async def new_session(project: str = Query(...),
+                      pr: Project = Depends(require_project("readonly")),
+                      user: User = Depends(get_current_user),
+                      session: AsyncSession = Depends(get_session)):
+    """Start a fresh thread, closing the current one.
+
+    Closed, not deleted: what was asked during an engagement is part
+    of the engagement.
+    """
+    cur = await _current(session, pr, user, create=False)
+    if cur is not None:
+        cur.closed = True
+    sess = AgentSession(project_id=pr.id, opened_by_id=user.id,
+                        last_at=datetime.now(UTC))
+    session.add(sess)
+    await session.commit()
+    await session.refresh(sess, ["turns"])
+    return await _session_out(session, sess, pr.code)
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(body: ChatRequest, project: str = Query(...),
                pr: Project | None = Depends(_optional_project),
@@ -339,7 +513,26 @@ async def chat(body: ChatRequest, project: str = Query(...),
             code=pr.code, client=f" for {pr.client}" if pr.client else "",
             reach=(GHOST_ON if any(t.name == "task_ghost" for t in tools) else ""),
             writes=WRITES_ON if allow else WRITES_OFF)
-    messages = [m.model_dump() for m in body.history]
+    # The thread is the engagement's, so the history comes from it
+    # rather than from the client. `body.history` is still accepted
+    # and still used when there is no project -- the all-engagements
+    # mode has no single thread to belong to.
+    sess = None
+    if pr is not None:
+        sess = await _current(session, pr, user)
+        await session.refresh(sess, ["turns"])
+        stored = []
+        for t in sess.turns:
+            try:
+                stored.append(json.loads(t.content))
+            except (ValueError, TypeError):
+                continue
+        # A client that posts history is not trusted over the thread:
+        # two people in the same conversation would otherwise each
+        # rewrite it with their own copy.
+        messages = stored
+    else:
+        messages = [m.model_dump() for m in body.history]
     messages.append({"role": "user", "content": body.message})
     max_steps = max(1, min(int(cfg.get("agent.max_steps") or 12), 50))
 
@@ -356,12 +549,37 @@ async def chat(body: ChatRequest, project: str = Query(...),
     except Exception as e:
         raise HTTPException(502, f"{type(e).__name__}: {e}") from e
 
+    steps_out = _redact_steps(reply.steps)
+
+    if sess is not None:
+        # Both turns, in one transaction, so a thread cannot end up
+        # holding a question with no answer.
+        seq = (max((t.seq for t in sess.turns), default=-1)) + 1
+        now = datetime.now(UTC)
+        session.add(AgentTurn(
+            session_id=sess.id, seq=seq, role="user", author_id=user.id,
+            content=json.dumps({"role": "user", "content": body.message}),
+            text=body.message[:20000]))
+        # The assistant turn carries the provider-shaped tail of the
+        # history -- everything the model added this round -- so the
+        # next turn can hand the model back exactly what it said,
+        # tool calls included.
+        tail = reply.history[len(messages):] if reply.history else []
+        session.add(AgentTurn(
+            session_id=sess.id, seq=seq + 1, role="assistant",
+            content=json.dumps(tail if tail else
+                               {"role": "assistant", "content": reply.text}),
+            text=reply.text, steps=json.dumps(steps_out)))
+        if not sess.title:
+            sess.title = body.message.strip()[:200]
+        sess.last_at = now
+        await session.commit()
+
     return ChatResponse(
         text=reply.text, provider=provider, model=model,
-        steps=[StepOut(kind=s.kind, text=s.text, tool=s.tool, args=s.args,
-                       result=(s.result or "")[:4000] if s.result else None)
-               for s in reply.steps],
-        stop_reason=reply.stop_reason, usage=reply.usage, history=reply.history)
+        steps=[StepOut(**d) for d in steps_out],
+        stop_reason=reply.stop_reason, usage=reply.usage,
+        history=reply.history, session_id=(sess.id if sess else None))
 
 
 # ------------------------------------------------- automatic remediation

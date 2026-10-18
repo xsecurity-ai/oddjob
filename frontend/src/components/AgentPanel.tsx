@@ -7,7 +7,7 @@ import CloseIcon from '@mui/icons-material/Close'
 import SendIcon from '@mui/icons-material/Send'
 import BuildIcon from '@mui/icons-material/BuildCircle'
 import DeleteSweepIcon from '@mui/icons-material/DeleteSweep'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type AgentStep } from '../lib/api'
 import { SlackHandlePrompt } from './SlackHandlePrompt'
 import { neon, glow } from '../theme'
@@ -15,11 +15,21 @@ import { neon, glow } from '../theme'
 /**
  * A chat about the open engagement, docked to the right.
  *
- * The transcript lives here rather than on the server: it is already in
- * front of the person who owns it, and a server-side session store would
- * be a second place for engagement data to sit and a second thing to
- * expire. The provider-shaped `history` the API returns is passed straight
- * back on the next turn, so neither side has to model the conversation.
+ * **The transcript belongs to the ENGAGEMENT, not to this browser.**
+ * It used to live here, on the reasoning that it was already in front
+ * of the person who owns it. What that missed is that an engagement is
+ * worked by several people: "what have we already asked" is a fact
+ * about the engagement, and two testers asking the same question — or
+ * an answer lost when a tab closes — costs more than the extra store.
+ * So the thread is loaded from the server and everyone with a role on
+ * the project reads the same one.
+ *
+ * Switching project lands on THAT project's thread, or an empty one.
+ * Carrying a conversation across would feed the agent the wrong
+ * context and put two clients' data in one scroll-back.
+ *
+ * A credential is never in it: the one tool that returns one has its
+ * result replaced before the turn is stored. See routers/agent.py.
  *
  * Tool calls are shown, not hidden. An agent that says "I found three
  * criticals" is only worth anything if you can see which query it ran.
@@ -30,13 +40,17 @@ interface Turn {
   text: string
   steps?: AgentStep[]
   error?: string
+  /** Who asked, when it was not you. Only set for turns loaded from
+   *  the shared thread — the point of sharing it is knowing which of
+   *  you already asked. */
+  author?: string | null
 }
 
 export function AgentPanel({ project, open, onClose }: {
   project: string | null; open: boolean; onClose: () => void
 }) {
+  const qc = useQueryClient()
   const [turns, setTurns] = useState<Turn[]>([])
-  const [history, setHistory] = useState<unknown[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const endRef = useRef<HTMLDivElement>(null)
@@ -47,9 +61,38 @@ export function AgentPanel({ project, open, onClose }: {
     enabled: open && !!project,
   })
 
-  // A new engagement is a new conversation; carrying one project's
-  // transcript into another would feed it the wrong context entirely.
-  useEffect(() => { setTurns([]); setHistory([]) }, [project])
+  // The engagement's thread, not this tab's. Keyed on the project so
+  // switching lands on that project's conversation rather than
+  // carrying one client's into another's view.
+  const thread = useQuery({
+    queryKey: ['agent-session', project],
+    queryFn: () => api.agentSession(project!),
+    enabled: open && !!project,
+  })
+
+  const fresh = useMutation({
+    mutationFn: () => api.newAgentSession(project!),
+    onSuccess: (sess) => {
+      setTurns([])
+      qc.setQueryData(['agent-session', project], sess)
+    },
+  })
+
+  // Replaces the local reset this used to do on a project change: the
+  // thread is whatever the server says it is for the project now, and
+  // a stale local transcript must not survive the switch even for the
+  // moment before the fetch lands.
+  useEffect(() => { setTurns([]) }, [project])
+  useEffect(() => {
+    const t = thread.data
+    if (!t) { setTurns([]); return }
+    setTurns(t.turns.map((x) => ({
+      role: x.role === 'user' ? 'user' as const : 'agent' as const,
+      text: x.text,
+      steps: x.steps,
+      author: x.role === 'user' ? x.author : null,
+    })))
+  }, [thread.data])
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) },
             [turns, busy])
 
@@ -60,9 +103,12 @@ export function AgentPanel({ project, open, onClose }: {
     setTurns((t) => [...t, { role: 'user', text: msg }])
     setBusy(true)
     try {
-      const r = await api.agentChat(project, msg, history)
-      setHistory(r.history)
+      // No history posted: the server reads the engagement's thread.
+      // Two people in one conversation would otherwise each rewrite
+      // it with their own copy.
+      const r = await api.agentChat(project, msg, [])
       setTurns((t) => [...t, { role: 'agent', text: r.text, steps: r.steps }])
+      void qc.invalidateQueries({ queryKey: ['agent-session', project] })
     } catch (e) {
       setTurns((t) => [...t, { role: 'agent', text: '',
                                error: e instanceof Error ? e.message : String(e) }])
@@ -106,12 +152,24 @@ export function AgentPanel({ project, open, onClose }: {
               height: 18, fontSize: 10, bgcolor: alpha(neon.pink, 0.14),
               color: neon.pink, border: `1px solid ${alpha(neon.pink, 0.45)}` }} />}
             <Box sx={{ flex: 1 }} />
-            {turns.length > 0 && (
-              <Tooltip title="Clear the conversation">
-                <IconButton size="small" onClick={() => { setTurns([]); setHistory([]) }}
-                  sx={{ color: neon.muted }}>
-                  <DeleteSweepIcon sx={{ fontSize: 17 }} />
-                </IconButton>
+            {/* Starts a new thread rather than clearing this one.
+                The conversation is the engagement's and somebody else
+                may be reading it, so a local wipe would hide shared
+                history from everyone and keep feeding the agent the
+                old context anyway. The previous thread is closed, not
+                deleted: what was asked during an engagement is part
+                of the engagement. */}
+            {turns.length > 0 && project && (
+              <Tooltip title="Start a new conversation. The current one is
+                              kept — it belongs to the engagement, and
+                              others on it can still read it.">
+                <span>
+                  <IconButton size="small" disabled={fresh.isPending}
+                    onClick={() => fresh.mutate()}
+                    sx={{ color: neon.muted }}>
+                    <DeleteSweepIcon sx={{ fontSize: 17 }} />
+                  </IconButton>
+                </span>
               </Tooltip>
             )}
             <IconButton size="small" onClick={onClose} sx={{ color: neon.muted }}>

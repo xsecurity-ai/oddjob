@@ -1249,6 +1249,98 @@ class WebAddress(Base, TimestampMixin):
     target: Mapped[Target] = relationship(back_populates="web_addresses")
 
 
+class AgentSession(Base, TimestampMixin):
+    """One conversation with the project agent, shared by the project.
+
+    **The transcript used to live only in the browser.** That was a
+    deliberate choice -- see routers/agent.py -- and the reason to
+    change it is equally deliberate: an engagement is worked by
+    several people, and "what did we already ask the agent" is a
+    fact about the engagement, not about whoever happened to have
+    the tab open. Two testers duplicating the same question, or
+    losing an answer when a tab closes, is the cost of keeping it
+    client-side.
+
+    **Scoped to the project, not the user.** Everyone with a role on
+    the engagement reads the same thread. Switching project does not
+    carry the conversation across -- a different engagement is a
+    different subject and a different client, and a transcript that
+    followed you between them would mix two clients' data in one
+    scroll-back, which is the one thing this application exists to
+    prevent.
+    """
+    __tablename__ = "agent_sessions"
+    __table_args__ = (
+        # The common read is "the newest session for this project".
+        Index("ix_agent_sessions_project_seen", "project_id", "last_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    #: Who opened it. Not who owns it -- see the class docstring.
+    opened_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
+    #: First question, trimmed, so a list of sessions is readable
+    #: without opening each one.
+    title: Mapped[str | None] = mapped_column(String(200))
+    #: Last activity, which is what the list sorts on. Distinct from
+    #: `updated_at`: a title correction is not activity.
+    last_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Closed sessions stay readable. The record of what was asked
+    #: during an engagement is part of the engagement.
+    closed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0", default=False)
+
+    turns: Mapped[list[AgentTurn]] = relationship(
+        back_populates="session", cascade="all, delete-orphan",
+        order_by="AgentTurn.seq")
+
+
+class AgentTurn(Base, TimestampMixin):
+    """One message in an agent conversation.
+
+    `content` is the provider-shaped message, as JSON, because that
+    is what has to go back to the model on the next turn and
+    re-deriving it from prose would not round-trip.
+
+    **A credential never lands here.** `get_finding_secret` returns
+    a value that `reveal_secret` releases only to a `user` role and
+    only with an audit entry naming who asked. A transcript readable
+    by everyone on the project -- including `readonly`, which exists
+    precisely to be handed out more freely -- would be a way around
+    both. So the tool RESULT for that one tool is replaced with a
+    note before it is stored. The agent still saw it in its own
+    turn; the database does not keep it.
+    """
+    __tablename__ = "agent_turns"
+    __table_args__ = (
+        UniqueConstraint("session_id", "seq", name="uq_agent_turn_seq"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"), index=True)
+    #: Order within the session. Explicit rather than relying on id,
+    #: because the id sequence is shared across every project.
+    seq: Mapped[int] = mapped_column(Integer)
+    #: user | assistant — the provider's own vocabulary.
+    role: Mapped[str] = mapped_column(String(16))
+    #: The provider-shaped message, JSON encoded.
+    content: Mapped[str] = mapped_column(Text)
+    #: Who typed it, for a `user` turn. Null for the assistant.
+    author_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
+    #: What the UI shows: the assistant's prose, or the question.
+    #: Kept beside `content` so rendering a transcript does not mean
+    #: parsing provider-specific shapes in the browser.
+    text: Mapped[str | None] = mapped_column(Text)
+    #: The tool calls made on this turn, JSON, already redacted.
+    steps: Mapped[str | None] = mapped_column(Text)
+
+    session: Mapped[AgentSession] = relationship(back_populates="turns")
+
+
 class WebAsset(Base, TimestampMixin):
     """A script, stylesheet or font a page pulls in, and what it is.
 

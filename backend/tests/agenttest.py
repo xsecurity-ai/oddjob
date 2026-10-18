@@ -1213,6 +1213,81 @@ check("writes are off when no single project is in view",
       (wide or {}).get("allow_writes") is False,
       str((wide or {}).get("allow_writes")))
 
+
+print("\n== the agent thread belongs to the engagement ==")
+# It used to live in the browser. An engagement is worked by several
+# people, so "what have we already asked" is a fact about the
+# engagement rather than about whoever has the tab open.
+st, none_yet = call("/api/agent/session?project=ALPHA", token=admin)
+check("a project with no thread says so rather than inventing one",
+      st == 200 and none_yet is None, f"status={st} {str(none_yet)[:60]}")
+
+st, fresh = call("/api/agent/session/new?project=ALPHA", "POST", {},
+                 token=admin)
+check("a thread can be started", st == 200 and (fresh or {}).get("id"),
+      f"status={st} {str(fresh)[:90]}")
+check("...on the project it was asked for",
+      (fresh or {}).get("project_code") == "ALPHA", str(fresh)[:70])
+check("...and is empty", (fresh or {}).get("turns") == [], str(fresh)[:70])
+
+# The point of the change: the OTHER person on the engagement reads
+# the same thread, without having been the one who opened it.
+st, seen = call("/api/agent/session?project=ALPHA", token=ntok)
+check("a readonly member of the project sees the same thread",
+      st == 200 and (seen or {}).get("id") == (fresh or {}).get("id"),
+      f"status={st} {str(seen)[:80]}")
+check("...and is told who opened it",
+      (seen or {}).get("opened_by") == "root", str(seen)[:80])
+
+# Switching engagement must not carry a client's conversation into
+# another client's view. That is the one thing this app exists to
+# prevent.
+st, bravo = call("/api/agent/session?project=BRAVO", token=admin)
+check("another engagement has its own thread, not this one",
+      st == 200 and (bravo is None or
+                     (bravo or {}).get("id") != (fresh or {}).get("id")),
+      f"status={st} {str(bravo)[:70]}")
+st, _ = call("/api/agent/session?project=BRAVO", token=ntok)
+check("a project they cannot read is 404, not an empty thread", st == 404,
+      f"status={st} — anything else leaks that BRAVO exists")
+
+st, second = call("/api/agent/session/new?project=ALPHA", "POST", {},
+                  token=admin)
+check("starting a new thread gives a different one",
+      (second or {}).get("id") != (fresh or {}).get("id"),
+      f"{(fresh or {}).get('id')} -> {(second or {}).get('id')}")
+st, now = call("/api/agent/session?project=ALPHA", token=admin)
+check("...and it is the one the project is now on",
+      (now or {}).get("id") == (second or {}).get("id"), str(now)[:70])
+
+print("\n== a credential never lands in a shared transcript ==")
+# `reveal_secret` releases a value only to a `user` role and only
+# with an audit entry naming who asked. A thread readable by
+# everyone on the project -- readonly included, which exists to be
+# handed out more freely -- would be a way around both.
+from app.routers import agent as _ag  # noqa: E402
+
+
+class _Step:
+    def __init__(self, tool, result):
+        self.kind, self.text, self.tool = "tool", "", tool
+        self.args, self.result = {}, result
+
+
+_red = _ag._redact_steps([
+    _Step("get_finding_secret", "hunter2-the-actual-password"),
+    _Step("list_findings", "three findings"),
+])
+check("the secret tool's result is not stored",
+      "hunter2" not in json.dumps(_red), json.dumps(_red)[:120])
+check("...and says where the value really is, rather than nothing",
+      "records who asked" in json.dumps(_red), json.dumps(_red)[:160])
+check("every other tool's result is kept",
+      any(d["result"] == "three findings" for d in _red), _red)
+check("the withholding is narrow, and stays narrow",
+      frozenset({"get_finding_secret"}) == _ag.SECRET_TOOLS,
+      _ag.SECRET_TOOLS)
+
 print("== read-only tools are available in read-only mode ==")
 # These four only read, and they are the ones an analyst actually asks
 # for: what is worth attacking, what runs PHP, what has a public
