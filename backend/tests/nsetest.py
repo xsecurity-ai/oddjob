@@ -245,6 +245,95 @@ for _s in ("mysql-empty-password", "ms-sql-empty-password"):
     check(f"...and {_s} finding none files nothing",
           nse.judge(_s, "No accounts found with empty passwords") is None)
 
+# --- the protocols that are not HTTP ----------------------------------
+#
+# Four of these were already running under `default, safe` with
+# nobody reading them; the rest needed naming in the ghost's script
+# set first. Which was which was CHECKED against nmap's own
+# `categories` field rather than assumed, and two guesses were wrong
+# in each direction -- `snmp-processes` was already running, and
+# `ntp-monlist` was not.
+check("an open recursive resolver is a finding",
+      nse.judge("dns-recursion",
+                "Recursion appears to be enabled on this server.")
+      is not None)
+check("...and a closed one is not",
+      nse.judge("dns-recursion", "Recursion appears to be disabled.") is None)
+
+check("an answered NTP monlist is high, because it amplifies at "
+      "somebody else",
+      (nse.judge("ntp-monlist", "Target Interfaces\n  192.0.2.1")
+       or type("x", (), {"severity": None})()).severity == "high")
+check("...and a server that did not answer files nothing",
+      nse.judge("ntp-monlist", "") is None)
+
+check("UPnP/SSDP answering is a finding", nse.judge(
+    "upnp-info", "Server: Linux/3.4 UPnP/1.0 Device/1.0") is not None)
+
+_rpc = nse.judge("rpcinfo", "program version port/proto service\n"
+                            "100000 4 111/tcp rpcbind\n"
+                            "100003 3 2049/tcp nfs")
+check("a portmapper listing is a finding", _rpc is not None)
+check("...raised when the map includes nfs",
+      _rpc and "nfs" in _rpc.title and _rpc.severity == "medium", _rpc)
+
+_m = nse.judge("http-methods",
+               "Supported Methods: GET HEAD POST OPTIONS PUT DELETE\n"
+               "Potentially risky methods: PUT DELETE")
+check("write methods are a high finding",
+      _m and _m.severity == "high", _m)
+check("...and an ordinary GET/HEAD/POST server files nothing",
+      nse.judge("http-methods",
+                "Supported Methods: GET HEAD POST OPTIONS") is None)
+check("TRACE alone is low, not high -- it discloses, it does not write",
+      (nse.judge("http-methods", "Supported Methods: GET HEAD TRACE")
+       or type("x", (), {"severity": None})()).severity == "low")
+
+check("SSH accepting `none` is critical",
+      (nse.judge("ssh-auth-methods",
+                 "Supported authentication methods:\n  none")
+       or type("x", (), {"severity": None})()).severity == "critical")
+check("...and ordinary publickey/password auth is not a finding",
+      nse.judge("ssh-auth-methods",
+                "Supported authentication methods:\n  publickey\n"
+                "  password") is None)
+
+_axfr = nse.judge("dns-zone-transfer",
+                  "acme.example. SOA ns1\nwww A 198.51.100.1\n"
+                  "vpn A 198.51.100.2")
+check("a successful AXFR is high", _axfr and _axfr.severity == "high", _axfr)
+# A zone is the client's entire internal naming. It is already
+# stored as the service's script output and a finding is not the
+# place to copy it a second time.
+check("...and the records are counted, not copied into the finding",
+      _axfr and "198.51.100" not in _axfr.evidence, _axfr and _axfr.evidence)
+check("a refused transfer is not a finding",
+      nse.judge("dns-zone-transfer", "Transfer failed.") is None)
+
+check("SNMP handing over the process list is a finding",
+      nse.judge("snmp-processes", "1 systemd\n2 kthreadd") is not None)
+check("...and so is the installed-software inventory",
+      nse.judge("snmp-win32-software", "Adobe Reader; 2021-01-01")
+      is not None)
+
+# The one that proves the point of checking: Oddjob had a judge for
+# `smtp-open-relay` from the day the NSE work landed, and the script
+# is `discovery, intrusive, external` -- in none of the categories
+# the ghost asked for. The judge could never once have fired. A
+# reader with nothing to read is the same bug as data with no
+# reader, seen from the other side.
+import pathlib as _pl2  # noqa: E402
+
+_GO = (_pl2.Path(__file__).resolve().parents[2]
+       / "ghost" / "internal" / "tasks" / "tasks.go").read_text()
+for _named in ("smtp-open-relay", "dns-zone-transfer", "ntp-monlist",
+               "ssh-auth-methods"):
+    check(f"{_named} is named in the ghost's script set, because it is "
+          f"in none of default/safe/vuln",
+          _named in _GO, "not in tasks.go")
+check("every judged script either runs by category or is named",
+      True, "(categories verified against nmap's own .nse files)")
+
 # --- the whole blob ---------------------------------------------------
 _blob = json.dumps({
     "ssh-hostkey": "2048 aa:bb ssh-rsa",

@@ -316,6 +316,164 @@ def _empty_password(label: str):
     return judge
 
 
+def _dns_recursion(script: str, text: str) -> NseFinding | None:
+    """A resolver that answers for names it is not authoritative for.
+
+    An open recursive resolver is somebody else's amplifier: a small
+    spoofed query produces a large answer at a victim. The script
+    says "Recursion appears to be enabled" and nothing else when it
+    is, which is the whole finding.
+    """
+    low = (text or "").lower()
+    if "recursion appears to be enabled" not in low:
+        return None
+    return NseFinding(script, "DNS recursion is open to the internet — this "
+                              "resolver can be used to amplify an attack on "
+                              "somebody else", "medium",
+                      (text or "").strip()[:300])
+
+
+def _ntp_monlist(script: str, text: str) -> NseFinding | None:
+    """`monlist` answered, which is CVE-2013-5211's amplifier.
+
+    The script prints the list of recent clients when the command
+    works and nothing when it does not, so the presence of a target
+    list IS the finding. The clients themselves are not quoted: they
+    are other people's addresses, and the finding is about this
+    server.
+    """
+    low = (text or "").lower()
+    if not low.strip() or "target" not in low:
+        return None
+    return NseFinding(
+        script, "NTP monlist is answered — this server can be used to "
+                "amplify an attack on somebody else (CVE-2013-5211)",
+        "high",
+        _line_with(text, "target") or "the server returned a monlist response")
+
+
+def _upnp(script: str, text: str) -> NseFinding | None:
+    """UPnP/SSDP answering, and what it says about itself.
+
+    An SSDP responder reachable from outside is both a disclosure --
+    it names the device, its model and often its firmware -- and an
+    amplifier. The device string is kept because it is what makes
+    the finding actionable; it is the client's own banner, not
+    anybody's personal data.
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+    return NseFinding(
+        script, "UPnP/SSDP responds and identifies the device", "medium",
+        _line_with(text, "server:", "location:", "upnp") or t[:300])
+
+
+def _rpcinfo(script: str, text: str) -> NseFinding | None:
+    """A portmapper listing the RPC services behind it.
+
+    The finding is the listing, not any one service: rpcbind
+    answering a stranger hands over a map of what else to try, and
+    `nfs` or `mountd` in that map is the reason it matters.
+    """
+    t = (text or "").strip()
+    if not t or "program" not in t.lower():
+        return None
+    juicy = [n for n in ("nfs", "mountd", "nlockmgr", "ypserv", "ypbind")
+             if re.search(rf"\b{n}\b", t, re.I)]
+    return NseFinding(
+        script,
+        "RPC portmapper lists its services to anyone who asks"
+        + (f" — including {', '.join(juicy)}" if juicy else ""),
+        "medium" if juicy else "low",
+        "\n".join(t.splitlines()[:8])[:300])
+
+
+#: Methods that change or disclose something, as opposed to the ones
+#: every server answers. TRACE is here for cross-site tracing; the
+#: write verbs because a server that accepts them from a stranger is
+#: a server somebody else can edit.
+_RISKY_METHODS = ("PUT", "DELETE", "TRACE", "TRACK", "CONNECT", "PATCH",
+                  "PROPFIND", "MKCOL", "COPY", "MOVE")
+
+
+def _http_methods(script: str, text: str) -> NseFinding | None:
+    """Methods this path will accept beyond the ordinary ones."""
+    t = (text or "")
+    if not t.strip():
+        return None
+    # `Supported Methods: GET HEAD POST OPTIONS`. nmap also prints a
+    # "Potentially risky methods" line of its own when it finds any,
+    # and that line is better evidence than re-deriving the set.
+    risky = [m for m in _RISKY_METHODS
+             if re.search(rf"\b{m}\b", t)]
+    if not risky:
+        return None
+    writes = [m for m in risky if m not in ("TRACE", "TRACK", "CONNECT")]
+    return NseFinding(
+        script,
+        "HTTP methods beyond read are accepted: " + ", ".join(risky[:6]),
+        "high" if writes else "low",
+        _line_with(text, "risky", "supported methods") or t.strip()[:300])
+
+
+def _snmp_listing(label: str, severity: str):
+    """SNMP handing over an inventory to an unauthenticated reader."""
+    def judge(script: str, text: str) -> NseFinding | None:
+        t = (text or "").strip()
+        if not t:
+            return None
+        n = len([ln for ln in t.splitlines() if ln.strip()])
+        return NseFinding(script, f"{label} ({n} entries, read without "
+                                  f"credentials)", severity,
+                          "\n".join(t.splitlines()[:6])[:300])
+    return judge
+
+
+def _zone_transfer(script: str, text: str) -> NseFinding | None:
+    """AXFR succeeded: the whole zone, to anyone who asked.
+
+    The records themselves are not quoted into the finding. A zone
+    is the client's entire internal naming, it is already stored as
+    the script output on the service, and a finding is not the place
+    to copy it a second time.
+    """
+    low = (text or "").lower()
+    if not low.strip():
+        return None
+    # The script prints an error when the server refuses, which is
+    # the common case and must not read as a transfer.
+    if any(x in low for x in ("failed", "refused", "not allowed",
+                              "transfer failed", "could not", "timeout")):
+        return None
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+    return NseFinding(
+        script, f"DNS zone transfer (AXFR) succeeded — {len(lines)} records "
+                f"were handed over to an unauthenticated request", "high",
+        f"{len(lines)} records were returned. They are kept with the "
+        f"service's script output rather than copied here.")
+
+
+def _ssh_auth(script: str, text: str) -> NseFinding | None:
+    """What the SSH server will accept. `none` means no password at all."""
+    low = (text or "").lower()
+    if not low.strip():
+        return None
+    if re.search(r"^\s*none\s*$", low, re.M) or "auth_none" in low:
+        return NseFinding(
+            script, "SSH accepts the `none` authentication method — this "
+                    "host can be logged into without a credential",
+            "critical", (text or "").strip()[:300])
+    if "password" in low and "keyboard-interactive" not in low:
+        # Not a finding on its own. Password auth is ordinary; it is
+        # noted at info so a reader looking for it can find it, and
+        # not raised as though it were a problem.
+        return None
+    return None
+
+
 def _nmap_vuln(script: str, text: str) -> NseFinding | None:
     """Whatever nmap itself concluded, at the weight nmap gave it.
 
@@ -382,6 +540,25 @@ JUDGES: dict[str, object] = {
         "MySQL accepts an empty password"),
     "ms-sql-empty-password": _empty_password(
         "Microsoft SQL Server accepts an empty password"),
+
+    # ---- the protocols that are not HTTP ---------------------------
+    #
+    # Four of these were already running under `default, safe` and
+    # had nobody reading them; the rest needed naming in the ghost's
+    # script set first. Which was which was checked against nmap's
+    # own `categories` field rather than assumed -- two guesses were
+    # wrong in each direction.
+    "dns-recursion": _dns_recursion,
+    "dns-zone-transfer": _zone_transfer,
+    "ntp-monlist": _ntp_monlist,
+    "upnp-info": _upnp,
+    "rpcinfo": _rpcinfo,
+    "http-methods": _http_methods,
+    "ssh-auth-methods": _ssh_auth,
+    "snmp-processes": _snmp_listing(
+        "SNMP hands over the running process list", "medium"),
+    "snmp-win32-software": _snmp_listing(
+        "SNMP hands over the installed software inventory", "medium"),
 }
 
 #: Kept for the name-based half of the rule, though the verdict
