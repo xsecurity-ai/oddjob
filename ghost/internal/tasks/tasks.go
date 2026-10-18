@@ -512,7 +512,62 @@ func nmapArgv(args map[string]any, outPath string, tg []string, rawSockets bool)
 // supposed to get low-volume fingerprinting only, and a scan with
 // `vuln` on is materially slower -- the queue was already moving at
 // roughly seven nmap tasks an hour.
-const NSEScripts = "default,safe,vuln,ssl-cert"
+//
+// `ssl-enum-ciphers` has to be named because it is in NEITHER
+// `default` nor `safe` -- nmap files it under `discovery, intrusive`
+// -- so until it was named here, Oddjob could say which hosts spoke
+// TLS and nothing whatever about whether that TLS was any good. No
+// cipher list, no protocol versions, no grade. That was the largest
+// genuine gap in the scanning phase.
+//
+// It costs time: the script offers each cipher suite in turn and a
+// host with several ports speaking TLS adds real seconds. It is
+// still the cheapest TLS analysis available, because the alternative
+// is another binary in the image and another task kind to budget.
+//
+// `smb-security-mode` and `smb2-security-mode` are likewise named.
+// Both ARE in `default`, so they already ran -- naming them is the
+// same insurance `ssl-cert` gets, because what they report (SMB
+// signing not required, which is what makes a relay attack work) is
+// now read as a finding rather than filed as inventory, and a
+// category edit must not be able to remove it quietly.
+//
+// `smb-enum-shares`, `mysql-empty-password` and
+// `ms-sql-empty-password` are all `intrusive` and none of them is in
+// a category above. Each answers a question with one unambiguous
+// answer and no interpretation: what is shared, and whether the
+// database admits an empty password. On an internal engagement
+// those are usually the first three things anybody wants to know,
+// and nothing in Oddjob could answer them.
+//
+// The empty-password pair ARE authentication attempts. One each,
+// against `root` and anonymous -- not a brute force and no lockout
+// risk -- but they are the reason this whole set sits under
+// `state_changing` in app/roe.py, and an engagement whose ceiling is
+// `read_only` refuses the nmap task that would run them.
+//
+// # What is deliberately NOT here
+//
+// `smb-enum-users` and `ldap-search` both work and both are
+// standard. They are left out because of what they RETURN: a list of
+// an organisation's usernames, or a dump of its directory. That is
+// somebody's personal data arriving in a database that is backed up,
+// searched and exported into reports, to answer a question nobody
+// asked yet. An operator who needs them can pass `--script` on a
+// single task.
+//
+// `http-enum` and `http-config-backup` duplicate what the gobuster
+// task already does, more slowly and with a worse wordlist.
+//
+// `snmp-brute` and the other `brute` scripts are credential
+// guessing. They belong behind a decision about lockout policy, not
+// in the set that rides along with every version scan.
+//
+// Each addition costs scan time, which is the real budget here: the
+// queue was already moving at roughly seven nmap tasks an hour.
+const NSEScripts = "default,safe,vuln,ssl-cert,ssl-enum-ciphers," +
+	"smb-security-mode,smb2-security-mode,smb-enum-shares," +
+	"mysql-empty-password,ms-sql-empty-password"
 
 // UDPTopPorts is how many of nmap's commonest UDP ports a `udp` task
 // sweeps when the caller names none.

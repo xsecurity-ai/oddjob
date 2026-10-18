@@ -171,6 +171,80 @@ check("...including when the prose happens to say vulnerable",
                 "found a comment: this page is vulnerable to nothing")
       is None)
 
+# --- TLS, which nothing could see until the script set widened -------
+#
+# `ssl-enum-ciphers` is in NEITHER `default` nor `safe` -- nmap files
+# it under `discovery, intrusive` -- so until the ghost named it,
+# Oddjob could say which hosts spoke TLS and nothing at all about
+# whether that TLS was any good.
+_WEAK_TLS = """  TLSv1.0:
+    ciphers:
+      TLS_RSA_WITH_3DES_EDE_CBC_SHA (rsa 2048) - C
+    warnings:
+      64-bit block cipher 3DES vulnerable to SWEET32 attack
+  TLSv1.2:
+    ciphers:
+      TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 (ecdh_x25519) - A
+  least strength: C"""
+_w = nse.judge("ssl-enum-ciphers", _WEAK_TLS)
+check("a deprecated protocol on offer is a finding", _w is not None)
+check("...naming the protocol, not just 'weak TLS'",
+      _w and "TLSv1.0" in _w.title, _w and _w.title)
+check("...and nmap's own grade for the weakest offering",
+      _w and "C" in _w.evidence, _w and _w.evidence)
+check("...with nmap's warning quoted rather than re-derived",
+      _w and "SWEET32" in _w.evidence, _w and _w.evidence)
+# A server that ALSO offers something strong still negotiates the
+# weak one, which is why nmap grades the weakest and so does this.
+check("...at medium for a deprecated protocol", _w.severity == "medium", _w)
+
+_bad = nse.judge("ssl-enum-ciphers",
+                 "  SSLv3:\n    ciphers:\n      TLS_RSA_WITH_RC4_128_SHA "
+                 "(rsa 2048) - F\n  least strength: F")
+check("SSLv3 and an F grade are high, not medium",
+      _bad and _bad.severity == "high", _bad)
+
+check("a clean TLS configuration files nothing",
+      nse.judge("ssl-enum-ciphers",
+                "  TLSv1.3:\n    ciphers:\n      TLS_AKE_WITH_AES_256_GCM"
+                "_SHA384 (ecdh_x25519) - A\n  least strength: A") is None)
+check("...and so does empty output", nse.judge("ssl-enum-ciphers", "") is None)
+
+# --- SMB ---------------------------------------------------------------
+check("SMB signing enabled-but-not-required is a finding",
+      nse.judge("smb2-security-mode",
+                "Message signing enabled but not required") is not None)
+check("...and says why it matters",
+      "relay" in nse.judge("smb2-security-mode",
+                           "Message signing enabled but not required").title)
+check("signing REQUIRED is not a finding",
+      nse.judge("smb2-security-mode",
+                "Message signing enabled and required") is None)
+check("the SMBv1 wording is understood too",
+      nse.judge("smb-security-mode",
+                "message_signing: disabled (dangerous, but default)")
+      is not None)
+
+_sh = nse.judge("smb-enum-shares",
+                "  ACME\\backups:\n    Anonymous access: READ/WRITE\n"
+                "  ACME\\IPC$:\n    Anonymous access: <none>")
+check("a readable share is a finding", _sh is not None)
+check("...counting only the ones we could actually open, not IPC$",
+      _sh and _sh.title.startswith("1 SMB share"), _sh and _sh.title)
+check("...and a writable one raises it to high",
+      _sh and _sh.severity == "high", _sh)
+check("shares that refused us are not an exposure",
+      nse.judge("smb-enum-shares",
+                "  ACME\\IPC$:\n    Anonymous access: <none>") is None)
+
+# --- empty database passwords -----------------------------------------
+for _s in ("mysql-empty-password", "ms-sql-empty-password"):
+    check(f"{_s} with an account is critical",
+          (nse.judge(_s, "root account has empty password") or
+           type("x", (), {"severity": None})()).severity == "critical")
+    check(f"...and {_s} finding none files nothing",
+          nse.judge(_s, "No accounts found with empty passwords") is None)
+
 # --- the whole blob ---------------------------------------------------
 _blob = json.dumps({
     "ssh-hostkey": "2048 aa:bb ssh-rsa",
