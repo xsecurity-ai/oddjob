@@ -54,6 +54,7 @@ def call(p, m="GET", b=None, token=None):
         except Exception: return e.code, raw[:300]
 
 
+from app import automation as _au  # noqa: E402
 from app.automation import (  # noqa: E402
     BATCH,
     NMAP_PROFILES,
@@ -1031,6 +1032,62 @@ check("an already-tasked subject is not queued again whatever its case",
       plan(Snapshot(auto_web="crawl",
                     web_urls={"https://Mixed.Example/"},
                     tasked={("katana", "https://mixed.example/")})))
+
+print("\n== nuclei as confirmation, not discovery ==")
+# The vulnerability run is already filtered to critical/high CVE
+# templates. This is a different question: instead of asking every
+# critical template whether it applies, ask only the CVEs the local
+# corpus has ALREADY matched to a service on that host.
+_sn = _au.Snapshot(
+    auto_nuclei="confirm",
+    web_urls={"https://a.acme.example", "https://b.acme.example"},
+    suspected={"https://a.acme.example": ["CVE-2021-44228", "CVE-2017-5638"]})
+_plan = _au.plan(_sn)
+_conf = [c for c in _plan if c.kind == "nuclei_confirm"]
+check("a URL with suspected CVEs gets a confirmation run",
+      len(_conf) == 1, [c.subject for c in _conf])
+check("...naming exactly those CVEs on the command line",
+      "-id CVE-2017-5638,CVE-2021-44228" in _conf[0].args["extra"],
+      _conf[0].args["extra"])
+# Sorted, so the same estate produces the same command line twice and
+# two runs are comparable.
+check("...in a stable order, so two runs can be compared",
+      _conf[0].args["extra"].index("CVE-2017-5638")
+      < _conf[0].args["extra"].index("CVE-2021-44228"))
+# The one that matters: asking nuclei to confirm an empty list is a
+# FULL template run wearing a confirmation's name.
+check("a URL with nothing suspected gets no task at all",
+      all(c.subject != "https://b.acme.example" for c in _conf),
+      [c.subject for c in _conf])
+check("...and no bare -id is ever emitted",
+      not any("-id " in c.args.get("extra", "") and c.args["extra"].rstrip()
+              .endswith("-id") for c in _plan))
+# No severity filter: the question is "is this specific lead real",
+# not "is it bad enough to ask".
+check("the confirmation profile does not filter by severity",
+      "-severity" not in _au.NUCLEI_PROFILES["nuclei_confirm"],
+      _au.NUCLEI_PROFILES["nuclei_confirm"])
+check("...but still skips templates that need a login",
+      "-etags authenticated" in _au.NUCLEI_PROFILES["nuclei_confirm"])
+
+# Its own kind, because dedupe is per (kind, subject): sharing one
+# with `nuclei` would mean a confirmation run marked the URL done and
+# the discovery run never happened.
+_both = _au.plan(_au.Snapshot(
+    auto_nuclei="both+confirm",
+    web_urls={"https://a.acme.example"},
+    suspected={"https://a.acme.example": ["CVE-2021-44228"]}))
+check("both+confirm queues all three kinds for one URL",
+      {c.kind for c in _both} == {"nuclei", "nuclei_tech", "nuclei_confirm"},
+      sorted({c.kind for c in _both}))
+
+# The choice lists live in two modules so schemas.py can validate
+# without importing automation. They have to agree.
+from app.models import NUCLEI_CHOICES as _NC  # noqa: E402
+
+check("the choice list and the kind map still agree",
+      set(_NC) == {"off", *_au.NUCLEI_KINDS}, sorted(_NC))
+
 
 print(f"\n{ok} passed, {fail} failed")
 raise SystemExit(1 if fail else 0)

@@ -976,3 +976,97 @@ async def leads_for_service(session: AsyncSession, product: str | None,
         "caveat": caveat,
         "feeds": await status(session),
     }
+
+
+# ------------------------------------------- confirmation, not discovery
+#
+# Which CVEs are worth asking nuclei about on a given origin.
+#
+# The vulnerability run is already filtered -- `-severity
+# critical,high -tags cve -etags authenticated` -- so this is not
+# about taming an unfiltered scan. It is a different question:
+# instead of asking every critical CVE template whether it applies,
+# ask only the ones the local corpus has ALREADY matched to a
+# service on that host.
+#
+# That turns nuclei from discovery into confirmation, and the two
+# want different template sets:
+#
+#   discovery      every critical/high CVE template. Finds things the
+#                  version banner never mentioned, and costs a full
+#                  template run per URL.
+#   confirmation   `-id CVE-…,CVE-…` for the suspected ones. Seconds
+#                  rather than minutes, and every hit is evidence for
+#                  a lead that already existed rather than a new
+#                  claim to triage.
+#
+# Neither replaces the other, which is why this is a separate task
+# kind rather than a change to the existing one: a CPE match needs a
+# version to have been detected, and plenty of services do not give
+# one.
+
+#: Most CVE ids to put on one command line. nuclei takes `-id` as a
+#: comma list and an argv has a length limit; past this the run is
+#: not a confirmation of anything in particular anyway.
+MAX_CONFIRM_IDS = 40
+
+
+async def suspected_cves(session: AsyncSession, project_id: int,
+                         origins: dict[str, str],
+                         limit: int = MAX_CONFIRM_IDS,
+                         ) -> dict[str, list[str]]:
+    """-> {origin: [CVE, …]} the corpus already links to that host.
+
+    `origins` is {origin: host}, as `webtargets.discoverable` gives
+    it. Read once per cycle so the planner stays pure data.
+
+    Only services with BOTH a product and a version are asked about.
+    Without a version a CPE match is product-wide, which is every CVE
+    that vendor has ever had -- a confirmation run built from that
+    would be the unfiltered scan this exists to avoid.
+    """
+    from .models import Service, Target
+
+    if not origins:
+        return {}
+    hosts = {h for h in origins.values() if h}
+    if not hosts:
+        return {}
+
+    rows = (await session.execute(
+        select(Target.host, Service.product, Service.version, Service.name)
+        .join(Service, Service.target_id == Target.id)
+        .where(Target.project_id == project_id,
+               Target.host.in_(sorted(hosts)),
+               Service.product.is_not(None),
+               Service.version.is_not(None)))).all()
+
+    # Per (product, version), not per service: an estate runs the same
+    # nginx on four hundred hosts and the lookup is identical for all
+    # of them.
+    by_pair: dict[tuple, list[str]] = {}
+    per_host: dict[str, set[str]] = {}
+    for host, product, version, name in rows:
+        key = (product, version, name)
+        if key not in by_pair:
+            leads = await leads_for_service(session, product, version, name,
+                                            limit=limit)
+            by_pair[key] = [c["cve"] for c in (leads.get("cves") or [])
+                            # Only an exact CPE version match. "Product
+                            # only" means the CPE covers every release,
+                            # which is not evidence about this one and
+                            # would put a confirmation run back where
+                            # it started.
+                            if str(c.get("version_match", "")).startswith(
+                                "exact")]
+        if by_pair[key]:
+            per_host.setdefault(host, set()).update(by_pair[key])
+
+    out: dict[str, list[str]] = {}
+    for origin, host in origins.items():
+        got = per_host.get(host)
+        if got:
+            # Sorted so the same estate produces the same command line
+            # twice, which is what makes two runs comparable.
+            out[origin] = sorted(got)[:limit]
+    return out

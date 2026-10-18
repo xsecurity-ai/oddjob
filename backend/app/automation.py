@@ -180,6 +180,14 @@ assert set(WEB_CHOICES) == {"off", *WEB_KINDS}
 NUCLEI_PROFILES: dict[str, str] = {
     "nuclei": "-severity critical,high -tags cve -etags authenticated",
     "nuclei_tech": "-tags tech",
+    # No `-tags` and no `-severity`. The template set for this one is
+    # named outright with `-id`, per URL, from the CVEs the local
+    # corpus already matched to a service on that host -- see
+    # `vulnfeed.suspected_cves`. A severity filter on top would drop
+    # a suspected CVE for scoring below the line, which is the one
+    # thing a confirmation run must not do: the question is "is this
+    # specific lead real", not "is it bad enough to ask".
+    "nuclei_confirm": "-etags authenticated",
 }
 assert not any(" " in v for p in NUCLEI_PROFILES.values()
                for v in p.split()[1::2]), "no argument value may contain a space"
@@ -189,6 +197,17 @@ NUCLEI_KINDS: dict[str, tuple[str, ...]] = {
     "vuln": ("nuclei",),
     "tech": ("nuclei_tech",),
     "both": ("nuclei", "nuclei_tech"),
+    #: Confirmation only: ask nuclei about the CVEs already suspected
+    #: on each host and nothing else. Seconds rather than minutes per
+    #: URL, and every hit is evidence for a lead that already existed
+    #: rather than a new claim to triage.
+    #:
+    #: Needs a version to have been detected -- a CPE match without
+    #: one is product-wide -- so a URL whose services gave no version
+    #: produces no task at all. That is the intended behaviour and
+    #: why this does not replace `vuln`.
+    "confirm": ("nuclei_confirm",),
+    "both+confirm": ("nuclei", "nuclei_tech", "nuclei_confirm"),
 }
 
 assert set(NUCLEI_CHOICES) == {"off", *NUCLEI_KINDS}
@@ -247,6 +266,15 @@ class Snapshot:
     #: Every web address in the project, as a url. The subject
     #: a crawl or a content-discovery run actually needs.
     web_urls: set[str] = field(default_factory=set)
+    #: {origin: [CVE, ...]} the local corpus already links to a
+    #: service on that origin's host, with an EXACT CPE version
+    #: match. Read once per cycle so `plan` stays pure data.
+    #:
+    #: Empty for an origin whose services gave no version, which is
+    #: not a gap to fill: a product-wide CPE match is every CVE that
+    #: vendor ever had, and a confirmation run built from that is the
+    #: unfiltered scan this avoids.
+    suspected: dict[str, list[str]] = field(default_factory=dict)
     #: {origin: [url, ...]} -- paths content discovery found that no
     #: crawl has started from. See `webtargets.crawl_seeds`, which
     #: explains at length why this one source is allowed to point a
@@ -392,11 +420,32 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
             # carries the same risk of a miscount becoming six figures
             # of queued scanning.
             cap = WEB_PER_CYCLE if limit is None else min(limit, WEB_PER_CYCLE)
-            out += [Candidate(kind, u,
-                              {"targets": [u],
-                               "extra": NUCLEI_PROFILES[kind]},
-                              "auto_nuclei")
-                    for u in want[:cap]]
+            if kind == "nuclei_confirm":
+                # Per URL, because the template set IS per URL. A URL
+                # with nothing suspected produces no task: asking
+                # nuclei to confirm an empty list would be a full
+                # template run wearing a confirmation's name.
+                out += [Candidate(kind, u,
+                                  {"targets": [u],
+                                   # Sorted HERE as well as in
+                                   # `suspected_cves`. The snapshot is
+                                   # plain data that a caller or a test
+                                   # builds, so the command line must
+                                   # not depend on who assembled it --
+                                   # two runs over the same estate have
+                                   # to be comparable.
+                                   "extra": NUCLEI_PROFILES[kind]
+                                            + " -id "
+                                            + ",".join(sorted(set(ids)))},
+                                  "auto_nuclei")
+                        for u in want[:cap]
+                        if (ids := s.suspected.get(u))]
+            else:
+                out += [Candidate(kind, u,
+                                  {"targets": [u],
+                                   "extra": NUCLEI_PROFILES[kind]},
+                                  "auto_nuclei")
+                        for u in want[:cap]]
 
     if s.auto_nmap in NMAP_PROFILES:
         args = NMAP_PROFILES[s.auto_nmap]
@@ -462,7 +511,15 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
     # dialog offers. The policy's own filter is unchanged and still
     # does the real work: of everywhere it could go, queue the ones
     # nothing has been run against yet.
-    web_urls = set(await discoverable(session, pr.id))
+    origins = await discoverable(session, pr.id)
+    web_urls = set(origins)
+    # Only when something will use it. The lookup is a query per
+    # distinct (product, version) in the project, and a project not
+    # running confirmation has no use for the answer.
+    suspected: dict[str, list[str]] = {}
+    if pr.auto_nuclei in ("confirm", "both+confirm"):
+        from .vulnfeed import suspected_cves
+        suspected = await suspected_cves(session, pr.id, origins)
 
     # Read whatever the switch is set to, rather than only when a
     # crawl is wanted: `plan` is where the policy lives, and a
@@ -480,7 +537,8 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
         auto_nuclei=str(getattr(pr, "auto_nuclei", None) or "off"),
         targets=targets, addresses=addresses,
         searched=searched, tasked=tasked,
-        scope_zones=scope_zones, web_urls=web_urls, seeds=seeds)
+        scope_zones=scope_zones, web_urls=web_urls, seeds=seeds,
+        suspected=suspected)
 
 
 async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:

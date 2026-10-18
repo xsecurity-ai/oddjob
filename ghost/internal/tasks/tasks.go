@@ -68,10 +68,15 @@ var Runners = map[string]Runner{
 	// so one name would mean whichever ran first suppressed the
 	// other. The flags that make them different arrive in `extra`.
 	"nuclei_tech": runNuclei,
-	"httpx":       runHTTPX,
-	"nslookup":    runNSLookup,
-	"reverse_ip":  runReverseIP,
-	"install":     runInstall,
+	// The same runner. The difference is entirely in the flags
+	// Oddjob sends: `-id CVE-…` naming only what the corpus
+	// already suspects on that host, which turns the run from
+	// discovery into confirmation.
+	"nuclei_confirm": runNuclei,
+	"httpx":          runHTTPX,
+	"nslookup":       runNSLookup,
+	"reverse_ip":     runReverseIP,
+	"install":        runInstall,
 }
 
 // ---------------------------------------------------------------- args

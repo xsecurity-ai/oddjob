@@ -101,7 +101,11 @@ NMAP_CHOICES = ("off", "top100", "full")
 #:   vuln   CVE templates at critical and high
 #:   tech   what the thing IS -- feeds the service, not the findings
 #:   both   both, as separate tasks per URL
-NUCLEI_CHOICES = ("off", "vuln", "tech", "both")
+NUCLEI_CHOICES = ("off", "vuln", "tech", "both",
+                  # Confirmation runs: nuclei asked only about the
+                  # CVEs the local corpus already matched to a
+                  # service on that host. See automation.NUCLEI_KINDS.
+                  "confirm", "both+confirm")
 
 
 class Project(Base, TimestampMixin):
@@ -208,7 +212,8 @@ class Project(Base, TimestampMixin):
     auto_web: Mapped[str] = mapped_column(
         String(16), default="off", server_default="off")
 
-    #: "off" | "vuln" | "tech" | "both". See NUCLEI_CHOICES.
+    #: "off" | "vuln" | "tech" | "both" | "confirm" | "both+confirm".
+    #: See NUCLEI_CHOICES.
     #:
     #: Off by default like the rest, and more deliberately than most:
     #: the vulnerability half runs CVE templates, which means sending
