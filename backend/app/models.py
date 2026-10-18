@@ -233,6 +233,43 @@ class Project(Base, TimestampMixin):
     auto_nuclei: Mapped[str] = mapped_column(
         String(16), default="off", server_default="off")
 
+    #: Ask each web origin what OTHER names it answers to. A host
+    #: serving twelve virtual hosts is twelve applications behind one
+    #: address, and eleven of them were invisible to everything else
+    #: here: content discovery asks what PATHS exist, and this asks
+    #: what SITES do.
+    auto_vhost: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false")
+    #: Probe every URL the project knows and record what answered.
+    #: The cheapest thing in the catalogue and the one that decides
+    #: whether anything else is worth queueing against a URL.
+    auto_httpx: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false")
+    # There is deliberately no `auto_geolocate`. Geolocation already
+    # runs for every project this worker touches -- it is a walk of a
+    # memory-mapped file on this machine, nothing leaves, and it
+    # costs nothing to ask -- so a switch for it would be a switch
+    # that does not switch anything, which is worse than none.
+
+    #: Everything on, at its most thorough, and kept that way.
+    #:
+    #: One switch instead of nine, for the engagement where the answer
+    #: to every "should we also..." is yes. It does not COPY values
+    #: into the other columns -- it is resolved when the policies are
+    #: read, so turning it off returns the project to whatever was set
+    #: before rather than to whatever the sink happened to leave
+    #: behind.
+    #:
+    #: **It deliberately does not imply the two policies that send a
+    #: client's domain to a third party** -- Certificate Transparency
+    #: and archived-URL lookups. Those are gated by an explicit site
+    #: decision for a documented reason (see app/ctlogs.py), and a
+    #: convenience switch that routed around a vendor-approval gate
+    #: would be the gate not existing. They stay separate and stay
+    #: off until somebody says.
+    kitchen_sink: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false")
+
     #: Extra paths for content discovery, one per line, APPENDED to
     #: whichever wordlist the agent is using rather than replacing it.
     #:

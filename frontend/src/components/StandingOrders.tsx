@@ -67,6 +67,21 @@ const SWITCHES = [
     help: 'Runs a reverse lookup on any host named by its address. '
       + 'Several names at one address still comes to you to decide.',
   },
+  {
+    field: 'auto_vhost' as const,
+    label: 'Find other sites on each host',
+    help: 'Asks each web origin what OTHER names it answers to. A host '
+      + 'serving twelve virtual hosts is twelve applications behind one '
+      + 'address, and content discovery cannot see them — it asks what '
+      + 'paths exist on a site, not what sites exist on a host.',
+  },
+  {
+    field: 'auto_httpx' as const,
+    label: 'Probe every known URL',
+    help: 'Asks each URL the project knows what it answers with. The '
+      + 'cheapest thing in the catalogue and the one that decides '
+      + 'whether anything heavier is worth queueing against a URL.',
+  },
 ]
 
 // Labelled by what the mode DOES, not by the tool that happens to do
@@ -132,15 +147,75 @@ function useStandingOrders(project: string) {
   // refetch while the database held the operator's choice.
   const web = String(pr.data?.auto_web ?? 'off')
   const nuclei = String(pr.data?.auto_nuclei ?? 'off')
-  const live = SWITCHES.filter((s) => on(s.field)).length
-    + (nmap !== 'off' ? 1 : 0) + (web !== 'off' ? 1 : 0)
-    + (nuclei !== 'off' ? 1 : 0)
+  const sink = Boolean(pr.data?.kitchen_sink)
+  // What is ACTUALLY in force. With the sink open every policy is at
+  // its most thorough regardless of the columns underneath, and a
+  // panel that showed the stored values would be showing something
+  // that is not happening.
+  const live = sink
+    ? SWITCHES.length + 3
+    : SWITCHES.filter((s) => on(s.field)).length
+      + (nmap !== 'off' ? 1 : 0) + (web !== 'off' ? 1 : 0)
+      + (nuclei !== 'off' ? 1 : 0)
 
   return {
     admin: roleOn(project) === 'admin',
     busy: pr.isLoading || save.isPending,
-    save, on, nmap, web, nuclei, live,
+    save, on, nmap, web, nuclei, live, sink,
   }
+}
+
+/** What the policies that are on have still not done.
+ *
+ *  The point of a switch that says "everything" is that somebody
+ *  stops checking. So it has to be able to answer "is it actually
+ *  done", and the answer is derived from the estate rather than from
+ *  whether the worker ran.
+ *
+ *  Silence here is a real answer and is said out loud: an empty gap
+ *  list reads as "nothing outstanding", not as a blank panel that
+ *  could equally mean the request failed.
+ */
+function GapReport({ project }: { project: string }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['standing-order-gaps', project],
+    queryFn: () => api.standingOrderGaps(project),
+    // Cheap, and the number is the point of looking.
+    refetchInterval: 30_000,
+  })
+  if (isLoading) return null
+  if (error) {
+    return (
+      <Box sx={{ fontSize: 11.5, color: neon.pink, pb: 1 }}>
+        Could not check what is outstanding: {(error as Error).message}. That
+        is a fact about this request, not about the estate.
+      </Box>
+    )
+  }
+  if (!data?.length) {
+    return (
+      <Box sx={{ fontSize: 11.5, color: neon.green, pb: 1 }}>
+        Nothing outstanding — every policy that is on has been applied to
+        everything it covers.
+      </Box>
+    )
+  }
+  return (
+    <Box sx={{ pb: 1 }}>
+      <Box sx={{ fontSize: 11.5, color: neon.yellow }}>
+        Still owed:
+      </Box>
+      {data.map((g) => (
+        <Box key={`${g.policy}:${g.what}`}
+          sx={{ fontSize: 11, color: alpha(neon.muted, 0.95), pl: 1 }}>
+          {g.outstanding} {g.what}
+          <Box component="span" sx={{ color: alpha(neon.muted, 0.6) }}>
+            {` · ${g.policy}`}
+          </Box>
+        </Box>
+      ))}
+    </Box>
+  )
 }
 
 /** One policy: its name, the sentence that says what it will do, and
@@ -170,12 +245,15 @@ function Row({ label, help, children }: {
 /** The controls themselves. Separate from the dialog so the shape can
  *  be read without the chrome around it. */
 export function StandingOrdersControls({ project }: { project: string }) {
-  const { admin, busy, save, on, nmap, web, nuclei } =
+  const { admin, busy, save, on, nmap, web, nuclei, sink } =
     useStandingOrders(project)
 
   const pick = (value: string, options: { value: string; label: string }[],
-                onChange: (v: string) => void) => (
-    <Select size="small" value={value} disabled={!admin || busy}
+                onChange: (v: string) => void, forced = false) => (
+    // `forced` is the kitchen sink holding this at its most thorough
+    // setting. Shown at that value and disabled, rather than left
+    // showing a stored value that is not what is happening.
+    <Select size="small" value={value} disabled={!admin || busy || forced}
       onChange={(e) => onChange(e.target.value)}
       sx={{ fontSize: 11.5, height: 28, minWidth: 170,
             color: value === 'off' ? neon.muted : neon.yellow }}>
@@ -196,13 +274,41 @@ export function StandingOrdersControls({ project }: { project: string }) {
         </Box>
       )}
 
+      {/* One switch instead of eight, for the engagement where the
+          answer to every "should we also..." is yes.
+
+          It does not COPY values into the other controls — the
+          server resolves it when the policies are read — so
+          turning it off returns the project to whatever was set
+          before rather than to whatever the sink left behind. The
+          controls below are disabled rather than altered while it
+          is on, which is what says so. */}
+      <Row label="Kitchen sink"
+        help={'Everything below, at its most thorough, and kept that '
+          + 'way: full TCP scans, crawling and content discovery, and '
+          + 'nuclei including confirmation runs. Your individual '
+          + 'settings are kept underneath and come back when you turn '
+          + 'this off. It does NOT turn on Certificate Transparency or '
+          + 'archived-URL lookups — those send the client’s domain to '
+          + 'a third party and stay behind their own decision.'}>
+        <FormControlLabel
+          sx={{ m: 0 }}
+          control={
+            <Switch size="small" checked={sink} disabled={!admin || busy}
+              onChange={(e) => save.mutate({ kitchen_sink: e.target.checked })} />
+          }
+          label="" />
+      </Row>
+
+      {sink && <GapReport project={project} />}
+
       {SWITCHES.map((s) => (
         <Row key={s.field} label={s.label} help={s.help}>
           <FormControlLabel
             sx={{ m: 0 }}
             control={
-              <Switch size="small" checked={on(s.field)}
-                disabled={!admin || busy}
+              <Switch size="small" checked={sink || on(s.field)}
+                disabled={!admin || busy || sink}
                 onChange={(e) => save.mutate({ [s.field]: e.target.checked })} />
             }
             label="" />
@@ -213,7 +319,8 @@ export function StandingOrdersControls({ project }: { project: string }) {
         help={'Scans hosts that have never been scanned. Top 100 is '
           + "nmap's own fast list; Full TCP is all 65,535 ports and is "
           + 'hours of traffic at the far end.'}>
-        {pick(nmap, NMAP, (v) => save.mutate({ auto_nmap: v }))}
+        {pick(sink ? 'full' : nmap, NMAP,
+              (v) => save.mutate({ auto_nmap: v }), sink)}
       </Row>
 
       <Row label="Web discovery"
@@ -222,7 +329,8 @@ export function StandingOrdersControls({ project }: { project: string }) {
           + 'own links; brute forcing asks for 4,751 paths it does not. '
           + 'Both against a large estate is a great deal of traffic at '
           + 'the far end.'}>
-        {pick(web, WEB, (v) => save.mutate({ auto_web: v }))}
+        {pick(sink ? 'both' : web, WEB,
+              (v) => save.mutate({ auto_web: v }), sink)}
       </Row>
 
       <Row label="nuclei"
@@ -233,7 +341,8 @@ export function StandingOrdersControls({ project }: { project: string }) {
           + 'informational findings. CVE templates send a known exploit’s '
           + 'request at a production system — the engagement has to have '
           + 'authorised that.'}>
-        {pick(nuclei, NUCLEI, (v) => save.mutate({ auto_nuclei: v }))}
+        {pick(sink ? 'both+confirm' : nuclei, NUCLEI,
+              (v) => save.mutate({ auto_nuclei: v }), sink)}
       </Row>
 
       <Stack direction="row" spacing={1}

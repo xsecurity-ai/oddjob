@@ -1089,5 +1089,88 @@ check("the choice list and the kind map still agree",
       set(_NC) == {"off", *_au.NUCLEI_KINDS}, sorted(_NC))
 
 
+print("\n== the kitchen sink ==")
+_estate = {
+    "targets": [("a.acme.example", False), ("b.acme.example", True)],
+    "addresses": {"198.51.100.1"},
+    "scope_zones": {"acme.example"},
+    "web_urls": {"https://a.acme.example/", "https://b.acme.example/"},
+}
+
+check("nothing is planned with every policy off",
+      plan(Snapshot(**_estate)) == [])
+
+_sink = Snapshot(kitchen_sink=True, **_estate)
+_eff = _au.effective(_sink)
+# A sink that left auto_nmap at `top100` would be a switch whose
+# name promised one thing and did another.
+check("the sink sets every policy to its MOST thorough value",
+      (_eff.auto_nmap, _eff.auto_web, _eff.auto_nuclei)
+      == ("full", "both", "both+confirm"),
+      (_eff.auto_nmap, _eff.auto_web, _eff.auto_nuclei))
+check("...and turns on the boolean ones",
+      _eff.auto_amass and _eff.auto_resolve_ips and _eff.auto_reverse_dns
+      and _eff.auto_vhost and _eff.auto_httpx)
+
+_kinds = {c.kind for c in plan(_sink)}
+for _k in ("amass", "nslookup", "nmap", "katana", "gobuster", "vhost",
+           "httpx", "nuclei", "nuclei_tech"):
+    check(f"the sink queues {_k}", _k in _kinds, sorted(_kinds))
+
+# Resolved when the policies are READ, not copied into the columns.
+# Switching it off has to return a project to what was set before,
+# not to whatever the sink happened to leave behind.
+check("the sink does not write into the other fields",
+      (_sink.auto_nmap, _sink.auto_web) == ("off", "off"), _sink.auto_nmap)
+check("...so an operator's own setting survives underneath it",
+      Snapshot(auto_nmap="top100", kitchen_sink=True,
+               **_estate).auto_nmap == "top100")
+
+# The gate this must not route around: both of those send a client's
+# domain to a third party and are behind an explicit site decision.
+check("the sink does NOT imply certificate transparency",
+      not any(k == "ct" or k.endswith("_ct") for k in _au.KITCHEN_SINK),
+      sorted(_au.KITCHEN_SINK))
+check("...nor archived-URL lookups",
+      not any("archive" in k for k in _au.KITCHEN_SINK))
+
+print("\n-- is it actually done --")
+_g = _au.gaps(_sink)
+check("an estate with nothing done reports gaps everywhere",
+      len(_g) >= 7, [x.policy for x in _g])
+check("...naming the policy, not just a number",
+      all(x.policy.startswith("auto_") for x in _g))
+check("...including the two policies added here",
+      {"auto_vhost", "auto_httpx"} <= {x.policy for x in _g},
+      sorted({x.policy for x in _g}))
+
+# A policy that is off has no gap BY DEFINITION. Reporting one would
+# turn "we chose not to" into "we failed to".
+check("a policy that is off reports no gap", _au.gaps(Snapshot(**_estate)) == [])
+
+# The report has to agree with the planner, or it is a clean bill of
+# health for work nobody did.
+_done = Snapshot(kitchen_sink=True,
+                 tasked={(c.kind, c.subject.lower()) for c in plan(_sink)}
+                 | {("nslookup", "a.acme.example"),
+                    ("reverse_ip", "198.51.100.1"),
+                    ("nmap", "a.acme.example"), ("nmap", "b.acme.example")},
+                 searched={"acme.example"}, **_estate)
+check("an estate where everything was tasked reports no gaps",
+      _au.gaps(_done) == [],
+      [f"{x.policy}:{x.outstanding}" for x in _au.gaps(_done)])
+
+# nuclei_confirm is owed only where a version was actually detected:
+# a CPE match without one is product-wide, and counting every URL
+# would report work that is not supposed to happen.
+check("confirm owes nothing when no version was detected",
+      _au.gaps(Snapshot(auto_nuclei="confirm", **_estate)) == [])
+check("...and owes exactly the origins that have one",
+      [x.outstanding for x in _au.gaps(Snapshot(
+          auto_nuclei="confirm",
+          suspected={"https://a.acme.example/": ["CVE-1"]},
+          **_estate))] == [1])
+
+
 print(f"\n{ok} passed, {fail} failed")
 raise SystemExit(1 if fail else 0)
