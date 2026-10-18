@@ -3647,9 +3647,10 @@ async def set_proxy(agent_id: int, body: ProxyToggle,
     a.proxy_enabled = bool(body.enabled)
     if not a.proxy_enabled:
         proxyhub.hub.drop(a.id)
-    await audit.record(session, user, "ghost.proxy",
-                       f"{a.name}: proxying "
-                       f"{'enabled' if a.proxy_enabled else 'disabled'}")
+    await audit.record(session, "ui", "ghost.proxy", user=user,
+                       project_code=pr.code,
+                       detail=f"{a.name}: proxying "
+                              f"{'enabled' if a.proxy_enabled else 'disabled'}")
     await session.commit()
     await session.refresh(a)
     return _agent_out(a, pr.code)
@@ -3698,8 +3699,9 @@ async def make_grant(agent_id: int, body: GrantNew,
     # The password is NOT in the audit line. The whole point of
     # storing a hash is undone by writing the plaintext somewhere
     # that is kept for longer.
-    await audit.record(session, user, "ghost.proxy.grant",
-                       f"{a.name}: issued proxy credential {username}")
+    await audit.record(session, "ui", "ghost.proxy.grant", user=user,
+                       project_code=pr.code,
+                       detail=f"{a.name}: issued proxy credential {username}")
     await session.commit()
     await session.refresh(g)
     return {"grant": _grant_out(g).model_dump(),
@@ -3728,8 +3730,9 @@ async def revoke_grant(agent_id: int, grant_id: int,
         raise HTTPException(404, "no such credential")
     if g.revoked_at is None:
         g.revoked_at = datetime.now(UTC)
-        await audit.record(session, user, "ghost.proxy.revoke",
-                           f"revoked proxy credential {g.username}")
+        await audit.record(session, "ui", "ghost.proxy.revoke", user=user,
+                           project_code=pr.code,
+                           detail=f"revoked proxy credential {g.username}")
     await session.commit()
     await session.refresh(g)
     return _grant_out(g)

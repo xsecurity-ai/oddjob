@@ -2840,5 +2840,93 @@ check("it goes through the HTTP handler rather than its own query",
       "reveal_secret" in _src, "reveal_secret" not in _src)
 
 
+# ================================================ the proxy endpoints
+# These exist because the three of them shipped over six pull requests
+# without one test that CALLED them. Every write path had
+# `audit.record(session, user, action, detail)` -- four positionals
+# against a signature of three plus keywords -- so enabling proxying,
+# issuing a credential and revoking one all raised TypeError and
+# returned 500. The protocol was tested to the byte; the HTTP in front
+# of it was not touched, and the button in the UI did nothing at all.
+#
+# So what is asserted here is deliberately shallow and deliberately
+# end-to-end: that each endpoint returns, with a real session, a real
+# project and a real ghost. A unit test of the SOCKS parser cannot
+# catch a bad argument list in a router.
+print("\n== the proxy endpoints answer at all ==")
+
+# Its own ghost: the one enrolled at the top of this suite has been
+# retired, killed and requeued by the time control reaches here, and
+# a 404 from a stale id would look exactly like the bug under test.
+_pg = call("/api/ghosts?project=AGENT", "POST",
+           {"name": "proxy-subject"}, token=admin)[1]
+PID = ((_pg or {}).get("agent") or {}).get("id")
+check("a ghost to proxy through", isinstance(PID, int), str(_pg)[:120])
+
+st, a = call(f"/api/ghosts/{PID}/proxy?project=AGENT", "PATCH",
+             {"enabled": True}, token=admin)
+check("enabling proxying on a ghost succeeds", st == 200,
+      f"status={st} {str(a)[:200]}")
+check("...and the ghost comes back with it on",
+      isinstance(a, dict) and a.get("proxy_enabled") is True, str(a)[:120])
+
+st, g = call(f"/api/ghosts/{PID}/proxy/grants?project=AGENT", "POST",
+             {"note": "a browser"}, token=admin)
+check("issuing a proxy credential succeeds", st in (200, 201),
+      f"status={st} {str(g)[:200]}")
+_user = (g or {}).get("username")
+_pass = (g or {}).get("password")
+check("...and hands back a username and a password",
+      isinstance(_user, str) and isinstance(_pass, str) and len(_pass) > 12,
+      str(_user))
+
+st, lst = call(f"/api/ghosts/{PID}/proxy/grants?project=AGENT", token=admin)
+check("the credential is listed", st == 200 and isinstance(lst, list)
+      and any(x.get("username") == _user for x in lst), str(lst)[:160])
+# The whole point of hashing it is undone if it comes back.
+check("...without the password, ever",
+      bool(_pass) and _pass not in json.dumps(lst),
+      "the password was readable")
+
+_gid = next((x["id"] for x in (lst or []) if x.get("username") == _user), None)
+st, r = call(f"/api/ghosts/{PID}/proxy/grants/{_gid}?project=AGENT",
+             "DELETE", token=admin)
+check("revoking it succeeds", st == 200, f"status={st} {str(r)[:200]}")
+check("...and it is marked revoked rather than deleted",
+      isinstance(r, dict) and r.get("revoked_at"), str(r)[:120])
+
+st, a = call(f"/api/ghosts/{PID}/proxy?project=AGENT", "PATCH",
+             {"enabled": False}, token=admin)
+check("switching proxying back off succeeds", st == 200,
+      f"status={st} {str(a)[:200]}")
+check("...and it is off", isinstance(a, dict)
+      and a.get("proxy_enabled") is False, str(a)[:120])
+
+# Admin, not user: this is the difference between a ghost that runs
+# its tasks and one that carries arbitrary traffic into a client
+# network.
+call("/api/auth/users", "POST",
+     {"username": "watcher", "password": "watcher-password-1",
+      "role": "user"}, token=admin)
+_w = call("/api/auth/login", "POST",
+          {"username": "watcher", "password": "watcher-password-1"})[1]
+_wt = (_w or {}).get("access_token")
+if _wt:
+    st, _ = call(f"/api/ghosts/{PID}/proxy?project=AGENT", "PATCH",
+                 {"enabled": True}, token=_wt)
+    check("a non-admin cannot switch proxying on", st in (401, 403, 404),
+          f"status={st}")
+
+# Every one of those writes an audit line, and a 500 in `audit.record`
+# was what broke them. Proving the entries landed proves the call
+# signature is right rather than merely that nothing raised.
+st, ev = call("/audit/json?limit=500", token=admin)
+_actions = {e.get("action") for e in ((ev or {}).get("entries") or [])}
+check("the audit trail has the proxy actions",
+      {"ghost.proxy", "ghost.proxy.grant",
+       "ghost.proxy.revoke"} <= _actions,
+      sorted(a for a in _actions if "proxy" in str(a)))
+
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
