@@ -347,6 +347,35 @@ func TestNSEScriptsKeepsTheCertificate(t *testing.T) {
 	}
 }
 
+// ssl-enum-ciphers is in NEITHER `default` nor `safe` -- nmap files
+// it under `discovery, intrusive` -- so it runs only while it is
+// named here. Without it Oddjob can say which hosts speak TLS and
+// nothing at all about whether that TLS is any good, which is the
+// state it was in: no cipher list, no protocol versions, no grade.
+//
+// Asserted separately from ssl-cert because the two are dropped by
+// different mistakes. ssl-cert survives a category narrowing by
+// accident, being in both; this one does not survive anything.
+func TestNSEScriptsAnalysesTheTLS(t *testing.T) {
+	for _, want := range []string{
+		"ssl-enum-ciphers",
+		// Both are in `default` already. Named anyway, because what
+		// they report -- SMB signing not required, which is what
+		// makes a relay attack work -- is now read as a finding, and
+		// a category edit must not be able to remove it quietly.
+		"smb-security-mode", "smb2-security-mode",
+	} {
+		if !strings.Contains(NSEScripts, want) {
+			t.Errorf("%s is not in the script set: %q", want, NSEScripts)
+		}
+	}
+	argv := nmapArgv(map[string]any{}, "/tmp/o.xml",
+		[]string{"h.example"}, false)
+	if !strings.Contains(strings.Join(argv, " "), "ssl-enum-ciphers") {
+		t.Errorf("an ordinary scan does not analyse TLS: %v", argv)
+	}
+}
+
 // A caller who named their own scripts keeps them. nmap honours the
 // LAST --script on the line, so appending ours would silently replace
 // theirs -- and the `full` profile asks for `ssl-cert` by name, which

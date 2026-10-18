@@ -205,6 +205,117 @@ _STATE_TITLE = {
 }
 
 
+#: Protocol versions nobody should still be offering. SSLv2 and
+#: SSLv3 are broken outright; TLS 1.0 and 1.1 are deprecated by RFC
+#: 8996 and fail PCI. Written as nmap writes them in the block
+#: header.
+_DEAD_TLS = ("SSLv2", "SSLv3", "TLSv1.0", "TLSv1.1")
+
+#: `ssl-enum-ciphers` ends with its own grade for the port. nmap is
+#: grading the weakest thing on offer, which is the right thing to
+#: report: a server that also offers something strong is still a
+#: server that will negotiate the weak one.
+_LEAST = re.compile(r"least strength:\s*([A-F])", re.I)
+
+
+def _ssl_ciphers(script: str, text: str) -> NseFinding | None:
+    """What this port will actually negotiate.
+
+    Three separate things, reported as one finding because they are
+    one conversation with one server and three findings on one port
+    is how a report becomes unreadable. The severity is the worst of
+    them and the evidence names each.
+    """
+    t = text or ""
+    if not t.strip():
+        return None
+    bad = [p for p in _DEAD_TLS if re.search(rf"^\s*{re.escape(p)}:", t, re.M)]
+    grade = (_LEAST.search(t).group(1).upper() if _LEAST.search(t) else "")
+    # nmap's own warnings, which it only emits when something is
+    # wrong. Quoted rather than re-derived: it already decided.
+    warns = [ln.strip() for ln in t.splitlines()
+             if ln.strip() and ln.strip() not in ("warnings:",)
+             and re.search(r"\b(SWEET32|BEAST|POODLE|broken|weak|insecure|"
+                           r"forward secrecy|64-bit block|anonymous)\b",
+                           ln, re.I)]
+    if not bad and not warns and grade in ("", "A"):
+        # A clean TLS configuration. Not a finding, and not silence
+        # either -- the sweep records that this was looked at.
+        return None
+    bits = []
+    if bad:
+        bits.append("offers " + ", ".join(bad))
+    if grade and grade != "A":
+        bits.append(f"nmap grades the weakest offering {grade}")
+    if warns:
+        bits.append(warns[0][:160])
+    # D/E/F and a dead protocol are different sizes of problem.
+    sev = ("high" if (grade in ("D", "E", "F") or "SSLv2" in bad
+                      or "SSLv3" in bad) else "medium")
+    return NseFinding(script, "Weak TLS configuration — " + "; ".join(bits[:2]),
+                      sev, "\n".join(([*bad] and ["Protocols: "
+                                                  + ", ".join(bad)] or [])
+                                      + ([f"Least strength: {grade}"]
+                                         if grade else [])
+                                      + warns[:4])[:300])
+
+
+def _smb_signing(script: str, text: str) -> NseFinding | None:
+    """SMB signing not required is what makes a relay attack work."""
+    low = (text or "").lower()
+    if not low.strip():
+        return None
+    # nmap words it two ways depending on the dialect, and both mean
+    # the same thing: a client may negotiate signing away.
+    weak = ("message signing enabled but not required" in low
+            or "message_signing: disabled" in low
+            or "signing disabled" in low)
+    if not weak:
+        return None
+    return NseFinding(
+        script, "SMB message signing is not required — relay attacks "
+                "against this host will work", "medium",
+        _line_with(text, "signing") or (text or "").strip()[:300])
+
+
+def _smb_shares(script: str, text: str) -> NseFinding | None:
+    """Shares this host offered to list.
+
+    Only the ones whose access says we could actually read them.
+    nmap enumerates shares it cannot open as well, and filing those
+    would report every IPC$ in the estate as an exposure.
+    """
+    t = text or ""
+    if not t.strip():
+        return None
+    readable = [ln.strip() for ln in t.splitlines()
+                if re.search(r"Anonymous access:\s*(READ|READ/WRITE)", ln, re.I)]
+    if not readable:
+        return None
+    writable = any("WRITE" in r.upper() for r in readable)
+    return NseFinding(
+        script,
+        f"{len(readable)} SMB share(s) readable without credentials"
+        + (" — and one is writable" if writable else ""),
+        "high" if writable else "medium",
+        "\n".join(readable[:6])[:300])
+
+
+def _empty_password(label: str):
+    """A database that admitted an empty password."""
+    def judge(script: str, text: str) -> NseFinding | None:
+        low = (text or "").lower()
+        # The script prints the account it got in as. When it fails
+        # it says so, and "no accounts" must not read as a finding.
+        if not low.strip() or "no accounts" in low or "not vulnerable" in low:
+            return None
+        if "account" not in low and "login success" not in low:
+            return None
+        return NseFinding(script, label, "critical",
+                          (text or "").strip()[:300])
+    return judge
+
+
 def _nmap_vuln(script: str, text: str) -> NseFinding | None:
     """Whatever nmap itself concluded, at the weight nmap gave it.
 
@@ -257,6 +368,20 @@ JUDGES: dict[str, object] = {
         "NFS exports are listable", "medium"),
     "ldap-rootdse": _unauth_service(
         "LDAP answers an anonymous root DSE query", "low"),
+
+    # ---- added once the script set was widened to collect them ----
+    #: What this port will actually negotiate. Until `ssl-enum-ciphers`
+    #: was named in the ghost's script set this could never fire:
+    #: nmap files it under `discovery, intrusive` and neither
+    #: `default` nor `safe` includes it.
+    "ssl-enum-ciphers": _ssl_ciphers,
+    "smb-security-mode": _smb_signing,
+    "smb2-security-mode": _smb_signing,
+    "smb-enum-shares": _smb_shares,
+    "mysql-empty-password": _empty_password(
+        "MySQL accepts an empty password"),
+    "ms-sql-empty-password": _empty_password(
+        "Microsoft SQL Server accepts an empty password"),
 }
 
 #: Kept for the name-based half of the rule, though the verdict
