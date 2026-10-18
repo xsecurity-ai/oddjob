@@ -120,8 +120,56 @@ check("a vuln script that found nothing files nothing",
 check("an unknown *-vuln-* script still gets judged",
       nse.judge("some-future-vuln-check",
                 "  State: VULNERABLE\n  IDs: CVE:CVE-2029-1") is not None)
-check("...while an unknown non-vuln script does not",
-      nse.judge("some-future-inventory", "State: VULNERABLE") is None)
+
+# --- nmap's four verdicts -------------------------------------------
+#
+# This was gated on a `*-vuln-*` NAME and missed everything that
+# reaches a verdict without saying so in its name. On a real estate
+# that was all of it: 187 services carried stored script output, 24
+# of them carried a state line, and the parser filed none.
+#
+# The names below are nmap's own and carry no client information.
+check("a script with no `vuln` in its name is still judged",
+      nse.judge("http-slowloris-check",
+                "  VULNERABLE:\n    State: LIKELY VULNERABLE\n"
+                "    IDs:  CVE:CVE-2007-6750") is not None)
+
+_states = {
+    "vulnerable": "    State: VULNERABLE\n    IDs: CVE:CVE-2017-0143",
+    "likely": "    State: LIKELY VULNERABLE\n    IDs:  CVE:CVE-2007-6750",
+    "unknown": "    State: UNKNOWN (unable to test)\n"
+               "    IDs:  CVE:CVE-2005-3299",
+    "no": "    State: NOT VULNERABLE",
+}
+for _want, _text in _states.items():
+    check(f"nmap's state is read as {_want!r}, not matched on a word",
+          nse.nmap_state(_text) == _want, nse.nmap_state(_text))
+
+# Three of nmap's four answers contain the word VULNERABLE. A regex
+# for the word files the NOT and the UNKNOWN; a regex anchored on
+# `State: VULNERABLE` files neither of the two that matter.
+_v = nse.judge("x-check", _states["vulnerable"])
+_l = nse.judge("x-check", _states["likely"])
+_u = nse.judge("x-check", _states["unknown"])
+check("VULNERABLE is high", _v and _v.severity == "high", _v)
+check("LIKELY VULNERABLE is medium, because nmap hedged and we keep "
+      "the hedge", _l and _l.severity == "medium", _l)
+check("...and the title says it is not confirmed",
+      _l and "not confirmed" in _l.title, _l)
+check("UNKNOWN (unable to test) is a finding, at info",
+      _u and _u.severity == "info", _u)
+# The whole point of keeping it: "could not determine" collapsed
+# into "absent" is how a finding gets missed.
+check("...whose title says neither confirmed nor ruled out",
+      _u and "neither confirmed nor ruled out" in _u.title, _u)
+check("NOT VULNERABLE files nothing — nmap answered the question",
+      nse.judge("x-check", _states["no"]) is None)
+check("output with no state line at all files nothing",
+      nse.judge("some-future-inventory", "Server: nginx") is None)
+check("...including when the prose happens to say vulnerable",
+      nse.judge("http-comments-displayer",
+                "found a comment: this page is vulnerable to nothing")
+      is None)
 
 # --- the whole blob ---------------------------------------------------
 _blob = json.dumps({

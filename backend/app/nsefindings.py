@@ -71,14 +71,49 @@ class NseFinding:
     evidence: str
 
 
-#: nmap's own verdict, which several `*-vuln-*` scripts emit in a
-#: standard block. When nmap says VULNERABLE it has matched a version
-#: AND usually probed; that is a stronger claim than anything this
-#: file could derive from prose.
-_VULNERABLE = re.compile(r"^\s*State:\s*VULNERABLE", re.M | re.I)
+#: nmap's own verdict line, whatever it says.
+#:
+#: The capture is the WHOLE state, not a match on the word
+#: VULNERABLE, because nmap writes four different answers in this
+#: one field and three of them contain that word:
+#:
+#:     State: VULNERABLE
+#:     State: LIKELY VULNERABLE
+#:     State: NOT VULNERABLE
+#:     State: UNKNOWN (unable to test)
+#:
+#: Found by reading 187 services of real stored output, where
+#: `http-slowloris-check` said LIKELY VULNERABLE and
+#: `http-phpmyadmin-dir-traversal` said UNKNOWN (unable to test).
+#: A regex for the word would have filed both of those and the NOT
+#: as findings; a regex anchored on `State: VULNERABLE` filed none
+#: of them, including the two that matter.
+_STATE = re.compile(r"^\s*State:\s*(.+?)\s*$", re.M | re.I)
 
 #: The same block's CVE reference, for the title.
 _CVE = re.compile(r"\b(CVE-\d{4}-\d{4,7})\b", re.I)
+
+
+def nmap_state(text: str) -> str:
+    """nmap's own verdict. -> vulnerable | likely | unknown | no | ''
+
+    `''` means the output carries no state line at all, which is most
+    NSE output and is not an answer about anything.
+    """
+    m = _STATE.search(text or "")
+    if not m:
+        return ""
+    raw = m.group(1).strip().upper()
+    # Order matters: NOT and LIKELY both contain VULNERABLE.
+    if raw.startswith("NOT "):
+        return "no"
+    if raw.startswith("UNKNOWN"):
+        return "unknown"
+    if "LIKELY" in raw and "VULNERABLE" in raw:
+        return "likely"
+    if raw.startswith("VULNERABLE"):
+        return "vulnerable"
+    return ""
 
 
 def _line_with(text: str, *needles: str) -> str:
@@ -150,15 +185,46 @@ def _unauth_service(label: str, severity: str):
     return judge
 
 
+#: What each of nmap's verdicts is worth as a finding.
+#:
+#: `unknown` is a finding, at `info`. That is the point of it: nmap
+#: tried to test for a CVE and could not, and the thing a reader
+#: must be able to tell is that nobody has established either way.
+#: Dropping it would turn "could not determine" into "absent", which
+#: is how a finding gets missed.
+_STATE_SEVERITY = {"vulnerable": "high", "likely": "medium",
+                   "unknown": "info"}
+
+_STATE_TITLE = {
+    "vulnerable": "nmap reports VULNERABLE",
+    # nmap's own hedge, kept as a hedge. Promoting it to VULNERABLE
+    # would be this file inventing confidence nmap declined to have.
+    "likely": "nmap reports LIKELY VULNERABLE — not confirmed",
+    "unknown": "nmap could not test for this — neither confirmed nor "
+               "ruled out",
+}
+
+
 def _nmap_vuln(script: str, text: str) -> NseFinding | None:
-    """Anything nmap itself marked VULNERABLE."""
-    if not _VULNERABLE.search(text or ""):
+    """Whatever nmap itself concluded, at the weight nmap gave it.
+
+    Judged for ANY script, not only `*-vuln-*` named ones. The live
+    estate had `http-slowloris-check` and
+    `http-phpmyadmin-dir-traversal` carrying real verdicts, and
+    neither name contains `vuln`: nmap's conclusion is nmap's
+    conclusion whatever it called the script that reached it.
+    """
+    state = nmap_state(text)
+    sev = _STATE_SEVERITY.get(state)
+    if sev is None:
+        # "no" lands here along with "". A NOT VULNERABLE is nmap
+        # answering the question, and the answer is nothing to file.
         return None
     cve = _CVE.search(text or "")
-    title = f"{script}: nmap reports VULNERABLE"
+    title = f"{script}: {_STATE_TITLE[state]}"
     if cve:
         title += f" ({cve.group(1).upper()})"
-    return NseFinding(script, title, "high",
+    return NseFinding(script, title, sev,
                       _line_with(text, "state:", "ids:", "risk factor")
                       or (text or "")[:300])
 
@@ -193,10 +259,10 @@ JUDGES: dict[str, object] = {
         "LDAP answers an anonymous root DSE query", "low"),
 }
 
-#: Every `*-vuln-*` script, plus the named ones that use the same
-#: VULNERABLE block. Matched by pattern because the set grows with
-#: nmap's own script library and pinning a list here would mean a new
-#: nmap shipped findings nobody reads.
+#: Kept for the name-based half of the rule, though the verdict
+#: block is now read for every script regardless. A `*-vuln-*` name
+#: is still a signal, and having it here documents the set that was
+#: originally covered.
 VULN_PATTERN = re.compile(r"(^|-)vuln(-|$)")
 
 
@@ -212,9 +278,12 @@ def judge(script: str, text: str) -> NseFinding | None:
     fn = JUDGES.get(script)
     if fn is not None:
         return fn(script, text or "")       # type: ignore[operator]
-    if VULN_PATTERN.search(script):
-        return _nmap_vuln(script, text or "")
-    return None
+    # nmap's own verdict block, from ANY script. This used to be
+    # gated on a `*-vuln-*` name and missed every script that
+    # reaches a verdict without saying so in its name -- which, on a
+    # real estate, was all of them: 24 stored results carried a
+    # state line and the parser filed none.
+    return _nmap_vuln(script, text or "")
 
 
 def findings_for(scripts_json: str | None) -> list[NseFinding]:
