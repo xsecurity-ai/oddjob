@@ -160,7 +160,12 @@ async def lifespan(app: FastAPI):
                         key = str(cfg.get("vulnfeed.nvd_api_key") or "").strip()
                         r1 = await vulnfeed.sync_exploitdb(s)
                         r2 = await vulnfeed.sync_nvd(s, key)
-                        for r in (r1, r2):
+                        # After NVD, not before: both of these mark
+                        # CVE rows, so they have nothing to mark until
+                        # the corpus they annotate is there.
+                        r3 = await vulnfeed.sync_kev(s)
+                        r4 = await vulnfeed.sync_epss(s)
+                        for r in (r1, r2, r3, r4):
                             if not r.get("ok"):
                                 print(f"vulnfeed: {r['source']} failed: "
                                       f"{r.get('error')}")

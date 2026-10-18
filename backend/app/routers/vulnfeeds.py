@@ -36,7 +36,8 @@ async def feed_status(_: User = Depends(get_current_user),
 
 
 @router.post("/sync", response_model=dict)
-async def sync_now(source: str = Query("all", pattern="^(all|exploitdb|nvd)$"),
+async def sync_now(source: str = Query(
+                       "all", pattern="^(all|exploitdb|nvd|kev|epss)$"),
                    user: User = Depends(require_site_admin),
                    session: AsyncSession = Depends(get_session)):
     """Fetch now rather than waiting for the daily run.
@@ -68,6 +69,12 @@ async def sync_now(source: str = Query("all", pattern="^(all|exploitdb|nvd)$"),
                 await vulnfeed.sync_exploitdb(s)
             if source in ("all", "nvd"):
                 await vulnfeed.sync_nvd(s, api_key)
+            # Ordered after NVD on purpose: both annotate CVE rows
+            # and have nothing to annotate until those exist.
+            if source in ("all", "kev"):
+                await vulnfeed.sync_kev(s)
+            if source in ("all", "epss"):
+                await vulnfeed.sync_epss(s)
 
     asyncio.create_task(_run())
     return {"started": source,
