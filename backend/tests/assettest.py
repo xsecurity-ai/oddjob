@@ -890,12 +890,90 @@ check("a body that no longer holds the value reads as absent",
 check("...and highlights nothing rather than guessing",
       gone.get("match_start") is None, gone.get("match_start"))
 
+# ---------------------------------------- a credential found in a PAGE
+#
+# `scan_pages` runs the same scanners over the body of every captured
+# 2xx exchange and files what they find through the same `_file_vuln`,
+# which stores the PAGE's url in `asset_url`. That url is a
+# `web_addresses` row and is never in `web_assets`, so the asset
+# lookup cannot succeed for one of them -- and the endpoint used to
+# answer "the asset was removed, or the project was re-imported",
+# which is a confident explanation of something that never happened.
+#
+# On the live estate that was 87 of 1,588 stored credentials: every
+# one findable, none viewable, all blamed on a deletion that had not
+# occurred. The evidence was in the captured response the whole time.
+PAGE_URL = "https://app.acme.example/settings"
+PAGE_BODY = ("<html><head><title>Settings</title></head>\n"
+             "<body>\n"
+             f"<script>const key = '{PLANTED}';</script>\n"
+             "</body></html>\n")
+
+
+async def _plant_page_secret():
+    """A finding recorded against a captured page, not an asset file."""
+    async with SessionLocal() as s:
+        pr = (await s.execute(select(Project).where(
+            Project.code == "ASSET"))).scalar_one()
+        t = (await s.execute(select(Target).where(
+            Target.project_id == pr.id))).scalars().first()
+        v = Vuln(target_id=t.id, title="credential in a page",
+                 severity="high", status="open",
+                 external_id="detect-secrets:page-origin")
+        s.add(v)
+        await s.flush()
+        # Line 3 of the BODY, which is what the scanner was handed:
+        # `scan_pages` strips the header block before scanning.
+        s.add(_FS(vuln_id=v.id, secret=PLANTED, detector="AWS Access Key",
+                  asset_url=PAGE_URL, path=PAGE_URL, line=3))
+        s.add(WebAddress(
+            target_id=t.id, url=PAGE_URL,
+            url_hash=hashlib.sha256(PAGE_URL.encode()).hexdigest(),
+            exchange_hash=hashlib.sha256(b"page-origin").hexdigest(),
+            scheme="https", path="/settings", status_code=200,
+            content_type="text/html",
+            # A raw capture: status line, headers, blank line, body.
+            # The endpoint has to strip exactly what the scanner did
+            # or the recorded line number lands in the headers.
+            response="HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+                     + PAGE_BODY,
+            sources="pagescan"))
+        await s.commit()
+        return v.id
+
+
+_page_id = asyncio.run(_plant_page_secret())
+st, pg = call(f"/api/vulns/{_page_id}/secret/source", token=admin)
+pg = pg or {}
+check("a credential found in a page body can be viewed at all",
+      st == 200, f"{st} {str(pg)[:120]}")
+check("...showing the response BODY, not the header block",
+      pg.get("body", "").startswith("<html>"), pg.get("body", "")[:40])
+check("...and the recorded line still means what it meant to the "
+      "scanner, which was handed the stripped body",
+      pg.get("located") == "confirmed", pg.get("located"))
+_pms, _pme = pg.get("match_start"), pg.get("match_end")
+check("...with the value itself highlighted",
+      _pms is not None and pg.get("body", "")[_pms:_pme] == PLANTED,
+      f"{_pms}:{_pme}")
+check("...offering one view, because a page has no minified sibling "
+      "or source map to choose between",
+      [v["origin"] for v in (pg.get("views") or [])] == ["page"],
+      pg.get("views"))
+check("...named as a page rather than borrowing an asset's vocabulary",
+      pg.get("origin") == "page" and pg.get("recorded_origin") == "page", pg)
+
 # Nothing to show, which is not the same as an error in the page.
 _noasset_id = asyncio.run(_plant_source(
     "never-fetched", SRC_LINE, with_asset=False))
-st, _ = call(f"/api/vulns/{_noasset_id}/secret/source", token=admin)
-check("a finding whose asset is not recorded is a 404, not a 500",
+st, _nores = call(f"/api/vulns/{_noasset_id}/secret/source", token=admin)
+check("a finding whose origin is not recorded is a 404, not a 500",
       st == 404, st)
+# The message must not name a cause it cannot know. It used to blame
+# a deletion for every page finding in the estate.
+check("...and the 404 says BOTH an asset and a page were looked for",
+      "asset" in str(_nores).lower() and "page" in str(_nores).lower(),
+      _nores)
 
 st, _ = call(f"/api/vulns/{_bare_id}/secret/source", token=admin)
 check("a finding with no stored credential has no source either",
