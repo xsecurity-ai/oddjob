@@ -240,7 +240,14 @@ export function TakeoversPanel({ project }: { project: string | null }) {
           </span>
         </Tooltip>
       </Stack>
-      <Box sx={{ flex: 1, minHeight: 0 }}>
+      {/* A flex COLUMN, not a plain block. `DataTable` is built to be
+          a flex child -- `flex: 1; min-height: 0; overflow: hidden` --
+          and in a block parent none of that does anything: `flex` is
+          ignored, the table grows past the box, and `overflow:
+          hidden` on an ancestor clips the rest of the rows away with
+          no scrollbar to reach them. */}
+      <Box sx={{ flex: 1, minHeight: 0, display: 'flex',
+                 flexDirection: 'column' }}>
         <DataTable
           rows={rows}
           columns={columns as ColumnDef[]}

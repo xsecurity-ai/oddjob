@@ -10,7 +10,8 @@ cd frontend && npm run dev                            # UI, /api proxied
 
 cd backend  && uv run python runtests.py              # all suites
 cd backend  && uv run python runtests.py webtest      # one, by name
-cd frontend && npx tsc --noEmit && node test/hooks.check.mjs
+cd frontend && npx tsc --noEmit && node test/hooks.check.mjs \
+                                && node test/table.scroll.check.mjs
 ```
 
 Backend suites live in `backend/tests/`; `runtests.py` stays at the
@@ -69,6 +70,16 @@ if nothing strips it. `runtests.py` strips it; keep it that way.
 
 **React hooks after an early return** blank the page at runtime and
 typecheck fine. `test/hooks.check.mjs` catches it.
+
+**Every table must be able to scroll to its last row.** `DataTable`
+is a flex child -- `flex: 1; min-height: 0; overflow: hidden` -- and
+the grid inside it does the scrolling. Put one in a plain block
+parent and all of that stops at once: `flex` is ignored, the Paper
+sizes to its content, and `overflow: hidden` clips the rest of the
+rows away with no scrollbar to reach them. It looks correct and is
+simply missing its tail, which is why it shipped twice. Wrap one in
+`display: 'flex', flexDirection: 'column'` and a parent with a
+definite height. `test/table.scroll.check.mjs` catches the shape.
 
 **The MIT DataGrid throws above 100 rows a page** and cannot do
 master-detail. Paging, sorting, filtering and row expansion are all done

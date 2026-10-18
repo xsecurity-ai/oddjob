@@ -241,6 +241,13 @@ jobs:
         working-directory: frontend
         run: node test/hooks.check.mjs
 
+      # A DataTable in a non-flex parent clips instead of scrolling,
+      # so the rows past the fold are simply unreachable. Shipped
+      # twice; a typecheck cannot see it and neither can review.
+      - name: Tables can scroll
+        working-directory: frontend
+        run: node test/table.scroll.check.mjs
+
       - name: Logic tests
         working-directory: frontend
         run: npm run test:logic --if-present
