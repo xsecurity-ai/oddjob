@@ -55,6 +55,7 @@ from .hosts import InvalidHost, normalise_host
 from .models import (
     FindingSecret,
     Target,
+    TargetOrigin,
     Vuln,
     WebAsset,
     WebAssetEndpoint,
@@ -62,6 +63,7 @@ from .models import (
     WebAssetRef,
 )
 from .scopegate import as_host, index_for
+from .weburl import origin_key
 
 log = logging.getLogger("oddjob.assetwork")
 
@@ -362,6 +364,9 @@ async def _record_cloud(session: AsyncSession, project_id: int, idx,
     found = assetlinks.cloud_resources(f.body or "")
     if not found:
         return 0, 0
+    # The file IS the provenance, so it is read once here rather than
+    # per resource: one bundle names up to fifty of these.
+    place = await _origin_of(session, f)
     added = refused = 0
     for provider, host in found:
         try:
@@ -383,11 +388,77 @@ async def _record_cloud(session: AsyncSession, project_id: int, idx,
             # information about a row we already had.
             if dup.kind == "host" and not dup.provider:
                 dup.kind, dup.provider = "cloud", provider
+            # Recorded even so. "This bundle names it" is true of a
+            # row we already had, and it is the only answer anybody
+            # has to "where did this come from".
+            await _remember_origin(session, project_id, dup.id, place)
             continue
-        session.add(Target(project_id=project_id, host=h, kind="cloud",
-                           provider=provider, alive=None))
+        t = Target(project_id=project_id, host=h, kind="cloud",
+                   provider=provider, alive=None)
+        session.add(t)
+        # Flushed for its id: the origin row needs one, and a target
+        # that arrives with no account of where it came from is the
+        # thing this is here to stop.
+        await session.flush()
+        await _remember_origin(session, project_id, t.id, place)
         added += 1
     return added, refused
+
+
+@dataclass(frozen=True)
+class _Place:
+    """The one spot a cloud identifier was read out of."""
+    asset_id: int | None
+    file_id: int | None
+    asset_url: str | None
+    file_path: str | None
+    page_url: str | None
+    origin_hash: str
+
+
+async def _origin_of(session: AsyncSession, f) -> _Place:
+    """Describe where this file sits, for the provenance row.
+
+    `page_url` is the asset's `first_page` -- the page it was first
+    seen on. Every page that loads the asset is in `web_asset_refs`
+    and the API reads them from there; storing all of them here would
+    be four hundred rows per bucket saying one thing.
+    """
+    asset = (await session.get(WebAsset, f.asset_id)
+             if getattr(f, "asset_id", None) else None)
+    asset_url = asset.url if asset is not None else None
+    path = getattr(f, "path", None)
+    return _Place(
+        asset_id=getattr(f, "asset_id", None),
+        file_id=getattr(f, "id", None),
+        asset_url=asset_url,
+        file_path=path,
+        page_url=(asset.first_page if asset is not None else None),
+        # Over what identifies the PLACE, not the row: the file row is
+        # rewritten whenever its bytes change, and a new id each time
+        # would file the same discovery again on every sweep.
+        origin_hash=origin_key("asset", asset_url, path),
+    )
+
+
+async def _remember_origin(session: AsyncSession, project_id: int,
+                           target_id: int, place: _Place) -> None:
+    """Record that this target was found in this place, once.
+
+    Upserted on (target, origin_hash), which is what the unique
+    constraint keys on: the sweep reads the same bundle every pass.
+    """
+    have = (await session.execute(
+        select(TargetOrigin.id).where(
+            TargetOrigin.target_id == target_id,
+            TargetOrigin.origin_hash == place.origin_hash))).first()
+    if have:
+        return
+    session.add(TargetOrigin(
+        project_id=project_id, target_id=target_id, source="asset",
+        asset_id=place.asset_id, file_id=place.file_id,
+        asset_url=place.asset_url, file_path=place.file_path,
+        page_url=place.page_url, origin_hash=place.origin_hash))
 
 
 async def scan_project(session: AsyncSession, project_id: int, *,

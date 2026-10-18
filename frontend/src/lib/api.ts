@@ -341,9 +341,47 @@ export interface Poc {
   created_at: string; updated_at: string
 }
 
+/** One place a target was discovered in.
+ *
+ *  A cloud resource is in no CIDR, nothing links to it and no port
+ *  scan meets it — the file that named it is the only reason we know
+ *  it exists, and this is that file.
+ *
+ *  **An empty list means NOT RECORDED, never "found nowhere".** Only
+ *  the code that discovers a target writes provenance, and only the
+ *  asset sweep does: a target typed in by hand, loaded from a scan
+ *  import or created before this existed has none, and nothing in the
+ *  system knows where it came from. Rendering that as an absence of
+ *  sources would state a fact nobody established. */
+export interface TargetOrigin {
+  id: number; target_id: number
+  /** `asset` — named in the code of a web asset this project fetched. */
+  source: string
+  /** The bundle the identifier was read out of. Snapshotted at
+   *  discovery, so it outlives the asset being refetched or deleted. */
+  asset_url: string | null
+  /** Which recovered file inside that bundle. `src/config.ts` out of a
+   *  source map says far more than "somewhere in app.min.js". */
+  file_path: string | null
+  /** The page that bundle was first seen on. */
+  page_url: string | null
+  /** Every page known to load that bundle, capped — read live from
+   *  the page references, because a page crawled later genuinely is
+   *  another site this resource was found on. */
+  pages: string[]
+  pages_total: number
+  /** Hostname of the page it was found on, for a one-value cell.
+   *  Null when no page is known, which is not the same as none. */
+  site: string | null
+  created_at: string
+}
+
 export interface TargetDetail {
   target: Target; services: Service[]; vulns: Vuln[]; pocs: Poc[]
   implants: Implant[]
+  /** Where this target came from. Empty means nothing recorded it —
+   *  see `TargetOrigin`. */
+  origins: TargetOrigin[]
 }
 
 /** Worst-first. Severity is a string in the DB, so every sort needs this —
@@ -1125,6 +1163,14 @@ export const api = {
     req<Explore>('/api/explore' + qs(o)),
   targetDetail: (project: string, host: string) =>
     req<TargetDetail>(`/api/targets/${encodeURIComponent(project)}/${encodeURIComponent(host)}/detail`),
+  /** Where the project's targets came from, keyed by target id.
+   *
+   *  One request for a whole page of rows: the Targets view renders
+   *  thousands and a fetch per row is a fetch per row. A target
+   *  MISSING from the map has no recorded origin — not an origin of
+   *  nowhere. */
+  targetOrigins: (project?: string) =>
+    req<Record<string, TargetOrigin[]>>('/api/targets/origins' + qs({ project })),
   stats: (project?: string) => req<Stats>('/api/stats' + qs({ project })),
 
   credentials: (project?: string) =>

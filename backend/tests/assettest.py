@@ -129,10 +129,12 @@ from app.db import SessionLocal  # noqa: E402
 from app.models import (  # noqa: E402
     Project,
     Target,
+    TargetOrigin,
     Vuln,
     WebAddress,
     WebAsset,
     WebAssetFile,
+    WebAssetRef,
 )
 
 
@@ -1344,9 +1346,45 @@ check("a file naming no cloud resource yields nothing",
 from app.assetwork import _record_cloud  # noqa: E402
 from app.scopegate import index_for  # noqa: E402
 
+# A REAL asset and a REAL file, not a stub with a body on it. The
+# file is the whole provenance now -- a bucket's only account of
+# itself is the bundle that named it and the pages that load that
+# bundle -- and a stub cannot exercise any of that.
+CLOUD_ASSET = f"{ORIGIN}/static/cloud.bundle.js"
+CLOUD_PAGE = f"{ORIGIN}/index.html"
+CLOUD_PAGE_2 = f"{ORIGIN}/checkout.html"
+CLOUD_BODY = ("var a='https://acme-assets.s3.eu-west-1.amazonaws.com/x';"
+              "var b='https://notours.blob.core.windows.net/y';")
 
-class _FakeFile:
-    def __init__(self, body): self.body = body
+
+async def _cloud_file(s, pr_id):
+    """The asset carrying the bundle, its file, and a second page."""
+    a = (await s.execute(select(WebAsset).where(
+        WebAsset.project_id == pr_id,
+        WebAsset.url == CLOUD_ASSET))).scalar_one_or_none()
+    if a is None:
+        # Stamped fetched and scanned so the sweeps above do not pick
+        # it up and change counts those assertions already made.
+        a = WebAsset(project_id=pr_id, target_id=None, url=CLOUD_ASSET,
+                     host="127.0.0.1", kind="script", first_page=CLOUD_PAGE,
+                     seen_on=2, fetched_at=_aw.assetfetch.now(),
+                     scanned_at=_aw.assetfetch.now())
+        s.add(a)
+        await s.flush()
+        # A SECOND page loading the same bundle. One asset is loaded
+        # by many pages, and "what site did this come from" has that
+        # many answers.
+        s.add(WebAssetRef(asset_id=a.id, target_id=None,
+                          page_url=CLOUD_PAGE_2))
+    f = (await s.execute(select(WebAssetFile).where(
+        WebAssetFile.asset_id == a.id))).scalars().first()
+    if f is None:
+        f = WebAssetFile(asset_id=a.id, project_id=pr_id, origin="raw",
+                         path="cloud.bundle.js", body=CLOUD_BODY,
+                         scanned_at=_aw.assetfetch.now())
+        s.add(f)
+        await s.flush()
+    return f
 
 
 async def _cloud_into_targets():
@@ -1354,9 +1392,8 @@ async def _cloud_into_targets():
         pr = (await s.execute(select(Project).where(
             Project.code == "ASSET"))).scalar_one()
         idx = await index_for(s, pr.id)
-        body = ("var a='https://acme-assets.s3.eu-west-1.amazonaws.com/x';"
-                "var b='https://notours.blob.core.windows.net/y';")
-        added, refused = await _record_cloud(s, pr.id, idx, _FakeFile(body))
+        f = await _cloud_file(s, pr.id)
+        added, refused = await _record_cloud(s, pr.id, idx, f)
         await s.commit()
         rows = {t.host: t for t in (await s.execute(select(Target).where(
             Target.project_id == pr.id))).scalars().all()}
@@ -1395,6 +1432,79 @@ check("a second sweep adds nothing", _added2 == 0, _added2)
 check("...and leaves one row for the bucket",
       len([h for h in _rows2 if h.startswith("acme-assets.")]) == 1,
       sorted(_rows2))
+
+print("\n== and WHERE the bucket came from ==")
+# The point of the whole thing. A bucket is in no CIDR, nothing links
+# to it and no port scan meets it: the bundle that named it is the
+# only reason it is in the project at all, and a row that cannot say
+# so leaves an operator with a hostname and no account of it.
+
+
+async def _cloud_origins():
+    async with SessionLocal() as s:
+        t = (await s.execute(select(Target).where(
+            Target.host == "acme-assets.s3.eu-west-1.amazonaws.com"))
+             ).scalar_one()
+        rows = (await s.execute(select(TargetOrigin).where(
+            TargetOrigin.target_id == t.id))).scalars().all()
+        return t, rows
+
+
+_t2, _origins = asyncio.run(_cloud_origins())
+check("the discovery is recorded, not thrown away", len(_origins) == 1,
+      len(_origins))
+_o = _origins[0] if _origins else None
+check("...naming the bundle it was read out of",
+      _o is not None and _o.asset_url == CLOUD_ASSET, _o and _o.asset_url)
+check("...and the file inside it, not just the bundle",
+      _o is not None and _o.file_path == "cloud.bundle.js",
+      _o and _o.file_path)
+check("...and the page that loads the bundle",
+      _o is not None and _o.page_url == CLOUD_PAGE, _o and _o.page_url)
+check("...tied back to the asset and file rows it came from",
+      _o is not None and _o.asset_id is not None and _o.file_id is not None,
+      _o and (_o.asset_id, _o.file_id))
+# Three sweeps have now read the same bundle. The sweep sees it on
+# every pass, so without the uniqueness key this table would grow
+# without bound while saying nothing new.
+check("re-reading the same bundle does not file the discovery again",
+      len(_origins) == 1, len(_origins))
+
+# The API, which is what the Targets page actually reads.
+st, r = call("/api/targets/origins?project=ASSET", token=admin)
+check("the origins endpoint answers", st == 200, st)
+_got = (r or {}).get(str(_t2.id)) or []
+check("...with the bucket's provenance keyed by target id",
+      len(_got) == 1, r)
+_first = _got[0] if _got else {}
+check("...carrying the site, derived from the page",
+      _first.get("site") == "127.0.0.1", _first.get("site"))
+# `first_page` is one page. Every page loading the asset is in
+# `web_asset_refs`, and a page crawled later is genuinely another
+# site this resource was found on -- so the list is read live.
+check("...and EVERY page that loads the bundle, not just the first",
+      sorted(_first.get("pages") or []) == sorted([CLOUD_PAGE, CLOUD_PAGE_2]),
+      _first.get("pages"))
+check("...with the full count beside the capped list",
+      _first.get("pages_total") == 2, _first.get("pages_total"))
+check("...said to have come from an asset, rather than left unexplained",
+      _first.get("source") == "asset", _first.get("source"))
+
+# The distinction the whole feature turns on. 127.0.0.1 was typed in
+# by hand at the top of this suite; nothing recorded where it came
+# from, and that is NOT the same claim as it having come from
+# nowhere. The endpoint leaves it out and the UI says "not recorded".
+_hand = (r or {}).get(str(_t2.id - 10**9))   # an id that cannot exist
+check("a target nothing recorded an origin for is simply absent",
+      _hand is None, _hand)
+st, r = call("/api/targets/ASSET/127.0.0.1/detail", token=admin)
+check("the detail of a hand-made target carries no origin",
+      st == 200 and (r or {}).get("origins") == [], (r or {}).get("origins"))
+st, r = call(
+    "/api/targets/ASSET/acme-assets.s3.eu-west-1.amazonaws.com/detail",
+    token=admin)
+check("...while the bucket's detail carries the bundle it came from",
+      st == 200 and len((r or {}).get("origins") or []) == 1, st)
 
 print("\n== a bot filter's refusal is not the application's answer ==")
 # The same cases as TestBlockedNeedsAProductAndAStatus in

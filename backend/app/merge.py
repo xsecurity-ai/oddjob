@@ -31,7 +31,16 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .addresses import attach, normalise_address
-from .models import Event, Implant, Poc, Service, Target, Vuln, WebAddress
+from .models import (
+    Event,
+    Implant,
+    Poc,
+    Service,
+    Target,
+    TargetOrigin,
+    Vuln,
+    WebAddress,
+)
 
 
 @dataclass
@@ -232,6 +241,26 @@ async def merge(session: AsyncSession, src: Target, dst: Target,
             await session.delete(i)
         else:
             i.target_id = dst.id
+
+    # Where each side was discovered follows the survivor. Nothing
+    # else in the system records it -- the bundle that named a bucket
+    # is the only account of why that row exists at all -- so letting
+    # the cascade take it would discard precisely the thing this
+    # module promises not to. Not counted in the plan because nothing
+    # is lost to report: the survivor ends up with every distinct
+    # place either row was found in.
+    places = {h for (h,) in (await session.execute(
+        select(TargetOrigin.origin_hash)
+        .where(TargetOrigin.target_id == dst.id))).all()}
+    for o in (await session.execute(select(TargetOrigin).where(
+            TargetOrigin.target_id == src.id))).scalars():
+        if o.origin_hash in places:
+            # Both were found in the same file. The survivor already
+            # says so, and the unique key will not hold two.
+            await session.delete(o)
+        else:
+            places.add(o.origin_hash)
+            o.target_id = dst.id
 
     # No uniqueness on these, so they move wholesale. Two findings with
     # the same title become two findings on one host, which is visible
