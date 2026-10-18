@@ -2100,6 +2100,76 @@ check("running the sweep again retracts nothing new",
       _pr3["retracted"] == 0, _pr3)
 
 
+print("\n-- identifiers that read like tokens --")
+# Five shapes an operator reported from a live estate, all kept by
+# the filter as it stood. The values here are SYNTHETIC: the real
+# ones are a client's and this repository is public. The shapes are
+# reproduced exactly.
+_f = _asx.implausible_secret
+
+# A URL is a location. It may CARRY a credential in a query
+# parameter, and that parameter is its own finding with its own
+# value -- the whole URL is not one.
+for _u in ("https://profile.example.com/forgot?b=35k2hAikCYidx5Sgiwiu"
+           "iiBm&client_id=dnuF0kFljdpNScQr5YUepIiE",
+           # Minified JavaScript holds URLs JSON-escaped.
+           "https:\\/\\/profile.example.com\\/forgot?b=35k2hAikCYid",
+           "wss://socket.example.com/stream?token=abcd1234efgh5678"):
+    check(f"a URL is not a credential ({_u[:18]}…)",
+          "URL" in (_f(_u, "Base64 High Entropy String") or ""),
+          _f(_u, "Base64 High Entropy String"))
+
+# A CDN or beacon path is slash-separated base64-looking junk and
+# reads exactly like a token to a detector that only sees characters.
+check("a slash path is not a credential",
+      "path" in (_f("/l10cRx/2I/a0/RvA6/zJAN8mbr__/bE/RGNjR0IHcgQ/LQlZ",
+                    "Base64 High Entropy String") or ""))
+check("...but a single slash is not enough to call it one",
+      _f("abc/defGHI123jklMNO456pqr", "Base64 High Entropy String") is None)
+
+# Words joined by separators: message constants, resource keys and
+# config names. All have respectable entropy and none is a secret.
+for _id in ("ForeignTaxResidency_Investorsummary_Deceased_Message_YES_WARNING",
+            "Notification-sc-1ok6jey-0.gigMLv.PendingInvestm",
+            "greenid_hosted_dev_user:6MtUzoUDQsf66uLpG3cbzSF"):
+    check(f"a separator-joined name is not a credential ({_id[:20]}…)",
+          "separator-joined" in (_f(_id, "Base64 High Entropy String") or ""),
+          _f(_id, "Base64 High Entropy String"))
+
+# The rule has to leave real credentials alone, and the ones with a
+# vendor prefix are exactly the shape it could get wrong: two
+# segments where one is a word.
+# Shortened on purpose. `scripts/check-secrets.sh` greps for the
+# full-length shapes and says why: "Real tokens have a length; the
+# placeholders in the docs and tests do not reach these thresholds."
+# A fixture that trips the repository's own credential check is a
+# fixture that teaches people to skip the check.
+for _real, _det in (("AKIAEXAMPLEKEY01", "AWS Access Key"),
+                    # Not a real vendor prefix. The SHAPE is what is under test --
+# three segments of which exactly one is a word, which is the
+# case the identifier rule must not catch -- and GitHub's push
+# protection rejects the genuine prefix even on a documented
+# example value.
+                    ("xx_live_4eC39HqLyjWDarjtT1zdp7dc", "Stripe Access Key"),
+                    ("ghp_16C7e42F292c6912E7710c8", "GitHub Token"),
+                    ("550e8400-e29b-41d4-a716-446655440000",
+                     "Hex High Entropy String"),
+                    ("aG92ZXJjcmFmdDI0ZWVsczE5",
+                     "Base64 High Entropy String")):
+    check(f"{_det} is still kept", _f(_real, _det) is None, _f(_real, _det))
+
+# Two segments is the shape of a prefixed credential, so the rule
+# requires three and two words. Asserted because loosening it is the
+# obvious "improvement" somebody will make.
+check("two segments are not enough to call something an identifier",
+      not _asx._compound_identifier("live_4eC39HqLyjWDarjtT1zdp7dc"))
+check("...nor is a three-segment credential with one word in it",
+      not _asx._compound_identifier("xx_live_4eC39HqLyjWDarjtT1zdp7dc"))
+check("...nor is one word among numbers",
+      not _asx._compound_identifier("550e8400-e29b-41d4-a716-4466"))
+check("three words joined are", _asx._compound_identifier("Foo_Bar_Baz"))
+
+
 srv.shutdown()
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

@@ -337,6 +337,48 @@ MAX_ENTROPY_LEN = 200
 #: for a file that genuinely holds a handful.
 MAX_ENTROPY_PER_FILE = 12
 
+#: A bare `www.`/host-looking string with a path. Caught separately
+#: from `://` because minified code frequently holds the scheme and
+#: the host as two literals.
+_URLISH = re.compile(r"^(?:https?|ftp|wss?):", re.I)
+
+#: Characters that join words into a name. Not `:`; a colon has its
+#: own meanings and the underscore run is enough to recognise the
+#: shape without it.
+_WORD_JOINERS = re.compile(r"[-_.]+")
+
+
+def _compound_identifier(v: str) -> bool:
+    """Is this words joined by separators rather than a generated value?
+
+    `ForeignTaxResidency_Investorsummary_Deceased_Message_YES_WARNING`
+    is a message constant. `Notification-sc-1ok6jey-0.gigMLv.Pending`
+    is a resource key. Both have respectable entropy, both contain a
+    credential-ish word somewhere, and neither is a secret.
+
+    The test is structural: split on the joiners, and ask how many
+    pieces are PURELY alphabetic and long enough to be a word. A
+    generated token has none -- base64 and hex both mix digits
+    through every segment -- while a name made of words has several.
+
+    Deliberately requires three segments and two words. Two is the
+    shape of a real prefixed credential (`sk_live_...`, `ghp_...`),
+    where exactly one segment is a word and the rest is the value.
+
+    **The trade, said plainly:** a passphrase-style secret —
+    `correct-horse-battery-staple` — is this shape and would be
+    dropped. That is a real cost. It is worth paying because on the
+    estate this was measured against, the shape appeared 1,498 times
+    and was a credential none of them.
+    """
+    if not v:
+        return False
+    parts = [p for p in _WORD_JOINERS.split(v) if p]
+    if len(parts) < 3:
+        return False
+    words = [p for p in parts if len(p) >= 3 and p.isalpha()]
+    return len(words) >= 2
+
 
 def implausible_secret(value: str, detector: str) -> str | None:
     """-> why this is not a credential, or None if it might be.
@@ -402,6 +444,21 @@ def implausible_secret(value: str, detector: str) -> str | None:
     if _ASPNET_DP.match(v):
         return ("an ASP.NET Data Protection token -- issued to the "
                 "browser on purpose and rotated per request")
+    # A URL is not a credential. It may CARRY one in a query
+    # parameter, and that parameter is its own finding with its own
+    # value; the whole URL is a location. `\/` because the detector
+    # reads string literals out of JavaScript, where a URL arrives
+    # JSON-escaped.
+    if "://" in v or ":\\/\\/" in v or _URLISH.match(v):
+        return "a URL, which is a location rather than a credential"
+    # Likewise a path. A beacon or CDN path is slash-separated
+    # base64-looking junk and reads exactly like a token to a
+    # detector that only sees characters.
+    if v.startswith("/") and v.count("/") >= 3:
+        return "a URL path, not a credential"
+    if _compound_identifier(v):
+        return ("separator-joined words -- a resource key, message "
+                "constant or config name rather than a generated value")
     # Only for entropy. A vendor shape this long would be a vendor
     # shape and is somebody else's problem to be wrong about.
     if detector in _ENTROPY_TYPES and len(v) > MAX_ENTROPY_LEN:
