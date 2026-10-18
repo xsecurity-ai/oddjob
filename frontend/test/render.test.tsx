@@ -23,8 +23,12 @@
  * here clicks anything — the pure half of that lives in logic.test.ts.
  */
 import { renderToString } from 'react-dom/server'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TableGrid, EmptyRows } from '../src/components/TableGrid'
 import { TableToolbar } from '../src/components/TableToolbar'
+import { AgentPanel } from '../src/components/AgentPanel'
+import { AuthProvider } from '../src/lib/auth'
+import type { AgentSession, AgentSessionBrief } from '../src/lib/api'
 import type { ColumnDef, FilterModel } from '../src/lib/columns'
 
 let pass = 0, fail = 0
@@ -138,6 +142,106 @@ check('a half-typed condition is not chipped, because it is not filtering',
 // its markup here would pass for the wrong reason whatever it claimed.
 // What the panel offers is decided by `filterableColumns`, which is a
 // pure function and is tested as one in logic.test.ts.
+
+console.log('\n== the agent panel keeps every open thread mounted ==')
+// The claim being tested is the one that makes a tab switch free: an
+// inactive thread is HIDDEN, not unmounted, so the draft in it, its
+// scroll position and a question still in flight all survive. Unmount
+// the inactive ones and all three are silently thrown away, which
+// looks identical until someone loses a half-written question.
+const brief = (id: number, title: string): AgentSessionBrief => ({
+  id, project_code: 'ACME', title, opened_by: 'tester', closed: false,
+  at: null, turn_count: 2,
+})
+const thread = (id: number, text: string): AgentSession => ({
+  id, project_code: 'ACME', title: text, opened_by: 'tester', closed: false,
+  at: null,
+  turns: [{ id, seq: 0, role: 'user', text, steps: [], author: 'tester',
+            at: null }],
+})
+
+/** A client primed with what the panel would have fetched. `useQuery`
+ *  reads the cache synchronously, so a server render sees the data
+ *  without a request. */
+function primed() {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false } } })
+  qc.setQueryData(['agent-sessions', 'ACME'],
+                  [brief(1, 'the crawl'), brief(2, 'the credential')])
+  qc.setQueryData(['agent-session', 'ACME', 1], thread(1, 'what did the crawl find'))
+  qc.setQueryData(['agent-session', 'ACME', 2], thread(2, 'is this credential worth anything'))
+  return qc
+}
+
+/** The panel under the two providers it reads from. `AuthProvider`
+ *  is there for `SlackHandlePrompt`, which the panel renders because
+ *  it is the one component every signed-in view mounts with the open
+ *  engagement in hand. */
+const mount = (qc: QueryClient) => renderToString(
+  <QueryClientProvider client={qc}>
+    <AuthProvider>
+      <AgentPanel project="ACME" open onClose={() => {}} />
+    </AuthProvider>
+  </QueryClientProvider>)
+
+// Two components under here read `window.localStorage` while
+// rendering — the handle prompt and the panel's docked/popped-out
+// preference — and node has no window at all. The shim is the
+// smallest thing that lets a server render reach them, and doubling
+// as the preference store is what makes the popped-out shape
+// testable below.
+const store: Record<string, string> = {}
+;(globalThis as { window?: unknown }).window = {
+  // The handle prompt asks the URL whether it is on a project page.
+  location: { pathname: '/p/ACME' },
+  localStorage: {
+    getItem: (k: string) => store[k] ?? null,
+    setItem: (k: string, v: string) => { store[k] = v },
+    removeItem: (k: string) => { delete store[k] },
+  },
+}
+
+const panel = mount(primed())
+
+// The transcript itself is filled by an effect, and effects do not
+// run under renderToString, so the question here is how many threads
+// are MOUNTED rather than what is written in them. Each one marks
+// itself with `data-thread`.
+const threads = (html: string) => (html.match(/data-thread="/g) ?? []).length
+const closers = (html: string) =>
+  (html.match(/aria-label="Close thread"/g) ?? []).length
+
+check('a tab per open thread on the engagement',
+      panel.includes('the crawl') && panel.includes('the credential'))
+check('each tab can be closed', closers(panel) === 2, String(closers(panel)))
+check('every thread is mounted, not only the one in front of you — '
+      + 'this is what makes a tab switch keep the draft in the other',
+      threads(panel) === 2, String(threads(panel)))
+check('and the one not in front of you is hidden rather than dropped',
+      panel.includes('display:none'))
+
+// One thread needs no strip: a tab bar with a single tab in it is
+// chrome that explains nothing.
+const solo = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+solo.setQueryData(['agent-sessions', 'ACME'], [brief(1, 'the crawl')])
+solo.setQueryData(['agent-session', 'ACME', 1], thread(1, 'what did the crawl find'))
+const one = mount(solo)
+check('a single thread is shown without a tab strip',
+      closers(one) === 0 && threads(one) === 1,
+      `${closers(one)} close buttons, ${threads(one)} threads`)
+
+// Popping out is the same drawer at the width of the window. It is a
+// width swap rather than a different component for a reason: a Dialog
+// would remount everything under it and discard exactly the drafts
+// and in-flight questions the hidden threads above exist to keep.
+store['oddjob.agent.fullscreen'] = '1'
+const popped = mount(primed())
+check('popped out, the panel is the whole window and not a side column',
+      popped.includes('width:100vw') && !popped.includes('width:480px'))
+check('docked, it is the side column it has always been',
+      panel.includes('width:480px'))
+check('and popping out changes the width, not the threads under it',
+      threads(popped) === 2, String(threads(popped)))
 
 console.log(`\n${'='.repeat(56)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(56)}`)
 process.exit(fail ? 1 : 0)
