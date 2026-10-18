@@ -8,11 +8,13 @@ import { neon, glow } from '../theme'
 
 /** How sure we are, and what each word actually claims.
  *
- *  Deliberately not a severity scale. `dangling` and `fingerprint`
- *  are two different kinds of evidence, and `candidate` is the
- *  absence of either — it is the "could not determine" of the three,
- *  and colouring it like a finding is exactly how a tester spends a
- *  morning proving a live Shopify store belongs to the client. */
+ *  Deliberately not a severity scale, and the four do not point the
+ *  same way. `dangling` and `fingerprint` are two kinds of evidence
+ *  that a name is unclaimed. `live` is evidence it is claimed and
+ *  serving — a finished answer, in the other direction. `candidate`
+ *  is the absence of all three; colouring it like a finding is
+ *  exactly how a tester spends a morning proving a live Shopify
+ *  store belongs to the client. */
 const VERDICT: Record<string, { label: string; colour: string; why: string }> = {
   dangling: {
     label: 'Dangling', colour: neon.pink,
@@ -22,9 +24,15 @@ const VERDICT: Record<string, { label: string; colour: string; why: string }> = 
     label: 'Fingerprint', colour: '#ff9f43',
     why: "The provider served its own “nothing is here” page.",
   },
+  live: {
+    label: 'Live', colour: alpha(neon.muted, 0.55),
+    why: 'The provider served something only a resource that exists can serve '
+       + '— a WAF page, a 405, a geo block. The name is claimed. Not a '
+       + 'takeover, and no finding is raised for it.',
+  },
   candidate: {
     label: 'Candidate', colour: neon.muted,
-    why: 'Points at a provider that hands out subdomains, and neither check could '
+    why: 'Points at a provider that hands out subdomains, and no check could '
        + 'be run. This is not a finding yet — it is a thing to go and look at.',
   },
 }
@@ -159,7 +167,7 @@ export function TakeoversPanel({ project }: { project: string | null }) {
             </Tooltip>
           )
         }
-        if (row.verdict === 'candidate') {
+        if (row.verdict === 'candidate' || row.verdict === 'live') {
           // Prose, not a marker: this says what is MISSING and what
           // to run to settle it, so it is read rather than matched.
           // Monospace and nowrap would make a sentence unreadable.
