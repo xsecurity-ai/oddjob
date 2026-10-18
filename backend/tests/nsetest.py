@@ -1,0 +1,249 @@
+"""NSE script output, read rather than merely stored.
+
+Every `-sV` the fleet runs carries `--script default,safe,vuln,
+ssl-cert`. The importer has stored what came back on
+`services.scripts` since it was written. Nothing selected that
+column, so a host answering "Anonymous FTP login allowed (FTP code
+230)" produced a finding in nobody's report.
+
+Two halves are tested here and they fail differently:
+
+  * the judge, which must not invent findings out of inventory --
+    `ssh-hostkey` and `ssl-cert` fire on nearly every host in an
+    estate and a parser that files them buries the four that matter;
+  * the import, which must raise the finding once and keep it once,
+    whatever a re-import does.
+"""
+
+import pathlib as _pathlib
+import sys as _sys
+
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import json
+import os
+import urllib.error
+import urllib.request
+
+BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8031")
+ok = fail = 0
+
+
+def check(label, cond, extra=""):
+    global ok, fail
+    if cond: ok += 1; print(f"  PASS  {label}")
+    else: fail += 1; print(f"  FAIL  {label} {extra}")
+
+
+def call(p, m="GET", b=None, token=None):
+    r = urllib.request.Request(BASE + p, method=m)
+    if b is not None:
+        r.data = json.dumps(b).encode()
+        r.add_header("Content-Type", "application/json")
+    if token: r.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(r, timeout=60) as x:
+            raw = x.read(); return x.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try: return e.code, json.loads(raw)
+        except Exception: return e.code, raw[:300]
+
+
+print("== the judge, without a database ==")
+from app import nsefindings as nse
+
+# --- inventory is not a finding -------------------------------------
+for script, out in (
+    ("ssh-hostkey", "2048 aa:bb:cc ssh-rsa\n256 dd:ee ssh-ed25519"),
+    ("ssl-cert", "Subject: commonName=www.acme.example\nIssuer: Let's Encrypt"),
+    ("http-title", "ACME Corporate Portal"),
+    ("smb-os-discovery", "OS: Windows Server 2019"),
+    ("banner", "220 ProFTPD Server"),
+):
+    check(f"{script} output is inventory, not a finding",
+          nse.judge(script, out) is None, nse.judge(script, out))
+
+# --- ftp-anon --------------------------------------------------------
+_ro = nse.judge("ftp-anon", "Anonymous FTP login allowed (FTP code 230)\n"
+                            "dr-xr-xr-x   2 0  0  4096 Jan 01 pub")
+check("anonymous FTP is a finding", _ro is not None)
+check("...at medium when the listing is read-only",
+      _ro and _ro.severity == "medium", _ro)
+check("...carrying the line that justifies it",
+      _ro and "FTP code 230" in _ro.evidence, _ro)
+_rw = nse.judge("ftp-anon", "Anonymous FTP login allowed (FTP code 230)\n"
+                            "drwxrwxrwx   2 0  0  4096 Jan 01 upload")
+check("a world-writable directory raises it to high",
+      _rw and _rw.severity == "high", _rw)
+check("...and the writable line is in the evidence, not only the title",
+      _rw and "drwxrwxrwx" in _rw.evidence, _rw)
+check("...and the title says which one it is",
+      _rw and "writable" in _rw.title, _rw)
+check("a refused anonymous login is not a finding",
+      nse.judge("ftp-anon", "Anonymous FTP login not allowed") is None)
+
+# --- smtp-open-relay: the count decides, not the sentence ------------
+check("0/16 is a PASS, not an open relay",
+      nse.judge("smtp-open-relay",
+                "Server doesn't seem to be an open relay (0/16 tests)") is None)
+_relay = nse.judge("smtp-open-relay", "Server is an open relay (14/16 tests)")
+check("14/16 is an open relay", _relay and _relay.severity == "high", _relay)
+
+# --- data stores that answer strangers -------------------------------
+_redis = nse.judge("redis-info", "Version: 6.0.9\nUptime: 90210\nRole: master")
+check("an answering Redis is a high finding",
+      _redis and _redis.severity == "high", _redis)
+check("a Redis that demanded auth is not",
+      nse.judge("redis-info", "ERROR: NOAUTH Authentication required.") is None)
+check("a Mongo that demanded auth is not",
+      nse.judge("mongodb-info",
+                "ERROR: command failed: auth required") is None)
+check("an empty script output is not a finding",
+      nse.judge("redis-info", "") is None)
+
+# --- nmap's own VULNERABLE block -------------------------------------
+_ms17 = nse.judge("smb-vuln-ms17-010", """
+VULNERABLE:
+  Remote Code Execution vulnerability in Microsoft SMBv1 servers
+    State: VULNERABLE
+    IDs:  CVE:CVE-2017-0143
+    Risk factor: HIGH""")
+check("nmap's VULNERABLE verdict is taken at face value",
+      _ms17 and _ms17.severity == "high", _ms17)
+check("...and the CVE reaches the title",
+      _ms17 and "CVE-2017-0143" in _ms17.title, _ms17)
+check("a vuln script that found nothing files nothing",
+      nse.judge("smb-vuln-ms17-010",
+                "  State: NOT VULNERABLE") is None)
+# The pattern, not a pinned list: nmap ships new -vuln- scripts and a
+# list here would mean an upgrade quietly adds findings nobody reads.
+check("an unknown *-vuln-* script still gets judged",
+      nse.judge("some-future-vuln-check",
+                "  State: VULNERABLE\n  IDs: CVE:CVE-2029-1") is not None)
+check("...while an unknown non-vuln script does not",
+      nse.judge("some-future-inventory", "State: VULNERABLE") is None)
+
+# --- the whole blob ---------------------------------------------------
+_blob = json.dumps({
+    "ssh-hostkey": "2048 aa:bb ssh-rsa",
+    "ftp-anon": "Anonymous FTP login allowed (FTP code 230)",
+    "smb-vuln-ms17-010": "State: VULNERABLE\nIDs: CVE:CVE-2017-0143",
+    "ssl-cert": "Subject: commonName=acme",
+})
+_fs = nse.findings_for(_blob)
+check("two findings out of four scripts", len(_fs) == 2,
+      [f.script for f in _fs])
+check("the high one sorts first", _fs and _fs[0].severity == "high", _fs)
+check("the same blob twice gives an identical list",
+      [f.title for f in nse.findings_for(_blob)] == [f.title for f in _fs])
+check("malformed JSON is no findings, not a crash",
+      nse.findings_for("{not json") == [])
+check("NULL scripts is no findings, not a crash",
+      nse.findings_for(None) == [])
+check("a JSON list rather than an object does not crash",
+      nse.findings_for('["ftp-anon"]') == [])
+
+# The upsert key has to separate two instances of one service.
+check("the key carries the port",
+      nse.external_id(21, "tcp", "ftp-anon")
+      != nse.external_id(2121, "tcp", "ftp-anon"))
+check("the key carries the protocol",
+      nse.external_id(161, "udp", "snmp-info")
+      != nse.external_id(161, "tcp", "snmp-info"))
+
+
+print("\n== end to end: an import raises the finding ==")
+admin = call("/api/auth/setup", "POST",
+             {"username": "root", "password": "root-password-1"})[1]["access_token"]
+call("/api/projects", "POST", {"code": "ACME", "name": "ACME NSE"}, token=admin)
+
+XML = """<?xml version="1.0"?>
+<nmaprun scanner="nmap" version="7.94" args="nmap -sV --script default,safe,vuln" start="1700000000">
+ <host><status state="up"/>
+  <address addr="198.51.100.10" addrtype="ipv4"/>
+  <hostnames><hostname name="ftp.acme.example" type="PTR"/></hostnames>
+  <ports>
+   <port protocol="tcp" portid="21"><state state="open" reason="syn-ack"/>
+    <service name="ftp" product="vsftpd" version="2.3.4" method="probed"/>
+    <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)&#10;drwxrwxrwx 2 0 0 4096 Jan 01 upload"/>
+    <script id="ftp-syst" output="STAT: FTP server status"/>
+   </port>
+   <port protocol="tcp" portid="22"><state state="open" reason="syn-ack"/>
+    <service name="ssh" product="OpenSSH" version="9.6p1" method="probed"/>
+    <script id="ssh-hostkey" output="2048 aa:bb:cc ssh-rsa"/>
+   </port>
+  </ports>
+ </host>
+</nmaprun>
+"""
+
+st, r = call("/api/scans/nmap?project=ACME", "POST", {"xml": XML}, token=admin)
+check("import accepted", st == 200, f"status={st} {str(r)[:200]}")
+check("the script output was stored", (r or {}).get("scripts_captured") == 3, r)
+# The finding came out of the import itself, not out of a later pass.
+check("the import counted the finding it raised",
+      (r or {}).get("vulns_created") == 1, r)
+
+st, v = call("/api/vulns?project=ACME&limit=50", token=admin)
+_rows = (v or {}).get("items", [])
+_nse = [x for x in _rows if (x.get("external_id") or "").startswith("nse:")]
+check("exactly one NSE finding", len(_nse) == 1,
+      [x.get("external_id") or x.get("title") for x in _rows])
+if _nse:
+    x = _nse[0]
+    check("...high, because the directory is writable",
+          x["severity"] == "high", x)
+    check("...on the port it was found on", x.get("port") == 21, x)
+    check("...keyed so a re-import finds it again",
+          x["external_id"] == "nse:tcp/21:ftp-anon", x)
+    check("...carrying the script's own words as evidence",
+          "FTP code 230" in (x.get("description") or ""), x)
+    check("...and saying plainly that no extra traffic was sent",
+          "no additional" in (x.get("description") or "").lower(), x)
+check("ssh-hostkey did not become a finding",
+      not any("hostkey" in (x.get("external_id") or "") for x in _rows), _rows)
+check("ftp-syst did not become a finding either",
+      not any("ftp-syst" in (x.get("external_id") or "") for x in _rows))
+
+# A person's triage must survive the parser running again. `record`
+# re-asserts the severity and not the triage on purpose: a re-import
+# is not an argument against somebody's judgement.
+if _nse:
+    st, _ = call(f"/api/vulns/{_nse[0]['id']}/triage", "PATCH",
+                 {"triage": "false_positive"}, token=admin)
+    check("triage can be set", st == 200, st)
+
+st, r2 = call("/api/scans/nmap?project=ACME", "POST", {"xml": XML}, token=admin)
+check("re-import accepted", st == 200, (st, str(r2)[:200]))
+check("...and raises no second copy", (r2 or {}).get("vulns_created") == 0, r2)
+st, v2 = call("/api/vulns?project=ACME&limit=50", token=admin)
+_nse2 = [x for x in (v2 or {}).get("items", [])
+         if (x.get("external_id") or "").startswith("nse:")]
+check("still one finding after a re-import", len(_nse2) == 1,
+      [x.get("external_id") for x in _nse2])
+if _nse2:
+    check("...and the person's triage still stands",
+          _nse2[0].get("triage") == "false_positive", _nse2[0])
+
+# The sweep is what reads the backlog -- every service scanned before
+# this existed. It has to agree with the import: run over data the
+# import already handled, it must add nothing.
+print("\n== the backlog sweep ==")
+import asyncio
+
+from app.db import SessionLocal
+
+
+async def _sweep():
+    async with SessionLocal() as s:
+        out = await nse.sweep(s)
+        await s.commit()
+        return out
+
+_seen, _new = asyncio.run(_sweep())
+check("the sweep read the services carrying script output", _seen >= 2, _seen)
+check("...and found nothing new, because the import already had it",
+      _new == 0, _new)
+
+print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
+_sys.exit(1 if fail else 0)

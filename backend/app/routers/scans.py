@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import addresses, importers, slack
+from .. import addresses, importers, nsefindings, slack
 from ..db import SessionLocal, get_session
 from ..events import broker
 from ..hosts import InvalidHost, normalise_host
@@ -202,6 +202,13 @@ async def _service(session: AsyncSession, target: Target, ps: ParsedService,
         "cpe": _j(ps.cpe), "scripts": _j(ps.scripts), "banner": ps.banner or None,
     }
     res.scripts_captured += len(ps.scripts)
+    # The scripts are not only stored, they are read. nmap has been
+    # told to run `vuln` and friends since the fleet was built, and
+    # until this call every "Anonymous FTP login allowed" it reported
+    # sat in a JSON column that nothing selected. No extra traffic:
+    # this is the answer already in hand.
+    res.vulns_created += await nsefindings.record_service(
+        session, target.id, ps.port, ps.protocol, ps.scripts)
     if ps.state == "open" and ps.name == "UNKNOWN":
         res.services_unknown += 1
     # A service that answered is proof the host is up, whatever the host
