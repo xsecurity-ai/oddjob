@@ -834,6 +834,17 @@ class Vuln(Base, TimestampMixin):
     #: somebody typed in, or one from before this existed. Those are
     #: never resolved by a sweep — a person's finding is not something
     #: a tool gets to close.
+    #: The web asset this finding came out of, when it came out of
+    #: one. NULL for everything else — a port scan finding, a page
+    #: finding, something somebody typed in.
+    #:
+    #: Stored rather than derived. The asset URL has always been in
+    #: the description (see `assetwork.origin_block`), and parsing
+    #: prose to answer "how many findings does this bundle carry" is
+    #: the arrangement that put `codename` and `remediation` in the
+    #: database and nowhere else.
+    asset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("web_assets.id", ondelete="SET NULL"), index=True)
     scanner: Mapped[str | None] = mapped_column(String(64), index=True)
     #: When a scan first reported it, and when one last did. Distinct
     #: from `created_at`/`updated_at`, which move for reasons that have

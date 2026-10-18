@@ -27,6 +27,7 @@ import CloseIcon from '@mui/icons-material/Close'
 import SearchIcon from '@mui/icons-material/Search'
 import { useQuery } from '@tanstack/react-query'
 import { api, type WebAsset } from '../lib/api'
+import { SEVERITY_COLOUR as SEV } from '../lib/severity'
 import type { ColumnDef } from '../lib/columns'
 import { AssetModal } from './AssetModal'
 import { DataTable } from './DataTable'
@@ -160,6 +161,43 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
         <Box sx={{ color: (p.value ?? 0) > 1 ? neon.pink : neon.muted }}>
           {p.value}
         </Box>
+      ),
+    },
+    {
+      // What this asset is CARRYING, not what is wrong with the host
+      // that serves it. A CDN bundle's host is somebody else's
+      // infrastructure; the bundle is ours to answer for.
+      field: 'vulns', headerName: 'Findings', width: 128, type: 'number',
+      renderCell: (p) => {
+        const r = p.row as WebAsset
+        if (!r.vulns) {
+          return <Box sx={{ color: alpha(neon.muted, 0.35) }}>—</Box>
+        }
+        return (
+          <Stack direction="row" spacing={0.6} sx={{ alignItems: 'center' }}>
+            <Box sx={{ color: neon.text }}>{r.vulns}</Box>
+            {/* Severity beside the total rather than instead of it.
+                "14 findings" and "14 findings, 3 of them critical"
+                are different sentences and only the second says
+                where to start. */}
+            {r.criticals > 0 && (
+              <Box sx={{ fontSize: 10.5, color: SEV.critical,
+                         fontWeight: 700 }}>{r.criticals}C</Box>
+            )}
+            {r.highs > 0 && (
+              <Box sx={{ fontSize: 10.5, color: SEV.high }}>{r.highs}H</Box>
+            )}
+          </Stack>
+        )
+      },
+    },
+    {
+      field: 'secrets', headerName: 'Secrets', width: 96, type: 'number',
+      renderCell: (p) => (p.value ?? 0) > 0 ? (
+        <Box sx={{ color: neon.yellow, fontWeight: 700,
+                   textShadow: glow(neon.yellow, 0.5) }}>{p.value}</Box>
+      ) : (
+        <Box sx={{ color: alpha(neon.muted, 0.35) }}>—</Box>
       ),
     },
     {
