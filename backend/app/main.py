@@ -205,9 +205,24 @@ async def lifespan(app: FastAPI):
         async with SessionLocal() as s:
             cfg = await load_all(s)
         if cfg.get("proxy.enabled"):
+            # TLS is optional and additive: with a certificate the
+            # same port also answers CONNECT, so a browser can be
+            # pointed at the host directly. Without one it is SOCKS
+            # alone, which needs a tunnel. A cert that fails to load
+            # must NOT take the SOCKS listener down with it -- the
+            # tunnel path is what people are already using.
+            tls = None
+            cert = str(cfg.get("proxy.tls_cert") or "").strip()
+            key = str(cfg.get("proxy.tls_key") or "").strip()
+            if cert and key:
+                from . import proxyhttps
+                try:
+                    tls = proxyhttps.context(cert, key)
+                except Exception as e:               # noqa: BLE001
+                    print(f"proxy TLS off, certificate did not load: {e}")
             proxy_srv = await proxyserver.serve(
                 str(cfg.get("proxy.bind") or "127.0.0.1"),
-                int(cfg.get("proxy.port") or 8443))
+                int(cfg.get("proxy.port") or 8443), tls)
     except Exception as e:                                   # noqa: BLE001
         print(f"socks proxy did not start: {e}")
 

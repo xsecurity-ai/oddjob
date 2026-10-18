@@ -20,6 +20,26 @@ SNI with `ssl_preread`, which only classifies TLS handshakes. There
 is nothing for it to match on, so sharing the port would need a
 first-byte demuxer nginx does not have.
 
+# Three things arrive on this port, and the first byte names them
+
+    0x05            a SOCKS5 greeting        -> handle()
+    0x16            a TLS ClientHello        -> TLS, then CONNECT
+    'A'-'Z'         a plain HTTP verb        -> CONNECT
+
+The third is the one to prefer in a deployment, and it is why TLS
+here is optional rather than required: **let nginx terminate it.**
+It already holds a certificate for this host and already renews it,
+`--with-stream_ssl_module` lets it listen on 8443 and hand the
+decrypted stream here, and a certificate this process never sees is
+a certificate this process cannot mishandle. See
+deploy/nginx/oddjob-connect.conf.
+
+Terminating TLS in-process is kept for the deployment that has no
+nginx, and because a self-signed certificate is a reasonable thing
+to want -- but note that a browser offers no click-through for a
+PROXY certificate the way it does for a page, so a self-signed one
+has to be imported into every browser's trust store first.
+
 # The order of the handshake is the order of the checks
 
 Method negotiation, then credentials, then the CONNECT. The
@@ -32,6 +52,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import ssl
 
 from . import proxyauth, socks
 from .db import SessionLocal
@@ -202,10 +223,151 @@ async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
             await w.wait_closed()
 
 
-async def serve(bind: str, port: int) -> asyncio.AbstractServer:
+#: What a TLS ClientHello starts with. A SOCKS5 greeting starts with
+#: 0x05, so the two cannot be confused by their first byte -- which
+#: is what lets them share a port.
+TLS_HELLO = 0x16
+SOCKS5 = 0x05
+
+
+async def demux(r: asyncio.StreamReader, w: asyncio.StreamWriter,
+                tls: ssl.SSLContext | None) -> None:
+    """Route one connection to SOCKS or to CONNECT-over-TLS.
+
+    One port, two protocols, and no ambiguity about which: a SOCKS5
+    greeting opens 0x05 and a TLS ClientHello opens 0x16. The
+    comment at the top of this file says nginx cannot do this
+    because `ssl_preread` only classifies TLS; a one-byte peek can,
+    and it is the whole mechanism.
+
+    Why share at all: the SOCKS listener is reached through an SSH
+    tunnel and must keep working exactly as it does, while a browser
+    pointed at the host needs TLS on a port it can name. Giving the
+    second its own port would mean another firewall hole and another
+    thing to document.
+    """
+    try:
+        first = await asyncio.wait_for(r.read(1), HANDSHAKE_TIMEOUT)
+    except (TimeoutError, ConnectionResetError):
+        with contextlib.suppress(Exception):
+            w.close()
+        return
+    if not first:
+        with contextlib.suppress(Exception):
+            w.close()
+        return
+
+    if first[0] == TLS_HELLO:
+        if tls is None:
+            # A browser tried TLS and we have no certificate. Say so
+            # in the log; there is nothing useful to say on the wire
+            # because the client is waiting for a ServerHello.
+            log.warning("proxy: TLS offered but no certificate is "
+                        "configured — set proxy.tls_cert and "
+                        "proxy.tls_key")
+            with contextlib.suppress(Exception):
+                w.close()
+            return
+        await _tls_then_connect(r, w, first, tls)
+        return
+
+    # A plain HTTP verb. Either a browser speaking CONNECT to a port
+    # where something in front has ALREADY terminated TLS -- which
+    # is the arrangement worth preferring, see the module header --
+    # or a browser that is not configured as a proxy at all. The
+    # CONNECT handler answers both, and its answer to the second is
+    # more use than a dropped connection.
+    if 0x41 <= first[0] <= 0x5A:
+        from . import proxyhttps
+        await proxyhttps.handle(_Pushback(r, first), w)
+        return
+
+    if first[0] != SOCKS5:
+        log.info("proxy: first byte %#04x is none of SOCKS5, TLS or HTTP",
+                 first[0])
+        with contextlib.suppress(Exception):
+            w.close()
+        return
+    await handle(_Pushback(r, first), w)
+
+
+class _Pushback:
+    """A StreamReader with one byte put back in front of it.
+
+    The demux has to consume a byte to classify the connection, and
+    the handler behind it expects to read the stream from its
+    beginning. Wrapping is less invasive than teaching both
+    protocol handlers about a prefix they should not know exists.
+    """
+
+    def __init__(self, inner: asyncio.StreamReader, head: bytes) -> None:
+        self._inner = inner
+        self._head = bytearray(head)
+
+    async def readexactly(self, n: int) -> bytes:
+        out = bytearray()
+        if self._head:
+            take = min(n, len(self._head))
+            out += self._head[:take]
+            del self._head[:take]
+            n -= take
+        if n:
+            out += await self._inner.readexactly(n)
+        return bytes(out)
+
+    async def read(self, n: int = -1) -> bytes:
+        if self._head:
+            if n is None or n < 0:
+                out = bytes(self._head) + await self._inner.read(-1)
+                self._head.clear()
+                return out
+            take = min(n, len(self._head))
+            out = bytes(self._head[:take])
+            del self._head[:take]
+            return out
+        return await self._inner.read(n)
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+
+async def _tls_then_connect(r: asyncio.StreamReader,
+                            w: asyncio.StreamWriter, first: bytes,
+                            tls: ssl.SSLContext) -> None:
+    """Upgrade this connection to TLS and hand it to the CONNECT handler.
+
+    `start_tls` on an existing transport is the only way to do this
+    after peeking, and it needs the byte we took back in the stream
+    first -- the handshake starts at the ClientHello's first byte.
+    """
+    from . import proxyhttps
+
+    loop = asyncio.get_running_loop()
+    transport = w.transport
+    protocol = transport.get_protocol()
+    # Feed the peeked byte back before the handshake reads.
+    protocol.data_received(first)
+    try:
+        new_transport = await loop.start_tls(
+            transport, protocol, tls, server_side=True)
+    except (ssl.SSLError, ConnectionResetError, TimeoutError) as e:
+        log.info("proxy: TLS handshake failed — %s", e)
+        with contextlib.suppress(Exception):
+            w.close()
+        return
+    w._transport = new_transport                     # noqa: SLF001
+    await proxyhttps.handle(r, w)
+
+
+async def serve(bind: str, port: int,
+                tls: ssl.SSLContext | None = None) -> asyncio.AbstractServer:
     """Start listening. The caller owns the server object."""
-    srv = await asyncio.start_server(handle, bind, port)
+    async def _on(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+        await demux(r, w, tls)
+
+    srv = await asyncio.start_server(_on, bind, port)
     where = ", ".join(str(s.getsockname()) for s in (srv.sockets or ()))
-    log.warning("SOCKS5 proxy listening on %s — every connection is "
-                "authenticated, scope-gated and recorded", where)
+    log.warning("proxy listening on %s (SOCKS5%s) — every connection is "
+                "authenticated, scope-gated and recorded",
+                where, " and CONNECT-over-TLS" if tls else ", no TLS cert")
     return srv

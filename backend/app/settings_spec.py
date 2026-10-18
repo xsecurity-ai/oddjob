@@ -105,7 +105,25 @@ SPEC = [
      "help": "Not 443. A browser pointed at a SOCKS proxy speaks raw "
              "SOCKS5 — no TLS, no SNI — and nginx routes 443 by SNI, so "
              "there is nothing for it to match on and the two cannot "
-             "share a port without a demuxer nginx does not have."},
+             "share a port without a demuxer nginx does not have. This "
+             "port carries both SOCKS5 and CONNECT-over-TLS: Oddjob "
+             "demuxes them on the first byte, which nginx cannot do."},
+    {"key": "proxy.tls_cert", "group": "Site",
+     "label": "Proxy TLS certificate", "type": "text", "default": "",
+     "help": "Path, inside the container, to a certificate for this "
+             "host. Setting it turns on CONNECT-over-TLS on the same "
+             "port, which is what lets a browser be pointed straight at "
+             "Oddjob instead of through an SSH tunnel: the credential "
+             "then travels inside TLS instead of in clear, which is "
+             "what SOCKS5 cannot offer. It must be a certificate the "
+             "browser already trusts — there is no click-through for a "
+             "proxy the way there is for a page. Empty means SOCKS "
+             "only, reachable through a tunnel."},
+    {"key": "proxy.tls_key", "group": "Site",
+     "label": "Proxy TLS key", "type": "text", "default": "",
+     "help": "Path, inside the container, to the private key for the "
+             "certificate above. Both must be set or neither does "
+             "anything."},
     # ----------------------------------------- certificate transparency
     # The one source here that SENDS something. Everything else in
     # this file either stays local (geoip looks up a database this

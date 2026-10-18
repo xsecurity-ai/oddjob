@@ -231,6 +231,18 @@ speaks raw SOCKS5 — first byte `0x05`, no TLS, no SNI — and nginx
 routes 443 by SNI. There is nothing for it to match on, so the two
 cannot share a port without a first-byte demuxer nginx does not have.
 
+**The port has to be published.** `docker-compose.yml` maps it
+alongside the app; if you run your own compose, map `8443` or the
+listener binds inside the container and nothing outside can reach
+it. Worth knowing that `ssh -N -L 8443:...` succeeds whether or not
+anything is listening on the far side, so the tunnel coming up is
+not evidence the proxy is there. Check it:
+
+```bash
+# on the Oddjob host
+ss -ltn | grep 8443
+```
+
 ### 2. Enable it for one Ghost
 
 **Ghosts → pick one → Proxy.** Per agent, and off by default. A Ghost
@@ -251,7 +263,89 @@ and must never be one — SOCKS5 sends the password in clear text on
 every connection, so it has to be a secret worth exactly this one
 capability, which you can revoke without touching an account.
 
-### Point the browser at it
+### Without a tunnel: point the browser at the host
+
+The same port also answers **HTTP CONNECT inside TLS**, so the
+browser goes straight at `your-oddjob-host:8443` with the
+credential — no SSH tunnel.
+
+**This is the only form that is safe to publish.** SOCKS5 sends the
+username and password as plaintext bytes (RFC 1929) and everything
+after the handshake is the raw stream, so a SOCKS port on `0.0.0.0`
+puts the credential *and* all your traffic to the client's estate in
+the clear, on a route into their network that anyone can reach.
+Inside TLS, the credential is a `Proxy-Authorization` header in an
+encrypted session.
+
+Three things arrive on 8443 and the first byte tells them apart, so
+nothing has to guess and your existing tunnel keeps working:
+
+| first byte | what it is | where it goes |
+|---|---|---|
+| `0x05` | a SOCKS5 greeting | the SOCKS listener |
+| `0x16` | a TLS ClientHello | TLS, then CONNECT |
+| `A`–`Z` | a plain HTTP verb | CONNECT |
+
+#### Prefer: let nginx hold the certificate
+
+If you already run nginx in front of Oddjob, give it the TLS and
+leave Oddjob the proxying. Copy `deploy/nginx/oddjob-connect.conf`
+into your **`stream { }`** context — not `http { }` — and point it
+at the certificate nginx already renews. Oddjob then sees a plain
+`CONNECT` on 8443 and needs no certificate of its own.
+
+Better for three reasons that are not about performance: the
+certificate is already there and already renewing; a certificate the
+application never sees is one it cannot mishandle; and nginx's is
+trusted by every browser already.
+
+What nginx **cannot** do is be the proxy — it has no CONNECT
+support, and the per-ghost grant, the scope gate, the audit row and
+the tunnel to the right agent all live in Oddjob and must not be
+duplicated. It does the one part it is good at.
+
+#### Or: let Oddjob terminate it
+
+Set **`proxy.tls_cert`** and **`proxy.tls_key`** to paths inside the
+container. For a deployment with no reverse proxy this is the right
+answer.
+
+**A self-signed certificate works, but not for free.** A browser
+offers no click-through for a *proxy* certificate the way it does
+for a page — the connection simply fails, with no interstitial to
+accept. So a self-signed one has to be imported into the trust store
+of every browser that will use it. That is fine for one laptop and
+tedious for a team, which is why the nginx route above is the
+default advice.
+
+A certificate that fails to load turns TLS off and leaves SOCKS
+running, rather than taking down the path people are already using.
+
+Firefox has no "HTTPS proxy" option — its dropdown offers HTTP,
+SOCKS4 and SOCKS5, none of which is a TLS-wrapped proxy. A PAC file
+is the supported way to say it, and Oddjob serves one:
+
+**Settings → Network Settings → Automatic proxy configuration URL**
+
+```
+https://your-oddjob-host/api/ghosts/proxy.pac
+```
+
+That PAC deliberately has **no `DIRECT` fallback**. A PAC that says
+`HTTPS host:port; DIRECT` sends traffic straight at the client's
+estate from your own address the moment the proxy is unreachable —
+silently, from the wrong egress. Failing closed is the only correct
+behaviour for a proxy whose entire purpose is where the packet comes
+from.
+
+With `curl`:
+
+```bash
+curl --proxy https://user:pass@your-oddjob-host:8443 \
+     https://intranet.acme.example/
+```
+
+### Or through a tunnel: point the browser at localhost
 
 Firefox, which has real per-browser proxy settings (Chrome uses the
 system ones, so prefer Firefox unless you want it machine-wide):
