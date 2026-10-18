@@ -16,6 +16,15 @@ more than the extra store. Switching project starts a new thread
 rather than carrying one across, because a transcript spanning two
 clients is the one thing this application exists to prevent.
 
+A project may have SEVERAL open threads at once — one question is
+rarely the only one in flight — and they are listed by `/sessions`.
+They are open threads of the ENGAGEMENT, not tabs of one browser:
+the same reasoning that put the transcript on the server applies to
+the list of them, so a thread a colleague opened an hour ago is one
+you can pick up rather than one you cannot see. `/session` with no
+`thread` still answers with the newest open one, which is what a
+client that knows nothing about the list gets.
+
 **A credential never lands in a turn.** `get_finding_secret` returns a
 value that `reveal_secret` releases only to a `user` role and only with
 an audit entry naming who asked. A transcript readable by everyone on
@@ -31,7 +40,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..agent import AgentError, build, run, token_kind
@@ -348,6 +357,23 @@ class SessionOut(BaseModel):
     turns: list[TurnOut] = []
 
 
+class SessionBrief(BaseModel):
+    """One thread, without its turns.
+
+    The tab strip needs a title and an id for every open thread and
+    the transcript of none of them; sending every turn of every
+    thread to label six tabs would be sending the engagement's whole
+    conversation to draw a strip 34 pixels tall.
+    """
+    id: int
+    project_code: str
+    title: str | None = None
+    opened_by: str | None = None
+    closed: bool = False
+    at: str | None = None
+    turn_count: int = 0
+
+
 def _redact_steps(steps) -> list[dict]:
     """Tool calls, with the one result that must not be stored removed.
 
@@ -417,20 +443,86 @@ async def _current(session: AsyncSession, pr: Project, user: User,
     return sess
 
 
+async def _pick(session: AsyncSession, pr: Project, user: User,
+                thread: int | None, create: bool = True):
+    """The thread the caller named, or the project's newest open one.
+
+    A named thread is checked against the project in the request, and
+    a mismatch is a 404 rather than a 403: an id belonging to another
+    engagement must not be confirmed to exist by the error for it.
+    `require_project` has already established that the caller may
+    read this project, so that is the only check left to make.
+    """
+    if thread is None:
+        return await _current(session, pr, user, create=create)
+    sess = await session.get(AgentSession, thread)
+    if sess is None or sess.project_id != pr.id:
+        raise HTTPException(404, f"no thread {thread} on {pr.code}")
+    return sess
+
+
+@router.get("/sessions", response_model=list[SessionBrief])
+async def list_sessions(project: str = Query(...),
+                        closed: bool = Query(
+                            False, description="Include closed threads"),
+                        pr: Project = Depends(require_project("readonly")),
+                        session: AsyncSession = Depends(get_session)):
+    """Every open thread on this engagement, newest activity first.
+
+    The list is the engagement's, like the threads in it. Someone
+    else's open question therefore appears as a tab you can pick up,
+    which is the whole reason the transcript stopped living in one
+    browser.
+
+    `readonly` is enough, for the same reason it is enough to read a
+    thread: chatting is already open to readonly, so the record of
+    those chats has to be.
+    """
+    q = (select(AgentSession, func.count(AgentTurn.id))
+         .outerjoin(AgentTurn, AgentTurn.session_id == AgentSession.id)
+         .where(AgentSession.project_id == pr.id)
+         .group_by(AgentSession.id)
+         .order_by(AgentSession.last_at.desc().nullslast(),
+                   AgentSession.id.desc()))
+    if not closed:
+        q = q.where(AgentSession.closed.is_(False))
+    rows = (await session.execute(q)).all()
+
+    ids = {s.opened_by_id for s, _ in rows if s.opened_by_id}
+    who: dict[int, str] = {}
+    if ids:
+        who = {u.id: u.username for u in (await session.execute(
+            select(User).where(User.id.in_(ids)))).scalars().all()}
+    return [SessionBrief(
+        id=s.id, project_code=pr.code, title=s.title,
+        opened_by=who.get(s.opened_by_id or -1), closed=bool(s.closed),
+        at=(s.last_at or s.created_at).isoformat()
+        if (s.last_at or s.created_at) else None,
+        turn_count=n) for s, n in rows]
+
+
 @router.get("/session", response_model=SessionOut | None)
 async def get_session_(project: str = Query(...),
+                       thread: int | None = Query(
+                           None, description="A thread on this project. "
+                                             "Omitted means the newest open "
+                                             "one."),
                        pr: Project = Depends(require_project("readonly")),
                        user: User = Depends(get_current_user),
                        session: AsyncSession = Depends(get_session)):
-    """This engagement's agent thread, as everyone on it sees it.
+    """One of this engagement's agent threads, as everyone on it sees it.
 
     `readonly` is enough to READ. Chatting is already open to
     readonly, so the transcript of those chats has to be, or the
     record would be visible to fewer people than the conversation
     that produced it. The credential case is handled by not storing
     the value -- see `_redact_steps`.
+
+    With no `thread` this is the newest open one, which is what it
+    has always answered: a project nothing has been asked of still
+    says null rather than opening a thread in order to report one.
     """
-    sess = await _current(session, pr, user, create=False)
+    sess = await _pick(session, pr, user, thread, create=False)
     if sess is None:
         return None
     await session.refresh(sess, ["turns"])
@@ -439,17 +531,29 @@ async def get_session_(project: str = Query(...),
 
 @router.post("/session/new", response_model=SessionOut)
 async def new_session(project: str = Query(...),
+                      close_current: bool = Query(
+                          True, description="Close the thread that was open. "
+                                            "False opens one alongside it."),
                       pr: Project = Depends(require_project("readonly")),
                       user: User = Depends(get_current_user),
                       session: AsyncSession = Depends(get_session)):
-    """Start a fresh thread, closing the current one.
+    """Start a fresh thread.
 
-    Closed, not deleted: what was asked during an engagement is part
-    of the engagement.
+    `close_current` defaults to true, which means "replace the
+    conversation": the thread that was open is closed, not deleted,
+    because what was asked during an engagement is part of the
+    engagement.
+
+    False opens one ALONGSIDE, which is what a second tab is. Two
+    questions in flight at once is the ordinary case — "what did the
+    crawl find" and "is this credential worth anything" are not one
+    conversation — and making the second one end the first is what
+    the tab strip exists to stop.
     """
-    cur = await _current(session, pr, user, create=False)
-    if cur is not None:
-        cur.closed = True
+    if close_current:
+        cur = await _current(session, pr, user, create=False)
+        if cur is not None:
+            cur.closed = True
     sess = AgentSession(project_id=pr.id, opened_by_id=user.id,
                         last_at=datetime.now(UTC))
     session.add(sess)
@@ -458,8 +562,41 @@ async def new_session(project: str = Query(...),
     return await _session_out(session, sess, pr.code)
 
 
+@router.post("/session/{thread}/close", response_model=SessionBrief)
+async def close_session(thread: int, project: str = Query(...),
+                        pr: Project = Depends(require_project("readonly")),
+                        user: User = Depends(get_current_user),
+                        session: AsyncSession = Depends(get_session)):
+    """Close one thread. It stays readable; it stops being offered.
+
+    Closing is not deleting, and the distinction is the point: the
+    record of what was asked during an engagement is part of the
+    engagement, so a closed thread is still fetchable by id and still
+    listed by `/sessions?closed=true`.
+
+    It closes for EVERYONE on the project, because the thread is the
+    project's and not one person's tab. The UI says so before it asks.
+    """
+    sess = await _pick(session, pr, user, thread, create=False)
+    if sess is None:
+        raise HTTPException(404, f"no thread {thread} on {pr.code}")
+    sess.closed = True
+    n = (await session.execute(
+        select(func.count(AgentTurn.id))
+        .where(AgentTurn.session_id == sess.id))).scalar_one()
+    await session.commit()
+    return SessionBrief(
+        id=sess.id, project_code=pr.code, title=sess.title,
+        closed=True, turn_count=n,
+        at=(sess.last_at or sess.created_at).isoformat()
+        if (sess.last_at or sess.created_at) else None)
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(body: ChatRequest, project: str = Query(...),
+               thread: int | None = Query(
+                   None, description="Which of this project's threads to ask "
+                                     "in. Omitted means the newest open one."),
                pr: Project | None = Depends(_optional_project),
                user: User = Depends(get_current_user),
                session: AsyncSession = Depends(get_session)):
@@ -519,7 +656,13 @@ async def chat(body: ChatRequest, project: str = Query(...),
     # mode has no single thread to belong to.
     sess = None
     if pr is not None:
-        sess = await _current(session, pr, user)
+        sess = await _pick(session, pr, user, thread)
+        if sess.closed:
+            # Reopening it silently would resurrect a thread somebody
+            # deliberately ended, and for everyone on the project at
+            # once. Say which it was instead; the caller can start one.
+            raise HTTPException(
+                409, f"thread {sess.id} is closed. Start a new one.")
         await session.refresh(sess, ["turns"])
         stored = []
         for t in sess.turns:

@@ -501,7 +501,7 @@ export interface AgentTurn {
 
 /** An agent conversation, owned by the ENGAGEMENT rather than by the
  *  browser that started it. Switching project lands on that
- *  project's thread, never carries this one across. */
+ *  project's threads, never carries this one across. */
 export interface AgentSession {
   id: number
   project_code: string
@@ -512,10 +512,30 @@ export interface AgentSession {
   turns: AgentTurn[]
 }
 
+/** One thread without its turns — what a tab is drawn from.
+ *
+ *  The list is the ENGAGEMENT's open threads, not this browser's
+ *  tabs: a thread a colleague opened is one you can pick up, which
+ *  is the same reason the transcript itself lives on the server. */
+export interface AgentSessionBrief {
+  id: number
+  project_code: string
+  title: string | null
+  opened_by: string | null
+  closed: boolean
+  at: string | null
+  turn_count: number
+}
+
 export interface AgentReply {
   text: string; provider: string; model: string
   steps: AgentStep[]; stop_reason: string
   usage: Record<string, number>; history: unknown[]
+  /** Which thread it landed in. Null only in the all-engagements
+   *  mode, which has no single project to own a thread. Needed when
+   *  the first message of a project opens one: that is the only way
+   *  the client learns the id it must then address. */
+  session_id: number | null
 }
 export interface Report {
   id: number; project_code: string; kind: string; title: string
@@ -1280,18 +1300,35 @@ export const api = {
 
   agentStatus: (project: string) =>
     req<AgentStatus>('/api/agent/status' + qs({ project })),
-  agentChat: (project: string, message: string, history: unknown[]) =>
-    req<AgentReply>('/api/agent/chat' + qs({ project }),
+  /** Ask in one thread. `thread` omitted means the newest open one,
+   *  which is what a caller with no tab strip gets. */
+  agentChat: (project: string, message: string, history: unknown[],
+              thread?: number) =>
+    req<AgentReply>('/api/agent/chat' + qs({ project, thread }),
       { method: 'POST', body: JSON.stringify({ message, history }) }),
-  /** This engagement's agent thread, as everyone on it sees it.
-   *  Null when the project has not been asked anything yet — which
-   *  is different from an empty thread somebody started. */
-  agentSession: (project: string) =>
-    req<AgentSession | null>('/api/agent/session' + qs({ project })),
-  /** Close the current thread and open a fresh one. Closed, not
-   *  deleted: what was asked during an engagement is part of it. */
-  newAgentSession: (project: string) =>
-    req<AgentSession>('/api/agent/session/new' + qs({ project }),
+  /** This engagement's open threads, newest activity first. Everyone
+   *  on the project sees the same list. */
+  agentSessions: (project: string) =>
+    req<AgentSessionBrief[]>('/api/agent/sessions' + qs({ project })),
+  /** One of this engagement's agent threads, as everyone on it sees
+   *  it. Null when the project has not been asked anything yet —
+   *  which is different from an empty thread somebody started. */
+  agentSession: (project: string, thread?: number) =>
+    req<AgentSession | null>('/api/agent/session' + qs({ project, thread })),
+  /** Open a fresh thread. `closeCurrent` true replaces the
+   *  conversation, closing the one that was open — closing, never
+   *  deleting: what was asked during an engagement is part of it.
+   *  False leaves it running and opens one alongside, which is what
+   *  a new tab is. */
+  newAgentSession: (project: string, closeCurrent = true) =>
+    req<AgentSession>('/api/agent/session/new'
+                      + qs({ project, close_current: closeCurrent }),
+      { method: 'POST', body: '{}' }),
+  /** Close one thread, for everyone on the engagement — it is the
+   *  engagement's thread, not your tab. It stays readable by id. */
+  closeAgentSession: (project: string, thread: number) =>
+    req<AgentSessionBrief>(`/api/agent/session/${thread}/close`
+                           + qs({ project }),
       { method: 'POST', body: '{}' }),
   importReport: (project: string, content: string, format = 'auto',
                  mode: 'strict' | 'open' = 'strict',

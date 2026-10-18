@@ -1260,6 +1260,77 @@ st, now = call("/api/agent/session?project=ALPHA", token=admin)
 check("...and it is the one the project is now on",
       (now or {}).get("id") == (second or {}).get("id"), str(now)[:70])
 
+
+print("\n== several threads at once, and the list is the engagement's ==")
+# "What did the crawl find" and "is this credential worth anything"
+# are not one conversation. A second question must not end the first,
+# which may also be somebody else's.
+st, beside = call("/api/agent/session/new?project=ALPHA&close_current=false",
+                  "POST", {}, token=admin)
+check("a thread can be opened beside the one already open",
+      st == 200 and (beside or {}).get("id") != (second or {}).get("id"),
+      f"status={st} {str(beside)[:80]}")
+
+st, threads = call("/api/agent/sessions?project=ALPHA", token=admin)
+ids = [t["id"] for t in (threads or [])]
+check("both are listed as open",
+      st == 200 and (beside or {}).get("id") in ids
+      and (second or {}).get("id") in ids, f"status={st} {ids}")
+check("...and the one that was replaced is not",
+      (fresh or {}).get("id") not in ids,
+      f"{(fresh or {}).get('id')} must have stayed closed: {ids}")
+check("...newest activity first",
+      ids[0] == (beside or {}).get("id"), ids)
+check("...with the turn count, so a tab needs no transcript to label it",
+      all("turn_count" in t for t in (threads or [])), str(threads)[:90])
+
+# The list is the engagement's, exactly like the threads in it: a
+# question a colleague left running is one you can pick up.
+st, theirs = call("/api/agent/sessions?project=ALPHA", token=ntok)
+check("a readonly member of the project sees the same open threads",
+      st == 200 and [t["id"] for t in (theirs or [])] == ids,
+      f"status={st} {str(theirs)[:90]}")
+
+st, one = call(f"/api/agent/session?project=ALPHA"
+               f"&thread={(second or {}).get('id')}", token=ntok)
+check("a named thread is fetched by id, not only the newest",
+      st == 200 and (one or {}).get("id") == (second or {}).get("id"),
+      f"status={st} {str(one)[:70]}")
+
+# An id belonging to another engagement must not be reachable through
+# a project the caller can read -- that would be the one thing the
+# per-project thread exists to prevent, done with a number.
+st, bsess = call("/api/agent/session/new?project=BRAVO", "POST", {},
+                 token=admin)
+st, _ = call(f"/api/agent/session?project=ALPHA"
+             f"&thread={(bsess or {}).get('id')}", token=admin)
+check("another engagement's thread is 404 through this one, not readable",
+      st == 404, f"status={st} — a thread id must not cross projects")
+st, _ = call(f"/api/agent/session/{(bsess or {}).get('id')}/close"
+             f"?project=ALPHA", "POST", {}, token=admin)
+check("...and cannot be closed through it either", st == 404, f"status={st}")
+
+# Closing is not deleting. What was asked during an engagement is
+# part of the engagement.
+bid = (beside or {}).get("id")
+st, shut = call(f"/api/agent/session/{bid}/close?project=ALPHA", "POST", {},
+                token=admin)
+check("a thread can be closed", st == 200 and (shut or {}).get("closed") is True,
+      f"status={st} {str(shut)[:70]}")
+st, rest = call("/api/agent/sessions?project=ALPHA", token=admin)
+check("...and drops out of the open list",
+      bid not in [t["id"] for t in (rest or [])], str(rest)[:90])
+st, kept = call(f"/api/agent/session?project=ALPHA&thread={bid}", token=admin)
+check("...but is still readable by id, because it was kept",
+      st == 200 and (kept or {}).get("id") == bid
+      and (kept or {}).get("closed") is True, f"status={st} {str(kept)[:70]}")
+st, arch = call("/api/agent/sessions?project=ALPHA&closed=true", token=admin)
+check("...and is listed when closed threads are asked for",
+      bid in [t["id"] for t in (arch or [])], str(arch)[:90])
+check("closing one does not touch the others",
+      (second or {}).get("id") in [t["id"] for t in (rest or [])],
+      str(rest)[:90])
+
 print("\n== a credential never lands in a shared transcript ==")
 # `reveal_secret` releases a value only to a `user` role and only
 # with an audit entry naming who asked. A thread readable by
