@@ -684,6 +684,31 @@ class VulnOut(_VulnFields):
     created_at: datetime
     updated_at: datetime
 
+    # ---- lifecycle. See app/lifecycle.py ----------------------------
+    #: Which tool reported it. NULL for a finding somebody typed in,
+    #: and for anything imported before this existed.
+    scanner: str | None = None
+    #: When a scan first reported it and when one last did. NOT
+    #: `created_at`/`updated_at`, which move when somebody edits a
+    #: severity or writes a remediation.
+    first_seen_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    #: new | present | resolved | unconfirmed.
+    #:
+    #: Derived per request rather than stored, so a re-scan that finds
+    #: a thing again revives it without anything having to clear a
+    #: column first. `unconfirmed` is a real answer and not a hedge:
+    #: it means nothing that reports this kind of finding has looked
+    #: since it was last seen.
+    lifecycle: str = "unconfirmed"
+    #: The sentence behind that word. A `resolved` shown without one
+    #: is a claim the reader has to take on trust, and it is the
+    #: claim that most deserves not to be.
+    lifecycle_why: str | None = None
+    #: When a tool that reports this kind of finding last looked at
+    #: this host. None means never.
+    last_looked_at: datetime | None = None
+
 
 # ------------------------------------------------------------------ pocs
 class _PocFields(BaseModel):

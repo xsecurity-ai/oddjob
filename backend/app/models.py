@@ -781,7 +781,69 @@ class Vuln(Base, TimestampMixin):
     # than forking a duplicate. Unique per project, not globally.
     external_id: Mapped[str | None] = mapped_column(String(128), index=True)
 
+    # ---- lifecycle: what happened to this between scans -------------
+    #
+    # See `app/lifecycle.py`. These three answer "is it still there",
+    # which a row that only ever had `created_at` could not: a finding
+    # written in March sat at `open` for ever, through nine re-scans
+    # that no longer saw it.
+    #
+    #: Which tool reported it -- the import format (`nmap`, `nuclei`,
+    #: `burp`), or the in-process scanner's own name. Matched against
+    #: `finding_sweeps.scanner`, so an nmap run cannot resolve a Burp
+    #: finding.
+    #:
+    #: NULL means nobody is responsible for looking again: a finding
+    #: somebody typed in, or one from before this existed. Those are
+    #: never resolved by a sweep — a person's finding is not something
+    #: a tool gets to close.
+    scanner: Mapped[str | None] = mapped_column(String(64), index=True)
+    #: When a scan first reported it, and when one last did. Distinct
+    #: from `created_at`/`updated_at`, which move for reasons that have
+    #: nothing to do with observation — a triage change, a remediation
+    #: being written, a severity edit.
+    first_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True)
+
     target: Mapped[Target] = relationship(back_populates="vulns")
+
+
+class FindingSweep(Base):
+    """One tool looked at one host, and this is when it last did.
+
+    The positive record that makes `resolved` sayable. Without it,
+    the absence of a finding from a new scan means nothing: a nuclei
+    run with a narrower template set, a scan that errored half way
+    and a host that was down all produce the same silence, and none
+    of them is a remediation.
+
+    One row per (target, scanner), holding the LAST time rather than
+    every time. An append log over months of recurring scanning
+    would be enormous and would answer no question this does not --
+    nothing asks "how many times", only "when last".
+    """
+    __tablename__ = "finding_sweeps"
+    __table_args__ = (
+        # The lookup is always (target, scanner), and it is also the
+        # uniqueness: two rows for one pair would mean two answers to
+        # "when did nmap last look at this host".
+        Index("ix_finding_sweeps_target_scanner", "target_id", "scanner",
+              unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Denormalised from the target so a project's whole sweep table
+    #: loads in one query. A report over 4,000 findings would
+    #: otherwise join per finding.
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), index=True)
+    scanner: Mapped[str] = mapped_column(String(64))
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True),
+                                         nullable=False)
 
 
 class FindingSecret(Base, TimestampMixin):

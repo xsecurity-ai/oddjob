@@ -187,6 +187,39 @@ export interface Vuln {
   description: string | null; remediation: string | null
   external_id: string | null
   created_at: string; updated_at: string
+
+  /** Which tool reported it. null for a finding somebody typed in,
+   *  and for anything imported before the lifecycle existed. */
+  scanner: string | null
+  /** When a scan first reported it and when one last did. NOT
+   *  created_at/updated_at, which move when somebody edits a
+   *  severity or writes a remediation. */
+  first_seen_at: string | null
+  last_seen_at: string | null
+  /** new | present | resolved | unconfirmed.
+   *
+   *  Four, not three. `unconfirmed` means nothing that reports this
+   *  kind of finding has looked since it was last seen — it is a
+   *  real answer and not a hedged `resolved`. */
+  lifecycle: string
+  /** The sentence behind that word. `resolved` is a claim, and a
+   *  reader is entitled to see what it rests on. */
+  lifecycle_why: string | null
+  /** When a tool that reports this kind of finding last looked at
+   *  this host. null means never. */
+  last_looked_at: string | null
+}
+
+/** What changed between the last scan and the one before it. */
+export interface VulnLifecycle {
+  project_code: string
+  counts: Record<string, number>
+  meaning: Record<string, string>
+  /** Per scanner: when it last looked, and at how many hosts. Makes
+   *  the counts readable — "0 resolved" from a tool that has not run
+   *  in six weeks is not good news. */
+  scanners: { scanner: string; hosts: number; last_looked_at: string | null }[]
+  unconfirmed_hosts: string[]
 }
 
 /** One host carrying the same finding. */
@@ -1014,6 +1047,13 @@ export const api = {
   vulns: (project?: string) => req<Page<Vuln>>('/api/vulns' + qs({ project, limit: 100000 })),
   /** One finding, with its full text and every host it appears on. */
   vuln: (id: number) => req<VulnDetail>(`/api/vulns/${id}`),
+  /** New since the last scan, still present, resolved — and unknown.
+   *
+   *  Derived on the server per request from the sweep table, so a
+   *  scan that finds something again revives it with nothing to
+   *  clear first. */
+  vulnLifecycle: (project: string) =>
+    req<VulnLifecycle>('/api/vulns/lifecycle' + qs({ project })),
   /** Exact-match service lookup — distinct from `q`, which is a substring
    *  search across every column and would also match a banner. */
   servicesWhere: (o: { project?: string; port?: number; name?: string }) =>
