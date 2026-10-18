@@ -452,5 +452,51 @@ check("...with nothing to report as changed, because nothing did",
       (_d or {}).get("configuration_changed"))
 
 
+print("\n== a caller with no configuration does not erase one ==")
+# The backlog sweep reads a stored column, not a command line, so it
+# has no manifest to report -- and it runs at every start. When the
+# overwrite was unconditional, one restart wiped the manifest off
+# every finding an import had established and quietly downgraded
+# every later `resolved` to the weaker kind.
+import asyncio as _aio3  # noqa: E402
+import inspect as _in3  # noqa: E402
+
+from app import nsefindings as _nf  # noqa: E402
+from app.db import SessionLocal as _Sess3  # noqa: E402
+from app.models import Target as _T3  # noqa: E402
+
+check("the NSE recorder only sets a manifest it was given",
+      "if run_manifest:" in _in3.getsource(_nf.record),
+      "record() overwrites found_by_manifest unconditionally")
+check("...and so does the sweep recorder",
+      "if manifest:" in _in3.getsource(lc.record_sweep),
+      "record_sweep() overwrites manifest unconditionally")
+
+
+async def _manifest_survives():
+    """An import establishes a manifest; a sweep must not remove it."""
+    from sqlalchemy import select as _s3
+    async with _Sess3() as s:
+        t = (await s.execute(_s3(_T3))).scalars().first()
+        if t is None:
+            return None
+        await lc.record_sweep(s, t.project_id, t.id, "probe",
+                              datetime(2026, 5, 1, tzinfo=UTC), "known-mf")
+        await s.commit()
+        # The shape of the backlog sweep: a LATER look, with no
+        # manifest to report.
+        await lc.record_sweep(s, t.project_id, t.id, "probe",
+                              datetime(2026, 6, 1, tzinfo=UTC), None)
+        await s.commit()
+        return (await lc.sweeps_for_targets(s, [t.id])).get((t.id, "probe"))
+
+
+_sv = _aio3.run(_manifest_survives())
+check("a later manifest-less sweep still moves the timestamp",
+      bool(_sv) and _sv[0].month == 6, _sv)
+check("...but leaves the manifest an import established",
+      bool(_sv) and _sv[1] == "known-mf", _sv)
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 _sys.exit(1 if fail else 0)

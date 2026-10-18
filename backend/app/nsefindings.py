@@ -484,7 +484,17 @@ async def record(session: AsyncSession, target_id: int, port: int | None,
             row.first_seen_at = seen_at
         if not row.scanner:
             row.scanner = SCANNER
-        row.found_by_manifest = run_manifest
+        # Only when the caller KNOWS one. None here means "this call
+        # has no configuration to report", which is the backlog
+        # sweep's position -- it reads a column, not a command line
+        # -- and is not the same as "the run had no configuration".
+        #
+        # This was unconditional, and the sweep runs at every start:
+        # one restart would have wiped the manifest off every NSE
+        # finding an import had established, quietly downgrading
+        # every later `resolved` to the weaker kind.
+        if run_manifest:
+            row.found_by_manifest = run_manifest
         return False
     session.add(Vuln(
         target_id=target_id, title=f.title[:1000], severity=f.severity,

@@ -222,7 +222,15 @@ async def record_sweep(session: AsyncSession, project_id: int,
         # event, and a row carrying March's configuration beside
         # May's timestamp would answer "was it comparable" about a
         # run that never happened.
-        row.manifest = manifest
+        #
+        # Except when the caller has none to give. `None` means "this
+        # caller cannot say what the run was configured to do", which
+        # is true of the backlog sweep -- it reads a stored column,
+        # not a command line -- and is not a statement that the
+        # configuration was unknown at the time. Overwriting on it
+        # would make every restart degrade what the imports knew.
+        if manifest:
+            row.manifest = manifest
 
 
 async def remember_manifest(session: AsyncSession, scanner: str,
