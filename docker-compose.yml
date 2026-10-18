@@ -115,6 +115,21 @@ services:
     # address. See SECURITY.md.
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8000}:8000"
+      # The ghost proxy, when `proxy.enabled` is on. Published
+      # because it was NOT, and the feature therefore could not
+      # work at all: the listener bound inside the container, the
+      # port was not mapped, and `ssh -L 8443:127.0.0.1:8443` on
+      # the host forwarded to nothing. An `ssh -L` succeeds whether
+      # or not anything listens on the far side, so the tunnel
+      # coming up proved nothing and the gap went unnoticed.
+      #
+      # Loopback by default, like the app above. On that address it
+      # is reachable through an SSH tunnel and from nowhere else,
+      # which is the right default for a route into a client's
+      # network. Set PROXY_BIND_ADDRESS to publish it, and read
+      # `proxy.tls_cert` first: without a certificate this port is
+      # SOCKS5, whose credential is plaintext on the wire.
+      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:${PROXY_PORT:-8443}:8443"
 
 volumes:
   pgdata:

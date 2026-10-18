@@ -42,7 +42,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import AliasChoices, BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -3654,6 +3654,54 @@ async def set_proxy(agent_id: int, body: ProxyToggle,
     await session.commit()
     await session.refresh(a)
     return _agent_out(a, pr.code)
+
+
+@router.get("/proxy.pac", response_class=PlainTextResponse)
+async def proxy_pac(request: Request,
+                    session: AsyncSession = Depends(get_session)):
+    """A proxy auto-config file, for pointing a browser at this host.
+
+    **Unauthenticated, and that is deliberate.** A PAC file is
+    fetched by the browser's network stack before any session
+    exists, so it cannot carry a bearer token. What it discloses is
+    this host's own name and port -- which the person fetching it
+    already typed -- and nothing about any engagement. The proxy
+    itself is what authenticates, on every single CONNECT.
+
+    Firefox has no field for "HTTPS proxy": its dropdown offers
+    HTTP, SOCKS4 and SOCKS5, none of which is a TLS-wrapped proxy.
+    A PAC returning `HTTPS host:port` is the supported way to say
+    it, in Firefox and Chrome both, which is why this exists rather
+    than a line of documentation.
+    """
+    from ..routers.settings import load_all
+    cfg = await load_all(session)
+    if not cfg.get("proxy.enabled"):
+        raise HTTPException(404, "the proxy is not enabled on this Oddjob")
+    cert = str(cfg.get("proxy.tls_cert") or "").strip()
+    key = str(cfg.get("proxy.tls_key") or "").strip()
+    port = int(cfg.get("proxy.port") or 8443)
+    host = (request.url.hostname or "").strip()
+    if not (cert and key):
+        raise HTTPException(
+            404, "this Oddjob has no proxy certificate, so there is no "
+                 "HTTPS proxy to point at. Reach the SOCKS listener "
+                 f"through a tunnel instead: ssh -N -L {port}:127.0.0.1:"
+                 f"{port} {host}")
+    # DIRECT is deliberately absent from the fallback. A PAC that
+    # says `HTTPS host:port; DIRECT` sends traffic straight at the
+    # client's estate from the tester's own address the moment the
+    # proxy is unreachable -- silently, and from the wrong egress.
+    # Failing closed is the only correct behaviour for a proxy whose
+    # whole purpose is where the packet comes from.
+    return (
+        "// Oddjob ghost proxy. Everything goes through the Ghost; a\n"
+        "// failure is a failure, not a quiet fallback to your own\n"
+        "// address -- which is the one thing that must not happen on\n"
+        "// an engagement.\n"
+        "function FindProxyForURL(url, host) {\n"
+        f'  return "HTTPS {host}:{port}";\n'
+        "}\n")
 
 
 @router.get("/{agent_id}/proxy/grants", response_model=list[GrantOut])

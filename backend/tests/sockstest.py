@@ -526,5 +526,144 @@ check("a SOCKS4 client is not answered with success",
       reply.hex() if reply else "(closed)")
 
 
+# ================================================ CONNECT over TLS
+# The second way in, and the reason it exists: SOCKS5 carries its
+# credential in plaintext (RFC 1929), so it is only safe down a
+# tunnel somebody already authenticated. CONNECT inside TLS is what
+# lets a browser be pointed straight at the host.
+#
+# Everything after the credential check is the SOCKS path unchanged
+# -- same grants, same scopegate, same tunnel, same audit row --
+# because two ways in that authorise differently is one way in
+# nobody has checked.
+import base64 as _b64  # noqa: E402
+
+from app import connect as _cx  # noqa: E402
+
+print("\n== what a CONNECT request says ==")
+
+
+def _head(line, *headers):
+    return line + "\r\n" + "".join(h + "\r\n" for h in headers) + "\r\n"
+
+
+_r = _cx.parse_request(_head(
+    "CONNECT internal.acme.example:443 HTTP/1.1",
+    "Proxy-Authorization: Basic " + _b64.b64encode(b"u1:p1").decode(),
+    "User-Agent: Firefox/140.0"))
+check("the destination is read", (_r.host, _r.port) ==
+      ("internal.acme.example", 443), (_r.host, _r.port))
+check("...and the credential with it", (_r.username, _r.password) ==
+      ("u1", "p1"), (_r.username, _r.password))
+check("...and it counts as authenticated", _r.authenticated)
+
+# A browser's FIRST request carries no credential -- it waits to be
+# asked. That is not a failed login and must not be recorded as one.
+_r2 = _cx.parse_request(_head("CONNECT a.acme.example:8443 HTTP/1.1"))
+check("no Proxy-Authorization is 'not yet', not 'wrong'",
+      _r2.username is None and not _r2.authenticated, _r2)
+
+# An IPv6 literal is the one host form that contains colons.
+_r3 = _cx.parse_request(_head("CONNECT [2001:db8::1]:443 HTTP/1.1"))
+check("an IPv6 literal keeps its address and loses its brackets",
+      (_r3.host, _r3.port) == ("2001:db8::1", 443), (_r3.host, _r3.port))
+
+print("\n== and what it refuses ==")
+for _bad, _why in [
+    ("GET / HTTP/1.1", "a browser not configured as a proxy"),
+    ("CONNECT acme.example HTTP/1.1", "no port"),
+    ("CONNECT acme.example:0 HTTP/1.1", "port zero"),
+    ("CONNECT acme.example:99999 HTTP/1.1", "port out of range"),
+    ("CONNECT http://acme.example/x:443 HTTP/1.1", "a URL, not a host"),
+    ("CONNECT a@b:443 HTTP/1.1", "userinfo, which moves the destination"),
+    ("CONNECT acme.example:443 HTTP/2", "not a version we speak"),
+]:
+    try:
+        _cx.parse_request(_head(_bad))
+        check(f"refused: {_why}", False, f"accepted {_bad!r}")
+    except _cx.ProtocolError:
+        check(f"refused: {_why}", True)
+
+# The common mistake deserves a readable answer, not "bad request".
+try:
+    _cx.parse_request(_head("GET / HTTP/1.1"))
+except _cx.ProtocolError as e:
+    check("...and a plain GET is told what this port is",
+          "proxy, not a web server" in str(e), str(e))
+
+print("\n== a credential that cannot be decoded is not a login attempt ==")
+# Same 407 either way: a browser with a stale cached credential
+# should be re-prompted, not refused outright.
+for _hdr in ("Basic !!!not-base64!!!", "Basic " + _b64.b64encode(b"nocolon").decode(),
+             "Bearer abc", "Basic"):
+    _rr = _cx.parse_request(_head("CONNECT a.acme.example:443 HTTP/1.1",
+                                  "Proxy-Authorization: " + _hdr))
+    check(f"undecodable {_hdr.split()[0]!r} reads as absent",
+          _rr.username is None, _rr.username)
+
+print("\n== the replies ==")
+check("the challenge asks for Basic, with a realm",
+      b"407" in _cx.challenge() and b'Basic realm=' in _cx.challenge())
+check("...and names what the credential is for",
+      b"Oddjob ghost proxy" in _cx.challenge())
+check("success is exactly the tunnel-opening line",
+      _cx.ok() == b"HTTP/1.1 200 Connection Established\r\n\r\n",
+      _cx.ok())
+# A proxy that answers every refusal identically teaches its user
+# nothing, and these are all things they can fix.
+check("a refusal carries its reason",
+      b"not in scope" in _cx.refused("host is not in scope"))
+
+print("\n== one port, two protocols, no ambiguity ==")
+# This is the whole mechanism: a SOCKS5 greeting opens 0x05 and a
+# TLS ClientHello opens 0x16, so the first byte decides and nothing
+# has to guess.
+from app import proxyserver as _ps  # noqa: E402
+
+check("SOCKS5 and TLS cannot be confused by their first byte",
+      _ps.SOCKS5 != _ps.TLS_HELLO and (_ps.SOCKS5, _ps.TLS_HELLO) == (5, 0x16),
+      (_ps.SOCKS5, _ps.TLS_HELLO))
+# Three things arrive here and none of their first bytes overlap:
+# 0x05 SOCKS5, 0x16 TLS, and an uppercase ASCII letter for a plain
+# HTTP verb -- which is what arrives when nginx has already taken
+# the TLS off, the arrangement worth preferring.
+check("...and neither can be an HTTP verb",
+      not (0x41 <= _ps.SOCKS5 <= 0x5A) and not (0x41 <= _ps.TLS_HELLO <= 0x5A))
+check("'C' for CONNECT is in the HTTP range the demux routes",
+      0x41 <= ord("C") <= 0x5A)
+
+
+async def _pushback_roundtrip():
+    """The peeked byte must still be there for the handler behind."""
+    r = asyncio.StreamReader()
+    r.feed_data(b"\x05\x01\x02rest-of-it")
+    r.feed_eof()
+    first = await r.read(1)
+    pb = _ps._Pushback(r, first)
+    return await pb.readexactly(3), await pb.read(-1)
+
+
+_three, _rest = run(_pushback_roundtrip())
+check("the byte the demux consumed is given back",
+      _three == b"\x05\x01\x02", _three)
+check("...and the rest of the stream follows it unchanged",
+      _rest == b"rest-of-it", _rest)
+
+# Every attribute the CONNECT handler reads off a Decision has to
+# exist on it. Writing `reason_code` instead of `outcome` typechecks
+# nowhere and would raise on the refusal path only -- which is
+# exactly how `Ruling.why` reached production here.
+import inspect as _inspect  # noqa: E402
+import re as _re  # noqa: E402
+
+from app import proxyauth as _pa  # noqa: E402
+from app import proxyhttps as _ph  # noqa: E402
+
+_used = set(_re.findall(r"\bd\.([a-z_]+)", _inspect.getsource(_ph)))
+check("the CONNECT handler reads only fields Decision has",
+      not (_used - set(_pa.Decision.__dataclass_fields__)),
+      sorted(_used - set(_pa.Decision.__dataclass_fields__)))
+
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
