@@ -1747,6 +1747,76 @@ class WebAssetRef(Base):
     asset: Mapped[WebAsset] = relationship()
 
 
+#: How a target came to exist. One value today; the column is here
+#: because the question "where did this come from" is asked of every
+#: row sooner or later, and only the discovering code can answer it.
+ORIGIN_SOURCES = (
+    "asset",        # named in the code of a web asset this project fetched
+)
+
+
+class TargetOrigin(Base, TimestampMixin):
+    """Where a target was discovered, as recorded by whatever found it.
+
+    A bucket named in a JavaScript bundle is not reachable from any
+    CIDR, nothing links to it, and no port scan meets it: the file
+    that mentions it is the ONLY reason we know it exists. Without
+    this table the target arrives in the list with no account of
+    itself, and the first question an operator asks -- "where did
+    this come from" -- has no answer anywhere in the system.
+
+    **Absent is not nothing.** A target with no row here was not
+    found to come from nowhere; nothing recorded where it came from.
+    Rows created before this table existed, and targets typed in by
+    hand or loaded from a scan import, all have none, and the UI says
+    "not recorded" rather than "none" for exactly that reason.
+
+    **Snapshots beside the foreign keys, deliberately.** `asset_id`
+    and `file_id` are `SET NULL`: an asset re-fetched, superseded or
+    deleted must not take the provenance with it. The URL and path
+    are copied in at discovery time so the answer survives the row it
+    came from.
+    """
+    __tablename__ = "target_origins"
+    __table_args__ = (
+        # One row per (target, place it was found in). A sweep sees
+        # the same bundle every pass; without this the table grows
+        # without bound while saying nothing new.
+        #
+        # Keyed on a digest rather than the URL itself: a Postgres
+        # btree entry caps near 2.7 KB and bundle URLs run past it,
+        # so the index cannot carry the text. Same reason, and same
+        # shape, as `web_addresses.url_hash`.
+        UniqueConstraint("target_id", "origin_hash", name="uq_target_origin"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    #: Indexed, and not only for reads: deleting a project deletes its
+    #: targets, and every delete goes through this key.
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), index=True)
+    #: One of ORIGIN_SOURCES.
+    source: Mapped[str] = mapped_column(String(16))
+
+    asset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("web_assets.id", ondelete="SET NULL"), index=True)
+    file_id: Mapped[int | None] = mapped_column(
+        ForeignKey("web_asset_files.id", ondelete="SET NULL"), index=True)
+    #: The asset the identifier was read out of, copied in at
+    #: discovery so it outlives `asset_id`.
+    asset_url: Mapped[str | None] = mapped_column(Text)
+    #: Which recovered file inside that asset -- `src/config.ts` in a
+    #: source map beats "somewhere in app.min.js".
+    file_path: Mapped[str | None] = mapped_column(Text)
+    #: The page that loads that asset, where one is known. This is
+    #: the "site it came from" an operator means.
+    page_url: Mapped[str | None] = mapped_column(Text)
+    #: sha256 over (source, asset_url, file_path). See the constraint.
+    origin_hash: Mapped[str] = mapped_column(String(64), index=True)
+
+
 # ======================================================= domain discovery
 #: How a candidate hostname was arrived at. Recorded because the reader's
 #: first question about a suggested name is always "why do you think so".

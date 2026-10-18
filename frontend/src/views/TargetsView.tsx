@@ -673,7 +673,8 @@ export function TargetsView({ project }: { project: string | null }) {
       {tab === 'cloud' ? (
         <Box sx={{ flex: 1, minHeight: 0, height: '100%',
                    display: 'flex', flexDirection: 'column' }}>
-          <CloudTargetsPanel rows={cloudRows} onOpen={(t) => open(t.project_code, t.host)} />
+          <CloudTargetsPanel rows={cloudRows} project={project}
+            onOpen={(t) => open(t.project_code, t.host)} />
         </Box>
       ) : (
       <DataTable

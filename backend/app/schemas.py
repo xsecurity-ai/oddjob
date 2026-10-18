@@ -1072,6 +1072,57 @@ class EventCreate(BaseModel):
     source: str | None = None
 
 
+class TargetOriginOut(BaseModel):
+    """One place a target was discovered in.
+
+    **An empty list is "not recorded", never "found nowhere".** Only
+    the code that discovers a target can say where it came from, and
+    only the asset sweep does so today: a target typed in by hand,
+    loaded from a scan import or created before provenance was kept
+    has no row here and nothing in the system knows its origin. The
+    UI is required to say that rather than render a blank as an
+    absence of sources.
+    """
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    target_id: int
+    #: How it was found. "asset" — named in the code of a web asset.
+    source: str
+    #: The asset the identifier was read out of. Snapshotted at
+    #: discovery, so it survives the asset being re-fetched or deleted.
+    asset_url: str | None = None
+    #: Which recovered file inside that asset. `src/config.ts` out of
+    #: a source map says far more than "somewhere in app.min.js".
+    file_path: str | None = None
+    #: The page that asset was first seen on.
+    page_url: str | None = None
+    #: Every page known to load that asset, newest query wins — this
+    #: is read live from `web_asset_refs` rather than stored, because
+    #: a page added to the crawl later genuinely adds a site this came
+    #: from. Capped; `pages_total` is the full count.
+    pages: list[str] = []
+    pages_total: int = 0
+    created_at: datetime
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Hostname of the page this was found on, for a "
+                    "one-value cell. Null when no page is known, which "
+                    "is not the same as no page existing.")
+    @property
+    def site(self) -> str | None:
+        from urllib.parse import urlsplit
+        for u in (self.page_url, *self.pages, self.asset_url):
+            if not u:
+                continue
+            try:
+                h = urlsplit(u).hostname
+            except ValueError:
+                continue
+            if h:
+                return h.lower()
+        return None
+
+
 class TargetDetail(BaseModel):
     """Everything about one target, in a single round trip.
 
@@ -1084,6 +1135,9 @@ class TargetDetail(BaseModel):
     vulns: list[VulnOut]
     pocs: list[PocOut]
     implants: list[ImplantOut] = []
+    #: Where this target came from, when anything recorded it. Empty
+    #: means nothing did — see `TargetOriginOut`.
+    origins: list[TargetOriginOut] = []
 
 
 # --------------------------------------------------------------- explore

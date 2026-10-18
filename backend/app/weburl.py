@@ -142,6 +142,29 @@ def exchange_key(method: str | None, url: str,
     return h.hexdigest()
 
 
+def origin_key(source: str, *parts: str | None) -> str:
+    """Identity of ONE PLACE a target was discovered in.
+
+    sha256 over the source and whatever locates it -- for a web asset,
+    the asset URL and the path of the file inside it. Hashed for the
+    same reason `url_key` is: a bundle URL can run past the 2.7 KB a
+    Postgres btree entry holds, so the text cannot carry the
+    uniqueness and a fixed digest has to.
+
+    Deliberately NOT keyed on the row ids. A `web_asset_files` row is
+    rewritten whenever its bytes change, so hashing its id would file
+    the same discovery again on every sweep that re-fetched the
+    bundle — which is precisely what the unique constraint exists to
+    prevent.
+    """
+    import hashlib
+    h = hashlib.sha256()
+    for part in (source, *parts):
+        h.update((part or "").encode("utf-8", "surrogatepass"))
+        h.update(b"\x1f")          # separator: "ab"+"c" must not equal "a"+"bc"
+    return h.hexdigest()
+
+
 #: Response headers whose value moves on its own, with nothing about the
 #: server or about the answer having changed. Hashing them makes every
 #: repeat of a request look like a different answer.
