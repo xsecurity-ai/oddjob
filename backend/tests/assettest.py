@@ -121,6 +121,7 @@ call("/api/projects/ASSET/scope", "POST", {"lines": ["127.0.0.1"]}, token=admin)
 call("/api/targets?project=ASSET", "POST", {"host": "127.0.0.1"}, token=admin)
 
 import asyncio  # noqa: E402
+import hashlib  # noqa: E402
 
 from sqlalchemy import select  # noqa: E402
 
@@ -129,6 +130,7 @@ from app.models import (  # noqa: E402
     Project,
     Target,
     Vuln,
+    WebAddress,
     WebAsset,
     WebAssetFile,
 )
@@ -1411,6 +1413,149 @@ check("...and says it was not the application",
       "not by the application" in _d, _d)
 check("...and does not claim a retry it cannot make",
       "cannot" in _d, _d)
+
+print("\n== the scanners read the pages too, not only what pages pull in ==")
+# The asset sweep reads bundles. It never read the page itself, and
+# an API key inlined in a <script> block is the same finding as the
+# same string in a bundle.
+
+# --- which responses are worth reading, decided without a database
+check("an .html URL picks the html rules",
+      _aw.page_ext("https://acme.example/index.html", None) == ".html")
+check("...and .htm is the same thing",
+      _aw.page_ext("https://acme.example/a.htm", None) == ".html")
+check("the URL beats a wrong content type, because /app.js is javascript",
+      _aw.page_ext("https://acme.example/app.js", "text/html") == ".js")
+check("a declared type is used when the URL has no extension",
+      _aw.page_ext("https://acme.example/api/session",
+                   "application/json; charset=utf-8") == ".json")
+check("a route with neither is still read",
+      _aw.page_ext("https://acme.example/api/session", None) == ".txt")
+# Guessing `.txt` at an unknown type is how a font ends up in front
+# of a secret scanner, which finds entropy in all of them.
+check("an image is NOT read",
+      _aw.page_ext("https://acme.example/logo.png", "image/png") is None)
+check("...nor a font", _aw.page_ext("https://acme.example/f.woff2",
+                                    "font/woff2") is None)
+
+# --- the header block is not the page
+_raw = ("HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html\r\n"
+        "Set-Cookie: SESSION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; HttpOnly\r\n"
+        "\r\n"
+        "<html><body>hello</body></html>")
+check("a raw exchange is cut at the header block",
+      _aw.response_body(_raw) == "<html><body>hello</body></html>",
+      _aw.response_body(_raw)[:60])
+# The reason it is cut: every authenticated response in the estate
+# carries the client's own session cookie, and reporting one as a
+# found credential on every page buries the key that is actually
+# inlined in the markup.
+check("...so the session cookie is not handed to a secret scanner",
+      "SESSION=" not in _aw.response_body(_raw))
+check("a body with no header block is left whole",
+      _aw.response_body("<html>\n\nstill the body</html>")
+      == "<html>\n\nstill the body</html>")
+check("a bare-LF header block is cut too",
+      _aw.response_body("HTTP/1.1 200 OK\nX: y\n\nbody") == "body")
+check("headers and nothing else is an empty body, not an error",
+      _aw.response_body("HTTP/1.1 204 No Content\r\n\r\n") == "")
+check("nothing at all is nothing", _aw.response_body("") == "")
+
+# --- end to end over the real table
+async def _scan_pages():
+    async with SessionLocal() as s:
+        t = (await s.execute(select(Target).where(
+            Target.project_id == pid))).scalars().first()
+        rows = [
+            # A 2xx page with a credential inlined in it.
+            #
+            # Deliberately NOT AWS's own documented example access
+            # key, which is the obvious thing to reach for here: it
+            # matches the access-key pattern in
+            # scripts/check-secrets.sh, which fails the build on a
+            # public repository -- and is right to, because a
+            # pattern that carves out "the example one" is a pattern
+            # people learn to argue with. This fires detect-secrets'
+            # Secret Keyword detector instead: a real detector path,
+            # and a string that is nobody's credential in any shape.
+            WebAddress(
+                target_id=t.id, url="https://acme.example/inline.html",
+                url_hash=hashlib.sha256(b"inline").hexdigest(),
+                exchange_hash=hashlib.sha256(b"inline-x").hexdigest(),
+                scheme="https", path="/inline.html", status_code=200,
+                content_type="text/html",
+                response="HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+                         "\r\n<html><script>var apiKey = "
+                         '"a3f1c9e7b2d84f60a1c5e8b3d7f20946";'
+                         "</script></html>"),
+            # A 404 carrying the same string. The server's error
+            # template is identical across a thousand URLs, so
+            # reading it files one finding a thousand times.
+            WebAddress(
+                target_id=t.id, url="https://acme.example/missing.html",
+                url_hash=hashlib.sha256(b"missing").hexdigest(),
+                exchange_hash=hashlib.sha256(b"missing-x").hexdigest(),
+                scheme="https", path="/missing.html", status_code=404,
+                content_type="text/html",
+                response='<html><script>var apiKey = '
+                         '"a3f1c9e7b2d84f60a1c5e8b3d7f20946";'
+                         "</script></html>"),
+            # Not text. Marked read, never handed to a scanner.
+            WebAddress(
+                target_id=t.id, url="https://acme.example/logo.png",
+                url_hash=hashlib.sha256(b"logo").hexdigest(),
+                exchange_hash=hashlib.sha256(b"logo-x").hexdigest(),
+                scheme="https", path="/logo.png", status_code=200,
+                content_type="image/png", response="\x89PNG binary"),
+        ]
+        for r in rows:
+            s.add(r)
+        await s.commit()
+        ids = [r.id for r in rows]
+
+        owed_before = (await _aw.pending(s, pid))["unscanned_pages"]
+        sw = await _aw.scan_pages(s, pid, limit=50)
+        owed_after = (await _aw.pending(s, pid))["unscanned_pages"]
+
+        back = {r.id: r for r in (await s.execute(select(WebAddress).where(
+            WebAddress.id.in_(ids)))).scalars().all()}
+        vulns = (await s.execute(select(Vuln).where(
+            Vuln.target_id == t.id))).scalars().all()
+        return sw, owed_before, owed_after, back, ids, vulns
+
+_sw, _before, _after, _back, _ids, _vulns = asyncio.run(_scan_pages())
+
+check("a 2xx body is queued to be read", _before >= 2, _before)
+check("...and a 404 is not — only 2xx", _back[_ids[1]].scanned_at is None,
+      _back[_ids[1]].scanned_at)
+check("the queue drains", _after < _before, f"{_before} -> {_after}")
+check("the 2xx page is marked read", _back[_ids[0]].scanned_at is not None)
+check("an image is marked read without being scanned",
+      _back[_ids[2]].scanned_at is not None)
+
+if have.get("detect-secrets"):
+    _hit = [v for v in _vulns
+            if "inline.html" in (v.description or "")]
+    check("a key inlined in a page becomes a finding", len(_hit) >= 1,
+          [v.title for v in _vulns][:4])
+    check("...and the finding names the page it came from",
+          any("https://acme.example/inline.html" in (v.description or "")
+              for v in _hit), [v.description[:60] for v in _hit][:2])
+    # The whole reason the 404 is excluded.
+    check("the same string in a 404 is NOT a second finding",
+          not any("missing.html" in (v.description or "") for v in _vulns))
+else:
+    check("skipped: no secret scanner present in this suite", True,
+          "(detect-secrets lives in the image)")
+
+# A second pass must not re-read what it already read, or the
+# backlog never drains and every finding is written twice.
+async def _again():
+    async with SessionLocal() as s:
+        return await _aw.scan_pages(s, pid, limit=50)
+
+check("a second pass reads nothing again", asyncio.run(_again()).scanned == 0)
 
 
 srv.shutdown()
