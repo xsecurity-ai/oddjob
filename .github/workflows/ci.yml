@@ -639,11 +639,37 @@ jobs:
             exit 1
           fi
 
+      # Polled, not asserted once.
+      #
+      # The wait above is on the container's HEALTH, and health is the
+      # API answering. Neither of these two facts is guaranteed to be
+      # observable at that instant: the entrypoint may still be
+      # finishing its alembic run, and `docker compose logs` reads a
+      # buffer that the daemon flushes on its own schedule. Asking
+      # once and failing turned both into a coin toss — this job
+      # failed on a PR and passed on re-run with no code change, more
+      # than once, which is the kind of flake people stop reading.
+      #
+      # Fifteen seconds is far longer than either needs and still
+      # fails fast when the migration genuinely did not run.
       - name: Migrations ran, and against Postgres
         run: |
           set -euo pipefail
-          docker compose exec -T app alembic current | grep -q '(head)'
-          docker compose logs app | grep -q 'db: postgresql'
+          for i in $(seq 1 15); do
+            at_head=$(docker compose exec -T app alembic current 2>/dev/null \
+                      | grep -c '(head)' || true)
+            on_pg=$(docker compose logs app 2>/dev/null \
+                    | grep -c 'db: postgresql' || true)
+            if [ "$at_head" -gt 0 ] && [ "$on_pg" -gt 0 ]; then
+              echo "migrations are at head, against postgres"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::after 15s: at_head=$at_head on_pg=$on_pg" >&2
+          docker compose exec -T app alembic current || true
+          docker compose logs app | tail -60
+          exit 1
 
       # Asked of python, not of `id`. The runtime image is distroless:
       # no shell and no coreutils, so `id -u` is not in it to run.
