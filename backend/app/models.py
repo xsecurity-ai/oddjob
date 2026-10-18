@@ -89,6 +89,15 @@ WEB_CHOICES = ("off", "crawl", "gobuster", "both")
 #: stay in automation.py, which is behaviour rather than vocabulary.
 NMAP_CHOICES = ("off", "top100", "full")
 
+#: What `Project.max_impact` may be, here for the same reason: the
+#: schemas validate against it, and importing `app/roe.py` into the
+#: schemas to read one tuple is how an import cycle starts. What each
+#: value MEANS, and which task kinds fall under it, stays in roe.py —
+#: that is behaviour rather than vocabulary.
+#:
+#: Ordered least to most permissive, which is what "at most" means.
+IMPACT_CHOICES = ("read_only", "state_changing", "destructive")
+
 #: What `Project.auto_nuclei` may be, for the same reason as above.
 #:
 #: Two runs rather than one, because the filters that make each
@@ -253,6 +262,43 @@ class Project(Base, TimestampMixin):
     #: some WAFs block outright, and it would be an odd thing to arrive
     #: at by leaving a box blank.
     user_agent: Mapped[str | None] = mapped_column(String(200))
+
+    # ---- the rest of the authorisation letter -----------------------
+    #
+    # The scope list has been enforced config since the beginning.
+    # These two sentences were in the same document and the tool could
+    # not read them, so an engagement that ended on the 14th went on
+    # scanning on the 20th. See `app/roe.py`.
+    #
+    #: When testing is authorised from, and until. NULL at either end
+    #: means unbounded, which is what every project had before these
+    #: existed -- and is why they are nullable rather than defaulted
+    #: to anything.
+    #:
+    #: UTC, like every other timestamp here. A window written in the
+    #: client's local time is a conversion the operator makes once
+    #: when they type it, not one re-derived per task from a timezone
+    #: nobody recorded.
+    engagement_starts_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    engagement_ends_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    #: The most intrusive thing this engagement permits:
+    #: `read_only`, `state_changing` or `destructive`. "No intrusive
+    #: testing" in a letter becomes `read_only` here and the gate
+    #: enforces it, including against the operator who forgot.
+    #:
+    #: server_default, not just default=: a Python-side default
+    #: produces `ADD COLUMN ... NOT NULL` with no DDL default, which
+    #: neither SQLite nor Postgres accepts against a populated table.
+    #:
+    #: Defaults to `destructive` -- everything permitted. That is a
+    #: decision, not an oversight: this arrived after engagements were
+    #: already running, and a default that silently stopped a live
+    #: scan would be a worse failure than the one it prevents.
+    max_impact: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="destructive",
+        default="destructive")
 
     name: Mapped[str] = mapped_column(String(255))
     client: Mapped[str | None] = mapped_column(String(255))
