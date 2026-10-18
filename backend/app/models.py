@@ -47,6 +47,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -1148,6 +1149,15 @@ class WebAddress(Base, TimestampMixin):
         UniqueConstraint("target_id", "exchange_hash",
                          name="uq_weburl_target_method_url"),
         Index("ix_weburl_target_status", "target_id", "status_code"),
+        # The page sweep's queue, and the reason it is PARTIAL: every
+        # row starts with `scanned_at` NULL, so an index on the column
+        # alone contains the whole table and the planner ignores it.
+        # This one holds only the rows still owed, in id order, and
+        # shrinks as they are done. Measured on 168,231 rows / 1.7 GB
+        # -- see migration 9c2e1f4ab7d3.
+        Index("ix_web_addresses_unscanned", "id",
+              postgresql_where=text("scanned_at IS NULL"),
+              sqlite_where=text("scanned_at IS NULL")),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -1228,8 +1238,13 @@ class WebAddress(Base, TimestampMixin):
     #: read. A timeout has examined nothing, and stamping the row
     #: would retire it from the queue for ever on the strength of a
     #: failure.
+    #: Indexed by `ix_web_addresses_unscanned`, a PARTIAL index on
+    #: `id WHERE scanned_at IS NULL` declared in __table_args__ --
+    #: not `index=True` here. An index on the column alone contains
+    #: every row, which is exactly no help to a query whose whole
+    #: job is to find the rows where it is still NULL.
     scanned_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), index=True)
+        DateTime(timezone=True))
 
     target: Mapped[Target] = relationship(back_populates="web_addresses")
 
