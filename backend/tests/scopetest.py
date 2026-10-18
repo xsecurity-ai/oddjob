@@ -999,5 +999,61 @@ check("no allowlist: check_zone agrees with check",
       _open.check_zone("anything.example").allowed
       == _open.check("anything.example").allowed)
 
+# ============================== resolving a CNAME hop, and only that
+# `author.corporate.acme.example` is in scope. Its chain ends at
+# `d111111abcdef8.cloudfront.net`, which is not and should not be --
+# that is AWS's infrastructure and the engagement does not cover it.
+# But the takeover detector cannot reach a verdict without resolving
+# that hop: `dangling` means "the chain reached a name that does not
+# resolve", and with no lookup there is no answer. On the engagement
+# this was written for, 35 hops were refused and 18 rows stayed
+# permanently undetermined.
+#
+# So the permission is one DNS lookup of a name an in-scope host
+# already points at. The tests that matter are the ones about what
+# it will NOT do.
+from app import scopegate as _sg  # noqa: E402
+
+print("\n== a DNS lookup of a hop an in-scope host points at ==")
+_hops = {"d111111abcdef8.cloudfront.net",
+         "pti-acme-prod.eastus.cloudapp.azure.com"}
+
+check("nslookup of a hop in the chain is allowed",
+      _sg.resolvable_hop("nslookup", "d111111abcdef8.cloudfront.net", _hops))
+check("...case and a trailing dot do not change that",
+      _sg.resolvable_hop("nslookup", "D111111ABCDEF8.CloudFront.NET.", _hops))
+
+print("\n== and nothing else at all ==")
+# The whole justification is that a DNS lookup sends nothing to the
+# named host. Anything that puts a packet on it is touching a third
+# party the engagement does not cover.
+for _kind in ("nmap", "nuclei", "nuclei_tech", "httpx", "katana",
+              "gobuster", "syn", "udp", "vhost", "reverse_ip", "amass"):
+    check(f"{_kind} against the same hop is NOT allowed",
+          not _sg.resolvable_hop(_kind, "d111111abcdef8.cloudfront.net",
+                                 _hops))
+check("the permitted kinds are exactly one, and it sends nothing",
+      frozenset({"nslookup"}) == _sg.RESOLVE_ONLY_KINDS,
+      _sg.RESOLVE_ONLY_KINDS)
+
+# The candidate set is not open. A name no in-scope host's chain
+# mentions cannot be reached through this at all -- which is what
+# stops it being "resolve anything you like".
+check("a name nobody's chain mentions is not reachable",
+      not _sg.resolvable_hop("nslookup", "evil.example", _hops))
+check("...nor is a near-miss of one that is",
+      not _sg.resolvable_hop("nslookup", "d111111abcdef8.cloudfront.net.evil"
+                             ".example", _hops))
+check("...nor a parent of one that is",
+      not _sg.resolvable_hop("nslookup", "cloudfront.net", _hops))
+check("...nor a subdomain of one that is",
+      not _sg.resolvable_hop("nslookup", "x.d111111abcdef8.cloudfront.net",
+                             _hops))
+check("an empty subject is not a hop", not _sg.resolvable_hop("nslookup", "", _hops))
+check("with no hops recorded, nothing is allowed",
+      not _sg.resolvable_hop("nslookup", "d111111abcdef8.cloudfront.net",
+                             set()))
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 raise SystemExit(1 if fail else 0)

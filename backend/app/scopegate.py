@@ -212,3 +212,77 @@ def _probes(raw: str) -> list[str]:
         net = ipaddress.ip_network(s, strict=False)
         return sorted({str(net.network_address), str(net.broadcast_address)})
     return [s]
+
+
+# ------------------------------------------------- the CNAME carve-out
+#
+# A name the client's own DNS points at, resolved and nothing else.
+#
+# `author.corporate.acme.example` is in scope. Its CNAME chain ends
+# at `d111111abcdef8.cloudfront.net`, which is not and should not be
+# -- that is AWS's infrastructure, the engagement does not cover it,
+# and putting it on the scope list would authorise nmap and nuclei
+# against it too.
+#
+# But the takeover detector cannot settle anything without resolving
+# that hop. `dangling` means "the chain reached a name that does not
+# resolve", and with no lookup there is no answer: on the engagement
+# this was built for, 35 hops were refused and 18 rows stayed
+# permanently undetermined as a result.
+#
+# So: a DNS lookup of a hop in an in-scope host's own chain is
+# allowed, and nothing else is.
+#
+#   * One task kind. `nslookup` sends no packet to the named host at
+#     all -- it asks a resolver, which is what every browser visiting
+#     the client's site already does. A port scan of that hop would
+#     be touching a third party and stays refused.
+#   * The candidate set is not open. It is the hops already recorded
+#     in THIS project's `takeovers` table, which the detector derived
+#     from in-scope targets' own CNAMEs. A name nobody's chain
+#     mentions is not reachable through this at all.
+#   * Recorded as its own ruling, so an audit shows a lookup allowed
+#     by the carve-out and not by the scope list.
+#
+# The chain is attacker-influenced in the sense that DNS answers
+# are, which is the reason the permission granted is this small.
+# Resolving a name is not testing it.
+
+#: The only kind this applies to. Deliberately a set of one, and it
+#: should stay that way: everything else sends something.
+RESOLVE_ONLY_KINDS = frozenset({"nslookup"})
+
+
+async def cname_hops(session: AsyncSession, project_id: int) -> set[str]:
+    """Names this project's in-scope hosts point at, via CNAME.
+
+    Read from `takeovers`, which the detector rebuilds from targets
+    the project already holds -- so this set cannot name anything no
+    in-scope host's own DNS does.
+    """
+    from .models import Takeover
+
+    rows = (await session.execute(
+        select(Takeover.cname, Takeover.cname_chain)
+        .where(Takeover.project_id == project_id))).all()
+    out: set[str] = set()
+    for cname, chain in rows:
+        if cname:
+            out.add(cname.strip().lower().rstrip("."))
+        for hop in (chain or "").split("\n"):
+            hop = hop.strip().lower().rstrip(".")
+            if hop:
+                out.add(hop)
+    return out
+
+
+def resolvable_hop(kind: str, subject: str, hops: set[str]) -> bool:
+    """Whether the carve-out covers this one task.
+
+    Both halves required: the kind must send nothing, and the name
+    must be one an in-scope host actually points at.
+    """
+    if kind not in RESOLVE_ONLY_KINDS:
+        return False
+    name = (as_host(subject) or subject or "").strip().lower().rstrip(".")
+    return bool(name) and name in hops
