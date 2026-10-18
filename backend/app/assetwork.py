@@ -116,6 +116,17 @@ class Swept:
     #: Findings that could not be filed because nothing ties the
     #: asset to a target. Surfaced, not swallowed.
     unattributable: int = 0
+    #: Assets a bot filter refused rather than the origin. Inside
+    #: `failed` as well, deliberately -- the fetch did fail -- but
+    #: counted apart because the two are different problems with
+    #: different answers. Nine unrelated failures is a flaky estate;
+    #: nine refusals by one product is a filter to work around or
+    #: accept, and that is invisible while it exists only as prose
+    #: in nine `fetch_error` columns nobody reads together.
+    blocked: int = 0
+    #: Which products did the refusing, so the number above can be
+    #: read without opening a row. {"Cloudflare": 9}.
+    blocked_by: dict[str, int] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
 
@@ -256,6 +267,10 @@ async def fetch_project(session: AsyncSession, project_id: int, *,
             if not got.ok:
                 a.fetch_error = got.error
                 out.failed += 1
+                if got.blocked_by:
+                    out.blocked += 1
+                    out.blocked_by[got.blocked_by] = (
+                        out.blocked_by.get(got.blocked_by, 0) + 1)
                 continue
             a.fetch_error = None
             for origin, path, body in got.files:
@@ -734,6 +749,17 @@ class AssetWorker:
                         did.append(f"{pr.code}: fetched {sw.fetched}, "
                                    f"failed {sw.failed}, "
                                    f"unauthorised {sw.unauthorised}")
+                    # Said once a cycle rather than never. A filter
+                    # refusing our fetches is a fact about the
+                    # engagement, not a per-asset detail, and it
+                    # reads as "the client's servers refuse us"
+                    # until something names it.
+                    if sw.blocked:
+                        did.append(
+                            f"{pr.code}: {sw.blocked} asset(s) refused by a "
+                            f"bot filter, not by the origin: "
+                            + ", ".join(f"{k} x{v}" for k, v in
+                                        sorted(sw.blocked_by.items())))
                 if owed["unscanned"]:
                     sc = await scan_project(session, pr.id, limit=WORKER_SCAN)
                     if sc.scanned:
