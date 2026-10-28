@@ -27,12 +27,14 @@ import {
 /** Label plus its flag, so both readings are available at a glance. */
 function Flag({ text, flag }: { text: string; flag: string }) {
   return (
-    <Stack direction="row" spacing={1} alignItems="baseline">
+    <Stack direction="row" spacing={1} sx={{
+      alignItems: "baseline"
+    }}>
       <Box sx={{ fontSize: 13 }}>{text}</Box>
       <Box sx={{ fontFamily: `'Share Tech Mono', monospace`, fontSize: 11,
                  color: alpha(neon.cyan, 0.85) }}>{flag}</Box>
     </Stack>
-  )
+  );
 }
 
 export function NmapScanDialog({ project, targets, onClose, onQueued }: {
@@ -113,18 +115,30 @@ export function NmapScanDialog({ project, targets, onClose, onQueued }: {
               Scan type
             </Typography>
             <RadioGroup value={o.scan}
-              onChange={(e) => set('scan', e.target.value as 'syn' | 'connect')}>
+              onChange={(e) => set('scan', e.target.value as 'syn' | 'connect' | 'udp')}>
               <FormControlLabel value="syn" control={<Radio size="small" />}
                 label={<Flag text="SYN scan" flag="-sS" />} />
               <FormControlLabel value="connect" control={<Radio size="small" />}
                 label={<Flag text="TCP connect scan" flag="-sT" />} />
+              <FormControlLabel value="udp" control={<Radio size="small" />}
+                label={<Flag text="UDP scan, twenty commonest ports"
+                              flag="-sU --top-ports 20" />} />
             </RadioGroup>
             <Caveat>
               A SYN scan needs raw sockets and the agent may not have them —
               the Ghost list reports that as <i>privileged</i>. The agent picks
-              the scan type itself from what it can do; Oddjob cannot override
-              it either way.
+              between <b>-sS</b> and <b>-sT</b> itself from what it can do;
+              Oddjob cannot override it either way.
             </Caveat>
+            {o.scan === 'udp' && (
+              <Caveat>
+                UDP is the one it cannot pick for you, so this is sent
+                explicitly. It is also the only scan here that <b>fails</b>
+                without raw sockets rather than quietly running something
+                weaker — and the only one where finding nothing means
+                nothing answered, not that nothing is listening.
+              </Caveat>
+            )}
           </Box>
 
           <Stack>

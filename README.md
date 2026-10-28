@@ -177,6 +177,7 @@ themselves.
 docker run -d --name ghost --restart unless-stopped \
   --network host \
   --cap-drop=ALL --cap-add=NET_RAW --cap-add=NET_ADMIN \
+  --cap-add=NET_BIND_SERVICE \
   -e GHOST_SERVER=https://oddjob.internal \
   -e GHOST_ENROLL_TOKEN=ghost_... \
   -v ghost-state:/var/lib/ghost/work ghost-agent \
@@ -195,6 +196,251 @@ the [Ghost README](ghost/README.md).
 host you have compromised. The reasoning, the deployment modes, the
 routing policies and region configuration are all in the
 **[Ghost README](ghost/README.md)** read it before deploying one.
+
+---
+
+## Browsing through a Ghost: the SOCKS proxy
+
+A Ghost can carry your browser's traffic. You point the browser at
+Oddjob, Oddjob hands the stream to the Ghost over the tunnel it
+already holds open, and the Ghost makes the connection — so the
+request arrives **from inside the estate, at the address the client
+already sees you at**, instead of from your laptop.
+
+**It is off, and it stays off until three separate things are done.**
+That is deliberate: this is a proxy *into* a client's network, and
+every one of the three is somebody deciding, not a default.
+
+### 1. Turn the listener on
+
+**Site Config → SOCKS5 proxy through ghosts.** It binds `127.0.0.1`
+on port **8443**.
+
+**`proxy.bind` is inside the container, and it reads backwards.**
+`127.0.0.1` there is the *container's* loopback, and Docker forwards
+a published port to the container's bridge address — so it finds
+nothing listening and every connection is reset. The port looks open
+on the host, `ss` shows it `LISTEN`, and nothing answers. Leave it
+`0.0.0.0`; that publishes nothing by itself.
+
+**What the outside can reach is the `ports:` mapping**, which binds
+the host's `127.0.0.1` unless you set `PROXY_BIND_ADDRESS`. That is
+where the "only reachable locally" property actually comes from.
+
+On loopback it is reached with a tunnel, and whoever set that up has
+already proved who they are:
+
+```bash
+ssh -N -L 8443:127.0.0.1:8443 you@oddjob-host
+```
+
+**It is 8443 and cannot be 443.** A browser pointed at a SOCKS proxy
+speaks raw SOCKS5 — first byte `0x05`, no TLS, no SNI — and nginx
+routes 443 by SNI. There is nothing for it to match on, so the two
+cannot share a port without a first-byte demuxer nginx does not have.
+
+**The port has to be published.** `docker-compose.yml` maps it
+alongside the app; if you run your own compose, map `8443` or the
+listener binds inside the container and nothing outside can reach
+it. Worth knowing that `ssh -N -L 8443:...` succeeds whether or not
+anything is listening on the far side, so the tunnel coming up is
+not evidence the proxy is there. Check it:
+
+```bash
+# on the Oddjob host
+ss -ltn | grep 8443
+```
+
+### 2. Enable it for one Ghost
+
+**Ghosts → pick one → Proxy.** Per agent, and off by default. A Ghost
+that has not been told to proxy is refused *even with a valid
+credential*, so enabling it is a decision made in Oddjob rather than
+something an agent can arrange for itself.
+
+The Ghost then dials the tunnel out and holds it open. There is no
+inbound listener on the Ghost and no way to ask for one.
+
+### 3. Issue a credential
+
+**Ghosts → that Ghost → Proxy → New credential.** You get a username
+and password **once**; only a hash is stored.
+
+The credential is bound to that one Ghost. It is not an Oddjob login
+and must never be one — SOCKS5 sends the password in clear text on
+every connection, so it has to be a secret worth exactly this one
+capability, which you can revoke without touching an account.
+
+### Without a tunnel: point the browser at the host
+
+The same port also answers **HTTP CONNECT inside TLS**, so the
+browser goes straight at `your-oddjob-host:8443` with the
+credential — no SSH tunnel.
+
+**This is the only form that is safe to publish.** SOCKS5 sends the
+username and password as plaintext bytes (RFC 1929) and everything
+after the handshake is the raw stream, so a SOCKS port on `0.0.0.0`
+puts the credential *and* all your traffic to the client's estate in
+the clear, on a route into their network that anyone can reach.
+Inside TLS, the credential is a `Proxy-Authorization` header in an
+encrypted session.
+
+Two ports, and the split is forced rather than chosen:
+
+| port | speaks | for |
+|---|---|---|
+| `proxy.port` (8443) | SOCKS5, **or** plain CONNECT | a tunnel, or a TLS terminator in front |
+| `proxy.tls_port` (8444) | CONNECT **inside TLS** | a browser, pointed straight at the host |
+
+**Check the host port is free before publishing it.** A bind failure
+stops the container starting *at all* — that takes Oddjob down, not
+just the proxy. On one shared host 8444 was already held by another
+service's rootless-networking helper, and the published port had to
+move while the container side stayed 8444. `ss -ltn | grep 8444`
+first.
+
+8443 tells SOCKS from plain CONNECT by the first byte — `0x05` for a
+SOCKS5 greeting, `A`–`Z` for an HTTP verb. TLS cannot join them:
+classifying means *reading* that first byte, and a TLS handshake
+cannot survive having its first byte read by anything else. The
+ClientHello arrives incomplete and the handshake hangs for ever.
+(Observed, before this was split out: `openssl s_client` printing
+`Connecting to 127.0.0.1` and nothing more.) On its own port asyncio
+wraps the socket from byte zero, which works.
+
+Both ports end in the same handler after the credential check — same
+grants, same scope gate, same audit row.
+
+#### Prefer: let nginx hold the certificate
+
+If you already run nginx in front of Oddjob, give it the TLS and
+leave Oddjob the proxying. Copy `deploy/nginx/oddjob-connect.conf`
+into your **`stream { }`** context — not `http { }` — and point it
+at the certificate nginx already renews. Oddjob then sees a plain
+`CONNECT` on 8443 and needs no certificate of its own.
+
+Better for three reasons that are not about performance: the
+certificate is already there and already renewing; a certificate the
+application never sees is one it cannot mishandle; and nginx's is
+trusted by every browser already.
+
+What nginx **cannot** do is be the proxy — it has no CONNECT
+support, and the per-ghost grant, the scope gate, the audit row and
+the tunnel to the right agent all live in Oddjob and must not be
+duplicated. It does the one part it is good at.
+
+#### Or: let Oddjob terminate it
+
+Set **`proxy.tls_cert`** and **`proxy.tls_key`** to paths inside the
+container. For a deployment with no reverse proxy this is the right
+answer.
+
+**A self-signed certificate works, but not for free.** A browser
+offers no click-through for a *proxy* certificate the way it does
+for a page — the connection simply fails, with no interstitial to
+accept. So a self-signed one has to be imported into the trust store
+of every browser that will use it. That is fine for one laptop and
+tedious for a team, which is why the nginx route above is the
+default advice.
+
+A certificate that fails to load turns TLS off and leaves SOCKS
+running, rather than taking down the path people are already using.
+
+Firefox has no "HTTPS proxy" option — its dropdown offers HTTP,
+SOCKS4 and SOCKS5, none of which is a TLS-wrapped proxy. A PAC file
+is the supported way to say it, and Oddjob serves one:
+
+**Settings → Network Settings → Automatic proxy configuration URL**
+
+```
+https://your-oddjob-host/api/ghosts/proxy.pac
+```
+
+Verify it before trusting it — the handshake, not the log line:
+
+```bash
+openssl s_client -connect your-oddjob-host:8444 -servername your-oddjob-host
+#   Verify return code: 0 (ok)     <- a browser will accept this
+
+printf 'CONNECT example.com:443 HTTP/1.1\r\n\r\n' | \
+  openssl s_client -quiet -connect your-oddjob-host:8444 \
+                   -servername your-oddjob-host
+#   HTTP/1.1 407 Proxy Authentication Required
+```
+
+That PAC deliberately has **no `DIRECT` fallback**. A PAC that says
+`HTTPS host:port; DIRECT` sends traffic straight at the client's
+estate from your own address the moment the proxy is unreachable —
+silently, from the wrong egress. Failing closed is the only correct
+behaviour for a proxy whose entire purpose is where the packet comes
+from.
+
+With `curl`:
+
+```bash
+curl --proxy https://user:pass@your-oddjob-host:8443 \
+     https://intranet.acme.example/
+```
+
+### Or through a tunnel: point the browser at localhost
+
+Firefox, which has real per-browser proxy settings (Chrome uses the
+system ones, so prefer Firefox unless you want it machine-wide):
+
+**Settings → Network Settings → Manual proxy configuration**
+
+| | |
+|---|---|
+| SOCKS Host | `127.0.0.1` |
+| Port | `8443` |
+| | SOCKS v5 |
+| | ✅ Proxy DNS when using SOCKS v5 |
+
+Then browse. Firefox will ask for the username and password on the
+first request.
+
+**Tick "Proxy DNS".** Without it Firefox resolves the hostname on
+*your* machine and sends Oddjob an address, which defeats the point:
+split-horizon DNS inside an estate is the normal case, and the name
+you typed is the one the Ghost should resolve where it sits. It is
+also the name the scope gate rules on.
+
+With `curl`, for the same reason, use `socks5h` and not `socks5` —
+the `h` is what makes the remote end resolve:
+
+```bash
+curl --proxy socks5h://user:pass@127.0.0.1:8443 https://intranet.acme.example/
+```
+
+### What it will refuse, and why
+
+| | |
+|---|---|
+| No credential | SOCKS5 offers a "no authentication" method and every browser will use it happily. Accepting it would make this an open proxy, so it is answered with `0xFF`. |
+| SOCKS4 | No authentication at all. |
+| BIND, UDP ASSOCIATE | Both need the proxy to listen or relay datagrams — a second inbound surface. CONNECT is what a browser uses. |
+| Out of scope | **Every destination goes through the same scope gate a task does**, on the host as you typed it. The proxy cannot reach what a scan could not. |
+| A Ghost that is not connected | Reported as network-unreachable, separately from a refusal, because "that Ghost is not here" and "you may not go there" send you to different places. |
+
+### Everything is recorded
+
+Every connection is written down — **accepted and refused alike**.
+A proxy that logged only what it allowed could not answer *"did
+anybody try to reach that"*, which is the question this feature gets
+asked afterwards.
+
+What is stored is the decision, the destination and which credential
+was used. **No bodies and no byte contents**: the traffic is the
+client's and does not belong in this database.
+
+### If a credential leaks
+
+Revoke it. **Ghosts → that Ghost → Proxy → Revoke**, and it stops
+working on the next connection. Revocation is a timestamp rather than
+a delete, so the audit trail still has something to point at.
+
+Grants can also carry an expiry, and should: a proxy credential that
+lives for ever is one nobody remembers to take away.
 
 ---
 

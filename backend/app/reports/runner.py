@@ -17,11 +17,11 @@ import json
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from ..db import SessionLocal
 from ..events import broker
-from ..models import Project, Report, User
+from ..models import Project, Report, ReportRender, User
 from .agentic import AgentPassError, revise
 from .render import render
 from .template import build, summary_json
@@ -67,8 +67,42 @@ async def run(report_id: int, agentic: bool, min_severity: str = "low") -> None:
 
             row.content = json.dumps(doc.to_json())
             row.summary = summary_json(doc)
+
+            # Rendered HERE, both formats, and kept.
+            #
+            # This already rendered the PDF to measure `size_bytes`
+            # and threw the bytes away, while the download endpoint
+            # rendered the same document again on every single
+            # request. The work was being done twice over and
+            # discarded once.
+            #
+            # Both formats from one build, which is the property the
+            # download endpoint's docstring was protecting when it
+            # rendered late: the PDF and the DOCX a client receives
+            # are the same report, not two produced separately.
+            #
+            # A format that fails to render does not fail the report.
+            # The document is good, one renderer is not, and the
+            # download path will say so when somebody asks for that
+            # format rather than losing the other one too.
+            await _drop_renders(session, row.id)
+            size = None
+            for fmt in ("pdf", "docx"):
+                try:
+                    data, _media = render(doc, fmt)
+                except Exception as e:                   # noqa: BLE001
+                    log.warning("report %s: %s render failed: %s",
+                                report_id, fmt, e)
+                    continue
+                session.add(ReportRender(
+                    report_id=row.id, fmt=fmt, data=data, bytes=len(data),
+                    rendered_at=datetime.now(UTC)))
+                if fmt == "pdf":
+                    size = len(data)
             # Size the reader will actually download, not the JSON's.
-            row.size_bytes = len(render(doc, "pdf")[0])
+            # None when the PDF would not render, which is a gap
+            # rather than a zero.
+            row.size_bytes = size
             row.status = "ready"
             row.finished_at = datetime.now(UTC)
             row.error = None
@@ -84,6 +118,17 @@ async def run(report_id: int, agentic: bool, min_severity: str = "low") -> None:
         if row.status == "ready":
             await _notify(session, row)
             await _announce(session, row)
+
+
+async def _drop_renders(session, report_id: int) -> None:
+    """Throw away any cached render of this report.
+
+    Called before writing new ones. A regenerated report is a
+    different document, and a stale PDF beside fresh content is the
+    worst of both: it looks current and is not.
+    """
+    await session.execute(
+        delete(ReportRender).where(ReportRender.report_id == report_id))
 
 
 async def _announce(session, row: Report) -> None:

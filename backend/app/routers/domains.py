@@ -26,6 +26,7 @@ from ..models import (
     Project,
     Target,
     User,
+    WebAddress,
 )
 from ..roots import known_hosts, scope_roots
 from ..schemas import DomainCandidateOut, PromoteRequest
@@ -495,3 +496,242 @@ async def reject(body: PromoteRequest, project: str = Query(...),
         c.state, c.decided_by, c.decided_at = "rejected", user.id, now
     await session.commit()
     return {"rejected": [c.name for c in rows]}
+
+
+# ------------------------------------------- certificate transparency
+class ArchiveRequest(BaseModel):
+    """Which roots to ask the archive about."""
+    roots: list[str] = Field(default_factory=list, max_length=50)
+
+
+@router.post("/candidates/archived-urls")
+async def from_archive(body: ArchiveRequest, project: str = Query(...),
+                       pr: Project = Depends(require_project("user")),
+                       user: User = Depends(get_current_user),
+                       session: AsyncSession = Depends(get_session)):
+    """Propose paths a site used to serve, from a public web archive.
+
+    **This sends the named domains to a third party**, which is why
+    it is off until somebody turns it on and why it is a `user`
+    action rather than a readonly one. See `app/archived.py` and the
+    `archive.enabled` setting, whose help text says what leaves and
+    where it goes. Deliberately the same shape as the CT route next
+    door, because it is the same decision.
+
+    URLs are recorded as web addresses with **no status and no
+    response**: nothing here has fetched them. That is the honest
+    state -- an archive says a path existed once, which is not the
+    same as saying it answers now, and marking them as seen would
+    put a 2019 404 in a report as a live endpoint.
+
+    They are NOT crawl seeds. `webtargets.crawl_seeds` keys on
+    `sources ILIKE '%gobuster%'` precisely so that a crawl cannot
+    feed itself -- one project went from 1,109 queued tasks to
+    97,959 in under an hour when it could -- and `archive` is
+    outside that cycle by construction.
+
+    Hosts the project does not already have are reported, never
+    created. An archive records what a crawler saw, not what
+    anybody authorised.
+    """
+    from .. import archived
+    from ..weburl import exchange_key, url_key
+    from .settings import load_all
+
+    cfg = await load_all(session)
+    roots = [r.strip().lower().rstrip(".") for r in body.roots if r.strip()]
+    if not roots:
+        raise HTTPException(400, "name at least one root domain")
+
+    try:
+        found = [await archived.lookup(cfg, r) for r in roots]
+    except archived.Disabled as e:
+        # 409, not 403: the caller is allowed to do this, the
+        # installation has not agreed to it yet, and the fix is a
+        # decision in settings rather than a different account.
+        raise HTTPException(409, str(e)) from e
+
+    idx = await index_for(session, pr.id)
+    targets = {t.host.lower(): t for t in (await session.execute(
+        select(Target).where(Target.project_id == pr.id))).scalars().all()}
+
+    added = 0
+    already = 0
+    refused: dict[str, str] = {}
+    unknown_hosts: dict[str, int] = {}
+    errors: list[str] = []
+    truncated = [f.domain for f in found if f.truncated]
+
+    for f in found:
+        if f.error:
+            # Carried through rather than swallowed. "the archive
+            # could not be asked" and "this domain has no archived
+            # URLs" are different answers and only one is about the
+            # client.
+            errors.append(f.error)
+            continue
+        for u in f.urls:
+            host = archived.host_of(u)
+            if not host:
+                continue
+            ruling = idx.check(host)
+            if not ruling.allowed:
+                refused.setdefault(host, ruling.reason or "out of scope")
+                continue
+            t = targets.get(host)
+            if t is None:
+                # Counted per host, not per URL: "we found 4,000 URLs
+                # on a host you do not have" is one decision, not
+                # four thousand.
+                unknown_hosts[host] = unknown_hosts.get(host, 0) + 1
+                continue
+            uk = url_key(u)
+            # No request and no response, so the exchange identity is
+            # the metadata-only one -- the same shape an httpx
+            # sighting gets, and distinct from a real capture of the
+            # same URL.
+            xk = exchange_key("", u, None, None)
+            dup = (await session.execute(select(WebAddress).where(
+                WebAddress.target_id == t.id,
+                WebAddress.exchange_hash == xk))).scalar_one_or_none()
+            if dup is not None:
+                already += 1
+                continue
+            parts = u.split("://", 1)[-1].split("/", 1)
+            session.add(WebAddress(
+                target_id=t.id, url=u, url_hash=uk, exchange_hash=xk,
+                scheme="https" if u.lower().startswith("https") else "http",
+                path=("/" + (parts[1] if len(parts) > 1 else ""))[:1024],
+                method="",
+                # Null, and it means "nobody has asked". A path an
+                # archive remembers is not a path that answers.
+                status_code=None,
+                sources=f"archive:{f.source}"[:255],
+                notes=f"seen by {f.source}; not fetched by Oddjob"))
+            added += 1
+
+    await session.commit()
+    if added:
+        await record(session, pr.id, "change", user,
+                     f"archived-URL lookup proposed {added} path(s) across "
+                     f"{len(roots)} root(s)")
+    return {
+        "roots": roots,
+        "source": next((f.source for f in found if f.source), ""),
+        "added": added,
+        "already_known": already,
+        # Reported, never written. The fix for one of these is a
+        # scope edit or a target, not a retry.
+        "refused": refused,
+        "unknown_hosts": unknown_hosts,
+        # An empty result must not read as "this domain has nothing
+        # archived" when the truth is nobody could ask.
+        "errors": errors,
+        # A truncated list that does not say so reads as a complete
+        # one.
+        "truncated_roots": truncated,
+        "skipped_entries": sum(f.skipped for f in found),
+    }
+
+
+class CtRequest(BaseModel):
+    """Which roots to ask about."""
+    roots: list[str] = Field(default_factory=list, max_length=50)
+
+
+@router.post("/candidates/ct")
+async def from_ct(body: CtRequest, project: str = Query(...),
+                  pr: Project = Depends(require_project("user")),
+                  user: User = Depends(get_current_user),
+                  session: AsyncSession = Depends(get_session)):
+    """Propose hostnames from public certificate logs.
+
+    **This sends the named domains to a third party**, which is why
+    it is off until somebody turns it on and why it is a `user`
+    action rather than a readonly one. See `app/ctlogs.py` and the
+    `ct.enabled` setting, whose help text says what leaves and where
+    it goes.
+
+    Names come back as CANDIDATES, never as targets. A shared or
+    wildcard certificate names hosts belonging to other people, and a
+    name in a public log is not evidence that anybody agreed to be
+    scanned -- so every name is ruled on by `scopegate` here, the
+    refused ones are reported rather than written, and the rest wait
+    for a person on the same promote/reject flow every other
+    candidate uses.
+    """
+    from .. import ctlogs
+    from .settings import load_all
+
+    cfg = await load_all(session)
+    roots = [r.strip().lower().rstrip(".") for r in body.roots if r.strip()]
+    if not roots:
+        raise HTTPException(400, "name at least one root domain")
+
+    try:
+        found = [await ctlogs.lookup(cfg, r) for r in roots]
+    except ctlogs.Disabled as e:
+        # 409, not 403. The caller is allowed to do this; the
+        # installation has not agreed to it yet, and the fix is a
+        # decision in settings rather than a different account.
+        raise HTTPException(409, str(e)) from e
+
+    idx = await index_for(session, pr.id)
+    known = {h.lower() for h in await known_hosts(session, pr.id)}
+    existing = {n.lower() for n in (await session.execute(
+        select(DomainCandidate.name)
+        .where(DomainCandidate.project_id == pr.id))).scalars().all()}
+
+    proposed: list[str] = []
+    refused: dict[str, str] = {}
+    errors: list[str] = []
+    seen_already = 0
+
+    for f in found:
+        if f.error:
+            # Carried through rather than swallowed. "crt.sh could not
+            # be asked" and "this domain has no certificates" are
+            # different answers and only one of them is about the
+            # client.
+            errors.append(f.error)
+            continue
+        for n in f.names:
+            if n in known or n in existing:
+                seen_already += 1
+                continue
+            ruling = idx.check(n)
+            if not ruling.allowed:
+                # `reason`, not `why`. The first version guessed, and
+                # guessed on the ONLY branch no test covered: a CT
+                # lookup that proposes nothing out of scope never
+                # reaches this line, so three of the engagement's
+                # four root domains returned 200 and the fourth
+                # returned 500.
+                refused[n] = ruling.reason or "out of scope"
+                continue
+            existing.add(n)
+            proposed.append(n)
+            session.add(DomainCandidate(
+                project_id=pr.id, name=n, root_domain=f.domain,
+                source="ct", score=0,
+                reason=f"named by a certificate in a public log ({f.source})",
+                state="new"))
+
+    await session.commit()
+    if proposed:
+        await record(session, pr.id, "change", user,
+                     f"certificate transparency proposed {len(proposed)} "
+                     f"name(s) across {len(roots)} root(s)")
+    return {
+        "roots": roots,
+        "source": next((f.source for f in found if f.source), ""),
+        "proposed": sorted(proposed),
+        "already_known": seen_already,
+        # Reported, never written. The fix for one of these is a scope
+        # edit, not a retry.
+        "refused": refused,
+        # Said plainly, so an empty result cannot read as "this domain
+        # has no certificates" when the truth is nobody could ask.
+        "errors": errors,
+        "unusable_names": sum(f.unusable for f in found),
+    }

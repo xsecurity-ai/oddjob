@@ -1,15 +1,15 @@
 import { useMemo, useState } from 'react'
 import {
-  Alert, Badge, Box, Button, Chip, Snackbar, Stack, Tooltip, alpha,
+  Alert, Badge, Box, Button, Chip, Snackbar, Stack, Tab, Tabs, Tooltip, alpha,
 } from '@mui/material'
 import ScanIcon from '@mui/icons-material/RadarOutlined'
 import type { ColumnDef } from '../lib/columns'
 import { countryCell, extraAddresses } from '../lib/cellFacts'
-import { StandingOrders } from '../components/StandingOrders'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Target } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { DataTable } from '../components/DataTable'
+import { CloudTargetsPanel } from '../components/CloudTargetsPanel'
 import { useHostModal } from '../components/HostModal'
 import { ImportScanDialog } from '../components/ImportScanDialog'
 import { MergeTargetsDialog } from '../components/MergeTargetsDialog'
@@ -26,7 +26,7 @@ import { NmapScanDialog } from '../components/NmapScanDialog'
 import { ScanRangesDialog } from '../components/ScanRangesDialog'
 import { WebDiscoveryDialog } from '../components/WebDiscoveryDialog'
 import { ProbeDialog } from '../components/ProbeDialog'
-import { neon, glow } from '../theme'
+import { neon, glow, TAB_SX } from '../theme'
 
 /** Zero is muted so the eye lands on the non-zero numbers. */
 function Count({ n, color }: { n: number; color?: string }) {
@@ -49,7 +49,7 @@ function isAddress(v: string | null | undefined): boolean {
   // IPv6 is matched loosely on purpose: hex, colons and an optional
   // zone. Anything with a colon in it is not a hostname, so a loose
   // match here cannot mistake a name for an address.
-  return /^[0-9a-f:]+(%[0-9a-z]+)?$/i.test(s) && s.includes(':')
+  return /^[0-9a-f:]+(%[0-9a-z]+)?$/i.test(s) && s.includes(':');
 }
 
 /** The address to look a target up by, or '' when it has none. */
@@ -77,9 +77,18 @@ function needsName(t: Target): boolean {
  *  A mobile app is excluded for the opposite reason to the other
  *  direction: it has no address because there is nothing to resolve,
  *  so it is not a gap. Listing it would turn a correct N/A into a
- *  permanent outstanding task. */
+ *  permanent outstanding task.
+ *
+ *  A cloud resource is excluded for the same reason and was not: its
+ *  identifier is an ARN, a bucket name or a resource path, not a
+ *  hostname, so there is no name here to look up. Queueing one sent
+ *  the client's resource names to a resolver to be told, correctly,
+ *  that no such name exists. The backend applies the same rule — see
+ *  `dns_subject` in `app/hosts.py` — so a sweep queued any other way
+ *  drops them too. */
 function needsAddress(t: Target): boolean {
-  return t.kind !== 'mobile' && hasName(t) && !(t.ip_address ?? '').trim()
+  return t.kind !== 'mobile' && t.kind !== 'cloud'
+    && hasName(t) && !(t.ip_address ?? '').trim()
 }
 
 // ----------------------------------------------------------- widths
@@ -112,6 +121,7 @@ export function TargetsView({ project }: { project: string | null }) {
   const { canWrite } = useAuth()
   const { open } = useHostModal()
   const writable = canWrite(project)
+  const [tab, setTab] = useState<'scope' | 'cloud'>('scope')
   const [importing, setImporting] = useState(false)
   // The target that would be absorbed and removed.
   const [merging, setMerging] = useState<Target | null>(null)
@@ -199,6 +209,20 @@ export function TargetsView({ project }: { project: string | null }) {
   const choices = useMemo(() => openChoices(pending.data), [pending.data])
 
   const rows = useMemo(() => data?.items ?? [], [data])
+
+  // Two tabs over one fetch. A name a provider assigned per address
+  // is the provider's naming, not the client's estate -- on this
+  // engagement that is the large majority of the list, and mixing
+  // the two is what makes the real estate hard to see.
+  //
+  // `rows` itself is deliberately NOT narrowed: selection, the
+  // enumerate counts and the merge candidates all read it, and a
+  // cloud-named host is still a host you can look up or scan. Only
+  // what each tab DISPLAYS is split.
+  const scopeRows = useMemo(
+    () => rows.filter((t) => !t.cloud_family && t.kind !== 'cloud'), [rows])
+  const cloudRows = useMemo(
+    () => rows.filter((t) => !!t.cloud_family || t.kind === 'cloud'), [rows])
   const selectedRows = useMemo(() => {
     const want = new Set(selected)
     return rows.filter((t) => want.has(t.id))
@@ -384,7 +408,13 @@ export function TargetsView({ project }: { project: string | null }) {
         }
         const extra = Math.max(0, c.all.length - 1)
         return (
-          <Stack direction="row" spacing={0.6} alignItems="center" sx={{ minWidth: 0 }}>
+          <Stack
+            direction="row"
+            spacing={0.6}
+            sx={{
+              alignItems: "center",
+              minWidth: 0
+            }}>
             <Tooltip title={c.name ?? c.code}>
               <Chip size="small" label={c.code} sx={{
                 height: 19, fontSize: 10, letterSpacing: '0.06em',
@@ -406,7 +436,7 @@ export function TargetsView({ project }: { project: string | null }) {
               </Tooltip>
             ) : null}
           </Stack>
-        )
+        );
       } },
     { field: 'ip_address', headerName: 'IP Addresses', width: widths.ip,
       // Sorted and filtered on the first address, which is what the cell
@@ -427,7 +457,13 @@ export function TargetsView({ project }: { project: string | null }) {
         const all = p.row.ip_addresses ?? []
         const extra = extraAddresses(all)
         return (
-          <Stack direction="row" spacing={0.6} alignItems="center" sx={{ minWidth: 0 }}>
+          <Stack
+            direction="row"
+            spacing={0.6}
+            sx={{
+              alignItems: "center",
+              minWidth: 0
+            }}>
             <Box sx={{ overflow: 'hidden', textOverflow: 'ellipsis',
                        whiteSpace: 'nowrap' }}>{p.value || ''}</Box>
             {extra > 0 ? (
@@ -442,7 +478,7 @@ export function TargetsView({ project }: { project: string | null }) {
               </Tooltip>
             ) : null}
           </Stack>
-        )
+        );
       } },
     {
       // Tri-state. "Not probed" is shown as a dash, deliberately distinct from
@@ -626,14 +662,23 @@ export function TargetsView({ project }: { project: string | null }) {
           loading={pending.isLoading} error={pending.error as Error | null}
           auto={auto} onClose={() => setPicking(false)} />
       )}
-      {/* Only with one engagement in view: these are per-project
-          settings and "all projects" has no sensible meaning for
-          them. Above the table rather than behind a menu, because
-          something that scans a client on its own should be visible
-          from the screen that shows what it scanned. */}
-      {project && <StandingOrders project={project} />}
+      <Tabs value={tab} onChange={(_, v) => setTab(v)}
+        sx={{ minHeight: 34, px: 2, pt: 0.5,
+              borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
+        <Tab value="scope" sx={TAB_SX}
+          label={`In Scope${scopeRows.length ? ` (${scopeRows.length.toLocaleString()})` : ''}`} />
+        <Tab value="cloud" sx={TAB_SX}
+          label={`Cloud${cloudRows.length ? ` (${cloudRows.length.toLocaleString()})` : ''}`} />
+      </Tabs>
+      {tab === 'cloud' ? (
+        <Box sx={{ flex: 1, minHeight: 0, height: '100%',
+                   display: 'flex', flexDirection: 'column' }}>
+          <CloudTargetsPanel rows={cloudRows} project={project}
+            onOpen={(t) => open(t.project_code, t.host)} />
+        </Box>
+      ) : (
       <DataTable
-        rows={rows}
+        rows={scopeRows}
         columns={columns as ColumnDef[]}
         loading={isLoading}
         error={error as Error | null}
@@ -685,6 +730,7 @@ export function TargetsView({ project }: { project: string | null }) {
           </>
         ) : undefined}
       />
+      )}
     </>
   )
 }

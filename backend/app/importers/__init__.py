@@ -22,6 +22,8 @@ from . import (
     nessus,
     nmap,
     nuclei,
+    screenshot,
+    vhost,
 )
 from .model import (
     ImportError_,
@@ -30,6 +32,7 @@ from .model import (
     ParsedImplant,
     ParsedNote,
     ParsedScan,
+    ParsedScreenshot,
     ParsedService,
     ParsedVuln,
 )
@@ -48,6 +51,7 @@ __all__ = [
     "ParsedImplant",
     "ParsedNote",
     "ParsedScan",
+    "ParsedScreenshot",
     "ParsedService",
     "ParsedVuln",
     "detect",
@@ -68,6 +72,16 @@ REGISTRY = {
     "nuclei":      ("Nuclei JSONL (-jsonl)", nuclei.parse),
     "httpx":       ("httpx JSONL (-json)", httpx_json.parse),
     "crawl":       ("Ghost crawl (katana) JSON", crawl.parse),
+    #: Before `crawl`, because both are JSON objects from the same
+    #: agent and `crawl` matches on keys a screenshot result does not
+    #: carry -- but the ordering is what `ORDER` is read from, and
+    #: putting the narrower sniffer second is how `vhost` and
+    #: `gobuster` once read each other's documents.
+    "screenshot":  ("Ghost screenshots (chromium) JSON", screenshot.parse),
+    #: Before gobuster, and that ordering is load-bearing: `ORDER` is
+    #: `list(REGISTRY)`, so this dict decides which sniffer is asked
+    #: first. Both tools write `found`, `wordlist` and `hits`.
+    "vhost":       ("Ghost virtual-host discovery JSON", vhost.parse),
     "gobuster":    ("Ghost content discovery JSON", gobuster.parse),
     "cobaltstrike": ("Cobalt Strike beacons", c2.parse_cobaltstrike),
     "mythic":      ("Mythic callbacks", c2.parse_mythic),
@@ -103,6 +117,14 @@ _DETECTORS = {
     "nuclei": nuclei.looks_like,
     "httpx": httpx_json.looks_like,
     "crawl": crawl.looks_like,
+    # Keyed on `shots` plus `viewport`/`browser`, none of which a
+    # crawl result carries. Listed beside it so the two sniffers are
+    # read together.
+    "screenshot": screenshot.looks_like,
+    # Before gobuster deliberately. Both write `found` and
+    # `wordlist`, so a vhost result shown to gobuster's sniffer first
+    # would import as content discovery -- hostnames filed as paths.
+    "vhost": vhost.looks_like,
     "gobuster": gobuster.looks_like,
     "cobaltstrike": c2.looks_like_cobaltstrike,
     "mythic": c2.looks_like_mythic,

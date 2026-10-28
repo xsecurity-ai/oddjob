@@ -54,6 +54,7 @@ def call(p, m="GET", b=None, token=None):
         except Exception: return e.code, raw[:300]
 
 
+from app import automation as _au  # noqa: E402
 from app.automation import (  # noqa: E402
     BATCH,
     NMAP_PROFILES,
@@ -136,6 +137,46 @@ check("amass picks the zone once, not once per host",
       [c.subject for c in p] == ["acme.example"], [c.subject for c in p])
 check("...and passes the domain, not a target list",
       p[0].args.get("domain") == "acme.example", p[0].args)
+
+# A cloud resource's identifier is not a name. An ARN, a bucket name,
+# a resource path -- `registrable()` on one invents a zone belonging to
+# somebody who has never heard of the engagement, and a resolver asked
+# about one is told the client's resource names for no answer in
+# return. Both shapes are tested, because a bucket endpoint is the
+# case that looks fine: `backups.storage.example` as a CLOUD target is
+# a well-formed hostname and still is not one.
+CLOUDY = [("web.acme.example", True), ("bare.acme.example", False),
+          ("backups.storage.example", False),
+          ("arn:aws:s3:::acme-backups", False)]
+NOT_NAMES = {"backups.storage.example", "arn:aws:s3:::acme-backups"}
+p = plan(Snapshot(auto_resolve_ips=True, auto_amass=True, targets=CLOUDY,
+                  not_dns_named=NOT_NAMES))
+subs = {(c.kind, c.subject) for c in p}
+check("no resolve task takes a cloud identifier as its subject",
+      not [s for k, s in subs if k == "nslookup" and s in NOT_NAMES], subs)
+check("...and the plain host beside it is still resolved",
+      ("nslookup", "bare.acme.example") in subs, subs)
+check("no zone is derived from a cloud identifier",
+      ("amass", "storage.example") not in subs, subs)
+check("...and the hosts' own zone is still enumerated",
+      ("amass", "acme.example") in subs, subs)
+
+# The gap report has to subtract exactly the same targets. If it did
+# not, it would show work outstanding for ever that the planner will
+# never queue -- which is the complaint `roots.py` exists to end,
+# arriving by a different door.
+g = {x.policy: x.outstanding
+     for x in _au.gaps(Snapshot(auto_resolve_ips=True, targets=CLOUDY,
+                                not_dns_named=NOT_NAMES))}
+check("the gap report counts the one host, not the two cloud ids",
+      g.get("auto_resolve_ips") == 1, g)
+
+# Deliberately NOT filtered: a bucket usually has an address, and
+# dropping it from a port scan would leave a real asset uncovered. It
+# is the NAME that is unusable, not the asset.
+check("a cloud target is still port scanned",
+      len(plan(Snapshot(auto_nmap="top100", targets=CLOUDY,
+                        not_dns_named=NOT_NAMES))) == 4)
 
 p = plan(Snapshot(auto_nmap="top100", targets=ESTATE))
 check("nmap picks every host including the address",
@@ -687,6 +728,73 @@ async def roots_agree():
 asyncio.run(roots_agree())
 
 # =====================================================================
+# A cloud TARGET is not a source of domains, and not a name to resolve
+# =====================================================================
+print("\n--- a cloud target is neither enumerated nor resolved ---")
+
+# Different question from the section below, which is about a cloud
+# PROVIDER's zone. This one is about the project's own row: a target of
+# kind `cloud` is named by an ARN, a bucket name or a resource path,
+# and `registrable()` on one of those produces nonsense that was being
+# handed to amass and to a resolver.
+#
+# Read off the database deliberately, not from a hand-built Snapshot:
+# the half of this that can rot is `snapshot()` forgetting to carry the
+# kind, and a pure test cannot see that.
+call("/api/projects", "POST", {"code": "CLOUDT", "name": "CLOUDT"}, token=admin)
+# Only the host's zone is in scope. `storage.example` deliberately is
+# not: if the scope list named it, the scope half of `enumerable_roots`
+# would offer it legitimately and this test would be asserting nothing.
+call("/api/projects/CLOUDT/scope", "POST",
+     {"lines": ["acme.example"]}, token=admin)
+
+
+async def cloud_is_not_a_name():
+    from app.roots import enumerable_roots
+    async with SessionLocal() as s:
+        pr = (await s.execute(
+            select(Project).where(Project.code == "CLOUDT"))).scalar_one()
+        s.add(Target(project_id=pr.id, host="web.acme.example", kind="host"))
+        # The subtle one: a bucket whose identifier is a perfectly
+        # well-formed hostname. Nothing about the string says it is not
+        # a host, so the kind column is the only thing that knows.
+        s.add(Target(project_id=pr.id, host="backups.storage.example",
+                     kind="cloud", provider="aws"))
+        # And the one that is obviously not a hostname. It still
+        # reached the resolver, because nothing was checking.
+        s.add(Target(project_id=pr.id, host="arn:aws:s3:::acme-backups",
+                     kind="cloud", provider="aws"))
+        pr.auto_amass = True
+        pr.auto_resolve_ips = True
+        await s.commit()
+
+        found = await enumerable_roots(s, pr.id)
+        check("a cloud identifier yields no zone to enumerate",
+              "storage.example" not in found, sorted(found))
+        check("...while the host beside it still yields its own",
+              "acme.example" in found, sorted(found))
+
+        snap = await snapshot(s, pr)
+        check("the snapshot carries which targets are not DNS names",
+              snap.not_dns_named == {"backups.storage.example",
+                                     "arn:aws:s3:::acme-backups"},
+              sorted(snap.not_dns_named))
+        cands = {(c.kind, c.subject) for c in _au.plan(snap)}
+        check("no amass task is planned for a cloud target",
+              ("amass", "storage.example") not in cands, sorted(cands))
+        check("no nslookup task is planned for one either",
+              not [x for k, x in cands
+                   if k == "nslookup" and x in snap.not_dns_named],
+              sorted(cands))
+        check("...and the host beside them is still resolved",
+              ("nslookup", "web.acme.example") in cands, sorted(cands))
+        check("...and its zone still enumerated",
+              ("amass", "acme.example") in cands, sorted(cands))
+
+
+asyncio.run(cloud_is_not_a_name())
+
+# =====================================================================
 # Cloud providers: approved is not the same as enumerable
 # =====================================================================
 print("\n--- a cloud zone is never enumerated ---")
@@ -1031,6 +1139,145 @@ check("an already-tasked subject is not queued again whatever its case",
       plan(Snapshot(auto_web="crawl",
                     web_urls={"https://Mixed.Example/"},
                     tasked={("katana", "https://mixed.example/")})))
+
+print("\n== nuclei as confirmation, not discovery ==")
+# The vulnerability run is already filtered to critical/high CVE
+# templates. This is a different question: instead of asking every
+# critical template whether it applies, ask only the CVEs the local
+# corpus has ALREADY matched to a service on that host.
+_sn = _au.Snapshot(
+    auto_nuclei="confirm",
+    web_urls={"https://a.acme.example", "https://b.acme.example"},
+    suspected={"https://a.acme.example": ["CVE-2021-44228", "CVE-2017-5638"]})
+_plan = _au.plan(_sn)
+_conf = [c for c in _plan if c.kind == "nuclei_confirm"]
+check("a URL with suspected CVEs gets a confirmation run",
+      len(_conf) == 1, [c.subject for c in _conf])
+check("...naming exactly those CVEs on the command line",
+      "-id CVE-2017-5638,CVE-2021-44228" in _conf[0].args["extra"],
+      _conf[0].args["extra"])
+# Sorted, so the same estate produces the same command line twice and
+# two runs are comparable.
+check("...in a stable order, so two runs can be compared",
+      _conf[0].args["extra"].index("CVE-2017-5638")
+      < _conf[0].args["extra"].index("CVE-2021-44228"))
+# The one that matters: asking nuclei to confirm an empty list is a
+# FULL template run wearing a confirmation's name.
+check("a URL with nothing suspected gets no task at all",
+      all(c.subject != "https://b.acme.example" for c in _conf),
+      [c.subject for c in _conf])
+check("...and no bare -id is ever emitted",
+      not any("-id " in c.args.get("extra", "") and c.args["extra"].rstrip()
+              .endswith("-id") for c in _plan))
+# No severity filter: the question is "is this specific lead real",
+# not "is it bad enough to ask".
+check("the confirmation profile does not filter by severity",
+      "-severity" not in _au.NUCLEI_PROFILES["nuclei_confirm"],
+      _au.NUCLEI_PROFILES["nuclei_confirm"])
+check("...but still skips templates that need a login",
+      "-etags authenticated" in _au.NUCLEI_PROFILES["nuclei_confirm"])
+
+# Its own kind, because dedupe is per (kind, subject): sharing one
+# with `nuclei` would mean a confirmation run marked the URL done and
+# the discovery run never happened.
+_both = _au.plan(_au.Snapshot(
+    auto_nuclei="both+confirm",
+    web_urls={"https://a.acme.example"},
+    suspected={"https://a.acme.example": ["CVE-2021-44228"]}))
+check("both+confirm queues all three kinds for one URL",
+      {c.kind for c in _both} == {"nuclei", "nuclei_tech", "nuclei_confirm"},
+      sorted({c.kind for c in _both}))
+
+# The choice lists live in two modules so schemas.py can validate
+# without importing automation. They have to agree.
+from app.models import NUCLEI_CHOICES as _NC  # noqa: E402
+
+check("the choice list and the kind map still agree",
+      set(_NC) == {"off", *_au.NUCLEI_KINDS}, sorted(_NC))
+
+
+print("\n== the kitchen sink ==")
+_estate = {
+    "targets": [("a.acme.example", False), ("b.acme.example", True)],
+    "addresses": {"198.51.100.1"},
+    "scope_zones": {"acme.example"},
+    "web_urls": {"https://a.acme.example/", "https://b.acme.example/"},
+}
+
+check("nothing is planned with every policy off",
+      plan(Snapshot(**_estate)) == [])
+
+_sink = Snapshot(kitchen_sink=True, **_estate)
+_eff = _au.effective(_sink)
+# A sink that left auto_nmap at `top100` would be a switch whose
+# name promised one thing and did another.
+check("the sink sets every policy to its MOST thorough value",
+      (_eff.auto_nmap, _eff.auto_web, _eff.auto_nuclei)
+      == ("full", "both", "both+confirm"),
+      (_eff.auto_nmap, _eff.auto_web, _eff.auto_nuclei))
+check("...and turns on the boolean ones",
+      _eff.auto_amass and _eff.auto_resolve_ips and _eff.auto_reverse_dns
+      and _eff.auto_vhost and _eff.auto_httpx)
+
+_kinds = {c.kind for c in plan(_sink)}
+for _k in ("amass", "nslookup", "nmap", "katana", "gobuster", "vhost",
+           "httpx", "nuclei", "nuclei_tech"):
+    check(f"the sink queues {_k}", _k in _kinds, sorted(_kinds))
+
+# Resolved when the policies are READ, not copied into the columns.
+# Switching it off has to return a project to what was set before,
+# not to whatever the sink happened to leave behind.
+check("the sink does not write into the other fields",
+      (_sink.auto_nmap, _sink.auto_web) == ("off", "off"), _sink.auto_nmap)
+check("...so an operator's own setting survives underneath it",
+      Snapshot(auto_nmap="top100", kitchen_sink=True,
+               **_estate).auto_nmap == "top100")
+
+# The gate this must not route around: both of those send a client's
+# domain to a third party and are behind an explicit site decision.
+check("the sink does NOT imply certificate transparency",
+      not any(k == "ct" or k.endswith("_ct") for k in _au.KITCHEN_SINK),
+      sorted(_au.KITCHEN_SINK))
+check("...nor archived-URL lookups",
+      not any("archive" in k for k in _au.KITCHEN_SINK))
+
+print("\n-- is it actually done --")
+_g = _au.gaps(_sink)
+check("an estate with nothing done reports gaps everywhere",
+      len(_g) >= 7, [x.policy for x in _g])
+check("...naming the policy, not just a number",
+      all(x.policy.startswith("auto_") for x in _g))
+check("...including the two policies added here",
+      {"auto_vhost", "auto_httpx"} <= {x.policy for x in _g},
+      sorted({x.policy for x in _g}))
+
+# A policy that is off has no gap BY DEFINITION. Reporting one would
+# turn "we chose not to" into "we failed to".
+check("a policy that is off reports no gap", _au.gaps(Snapshot(**_estate)) == [])
+
+# The report has to agree with the planner, or it is a clean bill of
+# health for work nobody did.
+_done = Snapshot(kitchen_sink=True,
+                 tasked={(c.kind, c.subject.lower()) for c in plan(_sink)}
+                 | {("nslookup", "a.acme.example"),
+                    ("reverse_ip", "198.51.100.1"),
+                    ("nmap", "a.acme.example"), ("nmap", "b.acme.example")},
+                 searched={"acme.example"}, **_estate)
+check("an estate where everything was tasked reports no gaps",
+      _au.gaps(_done) == [],
+      [f"{x.policy}:{x.outstanding}" for x in _au.gaps(_done)])
+
+# nuclei_confirm is owed only where a version was actually detected:
+# a CPE match without one is product-wide, and counting every URL
+# would report work that is not supposed to happen.
+check("confirm owes nothing when no version was detected",
+      _au.gaps(Snapshot(auto_nuclei="confirm", **_estate)) == [])
+check("...and owes exactly the origins that have one",
+      [x.outstanding for x in _au.gaps(Snapshot(
+          auto_nuclei="confirm",
+          suspected={"https://a.acme.example/": ["CVE-1"]},
+          **_estate))] == [1])
+
 
 print(f"\n{ok} passed, {fail} failed")
 raise SystemExit(1 if fail else 0)

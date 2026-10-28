@@ -52,7 +52,7 @@ from .. import merge as merge_mod
 from ..db import get_session
 from ..domains import registrable
 from ..events import broker
-from ..hosts import InvalidHost, validate_host
+from ..hosts import InvalidHost, dns_subject, validate_host
 from ..lookups import BLOCKED, CHOICE, LOOKUP_KINDS
 from ..models import (
     AgentTask,
@@ -244,9 +244,15 @@ async def _outstanding(session: AsyncSession, pr: Project
                 # held, which is checked against the decision below.
                 if not [a for a in options if a not in t.ip_addresses]:
                     continue
-                # A mobile app has no address, so a forward lookup on
-                # one is not a gap to fill.
-                if t.kind == "mobile":
+                # Only targets that are named by a name. A mobile app's
+                # bundle id and a cloud resource's ARN or bucket name
+                # are identifiers, not hostnames, so an address against
+                # one is not an answer about that asset — and the
+                # absence of one is not a gap to fill. This read
+                # `kind == "mobile"` and let every cloud row through;
+                # `dns_subject` is now the single statement of the
+                # rule, shared with the standing orders.
+                if not dns_subject(t.kind):
                     continue
 
             if not subject:
@@ -1129,3 +1135,78 @@ async def _two(session: AsyncSession, pr: Project, host: str,
             raise HTTPException(404, f"{pr.code} has no target {name!r}")
         return t
     return await one(host), await one(into)
+
+
+# ----------------------------------------------------------- netblocks
+class NetblockOut(BaseModel):
+    network: str
+    asn: int | None = None
+    organisation: str | None = None
+    known: int
+    size: int
+    version: int
+    #: Whether "the rest of this prefix" is a real thing to go and
+    #: look at. False for every IPv6 prefix and for IPv4 blocks larger
+    #: than a /16.
+    enumerable: bool
+    #: Null when not enumerable. NOT zero -- the question does not
+    #: apply, which is a different answer from "none left".
+    unseen: int | None = None
+
+
+class NetblockReport(BaseModel):
+    usable: bool
+    note: str = ""
+    addresses: int = 0
+    blocks: list[NetblockOut] = Field(default_factory=list)
+
+
+@router.get("/netblocks", response_model=NetblockReport)
+async def netblocks(project: str = Query(...),
+                    limit: int = Query(100, le=1000),
+                    pr: Project = Depends(require_project("readonly")),
+                    _: User = Depends(get_current_user),
+                    session: AsyncSession = Depends(get_session)):
+    """Which announced prefixes this engagement's addresses sit in.
+
+    The point is the gap: twelve addresses resolved inside a /22 means
+    1,012 addresses in that /22 nobody has looked at, and the
+    forgotten assets live in the remainder.
+
+    **Reads only, and sends nothing anywhere.** The prefix comes from
+    the local GeoLite2-ASN database, which is already on disk for
+    geolocation -- `get_with_prefix_len` returns the network the
+    lookup matched on, built from the global routing table. No query
+    naming the client goes to asnmap, Team Cymru or anyone else.
+
+    **It does not expand anything.** Scanning the remainder of a
+    prefix is precisely the automation that could put packets in
+    somebody else's network, so this reports and an operator decides;
+    anything they then queue goes through `scopegate` like every
+    other task.
+
+    Ordered by how much evidence there is that a prefix is the
+    CLIENT'S -- density of addresses already held, not size of the
+    remainder. Measured against a real engagement, sorting by the
+    remainder put provider /16s holding a single address at the top,
+    which is an invitation to scan somebody else's network rather
+    than a finding.
+    """
+    if not await geoip.enabled(session):
+        return NetblockReport(usable=False, note=geoip.OFF_NOTE)
+
+    # `TargetAddress` carries `project_id` itself -- the same query
+    # the geolocation sweep above uses -- so no join through the link
+    # table is needed to scope this.
+    rows = (await session.execute(
+        select(TargetAddress.address)
+        .where(TargetAddress.project_id == pr.id).distinct())).scalars().all()
+    addresses = [a for a in rows if a]
+    blocks = geoip.netblocks(addresses)
+    return NetblockReport(
+        usable=True, addresses=len(addresses),
+        blocks=[NetblockOut(
+            network=b.network, asn=b.asn, organisation=b.organisation,
+            known=b.known, size=b.size, version=b.version,
+            enumerable=b.enumerable, unseen=b.unseen)
+            for b in blocks[:limit]])

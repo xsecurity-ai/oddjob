@@ -74,7 +74,13 @@ export function MergeTargetsDialog({ project, source, candidates, onClose }: {
         />
 
         {plan.isFetching && (
-          <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 2 }}>
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{
+              alignItems: "center",
+              mt: 2
+            }}>
             <CircularProgress size={14} />
             <Typography variant="caption" sx={{ color: neon.muted }}>
               Working out what would move…
@@ -94,8 +100,14 @@ export function MergeTargetsDialog({ project, source, candidates, onClose }: {
             <Typography variant="overline" sx={{ color: neon.cyan }}>
               What moves
             </Typography>
-            <Stack direction="row" spacing={0.8} flexWrap="wrap" useFlexGap
-              sx={{ mt: 0.5 }}>
+            <Stack
+              direction="row"
+              spacing={0.8}
+              useFlexGap
+              sx={{
+                flexWrap: "wrap",
+                mt: 0.5
+              }}>
               {moved.filter(([n]) => n > 0).map(([n, what]) => (
                 <Chip key={what} size="small"
                   label={`${n} ${what}${n === 1 ? '' : 's'}`}
@@ -175,5 +187,5 @@ export function MergeTargetsDialog({ project, source, candidates, onClose }: {
         </Button>
       </DialogActions>
     </Dialog>
-  )
+  );
 }

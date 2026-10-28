@@ -31,6 +31,29 @@ func TestUnaffordableKeepsNucleiOffATinyHost(t *testing.T) {
 	}
 }
 
+// A browser is the heaviest thing the agent can be asked to run, and
+// the 458 MB droplet is the host this check exists for. A ghost that
+// accepted a screenshot task there would start chromium, be OOM
+// killed, and take the scan it was already running with it.
+func TestUnaffordableKeepsChromiumOffASmallHost(t *testing.T) {
+	if !slices.Contains(Unaffordable(143), "screenshot") {
+		t.Error("a 143 MB host was offered a headless browser")
+	}
+	// A box with room for one, though, must still get them. The
+	// point is to size the work to the host, not to decide that only
+	// large hosts may take pictures.
+	if slices.Contains(Unaffordable(1024), "screenshot") {
+		t.Error("a 1 GB host was refused a screenshot it can hold")
+	}
+	// And it is sized above nuclei, which is the next heaviest
+	// thing here. If that stops being true it is a sign somebody
+	// lowered this without measuring.
+	if kindMemMB["screenshot"] <= kindMemMB["nuclei"] {
+		t.Errorf("screenshot is budgeted at %d MB, no more than nuclei's %d",
+			kindMemMB["screenshot"], kindMemMB["nuclei"])
+	}
+}
+
 // The reserve is subtracted first. Spending the last megabyte is the
 // condition this package exists to avoid, and the OOM killer takes
 // the agent rather than the scanner.

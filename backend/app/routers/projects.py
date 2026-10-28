@@ -906,6 +906,7 @@ async def delete_contact(project: str, contact_id: int,
 @router.patch("/{project}", response_model=ProjectOut)
 async def update_project(project: str, body: ProjectUpdate,
                          pr: Project = Depends(require_project("admin")),
+                         user: User = Depends(get_current_user),
                          session: AsyncSession = Depends(get_session)):
     data = body.model_dump(exclude_unset=True)
     if (data.get("slack_delivery") and data["slack_delivery"] != "site"
@@ -915,12 +916,37 @@ async def update_project(project: str, body: ProjectUpdate,
     if "slack_channel" in data:
         data["slack_channel"] = normalise_channel(data["slack_channel"])
     was = pr.status
+    before = {k: getattr(pr, k, None)
+              for k in ("max_impact", "engagement_starts_at",
+                        "engagement_ends_at")}
     for k, v in data.items():
         # A blank Slack token means unchanged, not cleared — the UI cannot
         # show the stored value, so saving any other field would wipe it.
         if k == "slack_token" and not v:
             continue
+        # Same rule, different reason. `exclude_unset` keeps an
+        # explicit `null`, so a form that posts every field would
+        # remove an engagement's expiry on the way past while saving
+        # something else entirely. Removing the bound on an
+        # authorisation has to be something somebody MEANT:
+        # DELETE /projects/{code}/engagement-window does it, and
+        # says who did in the audit log.
+        if k in ("engagement_starts_at", "engagement_ends_at") and v is None:
+            continue
         setattr(pr, k, v)
+    # A change to what the tool is PERMITTED to do, recorded
+    # separately from the row itself. "Who widened the ceiling, and
+    # when" is asked after the fact, and a project whose settings
+    # only show the current value cannot answer it.
+    for field, label in (("max_impact", "technique ceiling"),
+                         ("engagement_starts_at", "engagement start"),
+                         ("engagement_ends_at", "engagement end")):
+        if field in data and data[field] != before.get(field):
+            await audit.record(
+                session, "ui", f"project.{field}", user=user,
+                project_code=pr.code,
+                detail=f"{label}: {before.get(field) or 'unset'} "
+                       f"-> {data[field] or 'unset'}")
     await session.commit()
     # Only on a real transition: saving the form with the status
     # unchanged must not announce the engagement starting again.
@@ -933,6 +959,66 @@ async def update_project(project: str, body: ProjectUpdate,
     await broker.publish("projects", action="update", project=pr.code)
     row = (await session.execute(_counts_query().where(Project.id == pr.id))).first()
     return _out(row, await load_all(session))
+
+
+class GapOut(BaseModel):
+    """Something a standing order was supposed to cover and has not."""
+    policy: str
+    what: str
+    outstanding: int
+
+
+@router.get("/{project}/standing-orders/gaps", response_model=list[GapOut])
+async def standing_order_gaps(
+        project: str, pr: Project = Depends(require_project("user")),
+        _: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_session)):
+    """What the policies that are ON have still not done.
+
+    The point of a switch that says "everything" is that somebody
+    stops checking, so it has to be able to answer "is it actually
+    done" — and the only honest answer is derived from the estate
+    rather than from whether the worker ran.
+
+    An empty list means every policy that is on has nothing
+    outstanding. It does NOT mean the estate is fully enumerated: a
+    policy that is off has no gap by definition, which is why each
+    entry names its policy and not just a number.
+    """
+    from ..automation import gaps, snapshot
+    return [GapOut(policy=g.policy, what=g.what, outstanding=g.outstanding)
+            for g in gaps(await snapshot(session, pr))]
+
+
+@router.delete("/{project}/engagement-window", status_code=204)
+async def clear_engagement_window(
+        project: str, pr: Project = Depends(require_project("admin")),
+        user: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_session)):
+    """Remove both engagement dates, leaving the window unbounded.
+
+    The only way to clear them. A PATCH treats None as "leave it
+    alone", like every other field there, and that is deliberate:
+    removing the end date of a live engagement must be something
+    somebody MEANT, not something a partial update does on the way
+    past.
+
+    Audited for the same reason. "Who took the expiry off" is a
+    question that gets asked after the fact, and an unbounded
+    authorisation with nothing saying who removed the bound is the
+    state nobody wants to find.
+    """
+    had = (pr.engagement_starts_at, pr.engagement_ends_at)
+    pr.engagement_starts_at = None
+    pr.engagement_ends_at = None
+    if any(had):
+        await audit.record(
+            session, "ui", "project.engagement_window.clear", user=user,
+            project_code=pr.code,
+            detail="cleared the engagement window; testing is no longer "
+                   "bounded by date")
+    await session.commit()
+    await broker.publish("projects", action="update", project=pr.code)
 
 
 @router.delete("/{project}/slack-token", status_code=204)

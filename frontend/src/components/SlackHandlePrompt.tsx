@@ -4,8 +4,8 @@ import {
   DialogContent, DialogTitle, Divider, FormControlLabel, Snackbar, Stack,
   TextField, Typography, alpha,
 } from '@mui/material'
-import CheckCircleIcon from '@mui/icons-material/CheckCircleOutline'
-import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline'
+import CheckCircleIcon from '@mui/icons-material/CheckCircleOutlined'
+import ErrorOutlineIcon from '@mui/icons-material/ErrorOutlined'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
@@ -182,7 +182,15 @@ export function SlackHandlePrompt({ project }: { project: string | null }) {
   return (
     // No onClose and no Escape: see the note at the top of the file. The
     // only exits write an answer or a refusal.
-    <Dialog open={open} disableEscapeKeyDown maxWidth="sm" fullWidth
+    //
+    // `disableEscapeKeyDown` was removed in MUI v9, and the migration
+    // guide's replacement -- check `reason` inside onClose -- does not
+    // apply here, because there is no onClose to check it in. Escape is
+    // still inert: useModal swallows the keydown and only calls a close
+    // handler `if (onClose)`, so with none there is nothing to fire.
+    // Adding an onClose to satisfy the old prop's shape would be the one
+    // change that actually opens the exit this dialog is built to refuse.
+    <Dialog open={open} maxWidth="sm" fullWidth
       slotProps={{ paper: { sx: {
         backgroundColor: alpha(neon.paper, 0.98), backgroundImage: 'none',
         border: `1px solid ${alpha(neon.cyan, 0.4)}`,
@@ -213,7 +221,14 @@ export function SlackHandlePrompt({ project }: { project: string | null }) {
                   that workspace and you will be added to its channel
                   {channels.length === 1 ? '' : 's'}.
                 </Typography>
-                <Stack direction="row" spacing={0.7} flexWrap="wrap" useFlexGap sx={{ mt: 1.2 }}>
+                <Stack
+                  direction="row"
+                  spacing={0.7}
+                  useFlexGap
+                  sx={{
+                    flexWrap: "wrap",
+                    mt: 1.2
+                  }}>
                   {channels.map((c) => (
                     <Chip key={c} size="small" label={chan(c)} sx={{
                       height: 20, fontSize: 11, fontFamily: `'Share Tech Mono', monospace`,
@@ -312,7 +327,7 @@ export function SlackHandlePrompt({ project }: { project: string | null }) {
         )}
       </DialogActions>
     </Dialog>
-  )
+  );
 }
 
 /** What the invite actually did, per channel. */
@@ -345,11 +360,18 @@ function InviteReport({ me }: { me: SlackMe }) {
         ) : (
           <Stack spacing={0.7}>
             {lines.map((l, i) => (
-              <Stack key={i} direction="row" spacing={1} alignItems="flex-start" sx={{
-                px: 1.2, py: 0.8, borderRadius: 0.5,
-                background: alpha(neon.bgDeep, 0.5),
-                border: `1px solid ${alpha(l.ok ? neon.green : neon.red, 0.35)}`,
-              }}>
+              <Stack
+                key={i}
+                direction="row"
+                spacing={1}
+                sx={{
+                  alignItems: "flex-start",
+                  px: 1.2,
+                  py: 0.8,
+                  borderRadius: 0.5,
+                  background: alpha(neon.bgDeep, 0.5),
+                  border: `1px solid ${alpha(l.ok ? neon.green : neon.red, 0.35)}`
+                }}>
                 {l.ok
                   ? <CheckCircleIcon sx={{ fontSize: 15, color: neon.green, mt: 0.2 }} />
                   : <ErrorOutlineIcon sx={{ fontSize: 15, color: neon.red, mt: 0.2 }} />}
@@ -381,5 +403,5 @@ function InviteReport({ me }: { me: SlackMe }) {
         </Alert>
       )}
     </Stack>
-  )
+  );
 }

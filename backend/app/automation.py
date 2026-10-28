@@ -59,7 +59,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,6 +68,7 @@ from . import domains as gen
 from . import geoip
 from .db import SessionLocal
 from .events import broker
+from .hosts import dns_subject
 from .lookups import is_ip
 from .models import (
     NMAP_CHOICES,
@@ -180,6 +181,14 @@ assert set(WEB_CHOICES) == {"off", *WEB_KINDS}
 NUCLEI_PROFILES: dict[str, str] = {
     "nuclei": "-severity critical,high -tags cve -etags authenticated",
     "nuclei_tech": "-tags tech",
+    # No `-tags` and no `-severity`. The template set for this one is
+    # named outright with `-id`, per URL, from the CVEs the local
+    # corpus already matched to a service on that host -- see
+    # `vulnfeed.suspected_cves`. A severity filter on top would drop
+    # a suspected CVE for scoring below the line, which is the one
+    # thing a confirmation run must not do: the question is "is this
+    # specific lead real", not "is it bad enough to ask".
+    "nuclei_confirm": "-etags authenticated",
 }
 assert not any(" " in v for p in NUCLEI_PROFILES.values()
                for v in p.split()[1::2]), "no argument value may contain a space"
@@ -189,6 +198,17 @@ NUCLEI_KINDS: dict[str, tuple[str, ...]] = {
     "vuln": ("nuclei",),
     "tech": ("nuclei_tech",),
     "both": ("nuclei", "nuclei_tech"),
+    #: Confirmation only: ask nuclei about the CVEs already suspected
+    #: on each host and nothing else. Seconds rather than minutes per
+    #: URL, and every hit is evidence for a lead that already existed
+    #: rather than a new claim to triage.
+    #:
+    #: Needs a version to have been detected -- a CPE match without
+    #: one is product-wide -- so a URL whose services gave no version
+    #: produces no task at all. That is the intended behaviour and
+    #: why this does not replace `vuln`.
+    "confirm": ("nuclei_confirm",),
+    "both+confirm": ("nuclei", "nuclei_tech", "nuclei_confirm"),
 }
 
 assert set(NUCLEI_CHOICES) == {"off", *NUCLEI_KINDS}
@@ -224,8 +244,23 @@ class Snapshot:
     auto_nmap: str = "off"
     auto_web: str = "off"
     auto_nuclei: str = "off"
+    auto_vhost: bool = False
+    auto_httpx: bool = False
+    #: Everything on, at its most thorough. Resolved by `effective`
+    #: rather than copied into the fields above, so switching it off
+    #: returns the project to whatever was set before.
+    kitchen_sink: bool = False
     #: (host, has_address) for every target in the project.
     targets: list[tuple[str, bool]] = field(default_factory=list)
+    #: Of those, the ones whose identifier is not a DNS name — a cloud
+    #: resource id, a mobile bundle id. See `hosts.dns_subject`.
+    #:
+    #: A set beside `targets` rather than a third element in the tuple
+    #: because `targets` is what the port-scanning policy reads and it
+    #: wants all of them: a cloud resource usually has an address and
+    #: is perfectly scannable. It is only the NAME that is not a name,
+    #: so only the name-based policies subtract this.
+    not_dns_named: set[str] = field(default_factory=set)
     #: Every address the project has OBSERVED, from `target_addresses`
     #: -- what resolution, port scanning and the importers recorded,
     #: as opposed to the addresses somebody typed in as a target.
@@ -247,6 +282,15 @@ class Snapshot:
     #: Every web address in the project, as a url. The subject
     #: a crawl or a content-discovery run actually needs.
     web_urls: set[str] = field(default_factory=set)
+    #: {origin: [CVE, ...]} the local corpus already links to a
+    #: service on that origin's host, with an EXACT CPE version
+    #: match. Read once per cycle so `plan` stays pure data.
+    #:
+    #: Empty for an origin whose services gave no version, which is
+    #: not a gap to fill: a product-wide CPE match is every CVE that
+    #: vendor ever had, and a confirmation run built from that is the
+    #: unfiltered scan this avoids.
+    suspected: dict[str, list[str]] = field(default_factory=dict)
     #: {origin: [url, ...]} -- paths content discovery found that no
     #: crawl has started from. See `webtargets.crawl_seeds`, which
     #: explains at length why this one source is allowed to point a
@@ -255,6 +299,139 @@ class Snapshot:
     #: (kind, subject) this project has ever tasked. See "one attempt
     #: per subject" in the module docstring.
     tasked: set[tuple[str, str]] = field(default_factory=set)
+
+
+#: What each policy is set to when the kitchen sink is open.
+#:
+#: The most thorough value of each, not merely "on": a sink that
+#: left `auto_nmap` at `top100` would be a switch whose name
+#: promised one thing and did another.
+#:
+#: Certificate Transparency and archived-URL lookups are NOT here.
+#: They send a client's domain to a third party and are gated by an
+#: explicit site decision; a convenience switch that routed around a
+#: vendor-approval gate would be the gate not existing. See
+#: app/ctlogs.py, which argues it at length.
+KITCHEN_SINK: dict[str, object] = {
+    "auto_amass": True,
+    "auto_resolve_ips": True,
+    "auto_reverse_dns": True,
+    "auto_vhost": True,
+    "auto_httpx": True,
+    "auto_nmap": "full",
+    "auto_web": "both",
+    "auto_nuclei": "both+confirm",
+}
+
+
+def effective(s: Snapshot) -> Snapshot:
+    """The policies as they will actually be applied.
+
+    One place that resolves `kitchen_sink`, so nothing downstream has
+    to remember it exists. `plan` calls this; so does the gap report,
+    so the two cannot disagree about what was supposed to happen.
+    """
+    if not s.kitchen_sink:
+        return s
+    return replace(s, **KITCHEN_SINK)       # type: ignore[arg-type]
+
+
+def name_subjects(s: Snapshot) -> list[tuple[str, bool]]:
+    """The targets a NAME-based policy may take as a subject.
+
+    `auto_amass` enumerates under a zone and `auto_resolve_ips` asks a
+    resolver about a name; both derive their subject from the
+    identifier in `Target.host`, and for a cloud resource or a mobile
+    app that identifier is not a name — see `hosts.dns_subject`, which
+    is the one statement of that rule.
+
+    One function rather than the same filter written at each policy.
+    Two copies of a rule is how they come to disagree, which is the
+    bug `roots.py` was extracted to end and this is the same lesson:
+    the gap report below and `plan` must subtract exactly the same
+    targets, or the report shows work outstanding that the planner
+    will never queue, for ever.
+
+    The port-scanning policies are deliberately not filtered through
+    this. A bucket with an address is a thing to scan; it is only
+    unaskable ABOUT BY NAME.
+    """
+    return [(h, has) for h, has in s.targets if h not in s.not_dns_named]
+
+
+@dataclass(frozen=True)
+class Gap:
+    """Something a standing order was supposed to cover and has not."""
+    policy: str
+    #: What is still owed, in the operator's words.
+    what: str
+    outstanding: int
+
+
+def gaps(s: Snapshot) -> list[Gap]:
+    """What the policies that are ON have still not done.
+
+    The point of a switch that says "everything" is that somebody
+    stops checking. So it has to be able to answer "is it actually
+    done", and the only honest answer is derived from the estate
+    rather than from whether the worker ran.
+
+    Reads `effective`, the same resolution `plan` uses. Two readings
+    of what a project asked for is how they come to differ, and a
+    gap report that disagreed with the planner would be worse than
+    none: it would be a clean bill of health for work nobody did.
+
+    An empty list means every policy that is on has nothing
+    outstanding. It does NOT mean the estate is fully enumerated --
+    a policy that is off has no gap by definition, which is why the
+    report names the policy and not just the number.
+    """
+    s = effective(s)
+    out: list[Gap] = []
+
+    def add(policy: str, what: str, n: int) -> None:
+        if n:
+            out.append(Gap(policy, what, n))
+
+    if s.auto_amass:
+        zones = {z for z in s.scope_zones if z} - s.searched
+        add("auto_amass", "in-scope zone(s) never handed to amass",
+            len(zones))
+    if s.auto_resolve_ips:
+        add("auto_resolve_ips", "hostname(s) with no address recorded",
+            len([h for h, has in name_subjects(s)
+                 if not has and ("nslookup", h.lower()) not in s.tasked]))
+    if s.auto_reverse_dns:
+        add("auto_reverse_dns", "address(es) with no reverse lookup",
+            len([a for a in s.addresses
+                 if ("reverse_ip", a.lower()) not in s.tasked]))
+    if s.auto_nmap != "off":
+        add("auto_nmap", "host(s) never port scanned",
+            len([h for h, _ in s.targets
+                 if ("nmap", h.lower()) not in s.tasked]))
+    for flag, kind, label in (
+            (s.auto_vhost, "vhost", "URL(s) never asked for virtual hosts"),
+            (s.auto_httpx, "httpx", "URL(s) never probed")):
+        if flag:
+            add(f"auto_{kind}", label,
+                len([u for u in s.web_urls
+                     if (kind, u.lower()) not in s.tasked]))
+    if s.auto_web in WEB_KINDS:
+        for kind in WEB_KINDS[s.auto_web]:
+            add("auto_web", f"URL(s) with no {kind} run",
+                len([u for u in s.web_urls
+                     if (kind, u.lower()) not in s.tasked]))
+    if s.auto_nuclei in NUCLEI_KINDS:
+        for kind in NUCLEI_KINDS[s.auto_nuclei]:
+            # `nuclei_confirm` is owed only where a version was
+            # actually detected: a CPE match without one is
+            # product-wide, and counting every URL as a gap would
+            # report work that is not supposed to happen.
+            pool = (set(s.suspected) if kind == "nuclei_confirm"
+                    else s.web_urls)
+            add("auto_nuclei", f"URL(s) with no {kind} run",
+                len([u for u in pool if (kind, u.lower()) not in s.tasked]))
+    return out
 
 
 def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
@@ -269,6 +446,10 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
     The order is stable regardless, so an interrupted cycle resumes
     where it was rather than starting somewhere different.
     """
+    # The kitchen sink is resolved HERE and not at the call sites.
+    # Two readings of what a project asked for is how they come to
+    # differ, and the gap report below reads the same function.
+    s = effective(s)
     out: list[Candidate] = []
 
     if s.auto_amass:
@@ -280,7 +461,8 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
         # on one particular caller having filled a field -- the unit
         # tests construct Snapshots directly, and so would anyone
         # reasoning about this in isolation.
-        derived = [gen.registrable(h) for h, _ in s.targets if not is_ip(h)]
+        derived = [gen.registrable(h) for h, _ in name_subjects(s)
+                   if not is_ip(h)]
         for z in list(s.scope_zones) + derived:
             if not z or "." not in z or z in seen:
                 continue
@@ -294,7 +476,7 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
 
     if s.auto_resolve_ips:
         want = sorted(
-            h for h, has_addr in s.targets
+            h for h, has_addr in name_subjects(s)
             if not has_addr and not is_ip(h) and ("nslookup", h) not in s.tasked)
         out += [Candidate("nslookup", h, {}, "auto_resolve_ips")
                 for h in want[:limit]]
@@ -373,6 +555,33 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
                     for o, urls in sorted(s.seeds.items())[:cap]
                     if urls]
 
+    # What else does this address answer to? A host serving twelve
+    # virtual hosts is twelve applications behind one socket, and
+    # eleven of them are invisible to everything else here: content
+    # discovery asks what PATHS exist on a site, and this asks what
+    # SITES exist on a host.
+    #
+    # Per origin, like the web policies, and once ever per origin --
+    # the answer is a property of the server's configuration, not of
+    # the moment.
+    if s.auto_vhost:
+        want = sorted(u for u in s.web_urls
+                      if ("vhost", u.lower()) not in s.tasked)
+        cap = WEB_PER_CYCLE if limit is None else min(limit, WEB_PER_CYCLE)
+        out += [Candidate("vhost", u, {"targets": [u]}, "auto_vhost")
+                for u in want[:cap]]
+
+    # And the cheapest thing in the catalogue: ask every known URL
+    # what it answers with. It is what decides whether anything
+    # heavier is worth queueing against a URL at all, which is why
+    # it is worth doing to everything rather than to a selection.
+    if s.auto_httpx:
+        want = sorted(u for u in s.web_urls
+                      if ("httpx", u.lower()) not in s.tasked)
+        cap = WEB_PER_CYCLE if limit is None else min(limit, WEB_PER_CYCLE)
+        out += [Candidate("httpx", u, {"targets": [u]}, "auto_httpx")
+                for u in want[:cap]]
+
     if s.auto_nuclei in NUCLEI_KINDS:
         # Per URL, like auto_web and for the same reason: nuclei takes
         # a URL already known to answer (`PROBE_KINDS["nuclei"]`), and
@@ -392,11 +601,32 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
             # carries the same risk of a miscount becoming six figures
             # of queued scanning.
             cap = WEB_PER_CYCLE if limit is None else min(limit, WEB_PER_CYCLE)
-            out += [Candidate(kind, u,
-                              {"targets": [u],
-                               "extra": NUCLEI_PROFILES[kind]},
-                              "auto_nuclei")
-                    for u in want[:cap]]
+            if kind == "nuclei_confirm":
+                # Per URL, because the template set IS per URL. A URL
+                # with nothing suspected produces no task: asking
+                # nuclei to confirm an empty list would be a full
+                # template run wearing a confirmation's name.
+                out += [Candidate(kind, u,
+                                  {"targets": [u],
+                                   # Sorted HERE as well as in
+                                   # `suspected_cves`. The snapshot is
+                                   # plain data that a caller or a test
+                                   # builds, so the command line must
+                                   # not depend on who assembled it --
+                                   # two runs over the same estate have
+                                   # to be comparable.
+                                   "extra": NUCLEI_PROFILES[kind]
+                                            + " -id "
+                                            + ",".join(sorted(set(ids)))},
+                                  "auto_nuclei")
+                        for u in want[:cap]
+                        if (ids := s.suspected.get(u))]
+            else:
+                out += [Candidate(kind, u,
+                                  {"targets": [u],
+                                   "extra": NUCLEI_PROFILES[kind]},
+                                  "auto_nuclei")
+                        for u in want[:cap]]
 
     if s.auto_nmap in NMAP_PROFILES:
         args = NMAP_PROFILES[s.auto_nmap]
@@ -413,6 +643,11 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
         select(Target).where(Target.project_id == pr.id)
         .order_by(Target.host))).scalars().unique().all()
     targets = [(t.host, bool(t.addresses)) for t in rows]
+    # Read here rather than inferred from the host string later. A
+    # bucket name has no punctuation that gives it away -- `acme-backups`
+    # is a perfectly well-formed hostname and simply is not one -- so
+    # the kind column is the only thing that actually knows.
+    not_dns_named = {t.host for t in rows if not dns_subject(t.kind)}
 
     # Observed addresses, for `auto_reverse_dns`. Read from the table
     # rather than walked off `rows`, so an address recorded against a
@@ -462,7 +697,15 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
     # dialog offers. The policy's own filter is unchanged and still
     # does the real work: of everywhere it could go, queue the ones
     # nothing has been run against yet.
-    web_urls = set(await discoverable(session, pr.id))
+    origins = await discoverable(session, pr.id)
+    web_urls = set(origins)
+    # Only when something will use it. The lookup is a query per
+    # distinct (product, version) in the project, and a project not
+    # running confirmation has no use for the answer.
+    suspected: dict[str, list[str]] = {}
+    if pr.auto_nuclei in ("confirm", "both+confirm"):
+        from .vulnfeed import suspected_cves
+        suspected = await suspected_cves(session, pr.id, origins)
 
     # Read whatever the switch is set to, rather than only when a
     # crawl is wanted: `plan` is where the policy lives, and a
@@ -478,9 +721,13 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
         auto_nmap=str(pr.auto_nmap or "off"),
         auto_web=str(getattr(pr, "auto_web", None) or "off"),
         auto_nuclei=str(getattr(pr, "auto_nuclei", None) or "off"),
-        targets=targets, addresses=addresses,
+        auto_vhost=bool(getattr(pr, "auto_vhost", False)),
+        auto_httpx=bool(getattr(pr, "auto_httpx", False)),
+        kitchen_sink=bool(getattr(pr, "kitchen_sink", False)),
+        targets=targets, not_dns_named=not_dns_named, addresses=addresses,
         searched=searched, tasked=tasked,
-        scope_zones=scope_zones, web_urls=web_urls, seeds=seeds)
+        scope_zones=scope_zones, web_urls=web_urls, seeds=seeds,
+        suspected=suspected)
 
 
 async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
@@ -632,16 +879,41 @@ class Worker:
                     # it had the other four on as well, which selected
                     # it for unrelated reasons.
                     | (Project.auto_web != "off")
-                    | (Project.auto_nuclei != "off")))).scalars().all()
+                    | (Project.auto_nuclei != "off")
+                    # The two added later, and the switch that
+                    # implies every one of them. A project selected
+                    # by none of these predicates is a project the
+                    # worker never looks at, which is how `auto_web`
+                    # did nothing and said nothing for a month.
+                    | (Project.auto_vhost.is_(True))
+                    | (Project.auto_httpx.is_(True))
+                    | (Project.kitchen_sink.is_(True))))).scalars().all()
             if not rows:
                 self.last = "no project has a standing order"
                 return
             total: dict[str, int] = {}
+            outstanding: list[str] = []
             for pr in rows:
                 for policy, n in (await run_once(session, pr)).items():
                     total[policy] = total.get(policy, 0) + n
+                # The point of a switch that says "everything" is
+                # that somebody stops checking, so it has to be able
+                # to answer "is it actually done". Derived from the
+                # estate rather than from whether the worker ran.
+                if pr.kitchen_sink:
+                    g = gaps(await snapshot(session, pr))
+                    if g:
+                        outstanding.append(
+                            f"{pr.code}: " + "; ".join(
+                                f"{x.outstanding} {x.what}" for x in g[:4])
+                            + (f" (+{len(g) - 4} more)" if len(g) > 4 else ""))
             self.last = (", ".join(f"{n} {p}" for p, n in sorted(total.items()))
                          if total else "nothing outstanding")
+            # Said separately from what was queued. "Queued 40" and
+            # "still owes 4,000" are different facts and the second
+            # is the one somebody who turned the sink on wants.
+            if outstanding:
+                self.last += " | still owed — " + " | ".join(outstanding)
 
     async def _loop(self) -> None:
         log.info("standing-orders worker started")

@@ -49,23 +49,45 @@ var Runners = map[string]Runner{
 	"portscan": runPortscan,
 	"amass":    runAmass,
 	"gobuster": runGobuster,
+	// Content discovery's sibling: gobuster asks one server what
+	// paths it has, this asks one address what SERVERS it has. Same
+	// library, same wordlist, different question -- and on a shared
+	// address or behind a CDN the default vhost is often a holding
+	// page with an entire application hidden behind a Host header.
+	"vhost": runVhost,
 	// katana, in process. The `gospider` alias it replaced is gone:
 	// it was kept so that tasks queued under the old name would not
 	// be stranded mid-swap, and not one was ever queued. Keeping a
 	// name nothing has ever used is how a tool nobody can run stays
 	// installed on every agent.
 	"katana": runKatana,
-	"nuclei": runNuclei,
+	// A picture of the page, in a real browser. The only task here
+	// that reports what a page LOOKS like rather than what it said,
+	// and the heaviest thing this agent runs -- see screenshot.go for
+	// both, and capacity.kindMemMB for what it costs.
+	"screenshot": runScreenshot,
+	"nuclei":     runNuclei,
 	// Same runner, same binary. A separate KIND so that the server
 	// can tell "this URL has had the CVE templates" apart from "this
 	// URL has been fingerprinted" -- it dedupes on (kind, subject),
 	// so one name would mean whichever ran first suppressed the
 	// other. The flags that make them different arrive in `extra`.
 	"nuclei_tech": runNuclei,
-	"httpx":       runHTTPX,
-	"nslookup":    runNSLookup,
-	"reverse_ip":  runReverseIP,
-	"install":     runInstall,
+	// The same runner. The difference is entirely in the flags
+	// Oddjob sends: `-id CVE-…` naming only what the corpus
+	// already suspects on that host, which turns the run from
+	// discovery into confirmation.
+	"nuclei_confirm": runNuclei,
+	"httpx":          runHTTPX,
+	// One operator-edited request, written to a socket verbatim. Not
+	// an HTTP client: every runner above is free to use net/http
+	// because it composes its own requests, and this one must not,
+	// because the request is somebody else's bytes and correcting
+	// them is how a replay sends a different test. See replay.go.
+	"replay":     runReplay,
+	"nslookup":   runNSLookup,
+	"reverse_ip": runReverseIP,
+	"install":    runInstall,
 }
 
 // ---------------------------------------------------------------- args
@@ -109,6 +131,24 @@ func intOr(args map[string]any, key string, def int) int {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
 			return n
 		}
+	}
+	return def
+}
+
+// boolOr reads a switch a caller may have sent as a JSON bool, as a
+// string from a form field, or as a number. Anything unrecognised
+// leaves the default alone: a task that misspells a flag should run
+// the way it would have without it, not silently invert it.
+func boolOr(args map[string]any, key string, def bool) bool {
+	switch v := args[key].(type) {
+	case bool:
+		return v
+	case string:
+		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
+			return b
+		}
+	case float64:
+		return v != 0
 	}
 	return def
 }
@@ -356,6 +396,29 @@ func nmapArgv(args map[string]any, outPath string, tg []string, rawSockets bool)
 		// Either is fine because -sV is the strongest level either
 		// way, and letting it pick keeps the privileged case fast.
 		argv = append(argv, "-sV")
+	case "udp":
+		// The ground nobody covers. Everything else this agent runs
+		// is TCP, so SNMP, IPMI, NTP, mDNS and the rest are simply
+		// not looked at -- which is exactly why they stay unclaimed.
+		//
+		// The commonest ports ONLY, and not negotiable upward by
+		// accident. A full -sU sweep is both ruinously slow (nmap
+		// rate-limits itself against ICMP unreachables) and mostly
+		// noise: one 2,051-host sweep produced 42,890 open|filtered
+		// rows against 13 genuinely open ports. The importer drops
+		// non-open states, so that noise never reaches the database,
+		// but the scan still has to be waited for.
+		//
+		// `--top-ports` and `-p` are mutually exclusive the way -F
+		// and -p are, so the top list is only asked for when the
+		// caller named no ports of their own.
+		argv = append(argv, "-sU")
+		if ports == "" {
+			argv = append(argv, "--top-ports", UDPTopPorts)
+		}
+		// -sV on the few that answer. A UDP port with no service
+		// behind the number is the same dead end as a TCP one.
+		argv = append(argv, "-sV")
 	default:
 		// No technique named: the behaviour from before this existed.
 		if str(args, "profile") == "quick" {
@@ -460,7 +523,146 @@ func nmapArgv(args map[string]any, outPath string, tg []string, rawSockets bool)
 // supposed to get low-volume fingerprinting only, and a scan with
 // `vuln` on is materially slower -- the queue was already moving at
 // roughly seven nmap tasks an hour.
-const NSEScripts = "default,safe,vuln,ssl-cert"
+//
+// `ssl-enum-ciphers` has to be named because it is in NEITHER
+// `default` nor `safe` -- nmap files it under `discovery, intrusive`
+// -- so until it was named here, Oddjob could say which hosts spoke
+// TLS and nothing whatever about whether that TLS was any good. No
+// cipher list, no protocol versions, no grade. That was the largest
+// genuine gap in the scanning phase.
+//
+// It costs time: the script offers each cipher suite in turn and a
+// host with several ports speaking TLS adds real seconds. It is
+// still the cheapest TLS analysis available, because the alternative
+// is another binary in the image and another task kind to budget.
+//
+// `smb-security-mode` and `smb2-security-mode` are likewise named.
+// Both ARE in `default`, so they already ran -- naming them is the
+// same insurance `ssl-cert` gets, because what they report (SMB
+// signing not required, which is what makes a relay attack work) is
+// now read as a finding rather than filed as inventory, and a
+// category edit must not be able to remove it quietly.
+//
+// `smb-enum-shares`, `mysql-empty-password` and
+// `ms-sql-empty-password` are all `intrusive` and none of them is in
+// a category above. Each answers a question with one unambiguous
+// answer and no interpretation: what is shared, and whether the
+// database admits an empty password. On an internal engagement
+// those are usually the first three things anybody wants to know,
+// and nothing in Oddjob could answer them.
+//
+// The empty-password pair ARE authentication attempts. One each,
+// against `root` and anonymous -- not a brute force and no lockout
+// risk -- but they are the reason this whole set sits under
+// `state_changing` in app/roe.py, and an engagement whose ceiling is
+// `read_only` refuses the nmap task that would run them.
+//
+// # What is deliberately NOT here
+//
+// `smb-enum-users` and `ldap-search` both work and both are
+// standard. They are left out because of what they RETURN: a list of
+// an organisation's usernames, or a dump of its directory. That is
+// somebody's personal data arriving in a database that is backed up,
+// searched and exported into reports, to answer a question nobody
+// asked yet. An operator who needs them can pass `--script` on a
+// single task.
+//
+// `http-enum` and `http-config-backup` duplicate what the gobuster
+// task already does, more slowly and with a worse wordlist.
+//
+// `snmp-brute` and the other `brute` scripts are credential
+// guessing. They belong behind a decision about lockout policy, not
+// in the set that rides along with every version scan.
+//
+// Each addition costs scan time, which is the real budget here: the
+// queue was already moving at roughly seven nmap tasks an hour.
+// # The protocols that are not HTTP
+//
+// Four more named, each checked against nmap's own `categories`
+// field rather than assumed -- which corrected two guesses: both
+// `snmp-processes` and `snmp-win32-software` turn out to be
+// `default, safe` and were already running, needing a reader rather
+// than a place on this line.
+//
+// `smtp-open-relay` is the one that was most wrong. Oddjob has had
+// a judge for its output since the NSE work landed and the script
+// is `discovery, intrusive, external` -- in none of the categories
+// above -- so the judge could never once have fired. A reader with
+// nothing to read is the same bug as data with no reader, seen from
+// the other side.
+//
+// What it does, because `external` deserves saying: MAIL FROM and
+// RCPT TO, sixteen combinations, and never DATA. No message is
+// delivered even when the relay IS open. The envelope names nmap's
+// default test domain, which will appear in the client's mail logs.
+//
+// `dns-zone-transfer` is AXFR, which is the oldest finding in DNS
+// and is still there often enough to be worth one request.
+//
+// `ntp-monlist` is the amplification check: a server answering it
+// is a server somebody else can point at a victim. `discovery,
+// intrusive`, so it was not running either.
+//
+// `ssh-auth-methods` reports what the server will accept. `none` is
+// a critical finding and nothing else here could see it.
+//
+// Not added: `snmp-win32-users`, for the same reason
+// `smb-enum-users` is not -- it returns an organisation's usernames
+// into a database that is backed up, searched and exported, to
+// answer a question nobody has asked yet. And nothing for SOAP:
+// nmap has no SOAP script worth the name, and web services are
+// nuclei's job.
+const NSEScripts = "default,safe,vuln,ssl-cert,ssl-enum-ciphers," +
+	"smb-security-mode,smb2-security-mode,smb-enum-shares," +
+	"mysql-empty-password,ms-sql-empty-password," +
+	"smtp-open-relay,dns-zone-transfer,ntp-monlist,ssh-auth-methods"
+
+// explainExec turns an EPERM from exec into the sentence that
+// actually helps.
+//
+// `fork/exec /usr/bin/nmap: operation not permitted` says nothing
+// about capabilities, and the obvious readings are all wrong: the
+// process is root, the file is 0755, AppArmor and seccomp are off,
+// and every other binary in the image execs. It cost an afternoon.
+//
+// The cause is that the nmap PACKAGE ships the binary with file
+// capabilities, and the kernel refuses to exec a file whose
+// capabilities it cannot grant from the bounding set. Drop
+// CAP_NET_BIND_SERVICE -- which no reasonable person adds to a
+// scanner's cap list, because nothing here binds a low port -- and
+// nmap stops being executable at all.
+//
+// Matched on the message rather than on errno because what reaches
+// here is already a formatted string: the exec happens inside
+// os/exec and the typed error is wrapped by the time a Result is
+// built.
+func explainExec(detail string) string {
+	d := strings.ToLower(detail)
+	if !strings.Contains(d, "operation not permitted") ||
+		!strings.Contains(d, "exec") {
+		return detail
+	}
+	return detail + " — this is almost always a FILE CAPABILITY on the " +
+		"binary, not a file mode: the package ships nmap with " +
+		"cap_net_bind_service among others, and the kernel will not exec " +
+		"a file whose capabilities are outside the container's bounding " +
+		"set. Add --cap-add=NET_BIND_SERVICE (it is not for binding a " +
+		"port; it is for being allowed to run the binary at all). Being " +
+		"root does not help, and neither does disabling AppArmor or " +
+		"seccomp."
+}
+
+// UDPTopPorts is how many of nmap's commonest UDP ports a `udp` task
+// sweeps when the caller names none.
+//
+// Twenty, which is DNS, DHCP, TFTP, NTP, NetBIOS, SNMP, SMB, IKE,
+// syslog, RIP, IPP, SSDP and SQL Server browse -- the services that
+// are actually found on an external estate and the ones nobody
+// scans for. Past about this many the yield falls off a cliff while
+// the runtime does not: nmap rate-limits itself against ICMP
+// unreachables, so each extra port costs the same second whether or
+// not anything is listening.
+const UDPTopPorts = "20"
 
 // nseEnabled reports whether these arguments turn the script engine
 // on. `-A` implies `-sC`, which is why it counts.
@@ -498,7 +700,14 @@ func hasFlag(extra []string, flags ...string) bool {
 // therefore produces STRONGER coverage than a privileged one running
 // the default -sS.
 func needsRawSockets(args map[string]any) bool {
-	return str(args, "technique") == "syn"
+	// -sU is as privileged as -sS: nmap has to build the datagrams
+	// and read the ICMP unreachables that are the whole signal. An
+	// unprivileged -sU does not quietly downgrade to something
+	// weaker, it fails -- so refusing here gives the server a chance
+	// to hand the task to an agent that can run it, instead of
+	// burning three attempts on one that cannot.
+	t := str(args, "technique")
+	return t == "syn" || t == "udp"
 }
 
 // --------------------------------------------------------------- nmap
@@ -543,7 +752,7 @@ func runNmap(ctx context.Context, args map[string]any, workDir string) Result {
 		}
 		return Result{Status: "failed", Output: xml, Stderr: tail(r.stderr, 4000),
 			ExitCode: r.code,
-			Error:    fmt.Sprintf("nmap did not complete: %s", detail)}
+			Error:    fmt.Sprintf("nmap did not complete: %s", explainExec(detail))}
 	}
 	priv, advice := tools.RawSocketCapable()
 	sum := fmt.Sprintf("nmap over %d target(s)", len(tg))
@@ -762,7 +971,34 @@ func runHTTPX(ctx context.Context, args map[string]any, workDir string) Result {
 	// `-irr` likewise. httpx knows exactly what it sent and what came
 	// back; reporting only that the address is alive throws away the
 	// part a tester reads.
-	argv := []string{"-json", "-o", path, "-silent", "-duc", "-irr"}
+	//
+	// `-cname` and `-tech-detect` are here because the importer has
+	// always parsed `cname` and `tech` and httpx has never been asked
+	// to emit them: both keys were simply absent from every line this
+	// agent has ever sent. They cost nothing extra on the wire -- the
+	// resolution and the response body have already happened by the
+	// time httpx decides whether to report them.
+	//
+	// `-asn` is deliberately NOT here, though the importer parses that
+	// too. httpx v1.12 resolves ASNs through ProjectDiscovery's hosted
+	// service, so without a PDCP key the field comes back null, and
+	// with one every address we look up is sent to a third party. The
+	// server already carries GeoLite2-ASN and reads it locally, so the
+	// answer is on our side of the wire already.
+	argv := []string{"-json", "-o", path, "-silent", "-duc", "-irr",
+		"-cname", "-tech-detect"}
+	// The favicon mmh3 hash and the JARM fingerprint are the two that
+	// pivot: they cluster hosts by what is running rather than by what
+	// it is called, which finds estate nobody has attributed. They are
+	// also the two that cost an extra round trip each -- a GET for the
+	// icon and a set of TLS handshakes -- and the smallest ghost in the
+	// fleet is a 458MB droplet that OOM-killed httpx during exactly
+	// this probe. On by default because the pivot is the point; the
+	// switch is here so a host that cannot afford them can say so
+	// rather than failing the whole task.
+	if boolOr(args, "fingerprint", true) {
+		argv = append(argv, "-favicon", "-jarm")
+	}
 	argv = append(argv, headerArgs(args)...)
 	for _, t := range tg {
 		argv = append(argv, "-u", t)

@@ -56,18 +56,25 @@ var Known = map[string]pkg{
 	"httpx": {apt: "", brew: "", choco: "", version: "-version",
 		gomod:       "github.com/projectdiscovery/httpx/cmd/httpx@latest",
 		mustMention: "projectdiscovery"},
-	"subfinder": {apt: "", brew: "subfinder", choco: "", version: "-version",
-		gomod: "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"},
-	"ffuf": {apt: "ffuf", brew: "ffuf", choco: "ffuf", version: "-V",
-		gomod: "github.com/ffuf/ffuf/v2@latest"},
-	// Crawls a site and reports what it links to, including URLs found
-	// in JavaScript, which is where the interesting endpoints usually
-	// are. Go-only: there is no distro package anywhere.
-	"whatweb": {apt: "whatweb", brew: "whatweb", choco: "", version: "--version"},
-	"dnsx": {apt: "", brew: "dnsx", choco: "", version: "-version",
-		gomod: "github.com/projectdiscovery/dnsx/cmd/dnsx@latest"},
-	"naabu": {apt: "", brew: "naabu", choco: "", version: "-version",
-		gomod: "github.com/projectdiscovery/naabu/v2/cmd/naabu@latest"},
+	// NOTE subfinder, ffuf, whatweb, dnsx and naabu were here and are
+	// gone. Not one of them had an entry in `tasks.Runners`, so a
+	// Ghost could be told to install five binaries that nothing could
+	// ever execute -- the exact failure the `gospider` note in
+	// tasks.go exists to prevent, five times over. Each is also
+	// redundant against something already linked in: subfinder
+	// against amass, ffuf against gobuster, naabu against masscan and
+	// the built-in portscan, and whatweb against httpx's own
+	// `-tech-detect`, which the agent now passes.
+	//
+	// (The comment that used to sit above `whatweb` described a
+	// JS-aware crawler with no distro package. That is gospider or
+	// katana, not whatweb, which is Ruby and packaged by both apt and
+	// brew. It had been copied down from the entry above it.)
+	//
+	// dnsx is the one of the five worth having -- CNAME chains and
+	// wildcard detection are things nothing else here answers -- and
+	// it comes back when it has a runner to be reached through, not
+	// before.
 }
 
 type pkg struct {

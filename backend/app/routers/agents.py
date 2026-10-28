@@ -33,18 +33,46 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import AliasChoices, BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import agentcrypto, audit, countrygate, geoip, lookuphistory
+from .. import (
+    agentcrypto,
+    audit,
+    countrygate,
+    geoip,
+    lookuphistory,
+    proxyauth,
+    proxyhub,
+    proxytunnel,
+    roe,
+    scopegate,
+)
 from ..db import get_session
 from ..events import broker
 from ..hosts import validate_host
 from ..lookups import LOOKUP_KINDS
-from ..models import Agent, AgentDebugLog, AgentTask, Project, Setting, Target, User
+from ..models import (
+    Agent,
+    AgentDebugLog,
+    AgentTask,
+    Project,
+    ProxyGrant,
+    Setting,
+    Target,
+    User,
+)
 from ..scopegate import as_host, check_task_targets, index_for, refuse
 from ..security import get_current_user, new_agent_key, require_project, verify_key
 from ..tasking import outstanding_subjects, tasked_subjects
@@ -112,8 +140,11 @@ ABANDON_AFTER = timedelta(minutes=10)
 #: installing one would put a second, slower implementation on the
 #: host that nothing calls. The agent keeps its own copy of this
 #: list and refuses anything outside it; this is the first gate.
-INSTALLABLE = ("nmap", "masscan", "nuclei", "httpx", "subfinder",
-               "ffuf", "whatweb", "dnsx", "naabu")
+#: subfinder, ffuf, whatweb, dnsx and naabu were on this list and are
+#: gone: none of them had a runner on the agent, so authorising one
+#: installed a binary that nothing could then execute. See the note in
+#: the agent's `Known` map. dnsx returns when it has a runner.
+INSTALLABLE = ("nmap", "masscan", "nuclei", "httpx")
 
 #: How long an unused enrollment token stays good. Short, because a
 #: token sitting in a terminal history or a chat message is a way onto
@@ -207,6 +238,12 @@ TASK_KINDS: dict[str, str | None] = {
     #: produce nothing to file. For anything pointed at a client it
     #: is a bug that costs requests and reports nothing.
     "gobuster": "gobuster",
+    #: Content discovery's sibling, asking one address what SERVERS
+    #: it has rather than what paths. Its own importer because its
+    #: hits are hostnames, not paths: filing them through
+    #: `gobuster` would put `intranet.acme.example` in the URL
+    #: column as though it were a path on the host.
+    "vhost": "vhost",
     #: Crawling, likewise in-process. The `gospider` alias katana
     #: replaced is gone: it was kept so tasks queued under the old
     #: name would not be stranded mid-swap, and not one was ever
@@ -218,6 +255,14 @@ TASK_KINDS: dict[str, str | None] = {
     #: reads `web_addresses` and nothing wrote there. It failed
     #: silently because nothing was asked to do anything.
     "katana": "crawl",
+    #: A picture of the page, taken by chromium on the ghost.
+    #:
+    #: Imported as `screenshot`, which is the only importer that
+    #: writes bytes rather than text: the agent sends base64 and the
+    #: importer decodes it once. A `None` here would mean the images
+    #: were carried across the network and then thrown away, which is
+    #: the exact failure `katana` and `gobuster` had above.
+    "screenshot": "screenshot",
     "nuclei": "nuclei",
     #: The same binary and the same importer, as its own kind.
     #:
@@ -227,9 +272,22 @@ TASK_KINDS: dict[str, str | None] = {
     #: was never queued for it at all. Two kinds dedupe
     #: independently, which is what `auto_nuclei: both` needs.
     "nuclei_tech": "nuclei",
+    #: nuclei again, with `-id` naming only the CVEs the local corpus
+    #: already matched to a service on that host. Its own kind for the
+    #: same reason `nuclei_tech` is: dedupe is per (kind, subject), so
+    #: sharing one would mean a confirmation run marked the URL done
+    #: and the discovery run never happened.
+    "nuclei_confirm": "nuclei",
     "httpx": "httpx",
     "nslookup": None,
     "reverse_ip": None,
+    #: One edited HTTP request, sent verbatim from inside the client's
+    #: estate. `None` here does NOT mean the output is discarded --
+    #: the warning above about that still stands. It means the result
+    #: is not a scan FILE: there is no nmap XML or nuclei JSONL to
+    #: hand an importer, only one exchange, which `routers/web.py`
+    #: files as a web_addresses row of its own. See `apply_replay`.
+    "replay": None,
     "install": None,
     "shell": None,
 }
@@ -246,6 +304,12 @@ class AgentOut(BaseModel):
     version: str | None = None
     hostname: str | None = None
     privileged: bool = False
+    #: Whether this Ghost will carry proxied streams. Off unless
+    #: somebody turned it on; see the SOCKS section of the README.
+    proxy_enabled: bool = False
+    #: Whether its tunnel is up RIGHT NOW, in this process. Not
+    #: stored anywhere -- a tunnel is only true while its socket is.
+    proxy_connected: bool = False
     tools: dict = {}
     #: Reported by the agent about itself, not observed here.
     outbound_ip: str | None = None
@@ -547,6 +611,8 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         id=a.id, project_code=code, name=a.name, status=a.status,
         platform=a.platform, arch=a.arch, version=a.version,
         hostname=a.hostname, privileged=a.privileged, tools=_tools(a.tools),
+        proxy_enabled=bool(a.proxy_enabled),
+        proxy_connected=proxyhub.hub.get(a.id) is not None,
         call_in_url=a.call_in_url, last_seen=a.last_seen, last_ip=a.last_ip,
         retired_at=a.retired_at, retired_reason=a.retired_reason,
         retired_cleanup=_json_or_none(a.retired_cleanup),
@@ -738,12 +804,41 @@ async def reap_lost(session: AsyncSession, project_id: int,
 DISPATCH_WINDOW = 100
 
 
+#: The ordinary band. Everything a scan, a standing order or the bulk
+#: dialog queues sits here.
+PRIORITY_NORMAL = 0
+
+#: Work an operator is sitting and waiting for, which jumps the whole
+#: queue. Only `replay` uses it today.
+#:
+#: A band rather than a boolean so that a second interactive kind can
+#: be ranked against this one later without a migration, and so a
+#: number in the database reads as what it is.
+#:
+#: It is deliberately NOT a capacity override. A queue-jumping task
+#: still waits for a free slot, still goes through the scope gate at
+#: dispatch and still counts against the project's parallelism — it
+#: overtakes the backlog, it does not get its own lane past the
+#: controls.
+PRIORITY_INTERACTIVE = 100
+
+
 def _next_up(*where) -> object:
     """The next slice of the queue, taking each kind in turn.
 
     Oldest-first within a kind, round-robin across kinds: every kind's
     oldest task, then every kind's second, and so on. A single large
     batch therefore delays the other kinds rather than excluding them.
+
+    **Priority outranks both**, and has to outrank them in two places
+    rather than one. The window below reads DISPATCH_WINDOW rows, so
+    ordering only the final result would be no use at all: a task
+    sitting at position 3,000 of its own kind is not in the window to
+    be re-ordered. So the row number within a kind is computed with
+    priority first — which puts a jumping task at rn=1 for its kind,
+    inside the window — and the outer ordering then puts it ahead of
+    every other kind's rn=1 as well. Either one alone leaves a case
+    where the jump silently does not happen.
 
     Straight `ORDER BY id` was not merely unfair, it was invisible.
     Only DISPATCH_WINDOW rows are read, so a batch bigger than the
@@ -758,12 +853,14 @@ def _next_up(*where) -> object:
     Age still orders everything within a kind, so nothing overtakes
     work of its own type.
     """
-    rn = func.row_number().over(partition_by=AgentTask.kind,
-                                order_by=AgentTask.id).label("rn")
-    ranked = select(AgentTask.id.label("id"), rn).where(*where).subquery()
+    rn = func.row_number().over(
+        partition_by=AgentTask.kind,
+        order_by=[AgentTask.priority.desc(), AgentTask.id]).label("rn")
+    ranked = select(AgentTask.id.label("id"),
+                    AgentTask.priority.label("prio"), rn).where(*where).subquery()
     return (select(AgentTask)
             .join(ranked, AgentTask.id == ranked.c.id)
-            .order_by(ranked.c.rn, AgentTask.id)
+            .order_by(ranked.c.prio.desc(), ranked.c.rn, AgentTask.id)
             .limit(DISPATCH_WINDOW))
 
 
@@ -801,6 +898,7 @@ KIND_TOOL: dict[str, str] = {
     # which is exactly what the note above this map warns against.
     "nuclei": "nuclei",
     "nuclei_tech": "nuclei",
+    "nuclei_confirm": "nuclei",
     "httpx": "httpx",
 }
 
@@ -841,7 +939,7 @@ _UNSET = object()
 #: nslookup and reverse_ip are DNS. Listing them would mean passing an
 #: argument the runner ignores, which reads to anyone later as though
 #: the setting applies there when it does not.
-UA_KINDS = ("nmap", "gobuster", "katana", "nuclei", "httpx")
+UA_KINDS = ("nmap", "gobuster", "katana", "nuclei", "httpx", "screenshot")
 
 
 async def _project_ua(session: AsyncSession, project_id: int) -> str | None:
@@ -987,6 +1085,19 @@ def _retryable(error: str) -> bool:
     return not any(p in low for p in _PERMANENT)
 
 
+#: Kinds that are never handed to a second agent after a failure.
+#:
+#: Requeueing is right for a scan: the work is "find out what is on
+#: these hosts", any agent can do it, and the one that just died is the
+#: least likely to succeed. It is wrong for a replay. WHICH ghost sent
+#: the request is part of the result — the egress address is the whole
+#: reason this stopped being sent from the Oddjob server — so moving it
+#: to another ghost answers a different question, and sending the same
+#: edited POST twice because the first ghost's report was lost is a
+#: second real request at a client.
+NO_REQUEUE_KINDS = ("replay",)
+
+
 #: Task kinds whose output is a list of hostnames rather than a scan
 #: file. These do not go through the file importers — there is nothing
 #: to parse a format out of — so they get their own path below.
@@ -1058,21 +1169,41 @@ async def _import_names(session: AsyncSession, pr: Project, t: AgentTask,
 
 async def _assert_task_in_scope(session: AsyncSession, pr: Project,
                                 kind: str, args: dict | None) -> None:
-    """Refuse a task that would reach a host this project may not touch.
+    """Refuse a task the authorisation does not cover.
 
     The point of enforcement that matters most. Everything else here
     writes rows; this one puts packets on somebody's network from a
     machine inside it, and the agent cannot be the one to decide — it
     does what it is told, which is the entire design.
+
+    Three questions, from the same document: may we touch these
+    hosts, are we inside the dates, and is this technique permitted.
+    Only the first was ever asked.
     """
     if kind not in SCOPED_KINDS:
         return
+    # Dates and technique ceiling first, because they are facts about
+    # the engagement rather than about this task's arguments: an
+    # operator told "out of scope" for a task queued after the
+    # engagement ended will go and edit the scope list.
+    why = roe.refusal(pr, kind)
+    if why is not None:
+        raise HTTPException(ROE_STATUS, f"a {kind} task on {pr.code} "
+                                        f"was refused: {why}")
     idx = await index_for(session, pr.id)
     if not idx.defined:
         return
     ruling = check_task_targets(idx, args)
     if ruling is not None:
         raise refuse(ruling, f"a {kind} task on {pr.code}")
+
+
+#: A rules-of-engagement refusal is a 403: the operator is not
+#: permitted to do this, as distinct from the 422 an out-of-allowlist
+#: host gets, which is a fact about the request that editing the scope
+#: list would fix. Editing the scope list does not make an expired
+#: engagement current.
+ROE_STATUS = 403
 
 
 #: How many known names to hand a reverse lookup. Each one costs the
@@ -1209,6 +1340,72 @@ async def _eligible_agents(session: AsyncSession, project_id: int) -> list[Agent
             AgentTask.status.in_(("claimed", "running"))).distinct())).all()}
     return [a for a in rows
             if _stale(a, 1 if a.id in busy else 0) in ("online", "busy")]
+
+
+#: What `pick_ghost` found, in the order it prefers them. The caller
+#: reports this to the operator verbatim, because the three are three
+#: different waits: none at all, a slot or two, and "whenever that host
+#: comes back".
+DISPATCH_IDLE = "idle"
+DISPATCH_BUSY = "busy"
+DISPATCH_ABSENT = "absent"
+
+
+async def pick_ghost(session: AsyncSession,
+                     project_id: int) -> tuple[Agent | None, str]:
+    """The ghost to put one piece of interactive work on.
+
+    -> (agent, where it stands) or (None, DISPATCH_ABSENT).
+
+    Three answers, deliberately kept apart rather than collapsed into
+    "got one / did not":
+
+      idle    beating now and holding nothing. The task will be handed
+              over on its next beat, which is seconds away.
+      busy    beating now and mid-scan. The task is queued against it
+              and jumps that ghost's backlog, but still waits for a
+              slot -- see PRIORITY_INTERACTIVE.
+      absent  nothing is beating. Queued against whichever ghost this
+              engagement has, which may be hours away or may be never.
+
+    `absent` is still a ghost, and that is the point: queueing against
+    a quiet ghost is a better answer than refusing, because an agent
+    whose link dropped for a minute is the common case and the
+    operator's request survives it. Having NO ghost at all is a
+    different fact, and gets None so the caller can say so plainly
+    rather than inventing a destination.
+
+    Ordered by the agent's own priority then id, the same total order
+    `_eligible_agents` uses. Two callers disagreeing about which ghost
+    is first is how the same engagement sends two packets from two
+    egress addresses and reports one.
+    """
+    rows = (await session.execute(
+        select(Agent).where(Agent.project_id == project_id,
+                            Agent.status != "disabled")
+        .order_by(Agent.priority, Agent.id))).scalars().all()
+    if not rows:
+        return None, DISPATCH_ABSENT
+    busy = {aid for (aid,) in (await session.execute(
+        select(AgentTask.agent_id).where(
+            AgentTask.project_id == project_id,
+            AgentTask.status.in_(("claimed", "running")))
+        .distinct())).all()}
+    now = datetime.now(UTC)
+
+    def beating(a: Agent) -> bool:
+        seen = _aware(a.last_seen)
+        return seen is not None and (now - seen) < OFFLINE_AFTER
+
+    live = [a for a in rows if beating(a)]
+    for a in live:
+        if a.id not in busy:
+            return a, DISPATCH_IDLE
+    if live:
+        # All of them are working. The first in the same order the rest
+        # of the router uses, so this is the one a reader can predict.
+        return live[0], DISPATCH_BUSY
+    return rows[0], DISPATCH_ABSENT
 
 
 async def _may_claim(session: AsyncSession, project: Project, agent: Agent,
@@ -2098,9 +2295,45 @@ async def queue_per_host(session: AsyncSession, pr: Project, kind: str,
     scan is a result about a moment, and declining to look again would
     be a different and much stronger claim than this knows how to make.
     """
+    # The engagement's dates and technique ceiling, once. These are
+    # facts about the engagement, not about a subject, so there is no
+    # subset of the batch that is allowed and the whole call fails.
+    _roe = roe.refusal(pr, kind)
+    if _roe is not None:
+        raise HTTPException(ROE_STATUS,
+                            f"a {kind} task on {pr.code} was refused: {_roe}")
     idx = await index_for(session, pr.id)
+    # The caller's OTHER arguments, once, before anything is queued.
+    #
+    # The loop below checks each subject and nothing else, and the
+    # subject only ever replaces `targets` in the stored args --
+    # `{**args, "targets": [subject]}`. Everything else the caller
+    # sent went through untouched and unexamined, and `extra` is
+    # spliced onto the scanner's command line ahead of the targets,
+    # where nmap and masscan accept bare targets perfectly happily.
+    # A decoy under `targets` and a range under `extra` was a full
+    # scan of anything on the internet with every gate reporting
+    # "in scope".
+    #
+    # The whole call fails rather than a subject: these arguments
+    # apply to every task the batch would create, so there is no
+    # subset of it that is allowed.
+    _rest = {k: v for k, v in (args or {}).items()
+             if k not in scopegate.TARGET_KEYS}
+    _bad = scopegate.check_task_targets(idx, _rest) if idx.defined else None
+    if _bad is not None:
+        raise scopegate.refuse(_bad, "a task argument")
+    # Loaded once for the batch, and only for the kind that can use
+    # it. See the carve-out at the foot of scopegate.py: a DNS
+    # lookup of a hop an in-scope host's own CNAME points at is
+    # allowed, because without it the takeover detector can never
+    # reach a verdict -- and nothing else is.
+    hops: set[str] = set()
+    if kind in scopegate.RESOLVE_ONLY_KINDS:
+        hops = await scopegate.cname_hops(session, pr.id)
     created: list[int] = []
     refused: dict[str, str] = {}
+    by_cname: list[str] = []
     skipped: dict[str, int] = {}
     already: list[str] = []
     repeated: list[str] = []
@@ -2162,8 +2395,14 @@ async def queue_per_host(session: AsyncSession, pr: Project, kind: str,
         # callers did not.
         ruling = idx.check(as_host(subject) or subject)
         if not ruling.allowed:
-            refused[subject] = ruling.reason
-            continue
+            if scopegate.resolvable_hop(kind, subject, hops):
+                # Allowed by the carve-out, not by the scope list,
+                # and named back separately so the difference is
+                # visible to whoever reads the result.
+                by_cname.append(subject)
+            else:
+                refused[subject] = ruling.reason
+                continue
         # After the gate, so an out-of-scope subject still reads as
         # refused. Which of the two it is matters: one is a scope
         # problem to fix, the other is this run declining to repeat
@@ -2200,6 +2439,8 @@ async def queue_per_host(session: AsyncSession, pr: Project, kind: str,
                        project_code=pr.code,
                        detail=f"queued {len(created)} {kind} task(s), one "
                               f"per target"
+                              + (f"; {len(by_cname)} allowed as CNAME hops"
+                                 if by_cname else "")
                               + (f"; {len(refused)} refused" if refused else "")
                               + (f"; {len(skipped)} already answered empty"
                                  if skipped else "")
@@ -2210,7 +2451,12 @@ async def queue_per_host(session: AsyncSession, pr: Project, kind: str,
                        commit=True)
     return {"ids": created, "refused": refused, "queued": len(created),
             "skipped": skipped, "already_queued": already,
-            "already_done": repeated}
+            "already_done": repeated,
+            # Named back, not folded into `queued`. A permission used
+            # silently is one nobody audits, and this one is the
+            # single place a task runs against a name the scope list
+            # does not carry.
+            "allowed_as_cname_hop": by_cname}
 
 
 @router.post("/tasks/bulk", response_model=dict, status_code=201)
@@ -2316,7 +2562,12 @@ class QueuedOut(BaseModel):
 
 def _subject(kind: str, args: dict) -> str:
     """The one phrase that says what a task is for."""
-    for key in ("domain", "url", "host"):
+    # `dest_url` is the replay kind's destination. It is not called
+    # `url` for a reason that has nothing to do with this function --
+    # see the note at the call site in routers/web.py -- so it is
+    # named here too rather than having a replay show as a bare
+    # hostname in the queue.
+    for key in ("domain", "url", "dest_url", "host"):
         if args.get(key):
             return str(args[key])
     for key in ("targets", "domains", "urls"):
@@ -2889,22 +3140,94 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
     # leave alone.
     idx = await index_for(session, a.project_id)
 
-    def scope_refusal(task: AgentTask) -> str | None:
-        if not idx.defined or task.kind not in SCOPED_KINDS:
+    # The CNAME carve-out has to hold HERE as well as at queue time,
+    # and it did not: 35 lookups queued cleanly and then every one
+    # of them failed with "refused by the project's scope at
+    # dispatch". Two gates, one patched -- which is a gate.
+    #
+    # Loaded lazily, and only when a resolve-only task is actually
+    # about to be refused. A heartbeat arrives every few seconds
+    # from every ghost, and a query per beat to answer a question
+    # almost no beat asks is the wrong trade.
+    hops: set[str] | None = None
+
+    async def hop_set() -> set[str]:
+        nonlocal hops
+        if hops is None:
+            hops = await scopegate.cname_hops(session, a.project_id)
+        return hops
+
+    # Likewise lazy, and for the same reason: every task this agent
+    # is handed belongs to its own project, so this is one row, but a
+    # heartbeat arrives every few seconds from every ghost and most
+    # of them have nothing to dispatch.
+    engagement_row: Project | None = None
+
+    async def engagement() -> Project | None:
+        nonlocal engagement_row
+        if engagement_row is None:
+            engagement_row = await session.get(Project, a.project_id)
+        return engagement_row
+
+    async def scope_refusal(task: AgentTask) -> str | None:
+        if task.kind not in SCOPED_KINDS:
+            return None
+        # Checked here as well as at queue time, for the same reason
+        # scope is: a task queued inside the window and handed out a
+        # week later runs outside it, and nothing at queue time could
+        # have seen that coming. An engagement that ends with 4,000
+        # tasks queued must stop, not drain.
+        #
+        # Before `idx.defined`, deliberately. A project with no scope
+        # list still has dates and a ceiling, and returning early on
+        # the scope index would skip both.
+        why = roe.refusal(await engagement(), task.kind)
+        if why is not None:
+            return why
+        if not idx.defined:
             return None
         try:
             args = json.loads(task.args) if task.args else {}
         except ValueError:
             args = {}
         ruling = check_task_targets(idx, args if isinstance(args, dict) else {})
-        return ruling.reason if ruling is not None else None
+        if ruling is None:
+            return None
+        # Refused by the list. The one thing that may still pass is a
+        # DNS lookup of a name an in-scope host's own CNAME points
+        # at -- same rule, same single kind, same closed candidate
+        # set as at queue time.
+        #
+        # The carve-out must answer for EVERY host in the args, not
+        # only the ones under `targets`. It used to read `targets`
+        # alone while the refusal it was overriding could have come
+        # from any key, so a task carrying one genuine hop there and
+        # anything at all under `host` was re-admitted on the
+        # strength of the hop -- a lookup of a name the carve-out
+        # never examined. `task_hosts` is the same reader the refusal
+        # came out of, which is the property that makes the two agree.
+        if task.kind in scopegate.RESOLVE_ONLY_KINDS:
+            subjects = scopegate.task_hosts(args if isinstance(args, dict) else {})
+            known = await hop_set()
+            if subjects and all(
+                    scopegate.resolvable_hop(task.kind, str(t), known)
+                    for t in subjects):
+                return None
+        return ruling.reason
 
     def drop(task: AgentTask, why: str) -> None:
         """Fail it rather than skip it. A task silently passed over on
         every poll is one an operator watches stay 'queued' forever
-        with nothing saying why."""
+        with nothing saying why.
+
+        The sentence does not name the scope list any more: this gate
+        now also refuses on the engagement's dates and its technique
+        ceiling, and "refused by the project's scope" sent an
+        operator whose engagement had expired to go and edit the
+        scope list.
+        """
         task.status = "failed"
-        task.error = f"refused by the project's scope at dispatch: {why}"
+        task.error = f"refused by this engagement's rules at dispatch: {why}"
         task.finished_at = datetime.now(UTC)
 
     # What this agent is already holding. Anything here means the last
@@ -3027,7 +3350,7 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
                      AgentTask.status == "queued"))).scalars():
         if len(chosen) >= free:
             break
-        why = scope_refusal(cand)
+        why = await scope_refusal(cand)
         if why is not None:
             drop(cand, why)
             continue
@@ -3073,7 +3396,7 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
         for cand in pool:
             if len(chosen) >= free:
                 break
-            why = scope_refusal(cand)
+            why = await scope_refusal(cand)
             if why is not None:
                 drop(cand, why)
                 continue
@@ -3338,7 +3661,8 @@ async def submit_result(task_id: int, body: ResultIn,
         t.finished_at = now
     else:
         t.attempts = (t.attempts or 0) + 1
-        if t.attempts <= MAX_RETRIES and _retryable(body.error or ""):
+        if (t.attempts <= MAX_RETRIES and _retryable(body.error or "")
+                and t.kind not in NO_REQUEUE_KINDS):
             # Back in the queue, and back in the POOL: the agent that
             # just failed is the least likely to succeed, and leaving
             # it addressed there is how a broken host retries its own
@@ -3388,6 +3712,40 @@ async def submit_result(task_id: int, body: ResultIn,
             t.import_result = json.dumps({"error": f"{type(e).__name__}: {e}"[:500]})
             await session.commit()
 
+    # A replayed request becomes a web row, here, for the same reason
+    # the names above become targets: the result is evidence about the
+    # client's estate and the only thing that was ever going to file it
+    # is this handler. `t.import_as` is None for this kind — there is
+    # no scan file to parse — so nothing further down would touch it.
+    #
+    # Run on `done` only. A ghost that could not reach the host reports
+    # `done` with the failure inside its payload, deliberately: "this
+    # host now refuses the connection" is a result worth keeping, and
+    # `apply_replay` writes the row for it. A `failed` here means the
+    # ghost could not carry out the instruction at all — bad arguments,
+    # a runner that is not there — and there is no exchange to record.
+    if t.status == "done" and t.kind == "replay" and (t.output or "").strip():
+        from .web import apply_replay
+        try:
+            rep = await apply_replay(session, t, actor=f"ghost:{a.name}")
+            t.import_result = json.dumps(rep)
+            await session.commit()
+            imported = {**(imported or {}), "replay": rep}
+        except Exception:                        # noqa: BLE001
+            # Never fail the submission over it: the raw exchange is on
+            # the task either way, which is the evidence. And the
+            # detail goes to the log rather than down the wire, for the
+            # reason the lookup branch below gives — this response is
+            # read by a process on somebody else's network.
+            await session.rollback()
+            log.warning("filing the replay result for task %s failed",
+                        t.id, exc_info=True)
+            t.import_result = json.dumps(
+                {"error": "could not be filed; see the server log"})
+            await session.commit()
+            imported = {**(imported or {}),
+                        "replay": {"error": "could not be filed"}}
+
     # A finished DNS lookup resolves itself, here, rather than waiting
     # for somebody to open the Targets page. Most of what one returns
     # stopped being a decision when addresses became many-to-many — a
@@ -3429,7 +3787,30 @@ async def submit_result(task_id: int, body: ResultIn,
             res = await _run(session, pr, t.output, t.import_as,
                              f"ghost:{a.name}", mode="strict", decisions={})
             imported = json.loads(res.model_dump_json())
+            # Said in the log as well as carried in the result. This
+            # is the unattended path -- a nuclei template release
+            # changes the JSON shape, the tool still exits 0, the
+            # import still succeeds, and the standing order goes on
+            # reporting a clean estate to nobody in particular. The
+            # result object is only read by somebody who opens that
+            # task.
+            if res.parsed_nothing:
+                log.warning("task %s: %s", t.id, res.parsed_nothing)
             t.import_result = json.dumps(imported)
+            if t.import_as == "screenshot":
+                # The pictures are in `web_screenshots` now, so the
+                # base64 copy sitting on this row is a SECOND copy of
+                # every one of them -- the larger one, because base64
+                # is 4/3 of the bytes, and the one nothing reads.
+                # Across an estate photographed a page at a time it
+                # would be the biggest thing in the database.
+                #
+                # Only the payload goes. The URLs, statuses, titles,
+                # digests and the list of pages that could not be
+                # photographed all stay, so the task still says
+                # exactly what it did.
+                from ..importers import screenshot as _shot
+                t.output = _shot.without_images(t.output)
             await session.commit()
         except HTTPException as e:
             # The result is kept either way. A scan that ran and could
@@ -3443,3 +3824,313 @@ async def submit_result(task_id: int, body: ResultIn,
     for ch in ("targets", "services", "vulns", "web"):
         await broker.publish(ch, action="agent", project=code)
     return {"ok": True, "imported": imported}
+
+
+# ------------------------------------------------------ proxy tunnel
+async def _tunnel_agent(ws: WebSocket, session: AsyncSession) -> Agent | None:
+    """Authenticate a tunnel upgrade. -> the agent, or None to refuse.
+
+    The SAME Ed25519 scheme as every other request from a Ghost,
+    signed over this path with an empty body, so there is no second
+    way in to get wrong. A WebSocket handshake is an HTTP request and
+    carries headers like any other.
+
+    Returns None rather than raising: the socket is not accepted yet,
+    so there is nothing to send a status on beyond the handshake, and
+    the caller closes it with a code.
+    """
+    sig = ws.headers.get(agentcrypto.SIG_HEADER, "").strip()
+    claimed = ws.headers.get(agentcrypto.AGENT_HEADER, "").strip()
+    ts = ws.headers.get(agentcrypto.TS_HEADER, "").strip()
+    nonce = ws.headers.get(agentcrypto.NONCE_HEADER, "").strip()
+    if not (sig and claimed and ts and nonce):
+        return None
+    if not agentcrypto.fresh(ts):
+        return None
+    if not agentcrypto.nonces.check_and_add(nonce):
+        return None
+    try:
+        a = await session.get(Agent, int(claimed))
+    except ValueError:
+        return None
+    if a is None or not a.public_key:
+        return None
+    # Empty body: a handshake has none, and the agent signs the same
+    # shape. `TUNNEL_PATH` is a constant on both sides because the
+    # signature covers it.
+    if not agentcrypto.verify(a.public_key, sig, "GET", TUNNEL_PATH, b"",
+                              ts, nonce):
+        return None
+    return a
+
+
+#: Must match `socksrelay.TunnelPath` in the agent. The signature
+#: covers the path, so a disagreement is a 401 on every tunnel.
+TUNNEL_PATH = "/api/ghosts/proxy/tunnel"
+
+
+@router.websocket("/proxy/tunnel")
+async def proxy_tunnel(ws: WebSocket,
+                       session: AsyncSession = Depends(get_session)):
+    """A Ghost offering to carry proxied streams.
+
+    Refused unless the agent is enrolled, signs correctly, is not
+    disabled, and has `proxy_enabled` set. The last one is the switch
+    an operator throws: a Ghost that has not been told to proxy is
+    refused even with a perfect signature, so turning this on is a
+    decision made in Oddjob rather than something an agent can
+    arrange for itself.
+    """
+    agent = await _tunnel_agent(ws, session)
+    if agent is None:
+        # 1008 is "policy violation", the nearest thing a WebSocket
+        # close has to 401. The handshake is accepted first because
+        # a close code cannot be sent on a refused upgrade.
+        await ws.accept()
+        await ws.close(code=1008, reason="tunnel authentication failed")
+        return
+    if agent.status == "disabled":
+        await ws.accept()
+        await ws.close(code=1008, reason="this agent is disabled")
+        return
+    if not agent.proxy_enabled:
+        await ws.accept()
+        await ws.close(code=1008, reason="proxying is not enabled for this ghost")
+        return
+
+    await ws.accept()
+    tunnel = proxyhub.hub.register(agent.id, ws.send_bytes)
+    log.info("proxy tunnel up for agent %d (%s)", agent.id, agent.name)
+    try:
+        while True:
+            raw = await ws.receive_bytes()
+            try:
+                tunnel.on_frame(proxytunnel.decode(raw))
+            except proxytunnel.FrameError as e:
+                # Framing is lost; there is no way to know where the
+                # next frame starts, so the tunnel ends rather than
+                # risk feeding one stream's bytes to another.
+                log.warning("agent %d sent an unreadable frame: %s",
+                            agent.id, e)
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("proxy tunnel for agent %d ended: %s", agent.id, e)
+    finally:
+        # Guarded with the tunnel object: a Ghost that reconnected
+        # while this one was finishing already owns the slot, and
+        # evicting it here would drop the live tunnel.
+        proxyhub.hub.drop(agent.id, tunnel)
+        log.info("proxy tunnel down for agent %d", agent.id)
+
+
+# ------------------------------------------------- proxy, from the UI
+class ProxyToggle(BaseModel):
+    enabled: bool
+
+
+class GrantOut(BaseModel):
+    id: int
+    username: str
+    note: str | None = None
+    created_at: str | None = None
+    expires_at: str | None = None
+    last_used_at: str | None = None
+    revoked_at: str | None = None
+
+    @property
+    def live(self) -> bool:
+        return self.revoked_at is None
+
+
+class GrantNew(BaseModel):
+    note: str | None = Field(None, max_length=300)
+    #: Days until it stops working. A proxy credential that lives for
+    #: ever is one nobody remembers to take away, so this defaults to
+    #: a fortnight rather than to never.
+    expires_days: int | None = Field(14, ge=1, le=365)
+
+
+def _grant_out(g: ProxyGrant) -> GrantOut:
+    def iso(d):
+        return d.isoformat() if d else None
+    return GrantOut(id=g.id, username=g.username, note=g.note,
+                    created_at=iso(g.created_at), expires_at=iso(g.expires_at),
+                    last_used_at=iso(g.last_used_at),
+                    revoked_at=iso(g.revoked_at))
+
+
+@router.patch("/{agent_id}/proxy", response_model=AgentOut)
+async def set_proxy(agent_id: int, body: ProxyToggle,
+                    pr: Project = Depends(require_project("admin")),
+                    user: User = Depends(get_current_user),
+                    session: AsyncSession = Depends(get_session)):
+    """Switch proxying on or off for one Ghost.
+
+    **Admin, not user.** This is the difference between a Ghost that
+    runs the tasks it is given and one that will carry arbitrary
+    traffic into the client's network on anybody's say-so, and that
+    is not a routine operation.
+
+    Switching it OFF drops the live tunnel immediately rather than
+    waiting for the Ghost to notice. A revocation that takes effect
+    at some unspecified later point is not a revocation.
+    """
+    a = (await session.execute(
+        select(Agent).where(Agent.id == agent_id,
+                            Agent.project_id == pr.id))).scalar_one_or_none()
+    if a is None:
+        raise HTTPException(404, "no such ghost on this project")
+    a.proxy_enabled = bool(body.enabled)
+    if not a.proxy_enabled:
+        proxyhub.hub.drop(a.id)
+    await audit.record(session, "ui", "ghost.proxy", user=user,
+                       project_code=pr.code,
+                       detail=f"{a.name}: proxying "
+                              f"{'enabled' if a.proxy_enabled else 'disabled'}")
+    await session.commit()
+    await session.refresh(a)
+    return _agent_out(a, pr.code)
+
+
+@router.get("/proxy.pac", response_class=PlainTextResponse)
+async def proxy_pac(request: Request,
+                    session: AsyncSession = Depends(get_session)):
+    """A proxy auto-config file, for pointing a browser at this host.
+
+    **Unauthenticated, and that is deliberate.** A PAC file is
+    fetched by the browser's network stack before any session
+    exists, so it cannot carry a bearer token. What it discloses is
+    this host's own name and port -- which the person fetching it
+    already typed -- and nothing about any engagement. The proxy
+    itself is what authenticates, on every single CONNECT.
+
+    Firefox has no field for "HTTPS proxy": its dropdown offers
+    HTTP, SOCKS4 and SOCKS5, none of which is a TLS-wrapped proxy.
+    A PAC returning `HTTPS host:port` is the supported way to say
+    it, in Firefox and Chrome both, which is why this exists rather
+    than a line of documentation.
+    """
+    from ..routers.settings import load_all
+    cfg = await load_all(session)
+    if not cfg.get("proxy.enabled"):
+        raise HTTPException(404, "the proxy is not enabled on this Oddjob")
+    cert = str(cfg.get("proxy.tls_cert") or "").strip()
+    key = str(cfg.get("proxy.tls_key") or "").strip()
+    port = int(cfg.get("proxy.port") or 8443)
+    host = (request.url.hostname or "").strip()
+    if not (cert and key):
+        raise HTTPException(
+            404, "this Oddjob has no proxy certificate, so there is no "
+                 "HTTPS proxy to point at. Reach the SOCKS listener "
+                 f"through a tunnel instead: ssh -N -L {port}:127.0.0.1:"
+                 f"{port} {host}")
+    # DIRECT is deliberately absent from the fallback. A PAC that
+    # says `HTTPS host:port; DIRECT` sends traffic straight at the
+    # client's estate from the tester's own address the moment the
+    # proxy is unreachable -- silently, and from the wrong egress.
+    # Failing closed is the only correct behaviour for a proxy whose
+    # whole purpose is where the packet comes from.
+    return (
+        "// Oddjob ghost proxy. Everything goes through the Ghost; a\n"
+        "// failure is a failure, not a quiet fallback to your own\n"
+        "// address -- which is the one thing that must not happen on\n"
+        "// an engagement.\n"
+        "function FindProxyForURL(url, host) {\n"
+        f'  return "HTTPS {host}:{port}";\n'
+        "}\n")
+
+
+@router.get("/{agent_id}/proxy/grants", response_model=list[GrantOut])
+async def list_grants(agent_id: int,
+                      pr: Project = Depends(require_project("admin")),
+                      _: User = Depends(get_current_user),
+                      session: AsyncSession = Depends(get_session)):
+    """The credentials issued for this Ghost. Never the secrets."""
+    rows = (await session.execute(
+        select(ProxyGrant)
+        .where(ProxyGrant.agent_id == agent_id,
+               ProxyGrant.project_id == pr.id)
+        .order_by(ProxyGrant.id.desc()))).scalars().all()
+    return [_grant_out(g) for g in rows]
+
+
+@router.post("/{agent_id}/proxy/grants", response_model=dict)
+async def make_grant(agent_id: int, body: GrantNew,
+                     pr: Project = Depends(require_project("admin")),
+                     user: User = Depends(get_current_user),
+                     session: AsyncSession = Depends(get_session)):
+    """Issue a credential. The password is returned ONCE.
+
+    Only the hash is stored, as with an agent's enrollment key. If
+    the operator loses it they make another and revoke this one --
+    which is the behaviour you want from a secret that opens a route
+    into an engagement.
+    """
+    a = (await session.execute(
+        select(Agent).where(Agent.id == agent_id,
+                            Agent.project_id == pr.id))).scalar_one_or_none()
+    if a is None:
+        raise HTTPException(404, "no such ghost on this project")
+
+    username, password, hashed = proxyauth.new_grant()
+    expires = None
+    if body.expires_days:
+        expires = datetime.now(UTC) + timedelta(days=body.expires_days)
+    g = ProxyGrant(agent_id=a.id, project_id=pr.id, username=username,
+                   password_hash=hashed, created_by=user.id,
+                   note=(body.note or None), expires_at=expires)
+    session.add(g)
+    # The password is NOT in the audit line. The whole point of
+    # storing a hash is undone by writing the plaintext somewhere
+    # that is kept for longer.
+    await audit.record(session, "ui", "ghost.proxy.grant", user=user,
+                       project_code=pr.code,
+                       detail=f"{a.name}: issued proxy credential {username}")
+    await session.commit()
+    await session.refresh(g)
+    return {"grant": _grant_out(g).model_dump(),
+            "username": username,
+            # Shown once. There is no endpoint that returns it again.
+            "password": password}
+
+
+@router.delete("/{agent_id}/proxy/grants/{grant_id}", response_model=GrantOut)
+async def revoke_grant(agent_id: int, grant_id: int,
+                       pr: Project = Depends(require_project("admin")),
+                       user: User = Depends(get_current_user),
+                       session: AsyncSession = Depends(get_session)):
+    """Revoke a credential, and cut what it is already holding.
+
+    A timestamp rather than a delete, so the audit trail still has
+    something to point at when somebody asks what that credential
+    reached.
+
+    `decide` runs once per CONNECT, so a timestamp alone only stops
+    the NEXT connection. A credential revoked because it leaked would
+    have gone on relaying over every tunnel it had already
+    established -- indefinitely, since a CONNECT has no expiry of its
+    own. The live streams go too.
+    """
+    g = (await session.execute(
+        select(ProxyGrant)
+        .where(ProxyGrant.id == grant_id,
+               ProxyGrant.agent_id == agent_id,
+               ProxyGrant.project_id == pr.id))).scalar_one_or_none()
+    if g is None:
+        raise HTTPException(404, "no such credential")
+    if g.revoked_at is None:
+        g.revoked_at = datetime.now(UTC)
+        # Counted and said, because "revoked" and "revoked, and three
+        # connections were cut" are different facts and the second is
+        # the one that answers "was it still being used".
+        cut = proxyhub.hub.drop_grant(g.agent_id, g.id)
+        await audit.record(session, "ui", "ghost.proxy.revoke", user=user,
+                           project_code=pr.code,
+                           detail=f"revoked proxy credential {g.username}"
+                                  + (f"; cut {cut} live connection(s)"
+                                     if cut else ""))
+    await session.commit()
+    await session.refresh(g)
+    return _grant_out(g)

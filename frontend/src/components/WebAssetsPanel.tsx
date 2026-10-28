@@ -27,6 +27,7 @@ import CloseIcon from '@mui/icons-material/Close'
 import SearchIcon from '@mui/icons-material/Search'
 import { useQuery } from '@tanstack/react-query'
 import { api, type WebAsset } from '../lib/api'
+import { SEVERITY_COLOUR as SEV } from '../lib/severity'
 import type { ColumnDef } from '../lib/columns'
 import { AssetModal } from './AssetModal'
 import { DataTable } from './DataTable'
@@ -163,6 +164,43 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
       ),
     },
     {
+      // What this asset is CARRYING, not what is wrong with the host
+      // that serves it. A CDN bundle's host is somebody else's
+      // infrastructure; the bundle is ours to answer for.
+      field: 'vulns', headerName: 'Findings', width: 128, type: 'number',
+      renderCell: (p) => {
+        const r = p.row as WebAsset
+        if (!r.vulns) {
+          return <Box sx={{ color: alpha(neon.muted, 0.35) }}>—</Box>
+        }
+        return (
+          <Stack direction="row" spacing={0.6} sx={{ alignItems: 'center' }}>
+            <Box sx={{ color: neon.text }}>{r.vulns}</Box>
+            {/* Severity beside the total rather than instead of it.
+                "14 findings" and "14 findings, 3 of them critical"
+                are different sentences and only the second says
+                where to start. */}
+            {r.criticals > 0 && (
+              <Box sx={{ fontSize: 10.5, color: SEV.critical,
+                         fontWeight: 700 }}>{r.criticals}C</Box>
+            )}
+            {r.highs > 0 && (
+              <Box sx={{ fontSize: 10.5, color: SEV.high }}>{r.highs}H</Box>
+            )}
+          </Stack>
+        )
+      },
+    },
+    {
+      field: 'secrets', headerName: 'Secrets', width: 96, type: 'number',
+      renderCell: (p) => (p.value ?? 0) > 0 ? (
+        <Box sx={{ color: neon.yellow, fontWeight: 700,
+                   textShadow: glow(neon.yellow, 0.5) }}>{p.value}</Box>
+      ) : (
+        <Box sx={{ color: alpha(neon.muted, 0.35) }}>—</Box>
+      ),
+    },
+    {
       field: 'fetched', headerName: 'Bytes', width: 110, type: 'boolean',
       // The size is the evidence it was pulled back; a tick beside
       // it would say the same thing twice.
@@ -192,8 +230,15 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
   const d = q.data
   return (
     <Box sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}
-        flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        useFlexGap
+        sx={{
+          alignItems: "center",
+          flexWrap: "wrap",
+          mb: 1.5
+        }}>
         <ToggleButtonGroup exclusive size="small" value={filter}
           onChange={(_, v) => v && setFilter(v)}>
           <ToggleButton value="all" sx={{ fontSize: 11, py: 0.2 }}>
@@ -245,23 +290,25 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
             onChange={(e) => setContains(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') setTerm(contains) }}
             onBlur={() => setTerm(contains)}
-            InputProps={{
-              startAdornment: (
-                <InputAdornment position="start">
-                  <SearchIcon sx={{ fontSize: 15, color: neon.muted }} />
-                </InputAdornment>
-              ),
-              endAdornment: term ? (
-                <InputAdornment position="end">
-                  <IconButton size="small" title="Clear"
-                    onClick={() => { setContains(''); setTerm('') }}>
-                    <CloseIcon sx={{ fontSize: 14, color: neon.muted }} />
-                  </IconButton>
-                </InputAdornment>
-              ) : undefined,
-            }}
             sx={{ minWidth: 230,
-                  '& .MuiInputBase-input': { fontSize: 11.5, py: 0.5 } }} />
+                  '& .MuiInputBase-input': { fontSize: 11.5, py: 0.5 } }}
+            slotProps={{
+              input: {
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon sx={{ fontSize: 15, color: neon.muted }} />
+                  </InputAdornment>
+                ),
+                endAdornment: term ? (
+                  <InputAdornment position="end">
+                    <IconButton size="small" title="Clear"
+                      onClick={() => { setContains(''); setTerm('') }}>
+                      <CloseIcon sx={{ fontSize: 14, color: neon.muted }} />
+                    </IconButton>
+                  </InputAdornment>
+                ) : undefined,
+              }
+            }} />
         )}
         {!!term && (
           <Box sx={{ fontSize: 11, color: neon.cyan }}>
@@ -302,7 +349,7 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
         <AssetModal id={open} onClose={() => setOpen(null)} />
       )}
     </Box>
-  )
+  );
 }
 
 /**
@@ -344,8 +391,15 @@ function AssetSearch({ project }: { project: string | null }) {
 
   return (
     <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}
-        flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        useFlexGap
+        sx={{
+          alignItems: "center",
+          flexWrap: "wrap",
+          mb: 1.5
+        }}>
         <ToggleButtonGroup exclusive size="small" value={mode}
           onChange={(_, v) => v && setMode(v)}>
           <ToggleButton value="secrets" sx={{ fontSize: 11, py: 0.2 }}>
@@ -407,8 +461,15 @@ function AssetSearch({ project }: { project: string | null }) {
               border: `1px solid ${alpha(neon.purple, 0.3)}`,
               borderRadius: 1, p: 1.2,
             }}>
-              <Stack direction="row" spacing={1} alignItems="center"
-                flexWrap="wrap" useFlexGap sx={{ mb: 0.8 }}>
+              <Stack
+                direction="row"
+                spacing={1}
+                useFlexGap
+                sx={{
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  mb: 0.8
+                }}>
                 <Box sx={{ fontFamily: `'Share Tech Mono', monospace`,
                            fontSize: 12, color: neon.cyan, wordBreak: 'break-all' }}>
                   {a.url}
@@ -425,7 +486,9 @@ function AssetSearch({ project }: { project: string | null }) {
               <Stack spacing={0.6}>
                 {a.hits.map((h, i) => (
                   <Box key={`${h.offset}-${i}`}>
-                    <Stack direction="row" spacing={1} alignItems="baseline">
+                    <Stack direction="row" spacing={1} sx={{
+                      alignItems: "baseline"
+                    }}>
                       {h.rule && (
                         <Box sx={{ fontSize: 10, letterSpacing: '0.06em',
                           textTransform: 'uppercase',
@@ -456,5 +519,5 @@ function AssetSearch({ project }: { project: string | null }) {
         </Stack>
       )}
     </Box>
-  )
+  );
 }

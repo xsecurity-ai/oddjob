@@ -67,7 +67,14 @@ function Entry({ e }: { e: TimelineEvent }) {
         boxShadow: `0 0 8px ${alpha(colour, 0.6)}`,
       }} />
 
-      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        useFlexGap
+        sx={{
+          alignItems: "center",
+          flexWrap: "wrap"
+        }}>
         <Chip size="small" label={e.kind} sx={{
           height: 17, fontSize: 9.5, letterSpacing: '0.08em', textTransform: 'uppercase',
           bgcolor: alpha(colour, 0.14), color: colour,
@@ -115,7 +122,7 @@ function Entry({ e }: { e: TimelineEvent }) {
         </>
       )}
     </Box>
-  )
+  );
 }
 
 export function Timeline({ project, host, canWrite }: {
@@ -150,7 +157,15 @@ export function Timeline({ project, host, canWrite }: {
 
   return (
     <Box sx={{ mt: 3 }}>
-      <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1.5}
+        useFlexGap
+        sx={{
+          alignItems: "center",
+          flexWrap: "wrap",
+          mb: 1.5
+        }}>
         <Typography sx={{
           fontFamily: `'Orbitron', sans-serif`, fontSize: 11, letterSpacing: '0.16em',
           textTransform: 'uppercase', color: neon.pink, textShadow: glow(neon.pink, 0.5),
@@ -209,5 +224,5 @@ export function Timeline({ project, host, canWrite }: {
         </Typography>
       )}
     </Box>
-  )
+  );
 }

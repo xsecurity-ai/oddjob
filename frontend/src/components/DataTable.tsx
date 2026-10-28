@@ -4,7 +4,7 @@ import {
   DialogContent, DialogTitle, Paper, Stack, Tooltip, Typography, alpha,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
-import DeleteIcon from '@mui/icons-material/DeleteOutline'
+import DeleteIcon from '@mui/icons-material/DeleteOutlined'
 import EditIcon from '@mui/icons-material/EditOutlined'
 import RestartAltIcon from '@mui/icons-material/RestartAlt'
 import type { RowSelectionState } from '@tanstack/react-table'
@@ -37,7 +37,7 @@ const NO_IDS: number[] = []
 function csvCell(v: unknown): string {
   const s = v == null ? '' : String(v)
   const safe = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s
-  return `"${safe.replace(/"/g, '""')}"`
+  return `"${safe.replace(/"/g, '""')}"`;
 }
 
 export function DataTable({
@@ -266,7 +266,27 @@ export function DataTable({
 
   return (
     <Paper elevation={0} sx={{
-      flex: 1, minHeight: 0, m: { xs: 1, sm: 1.5 }, overflow: 'hidden',
+      // `flex: 1` is what sizes this inside the app shell, which is a
+      // flex column. `height: '100%'` is the fallback for every
+      // caller that is NOT one -- a plain block parent ignores
+      // `flex`, the Paper then sizes to its content, `overflow:
+      // hidden` clips instead of scrolling, and the rows below the
+      // fold become unreachable. That is the bug the Subdomain
+      // Takeovers tab shipped with.
+      //
+      // The two do not fight: in a flex container `flex: 1` sets
+      // `flex-basis: 0%`, which wins over `height` on the main axis,
+      // so this changes nothing for the callers that were already
+      // right. In a block parent with a definite height -- which any
+      // flex item with `flex: 1` has -- the percentage resolves and
+      // the table scrolls. In a parent with no definite height it
+      // falls back to `auto`, exactly as before.
+      //
+      // Checked by frontend/test/table.scroll.check.mjs, because a
+      // table that cannot reach its own last row is not a thing to
+      // rediscover a third time.
+      flex: 1, minHeight: 0, height: '100%',
+      m: { xs: 1, sm: 1.5 }, overflow: 'hidden',
       display: 'flex', flexDirection: 'column',
       backgroundColor: alpha(neon.paper, 0.72), backdropFilter: 'blur(6px)',
       border: `1px solid ${alpha(neon.pink, 0.34)}`,
@@ -371,7 +391,9 @@ export function DataTable({
           onWidth={view.setWidth}
           empty={filtering
             ? (
-              <Stack spacing={1} alignItems="center">
+              <Stack spacing={1} sx={{
+                alignItems: "center"
+              }}>
                 <Typography sx={{ fontSize: 12.5, color: neon.yellow }}>
                   No rows match the {armedItems(filterModel).length || 'current'} filter
                   {armedItems(filterModel).length === 1 ? '' : 's'} on this table.
@@ -427,5 +449,5 @@ export function DataTable({
         </DialogActions>
       </Dialog>
     </Paper>
-  )
+  );
 }

@@ -20,11 +20,15 @@ def check(l, c, e=""):
     else: fail += 1; print(f"  FAIL  {l} {e}")
 
 
-def call(p, m="GET", b=None, token=None):
+def call(p, m="GET", b=None, token=None, key=None):
     r = urllib.request.Request(BASE + p, method=m)
     if b is not None:
         r.data = json.dumps(b).encode(); r.add_header("Content-Type", "application/json")
     if token: r.add_header("Authorization", f"Bearer {token}")
+    # A ghost authenticates with its own key, not as a person. The
+    # replay section below needs both in the same suite, because the
+    # route is an operator asking and an agent answering.
+    if key: r.add_header("X-Ghost-Key", key)
     try:
         with urllib.request.urlopen(r, timeout=60) as x:
             raw = x.read(); return x.status, (json.loads(raw) if raw else None)
@@ -345,12 +349,105 @@ check("a search applies to the grouped listing too", (g2 or {}).get("total") == 
 # Editing a captured request and sending it again has to produce a NEW
 # row: the original and the edited one sitting side by side under the
 # same URL is the entire point.
+#
+# **The packet leaves from a ghost, not from this server.** So this
+# suite has to be one. `_ghost_send` below is the whole of an agent's
+# replay loop — beat, take the task, write the bytes to a socket, post
+# the answer — which is what makes these assertions about the route
+# rather than about a mock: the bytes under test really do go over TCP
+# and really do come back off it.
 print("\n== replay ==")
+import socket as _socket  # noqa: E402
+
 _hostport = BASE.split("//", 1)[1]
 _h, _, _p = _hostport.partition(":")
 call(f"/api/targets?project={_X}", "POST", {"host": _h}, token=admin)
 _self = [t for t in call(f"/api/targets?project={_X}&limit=50", token=admin)[1]["items"]
          if t["host"] == _h][0]
+
+st, _en = call(f"/api/ghosts?project={_X}", "POST",
+               {"name": "replay-ghost"}, token=admin)
+GKEY = (_en or {}).get("callback_key")
+GID = ((_en or {}).get("agent") or {}).get("id")
+# Not "replay-ghost": enrollment appends a suffix so that a container
+# restarted under the same name does not become two agents sharing
+# one row. Read back rather than assumed.
+GNAME = ((_en or {}).get("agent") or {}).get("name")
+check("a ghost is enrolled to send from", st == 201 and bool(GKEY),
+      f"{st} {str(_en)[:90]}")
+call("/api/ghosts/register", "POST",
+     {"platform": "linux", "arch": "amd64", "version": "test",
+      "hostname": "ghost", "privileged": False, "tools": {}}, key=GKEY)
+
+
+def _beat(ready=True, running=None):
+    return call("/api/ghosts/heartbeat", "POST",
+                {"ready": ready, "running_tasks": running or []}, key=GKEY)[1] or {}
+
+
+def _take(task_id, beat=None):
+    """The task with this id out of a heartbeat's hand-out, or None."""
+    for t in (beat if beat is not None else _beat()).get("tasks") or []:
+        if t.get("id") == task_id:
+            return t
+    return None
+
+
+def _wire(task):
+    """Do what the Go runner does: write the bytes, read the answer.
+
+    A raw socket and not urllib, deliberately. The point of this whole
+    path is that the request goes out exactly as it was typed, and an
+    HTTP client would rebuild it from parsed fields — which is the
+    thing that must not happen.
+    """
+    a = task["args"]
+    raw = _b64.b64decode(a["raw_b64"])
+    s = _socket.create_connection((a["host"], a["port"]), timeout=10)
+    s.settimeout(10)
+    chunks: list[bytes] = []
+    try:
+        s.sendall(raw)
+        while sum(len(c) for c in chunks) < a.get("resp_cap", 48 * 1024):
+            got = s.recv(8192)
+            if not got:
+                break
+            chunks.append(got)
+    finally:
+        s.close()
+    blob = b"".join(chunks)
+    status = None
+    if blob[:5] == b"HTTP/":
+        try:
+            status = int(blob.split(b" ", 2)[1])
+        except (IndexError, ValueError):
+            status = None
+    return {"status": status, "elapsed_ms": 7,
+            "response_b64": _b64.b64encode(blob).decode()}
+
+
+def _ghost_send(task_id, payload=None):
+    """Carry one replay task through. -> (what the ghost was given, result)."""
+    task = _take(task_id)
+    if task is None:
+        return None, {"error": "the ghost was never handed the task"}
+    out = payload if payload is not None else _wire(task)
+    call(f"/api/ghosts/tasks/{task_id}/result", "POST",
+         {"status": "done", "output": json.dumps(out), "stderr": "",
+          "summary": "replay", "exit_code": 0}, key=GKEY)
+    return task, call(f"/api/web/replays/{task_id}", token=admin)[1] or {}
+
+
+def replay(seed_id, raw, **opts):
+    """POST a replay and run it to completion. -> (status, ReplayOut)."""
+    st, q = call(f"/api/web/{seed_id}/replay", "POST",
+                 {"raw": raw, **opts}, token=admin)
+    if st != 200:
+        return st, q
+    _task, done = _ghost_send(q["task_id"])
+    return st, done
+
+
 st, seed = call("/api/web", "POST",
                 {"target_id": _self["id"], "url": f"http://{_hostport}/api/auth/methods",
                  "method": "GET"}, token=admin)
@@ -365,7 +462,42 @@ _seed_response = (_seed_pkt or {}).get("response")
 
 _raw = (f"GET /api/auth/methods HTTP/1.1\r\nHost: {_hostport}\r\n"
         f"Accept: application/json\r\n\r\n")
-st, rep = call(f"/api/web/{seed['id']}/replay", "POST", {"raw": _raw}, token=admin)
+
+# The POST answers "where is it going", not "what did it say". Pinned
+# on its own before the end-to-end run, because an endpoint that
+# silently sent the packet from this server would still satisfy every
+# assertion below it.
+st, _q = call(f"/api/web/{seed['id']}/replay", "POST", {"raw": _raw}, token=admin)
+check("the POST queues rather than sending", st == 200 and _q.get("task_id"),
+      f"{st} {str(_q)[:140]}")
+check("and names the ghost it will leave from",
+      _q.get("agent") == GNAME and _q.get("agent_id") == GID,
+      str(_q)[:140])
+check("an idle ghost is reported as idle", _q.get("dispatch") == "idle",
+      str(_q.get("dispatch")))
+st, _qt = call(f"/api/ghosts/tasks?project={_X}&limit=50", token=admin)
+_qrow = next((t for t in (_qt or []) if t.get("id") == _q["task_id"]), {})
+check("the replay is an agent task like any other work",
+      _qrow.get("kind") == "replay", str(_qrow)[:120])
+check("and nothing has been sent yet",
+      (call(f"/api/web/replays/{_q['task_id']}", token=admin)[1] or {})
+      .get("state") == "queued")
+
+# The bytes the ghost is handed are the bytes the operator typed.
+_handed = _take(_q["task_id"])
+check("the ghost is handed the request verbatim, base64'd",
+      _handed is not None
+      and _b64.b64decode(_handed["args"]["raw_b64"]).decode() == _raw,
+      str(_handed)[:160] if _handed else "never handed over")
+check("and told where to dial out of the target row, not the Host header",
+      _handed and _handed["args"]["host"] == _h
+      and _handed["args"]["port"] == int(_p),
+      str((_handed or {}).get("args", {}))[:120])
+_out = _wire(_handed)
+call(f"/api/ghosts/tasks/{_q['task_id']}/result", "POST",
+     {"status": "done", "output": json.dumps(_out), "stderr": "",
+      "summary": "replay", "exit_code": 0}, key=GKEY)
+st, rep = call(f"/api/web/replays/{_q['task_id']}", token=admin)
 check("the request is sent and the result recorded", st == 200, f"{st} {str(rep)[:140]}")
 check("it reached the server", (rep or {}).get("status_code") == 200,
       f"{(rep or {}).get('status_code')} err={(rep or {}).get('error')}")
@@ -431,12 +563,12 @@ check("the replayed response really does carry a volatile Date header",
 _sec = int(_time.time())
 while int(_time.time()) == _sec:
     _time.sleep(0.02)
-st, rep2 = call(f"/api/web/{seed['id']}/replay", "POST", {"raw": _raw}, token=admin)
+st, rep2 = replay(seed["id"], _raw)
 check("replaying the identical request twice does not duplicate",
       (rep2 or {}).get("web", {}).get("id") == (rep or {}).get("web", {}).get("id"),
       f"{(rep2 or {}).get('web', {}).get('id')} vs {(rep or {}).get('web', {}).get('id')}")
 _raw2 = _raw.replace("Accept: application/json", "Accept: text/html\r\nX-Test: 1")
-st, rep3 = call(f"/api/web/{seed['id']}/replay", "POST", {"raw": _raw2}, token=admin)
+st, rep3 = replay(seed["id"], _raw2)
 check("an edited request is a new row",
       (rep3 or {}).get("web", {}).get("id") not in
       (seed["id"], (rep or {}).get("web", {}).get("id")),
@@ -536,18 +668,176 @@ for smuggle, why in [
 st, bad = call(f"/api/web/{seed['id']}/replay", "POST", {"raw": ""}, token=admin)
 check("an empty request is refused", st == 422, f"{st} {str(bad)[:80]}")
 
-# A connection that fails is a result worth keeping, not a 500.
+# A connection that fails is a result worth keeping, not a 500 and not
+# a failed task. "This host now refuses the connection" is a finding,
+# and a row is filed for it beside the original so the two can be
+# compared. The ghost reports `done` with the failure in its payload,
+# which is exactly what the Go runner does.
 call(f"/api/targets?project={_X}", "POST", {"host": "127.0.0.2"}, token=admin)
 _dead = [t for t in call(f"/api/targets?project={_X}&limit=50", token=admin)[1]["items"]
          if t["host"] == "127.0.0.2"][0]
 st, seed2 = call("/api/web", "POST",
                  {"target_id": _dead["id"], "url": "http://127.0.0.2:9/x",
                   "method": "GET"}, token=admin)
-st, dead = call(f"/api/web/{seed2['id']}/replay", "POST",
-                {"raw": "GET /x HTTP/1.1\r\nHost: 127.0.0.2:9\r\n\r\n",
-                 "timeout": 2}, token=admin)
+st, _dq = call(f"/api/web/{seed2['id']}/replay", "POST",
+               {"raw": "GET /x HTTP/1.1\r\nHost: 127.0.0.2:9\r\n\r\n",
+                "timeout": 2}, token=admin)
+_, dead = _ghost_send(_dq["task_id"],
+                      {"error": "dial tcp 127.0.0.2:9: connection refused",
+                       "elapsed_ms": 1, "response_b64": ""})
 check("a failed connection is recorded rather than raising",
       st == 200 and (dead or {}).get("error"), f"{st} {str(dead)[:120]}")
+check("and it is a row, not just a task error",
+      (dead or {}).get("web", {}).get("id") not in (None, seed2["id"]),
+      str((dead or {}).get("web"))[:90])
+check("whose status is absent rather than invented",
+      (dead or {}).get("status_code") is None
+      and (dead or {}).get("web", {}).get("crawled") is False,
+      str((dead or {}).get("web"))[:120])
+
+# ---------------------------------------------- the dispatch rule
+# "Skip the line and go to the first available; if none are available
+# then choose one and task anyone; if there is no ghost at all, say
+# so." Three cases, three different answers.
+print("-- which ghost, and how far ahead of the queue --")
+
+# A deep backlog on the same ghost, of a kind that would otherwise be
+# taken first. Four thousand would be the real case; forty proves the
+# same thing in a suite, because the hand-out window is 100 and the
+# ordering is what decides, not the depth.
+for _i in range(40):
+    call(f"/api/ghosts/{GID}/tasks?project={_X}", "POST",
+         {"kind": "nslookup", "args": {"targets": [f"q{_i}.acme.example"]}},
+         token=admin)
+st, _jump = call(f"/api/web/{seed['id']}/replay", "POST",
+                 {"raw": _raw.replace("Accept: application/json",
+                                      "Accept: application/jump")}, token=admin)
+check("a replay is queued behind a backlog", st == 200, f"{st} {str(_jump)[:90]}")
+_first = (_beat().get("tasks") or [{}])[0]
+check("and is handed over FIRST, ahead of all of it",
+      _first.get("id") == _jump["task_id"],
+      f"got {_first.get('kind')} #{_first.get('id')}, "
+      f"wanted replay #{_jump['task_id']}")
+# Mutation check on the assertion above: without the priority ordering
+# the oldest nslookup is what comes back, so pin that the backlog is
+# genuinely in front of it by age.
+check("the backlog really was older than the replay",
+      all(t["id"] < _jump["task_id"]
+          for t in (call(f"/api/ghosts/tasks?project={_X}&limit=200",
+                         token=admin)[1] or [])
+          if t.get("kind") == "nslookup"))
+call(f"/api/ghosts/tasks/{_jump['task_id']}/result", "POST",
+     {"status": "done", "output": json.dumps(_wire(_first)), "stderr": "",
+      "summary": "replay", "exit_code": 0}, key=GKEY)
+
+# No idle ghost: it is queued against one anyway rather than refused.
+# The ghost is made busy by telling the server it is holding work,
+# which is the only thing "busy" has ever meant here.
+_holding = [t["id"] for t in (_beat().get("tasks") or [])]
+_bz = _beat(ready=False, running=_holding)
+st, _busy = call(f"/api/web/{seed['id']}/replay", "POST",
+                 {"raw": _raw.replace("application/json", "application/busy")},
+                 token=admin)
+check("a busy fleet still takes the work rather than refusing",
+      st == 200 and _busy.get("agent_id") == GID, f"{st} {str(_busy)[:110]}")
+check("and says plainly that it is waiting for a slot",
+      _busy.get("dispatch") == "busy" and "mid-scan" in (_busy.get("note") or ""),
+      str(_busy)[:160])
+# Drain, so the suite leaves the ghost idle for anything after it —
+# the work it was holding, and then the replay that was waiting behind
+# it, which is itself the proof that "queued on a busy ghost" really
+# does arrive rather than merely being accepted.
+for _tid in _holding:
+    call(f"/api/ghosts/tasks/{_tid}/result", "POST",
+         {"status": "done", "output": "[]", "stderr": "", "summary": "done",
+          "exit_code": 0}, key=GKEY)
+_was_busy = _take(_busy["task_id"])
+check("and the queued replay is handed over once the slot frees",
+      _was_busy is not None, str(_busy)[:110])
+if _was_busy is not None:
+    call(f"/api/ghosts/tasks/{_busy['task_id']}/result", "POST",
+         {"status": "done", "output": json.dumps(_wire(_was_busy)),
+          "stderr": "", "summary": "replay", "exit_code": 0}, key=GKEY)
+
+# No ghost at all. A real answer about the engagement, not an error to
+# swallow and not a quiet fallback to sending it from this server --
+# which is the whole thing this change exists to stop.
+call("/api/projects", "POST", {"code": "NOGHOST", "name": "No ghost"}, token=admin)
+call("/api/targets?project=NOGHOST", "POST", {"host": _h}, token=admin)
+_ng_t = [t for t in call("/api/targets?project=NOGHOST&limit=50",
+                         token=admin)[1]["items"] if t["host"] == _h][0]
+st, _ng_seed = call("/api/web", "POST",
+                    {"target_id": _ng_t["id"],
+                     "url": f"http://{_hostport}/api/auth/methods",
+                     "method": "GET"}, token=admin)
+st, _ng = call(f"/api/web/{_ng_seed['id']}/replay", "POST",
+               {"raw": _raw}, token=admin)
+check("an engagement with no ghost is told so, plainly",
+      st == 409 and "no ghost" in str(_ng), f"{st} {str(_ng)[:140]}")
+_ng_rows = call("/api/web?project=NOGHOST&limit=50", token=admin)[1] or {}
+check("and nothing was sent from the server instead — the seed row and "
+      "no second one", _ng_rows.get("total") == 1, str(_ng_rows.get("total")))
+
+# The one transformation `wire_form` makes, and the one it does not.
+print("-- what goes on the wire --")
+from app.routers.web import wire_form as _wf  # noqa: E402
+
+check("bare LF line endings become CRLF, because a textarea cannot type one",
+      _wf("GET / HTTP/1.1\nHost: a.acme.example\n\n")
+      == "GET / HTTP/1.1\r\nHost: a.acme.example\r\n\r\n")
+check("a request already in CRLF is left exactly as it is",
+      _wf("GET / HTTP/1.1\r\nHost: a.acme.example\r\n\r\nx=1")
+      == "GET / HTTP/1.1\r\nHost: a.acme.example\r\n\r\nx=1")
+check("the body is bytes and is not rewritten",
+      _wf("POST / HTTP/1.1\nHost: a.acme.example\n\na\nb\r\nc")
+      == "POST / HTTP/1.1\r\nHost: a.acme.example\r\n\r\na\nb\r\nc")
+check("header order, casing and duplicates all survive",
+      _wf("get /X HTTP/1.1\nhOsT: a.acme.example\nA: 1\nA: 2\nZ: 3\n\n")
+      == "get /X HTTP/1.1\r\nhOsT: a.acme.example\r\nA: 1\r\nA: 2\r\nZ: 3\r\n\r\n")
+check("a deliberately malformed request line is not repaired",
+      _wf("GET  HTTP/9.9 /x\n\n") == "GET  HTTP/9.9 /x\r\n\r\n")
+check("a request with no blank line still gets a terminator",
+      _wf("GET / HTTP/1.1\nHost: a.acme.example")
+      == "GET / HTTP/1.1\r\nHost: a.acme.example\r\n\r\n")
+
+# What the dispatch-time scope gate is offered out of a replay's
+# arguments. The gate reads EVERY argument looking for hosts, which is
+# right, and it is the reason two of those arguments are shaped the way
+# they are:
+#
+#   the request is base64, or the gate would find the Referer, the
+#   Origin and every cookie domain in it and refuse the task because
+#   one of them is not in the engagement
+#
+#   the destination is `dest_url` and not `url`, because `url` is one
+#   of the keys under which every comma-separated token counts as a
+#   host whatever it looks like -- and `/report/a,b` is a path, not a
+#   request to send something to `b`
+print("-- what the scope gate sees of a replay --")
+from app.scopegate import task_hosts as _th  # noqa: E402
+
+st, _comma = call(f"/api/web/{seed['id']}/replay", "POST",
+                  {"raw": f"GET /api/auth/methods?x=a,b HTTP/1.1\r\n"
+                          f"Host: {_hostport}\r\n"
+                          f"Referer: https://out-of-scope.example/p\r\n"
+                          f"Cookie: s=1; Domain=another.example\r\n\r\n"},
+                  token=admin)
+check("a replay carrying out-of-scope header values is queued, not refused",
+      st == 200, f"{st} {str(_comma)[:110]}")
+_ch = _take(_comma["task_id"])
+_seen = set(_th((_ch or {}).get("args") or {}))
+check("and the gate is offered the destination",
+      any(_h in s for s in _seen), str(sorted(_seen))[:160])
+check("and nothing out of the request body or headers",
+      not any("out-of-scope.example" in s or "another.example" in s
+              for s in _seen), str(sorted(_seen))[:200])
+check("and no stray token out of the query string",
+      "b" not in _seen, str(sorted(_seen))[:200])
+# Finished off, so the suite does not leave the ghost holding work.
+if _ch is not None:
+    call(f"/api/ghosts/tasks/{_comma['task_id']}/result", "POST",
+         {"status": "done", "output": json.dumps(_wire(_ch)), "stderr": "",
+          "summary": "replay", "exit_code": 0}, key=GKEY)
 
 print("\n== roots do not require targets ==")
 # A fresh engagement has scope and no targets, which is exactly when
@@ -749,5 +1039,682 @@ check("an unknown found_by is refused, not silently ignored",
       call("/api/web?project=WEB&found_by=nonsense", token=admin)[0] == 422)
 check("omitting it shows everything",
       call("/api/web?project=WEB&q=by-", token=admin)[1]["total"] == 4)
+
+
+# ================================================= subdomain takeovers
+# The matching is a pure function, so most of this is about the three
+# verdicts being three different claims rather than degrees of one.
+from app import takeover as _tk  # noqa: E402
+
+print("\n== which provider a CNAME lands on ==")
+check("an S3 bucket is recognised",
+      (_tk.provider_for("x.s3.amazonaws.com") or _tk.Provider("", ())).name == "AWS S3")
+check("...including the region-infix website form, which is not a suffix match",
+      (_tk.provider_for("b.s3-website-eu-west-1.amazonaws.com")
+       or _tk.Provider("", ())).name == "AWS S3")
+check("a trailing dot is the same name, because resolvers disagree about it",
+      _tk.provider_for("page.github.io.") is not None)
+check("case is not a different provider",
+      _tk.provider_for("PAGE.GITHUB.IO") is not None)
+check("something nobody hands out is not a provider",
+      _tk.provider_for("www.corp.com") is None)
+check("an empty cname is not a provider", _tk.provider_for("") is None)
+
+print("\n== the three verdicts are three different claims ==")
+d = _tk.decide("a.corp.com", ["a.herokuapp.com"],
+               unresolved={"a.herokuapp.com"})
+check("a chain reaching a name that does not resolve is `dangling`",
+      d is not None and d.verdict == "dangling", d and d.verdict)
+check("...and says which name it was",
+      d is not None and "a.herokuapp.com" in (d.evidence or ""), d and d.evidence)
+
+d = _tk.decide("b.corp.com", ["b.herokuapp.com"], bodies=["<h1>No such app</h1>"])
+check("a provider's own unclaimed page is `fingerprint`",
+      d is not None and d.verdict == "fingerprint", d and d.verdict)
+check("...and quotes the marker, so nobody has to refetch the page to know why",
+      d is not None and d.evidence == "No such app", d and d.evidence)
+
+d = _tk.decide("c.corp.com", ["c.myshopify.com"], bodies=["a perfectly live store"])
+check("a provider with neither piece of evidence is `candidate`, not a finding",
+      d is not None and d.verdict == "candidate", d and d.verdict)
+# It carries no evidence FOR a takeover -- that is what `candidate`
+# means -- but it does now say why neither check could convict. A
+# bare "could not determine" tells a reader a conclusion is absent
+# without telling them what is absent.
+check("...carrying no proof of a takeover",
+      d is not None and d.verdict == "candidate", d and d.verdict)
+check("...but saying why it could not be settled",
+      d is not None and d.evidence and "not proven either way" in d.evidence,
+      d and d.evidence)
+
+check("a host pointing nowhere interesting is not a row at all",
+      _tk.decide("d.corp.com", ["d.corp.com.cdn.internal"]) is None)
+check("no cname at all is not a row", _tk.decide("e.corp.com", []) is None)
+check("dangling outranks a fingerprint when both could apply",
+      (_tk.decide("f.corp.com", ["f.herokuapp.com"],
+                  bodies=["No such app"],
+                  unresolved={"f.herokuapp.com"}) or _tk.Candidate(
+                      "", "", [], "", True, "", None)).verdict == "dangling")
+
+print("\n== AWS puts the region where a suffix cannot see it ==")
+# Found by running the detector against a live engagement: the first
+# real CNAME chain collected ended at
+# `...elb.ap-southeast-1.amazonaws.com`, matched nothing, and the
+# table reported zero takeovers on an estate that had them. A suffix
+# match cannot see a region in the middle of a name.
+check("the ELB spelling that was actually observed matches",
+      (_tk.provider_for("zpath-prod-exporter-28195a8e3048929a"
+                        ".elb.ap-southeast-1.amazonaws.com")
+       or _tk.Provider("", ())).name == "AWS ELB")
+check("...as does the other spelling AWS uses",
+      (_tk.provider_for("x-123.eu-west-1.elb.amazonaws.com")
+       or _tk.Provider("", ())).name == "AWS ELB")
+check("...and the regionless one",
+      (_tk.provider_for("x-123.elb.amazonaws.com")
+       or _tk.Provider("", ())).name == "AWS ELB")
+check("an ELB name is NOT claimable — the suffix is AWS-assigned, so "
+      "nobody can re-register it",
+      (_tk.provider_for("x-123.elb.amazonaws.com")
+       or _tk.Provider("", ("",), claimable=True)).claimable is False)
+
+# The same infix problem for S3, which used to be three hardcoded
+# startswith checks inside the matcher.
+check("an S3 website endpoint with a region still matches",
+      (_tk.provider_for("b.s3-website-eu-west-1.amazonaws.com")
+       or _tk.Provider("", ())).name == "AWS S3")
+check("...and the dualstack spelling",
+      (_tk.provider_for("b.s3.dualstack.us-east-1.amazonaws.com")
+       or _tk.Provider("", ())).name == "AWS S3")
+check("...and the external-1 spelling",
+      (_tk.provider_for("b.s3-external-1.amazonaws.com")
+       or _tk.Provider("", ())).name == "AWS S3")
+check("...while a plain bucket is still claimable, unlike an ELB",
+      (_tk.provider_for("b.s3.amazonaws.com")
+       or _tk.Provider("", ())).claimable is True)
+
+print("\n== an undetermined row says WHAT is missing ==")
+# "Could not determine" on its own tells a reader a conclusion is
+# absent without telling them what is absent, which is the one thing
+# they need to go and settle it. Three genuinely different
+# situations hide behind that phrase and each implies a different
+# next action.
+_elb = _tk.decide("a.corp.com", ["x.elb.eu-west-1.amazonaws.com"])
+check("a provider with no unclaimed page says so",
+      "no distinctive unclaimed page" in (_elb.evidence or ""), _elb.evidence)
+check("...and names the lookup that would settle it",
+      "Run a DNS lookup" in (_elb.evidence or ""), _elb.evidence)
+
+_none = _tk.decide("b.corp.com", ["b.s3.amazonaws.com"])
+check("nothing fetched says nothing was fetched",
+      "nothing has been fetched" in (_none.evidence or ""), _none.evidence)
+check("...and says what to run", "httpx" in (_none.evidence or ""),
+      _none.evidence)
+
+_live = _tk.decide("c.corp.com", ["c.s3.amazonaws.com"],
+                   bodies=["<html>a perfectly live bucket</html>"])
+check("a page that is NOT the unclaimed one says the resource looks live",
+      "suggests the resource is live" in (_live.evidence or ""), _live.evidence)
+check("...while still not claiming it is proven either way",
+      "not proven either way" in (_live.evidence or ""), _live.evidence)
+
+check("the three reasons are actually different",
+      len({_elb.evidence, _none.evidence, _live.evidence}) == 3)
+# The finding carries it too: a vuln that says "could not determine"
+# with no reason gives its reader nothing to act on.
+check("the finding description carries the reason",
+      "Not confirmed:" in _tk.vuln_description(_elb),
+      _tk.vuln_description(_elb)[:80])
+
+print("\n== what CloudFront actually says, and what it means ==")
+# This section exists because the detector was wrong on live data and
+# said so with confidence. Its CloudFront fingerprint was the string
+# "ERROR: The request could not be satisfied", which CloudFront
+# returns for at least four unrelated reasons. Thirteen hostnames
+# matched it on one engagement. Reading the captured bodies back, all
+# thirteen were live distributions.
+#
+# The bodies below are the four real shapes, with the client's names
+# taken out.
+_CF = ('<HTML><HEAD><TITLE>ERROR: The request could not be satisfied'
+       '</TITLE></HEAD><BODY><H1>403 ERROR</H1>'
+       '<H2>The request could not be satisfied.</H2>'
+       '<HR noshade size="1px">{}'
+       '<BR clear="all"><HR noshade size="1px">'
+       '<PRE>Generated by cloudfront (CloudFront) HTTP3 Server</PRE>'
+       '</BODY></HTML>')
+_CF_UNCLAIMED = _CF.format("Bad request.")
+_CF_WAF = _CF.format("Request blocked.")
+_CF_METHOD = _CF.format(
+    "This distribution is not configured to allow the HTTP request method "
+    "that was used for this request.")
+_CF_GEO = _CF.format(
+    "The Amazon CloudFront distribution is configured to block access "
+    "from your country.")
+
+_tls = lambda b: _tk.Capture(b, secure=True)      # noqa: E731
+_plain = lambda b: _tk.Capture(b, secure=False)   # noqa: E731
+
+# The measured fact: every `Bad request.` on that engagement came
+# over http, and the SAME hostname over https returned the WAF page.
+# CloudFront routes on the TLS name, so a plaintext answer from it
+# says nothing about whether the name is claimed.
+d = _tk.decide("a.corp.com", ["a.cloudfront.net"],
+               bodies=[_plain(_CF_UNCLAIMED)])
+check("a plaintext CloudFront 'Bad request.' does NOT convict",
+      d is not None and d.verdict == "candidate", d and d.verdict)
+check("...and says it was the scheme that stopped it",
+      d is not None and "came over http" in (d.evidence or ""), d and d.evidence)
+
+d = _tk.decide("b.corp.com", ["b.cloudfront.net"],
+               bodies=[_tls(_CF_UNCLAIMED)])
+check("the same page over https DOES convict",
+      d is not None and d.verdict == "fingerprint", d and d.verdict)
+
+# The three that are served BY a distribution, so they prove the
+# opposite of a takeover. Each was counted as evidence FOR one.
+for _label, _body in (("a WAF block", _CF_WAF),
+                      ("a 405", _CF_METHOD),
+                      ("a geo block", _CF_GEO)):
+    d = _tk.decide("c.corp.com", ["c.cloudfront.net"], bodies=[_tls(_body)])
+    check(f"{_label} from CloudFront is `live`, not a takeover",
+          d is not None and d.verdict == "live", d and d.verdict)
+    check(f"...and {_label} says why the name is claimed",
+          d is not None and "claimed" in (d.evidence or ""), d and d.evidence)
+
+# `Bad request.` is four words that appear on a thousand error pages.
+# Without the guard the fingerprint matches a page CloudFront did not
+# serve at all.
+d = _tk.decide("e.corp.com", ["e.cloudfront.net"],
+               bodies=[_tls("<html><body>Bad request.</body></html>")])
+check("'Bad request.' on a page CloudFront did not generate is not a hit",
+      d is not None and d.verdict == "candidate", d and d.verdict)
+
+# Both at once is not a verdict. It is two observations that cannot
+# both describe the same moment, and picking the louder one is how
+# the thirteen false positives were written.
+d = _tk.decide("f.corp.com", ["f.cloudfront.net"],
+               bodies=[_tls(_CF_UNCLAIMED), _tls(_CF_WAF)])
+check("evidence that disagrees with itself is not a finding",
+      d is not None and d.verdict == "candidate", d and d.verdict)
+check("...and says so, rather than picking one",
+      d is not None and "disagrees with itself" in (d.evidence or ""),
+      d and d.evidence)
+
+# A dangling chain still outranks everything, including a live page:
+# a resolver reporting the hop empty is a fact about DNS, and the
+# page may simply be older.
+d = _tk.decide("g.corp.com", ["g.cloudfront.net"], bodies=[_tls(_CF_WAF)],
+               unresolved={"g.cloudfront.net"})
+check("a chain that does not resolve still outranks a live page",
+      d is not None and d.verdict == "dangling", d and d.verdict)
+
+# A plain string is still a body, for every provider that does not
+# route on SNI. Changing the shape must not quietly disarm the rest
+# of the table.
+check("a bare string body still works for a provider without tls_only",
+      (_tk.decide("h.corp.com", ["h.herokuapp.com"],
+                  bodies=["No such app"]) or
+       _tk.Candidate("", "", [], "", True, "", None)).verdict == "fingerprint")
+
+print("\n== `live` is an answer, not a finding ==")
+check("`live` is a verdict the detector can reach",
+      "live" in _tk.VERDICTS)
+check("...and it is NOT raised as a finding",
+      "live" not in _tk.RAISE_VERDICTS, _tk.RAISE_VERDICTS)
+# The other three are. A row that could not be settled is still
+# worth somebody's eyes; a row that was settled in the "nothing here"
+# direction is a finished question.
+check("...while the other three still are",
+      set(_tk.RAISE_VERDICTS) == {"dangling", "fingerprint", "candidate"},
+      _tk.RAISE_VERDICTS)
+check("a live row still has a severity, so the table has no hole",
+      _tk.severity_for(_tk.Candidate("x", "y", [], "AWS CloudFront",
+                                     False, "live", "served x")) == "low")
+
+
+print("\n== 'nobody looked' and 'it resolves' are different answers ==")
+# The gap this closes, found by actually running the lookups: 35 hops
+# were resolved on the live engagement and every row still read "no
+# lookup has reported this as empty" -- which is true of a name
+# nobody has looked up AND of one that answered an hour ago. A reader
+# told the first when the second is true is being told the check has
+# not happened when it has.
+_never = _tk.decide("a.corp.com", ["x.elb.eu-west-1.amazonaws.com"])
+_does = _tk.decide("b.corp.com", ["x.elb.eu-west-1.amazonaws.com"],
+                   resolved={"x.elb.eu-west-1.amazonaws.com"})
+check("with no lookup, it asks for one",
+      "Run a DNS lookup" in (_never.evidence or ""), _never.evidence)
+check("once it has resolved, it says so instead",
+      "answered with addresses" in (_does.evidence or ""), _does.evidence)
+check("...and stops asking for a lookup that has happened",
+      "Run a DNS lookup" not in (_does.evidence or ""), _does.evidence)
+check("the two are genuinely different sentences",
+      _never.evidence != _does.evidence)
+
+# A resolving hop does NOT prove the resource is claimed. Several of
+# these providers answer for names nobody has taken -- that is the
+# entire reason subdomain takeover works -- so the text must not
+# upgrade an observation into a conclusion.
+check("a resolving hop is not claimed to prove anything more",
+      _does.verdict == "candidate", _does.verdict)
+_live = _tk.decide("c.corp.com", ["c.s3.amazonaws.com"],
+                   bodies=["<html>a perfectly live bucket</html>"],
+                   resolved={"c.s3.amazonaws.com"})
+check("...and with a live-looking page too, it still says 'without proving'",
+      "without proving" in (_live.evidence or ""), _live.evidence)
+
+# An EMPTY answer still outranks everything: that is the one case
+# where the record is provably pointing at nothing.
+_gone = _tk.decide("d.corp.com", ["d.herokuapp.com"],
+                   unresolved={"d.herokuapp.com"},
+                   resolved={"d.herokuapp.com"})
+check("an empty answer still wins over a stale resolving one",
+      _gone.verdict == "dangling", _gone.verdict)
+
+
+print("\n== not every dangling record is an exploitable takeover ==")
+d = _tk.decide("g.corp.com", ["g.elasticbeanstalk.com"],
+               unresolved={"g.elasticbeanstalk.com"})
+check("beanstalk still dangles and is still reported",
+      d is not None and d.verdict == "dangling", d and d.verdict)
+check("...but is marked unclaimable, so a report does not overstate it",
+      d is not None and d.claimable is False, d and d.claimable)
+check("an S3 bucket by contrast is claimable",
+      (_tk.decide("h.corp.com", ["h.s3.amazonaws.com"]) or
+       _tk.Candidate("", "", [], "", False, "", None)).claimable is True)
+
+print("\n== the chain is kept, not just the hop that matched ==")
+d = _tk.decide("i.corp.com", ["edge.corp.com", "i.github.io"])
+check("an intermediate hop does not hide the provider behind it",
+      d is not None and d.provider == "GitHub Pages", d and d.provider)
+check("...and the cname recorded is the hop that landed on it",
+      d is not None and d.cname == "i.github.io", d and d.cname)
+check("...while the whole chain survives for a reader",
+      d is not None and d.chain == ["edge.corp.com", "i.github.io"], d and d.chain)
+
+print("\n== a takeover becomes a finding ==")
+def _sev(verdict, claimable):
+    return _tk.severity_for(_tk.Candidate(
+        "h", "cn", ["cn"], "P", claimable, verdict,
+        None if verdict == "candidate" else "evidence"))
+
+check("a record nobody can re-register is Low",
+      _sev("fingerprint", False) == "low")
+check("...and one anybody can is not",
+      _sev("fingerprint", True) == "high")
+
+# The inversion this table exists to prevent, measured on a live
+# engagement: keyed on `claimable` alone, an EVIDENCED CloudFront
+# finding ranked Low while an UNEVIDENCED Heroku name would have
+# ranked High. A report where a proven misconfiguration sits below a
+# guess teaches its reader to distrust the severities.
+print("\n== a guess never outranks evidence ==")
+_rank = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+_evidenced = [_sev(v, c) for v in ("dangling", "fingerprint")
+              for c in (False, True)]
+_guesses = [_sev("candidate", c) for c in (False, True)]
+check("the worst unevidenced row does not outrank the best evidenced one",
+      max(_rank[x] for x in _guesses) <= min(_rank[x] for x in _evidenced),
+      (_guesses, _evidenced))
+check("an unevidenced claimable row no longer borrows High",
+      _sev("candidate", True) == "low", _sev("candidate", True))
+check("evidence on a claimable provider is still the top of the table",
+      _sev("dangling", True) == "high")
+check("claimable=False is Low throughout, as specified",
+      all(_sev(v, False) == "low"
+          for v in ("dangling", "fingerprint", "candidate")))
+check("a verdict the table has never met falls to the floor, not the top",
+      _tk.severity_for(_tk.Candidate("h", "c", ["c"], "P", True,
+                                     "something-new", None)) == "low")
+_c = _tk.Candidate("x.corp.com", "y.elb.eu-west-1.amazonaws.com",
+                   ["y.elb.eu-west-1.amazonaws.com"], "AWS ELB",
+                   False, "candidate", None)
+_d = _tk.vuln_description(_c)
+check("the description says the verdict could not be determined, rather "
+      "than asserting the record dangles",
+      "Neither check could be run" in _d, _d[:80])
+check("...and says plainly that it is not an exploitable takeover",
+      "not an exploitable takeover" in _d, _d[:80])
+_c2 = _tk.Candidate("y.corp.com", "b.s3.amazonaws.com",
+                    ["b.s3.amazonaws.com"], "AWS S3", True,
+                    "fingerprint", "NoSuchBucket")
+_d2 = _tk.vuln_description(_c2)
+check("a claimable one says somebody else can serve content on the name",
+      "somebody else can serve content" in _d2, _d2[:80])
+check("...and quotes the evidence that convicted it",
+      "NoSuchBucket" in _d2, _d2[:120])
+
+print("\n== the endpoint ==")
+TAKEOVER_HTTPX = "\n".join(json.dumps(x) for x in [
+    {"url": "https://dead.corp.com", "input": "dead.corp.com",
+     "host": "10.0.0.77", "port": 443, "scheme": "https", "status_code": 404,
+     "cname": ["dead.herokuapp.com"]},
+    {"url": "https://live.corp.com", "input": "live.corp.com",
+     "host": "10.0.0.78", "port": 443, "scheme": "https", "status_code": 200,
+     "cname": ["live.corp.com.edge.internal"]},
+])
+imp(TAKEOVER_HTTPX)
+st, r = call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
+check("refresh runs and reports what it decided", st == 200, f"{st} {r}")
+# `total` counts TAKEOVERS. The findings raised are a separate number:
+# folding them into the same dict made `sum(counts.values())` report
+# eight rows for four, which is the sort of wrong a findings page
+# should not be able to show.
+check("total is the takeover count, not takeovers plus findings",
+      (r or {}).get("total") == sum((r or {}).get("counts", {}).values()),
+      r)
+check("...and the findings raised are reported separately",
+      "findings_open" in (r or {}), r)
+check("no verdict key is an internal one",
+      not any(k.startswith("_") for k in (r or {}).get("counts", {})), r)
+st, r = call("/api/web/takeovers?project=WEB", token=admin)
+check("the endpoint answers", st == 200, st)
+hosts = {i["hostname"]: i for i in (r or {}).get("items", [])}
+check("the host pointing at heroku is listed",
+      "dead.corp.com" in hosts, list(hosts))
+check("...as a candidate, because nothing here proved it dangles",
+      hosts.get("dead.corp.com", {}).get("verdict") == "candidate",
+      hosts.get("dead.corp.com"))
+check("...naming the provider", hosts.get("dead.corp.com", {}).get("provider") == "Heroku",
+      hosts.get("dead.corp.com"))
+check("the host pointing at internal infrastructure is NOT listed",
+      "live.corp.com" not in hosts, list(hosts))
+
+tid = hosts.get("dead.corp.com", {}).get("id")
+st, r = call(f"/api/web/takeovers/{tid}?project=WEB", "PATCH",
+             {"state": "false_positive", "note": "client owns it"}, token=admin)
+check("an operator can triage a row", st == 200 and r["state"] == "false_positive",
+      f"{st} {r}")
+
+# The whole point of re-deriving rather than accumulating: DNS facts
+# are rebuilt, operator decisions are not thrown away with them.
+call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
+st, r = call("/api/web/takeovers?project=WEB", token=admin)
+again = {i["hostname"]: i for i in (r or {}).get("items", [])}
+check("a refresh keeps the triage an operator already did",
+      again.get("dead.corp.com", {}).get("state") == "false_positive",
+      again.get("dead.corp.com"))
+
+# The finding side of the same pass.
+print("\n== the finding is raised, once, and tracks the record ==")
+st, vs = call("/api/vulns?project=WEB&limit=500", token=admin)
+tv = [v for v in (vs or {}).get("items", [])
+      if (v.get("external_id") or "").startswith("takeover:")]
+check("a finding was raised for the takeover", len(tv) >= 1, len(tv))
+# dead.corp.com points at Heroku, which IS first-come -- but nothing
+# here showed the name to be unclaimed, so the verdict is `candidate`
+# and the severity is Low. Claimable says how bad IF TRUE; the
+# verdict says whether we know it is true, and it caps the answer.
+# This assertion read High until the severity table grew its second
+# input, which is the inversion it was written to catch.
+check("...at Low: first-come, but nothing showed it was unclaimed",
+      all(v["severity"] == "low" for v in tv), [v["severity"] for v in tv])
+check("...keyed on external_id so it can be found again",
+      all(v["external_id"].startswith("takeover:") for v in tv), tv[:1])
+
+# Run the detector twice more. A detector that re-derives on every
+# pass and forks a finding each time produces a pile, not a list.
+call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
+call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
+st, vs2 = call("/api/vulns?project=WEB&limit=500", token=admin)
+tv2 = [v for v in (vs2 or {}).get("items", [])
+       if (v.get("external_id") or "").startswith("takeover:")]
+check("three refreshes do not make three findings",
+      len(tv2) == len(tv), f"{len(tv)} then {len(tv2)}")
+
+# The Low half of the pair: a provider surface nobody can re-register.
+ELB_HTTPX = json.dumps(
+    {"url": "https://lb.corp.com", "input": "lb.corp.com",
+     "host": "10.0.0.90", "port": 443, "scheme": "https",
+     "status_code": 200,
+     "cname": ["lb-9f2.elb.ap-southeast-1.amazonaws.com"]})
+imp(ELB_HTTPX)
+call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
+st, vs3 = call("/api/vulns?project=WEB&limit=500", token=admin)
+elb = [v for v in (vs3 or {}).get("items", [])
+       if (v.get("external_id") or "") == "takeover:lb.corp.com"]
+check("an ELB-backed record is raised too", len(elb) == 1, len(elb))
+check("...at Low, because the name is AWS-assigned and not re-registerable",
+      elb and elb[0]["severity"] == "low", elb and elb[0]["severity"])
+
+# The High case end to end: a first-come provider AND evidence. This
+# is the only shape that reaches the top of the table, and without a
+# test for it the severity column could be stuck on Low and nothing
+# would say so.
+S3_HTTPX = json.dumps(
+    {"url": "https://gone.corp.com", "input": "gone.corp.com",
+     "host": "10.0.0.91", "port": 443, "scheme": "https",
+     "status_code": 404, "cname": ["gone-assets.s3.amazonaws.com"],
+     "response": "HTTP/1.1 404\r\n\r\n<Error><Code>NoSuchBucket</Code>"
+                 "<Message>The specified bucket does not exist</Message>"
+                 "</Error>"})
+imp(S3_HTTPX)
+call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
+st, vs4 = call("/api/vulns?project=WEB&limit=500", token=admin)
+s3 = [v for v in (vs4 or {}).get("items", [])
+      if (v.get("external_id") or "") == "takeover:gone.corp.com"]
+check("an evidenced takeover on a first-come provider is raised",
+      len(s3) == 1, len(s3))
+check("...at High — the one shape that reaches the top of the table",
+      s3 and s3[0]["severity"] == "high", s3 and s3[0]["severity"])
+
+check("...and the note with it",
+      again.get("dead.corp.com", {}).get("note") == "client owns it",
+      again.get("dead.corp.com"))
+
+
+print("\n== a row that is serving raises nothing ==")
+# The half of the CloudFront fix that decides whether a client's
+# report gets cleaner. Thirteen findings were raised by the old
+# detector against hosts that were live all along. The new detector
+# decides those `live`, which is NOT in RAISE_VERDICTS -- so no
+# finding is raised, and `_sync_vulns` closes any that already
+# exists because it is no longer wanted.
+#
+# Closed rather than deleted, deliberately: "we found this and it
+# was not real" is a thing a report should be able to say.
+LIVE_ONLY = json.dumps(
+    {"url": "https://cdn.corp.com", "input": "cdn.corp.com",
+     "host": "10.0.0.92", "port": 443, "scheme": "https",
+     "status_code": 403, "cname": ["d111111abcdef8.cloudfront.net"],
+     "response": "HTTP/1.1 403\r\n\r\n<HTML><H1>403 ERROR</H1>"
+                 "<H2>The request could not be satisfied.</H2>"
+                 "Request blocked.<PRE>Generated by cloudfront (CloudFront)"
+                 "</PRE></HTML>"})
+imp(LIVE_ONLY)
+call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
+
+st, tks = call("/api/web/takeovers?project=WEB&verdict=live", token=admin)
+rows = [t for t in (tks or {}).get("items", [])
+        if t["hostname"] == "cdn.corp.com"]
+check("a WAF page from CloudFront decides the row `live`", len(rows) == 1,
+      [t["hostname"] for t in (tks or {}).get("items", [])])
+check("...and says what it saw, not that it could not tell",
+      rows and "claimed" in (rows[0]["evidence"] or ""),
+      rows and rows[0]["evidence"])
+
+st, vs5 = call("/api/vulns?project=WEB&limit=500", token=admin)
+cdn = [v for v in (vs5 or {}).get("items", [])
+       if (v.get("external_id") or "") == "takeover:cdn.corp.com"]
+# This is the number that was 13 on the live engagement.
+check("NO finding is raised for it", len(cdn) == 0,
+      [v["title"] for v in cdn])
+# The row still exists, so the work is visible even though nothing
+# was filed. A sweep that examined a host and found nothing must not
+# look like a sweep that never ran.
+check("...while the row stays in the table, so the check is visible",
+      len(rows) == 1)
+
+print("\n== plaintext cannot convict a provider that routes on SNI ==")
+# The production shape, which is the one that mattered: an http
+# "Bad request." on the same host as an https WAF page. The http
+# body is an artefact of asking port 80 -- CloudFront routes on the
+# TLS name -- so it must not create a contradiction with the https
+# answer, or every one of the thirteen would come back as
+# `candidate` instead of being settled.
+PLAINTEXT_BAD = json.dumps(
+    {"url": "http://cdn.corp.com", "input": "cdn.corp.com",
+     "host": "10.0.0.92", "port": 80, "scheme": "http",
+     "status_code": 403, "cname": ["d111111abcdef8.cloudfront.net"],
+     "response": "HTTP/1.1 403\r\n\r\n<HTML><H1>403 ERROR</H1>"
+                 "<H2>The request could not be satisfied.</H2>"
+                 "Bad request.<PRE>Generated by cloudfront (CloudFront)"
+                 "</PRE></HTML>"})
+imp(PLAINTEXT_BAD)
+call("/api/web/takeovers/refresh?project=WEB", "POST", {}, token=admin)
+st, tks2 = call("/api/web/takeovers?project=WEB", token=admin)
+row2 = [t for t in (tks2 or {}).get("items", [])
+        if t["hostname"] == "cdn.corp.com"]
+check("the http page does not argue with the https one",
+      row2 and row2[0]["verdict"] == "live",
+      row2 and (row2[0]["verdict"], row2[0]["evidence"]))
+st, vs6 = call("/api/vulns?project=WEB&limit=500", token=admin)
+cdn2 = [v for v in (vs6 or {}).get("items", [])
+        if (v.get("external_id") or "") == "takeover:cdn.corp.com"]
+check("...and still raises nothing", len(cdn2) == 0,
+      [v["title"] for v in cdn2])
+
+
+# ======================================================== screenshots
+print("== a ghost's screenshot lands, and can be read back ==")
+# The picture is the only artefact here that answers "what IS this"
+# rather than "what did it say", and it travels as base64 because the
+# agent's result is one JSON document in a text column -- a PNG
+# contains NUL bytes, which Postgres refuses in text outright. So the
+# round trip worth testing is: base64 in, bytes out, served as an
+# image.
+import struct as _struct  # noqa: E402
+import zlib as _zlib  # noqa: E402
+
+# `_b64` is already imported further up this file, where the exchange
+# capture needed it.
+
+
+def _png(w=4, h=3):
+    """A real, valid PNG. Built rather than pasted, so the test says
+    what makes it valid instead of carrying an opaque blob."""
+    def chunk(tag, data):
+        c = tag + data
+        return (_struct.pack(">I", len(data)) + c
+                + _struct.pack(">I", _zlib.crc32(c) & 0xFFFFFFFF))
+    raw = b"".join(b"\x00" + b"\xff\x00\x80" * w for _ in range(h))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", _struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", _zlib.compress(raw))
+            + chunk(b"IEND", b""))
+
+
+SHOT_URL = "https://portal.acme.example/login"
+SHOT = json.dumps({
+    "browser": "/usr/bin/chromium",
+    "viewport": {"width": 1280, "height": 800},
+    "shots": [{
+        "url": SHOT_URL,
+        "final_url": "https://sso.acme.example/login?rd=portal",
+        "status": 200, "title": "ACME portal",
+        "server": "acme-httpd/1.0", "page_content_type": "text/html",
+        "width": 1280, "height": 800,
+        "bytes": len(_png()), "sha256": "0" * 64,
+        "png_base64": _b64.b64encode(_png()).decode(),
+    }],
+    "failed": [{"url": "https://dead.acme.example/",
+                "error": "net::ERR_CONNECTION_REFUSED"}],
+})
+
+st, rep = imp(SHOT)
+check("a screenshot result is recognised without being told",
+      st == 200 and (rep or {}).get("format") == "screenshot", (st, rep))
+check("the picture is stored", (rep or {}).get("screenshots_created") == 1,
+      (rep or {}).get("screenshots_created"))
+# The page that could not be photographed is NAMED. "1 of 2" with no
+# account of the other is the substitution this codebase treats as a
+# bug rather than a rounding error.
+check("...and the page that failed is reported rather than dropped",
+      any("dead.acme.example" in e for e in (rep or {}).get("errors") or []),
+      (rep or {}).get("errors"))
+# A photographed URL is a FETCHED URL: a browser asked for it and drew
+# the answer. That is stronger evidence than a crawl's "something
+# linked to this", and it gives the picture a row to be shown on.
+st, rows = call("/api/web?project=WEB&q=portal.acme.example&limit=50",
+                token=admin)
+shot_row = [r for r in (rows or {}).get("items", [])
+            if r["url"] == SHOT_URL]
+check("the URL itself reaches the inventory", len(shot_row) == 1,
+      [r["url"] for r in (rows or {}).get("items", [])])
+check("...recorded as fetched, not merely linked to",
+      shot_row and shot_row[0]["crawled"] is True)
+check("...carrying what the browser saw",
+      shot_row and shot_row[0]["status_code"] == 200
+      and shot_row[0]["title"] == "ACME portal",
+      shot_row and (shot_row[0]["status_code"], shot_row[0]["title"]))
+
+st, pk = call(f"/api/web/{shot_row[0]['id']}/packet", token=admin)
+shot = (pk or {}).get("screenshot")
+check("the packet view knows the picture exists", st == 200 and bool(shot),
+      (st, pk))
+check("...and says when it was taken, because a picture carries no date",
+      bool((shot or {}).get("captured_at")), shot)
+check("...and where the browser ended up, which the image cannot show",
+      ((shot or {}).get("final_url") or "").startswith("https://sso.acme.example"),
+      (shot or {}).get("final_url"))
+# The image itself is bytes from its own endpoint. An <img> cannot
+# send an Authorization header, and nothing base64-encodes a megabyte
+# into JSON to get a picture onto a page.
+_req = urllib.request.Request(
+    f"{BASE}/api/web/screenshots/{shot['id']}/image")
+_req.add_header("Authorization", f"Bearer {admin}")
+with urllib.request.urlopen(_req, timeout=60) as _r:
+    _body = _r.read()
+    _ctype = _r.headers.get("Content-Type", "")
+check("the image comes back as a PNG",
+      _body.startswith(b"\x89PNG\r\n\x1a\n") and _ctype == "image/png",
+      (_ctype, _body[:8]))
+check("...byte for byte what the agent sent", _body == _png(),
+      (len(_body), len(_png())))
+
+# A second capture REPLACES. Ten pictures of one URL are ten copies of
+# one page, and across an estate that has reached 51,000 URLs that is
+# the difference between a database and a problem.
+AGAIN = json.loads(SHOT)
+AGAIN["shots"][0]["title"] = "ACME portal (maintenance)"
+st, rep2 = imp(json.dumps(AGAIN))
+check("a re-shoot replaces rather than accumulating",
+      (rep2 or {}).get("screenshots_updated") == 1
+      and (rep2 or {}).get("screenshots_created") == 0, rep2)
+st, pk2 = call(f"/api/web/{shot_row[0]['id']}/packet", token=admin)
+check("...and the metadata describes THIS picture, not the last one",
+      ((pk2 or {}).get("screenshot") or {}).get("title")
+      == "ACME portal (maintenance)",
+      ((pk2 or {}).get("screenshot") or {}).get("title"))
+
+# A field called png_base64 holding something else is not a picture,
+# and the one thing worse than no screenshot is one that renders as
+# nothing and explains itself to nobody.
+NOTPNG = json.dumps({
+    "browser": "/usr/bin/chromium", "viewport": {"width": 800, "height": 600},
+    "shots": [{"url": "https://fake.acme.example/",
+               "png_base64": _b64.b64encode(b"GIF89a not a png").decode()}],
+})
+st, rep3 = imp(NOTPNG)
+check("something that is not a PNG is refused, with a reason",
+      st != 200 or (rep3 or {}).get("screenshots_created") == 0,
+      (st, rep3))
+
+# An operator reading the task afterwards must still be able to see
+# what it did -- but not a second copy of every image.
+from app.importers import screenshot as _shotmod  # noqa: E402
+
+_stripped = json.loads(_shotmod.without_images(SHOT))
+check("the stored result keeps everything but the payload",
+      "png_base64" not in _stripped["shots"][0]
+      and _stripped["shots"][0]["url"] == SHOT_URL
+      and _stripped["shots"][0]["sha256"] == "0" * 64
+      and _stripped["failed"][0]["url"] == "https://dead.acme.example/",
+      _stripped["shots"][0])
+check("...and says where the bytes went",
+      _stripped["shots"][0].get("stored_in_database") is True)
+check("stripping something that is not a screenshot result changes nothing",
+      _shotmod.without_images("not json at all") == "not json at all")
+
 
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

@@ -332,4 +332,15 @@ def summary_json(doc: ReportDoc) -> str:
         "sections": [s.heading for s in doc.sections],
         "stats": doc.stats,
         "agent_edited": doc.agent_edited,
+        # Carried here as well as in the document.
+        #
+        # The list used to read it by parsing the whole `content`
+        # column -- twelve megabytes of JSON per row, to pull out one
+        # optional string. Two reports made listing them a sixty
+        # second request that timed out and rendered as "no reports".
+        #
+        # `summary` is a few hundred bytes and the list already loads
+        # it, so putting the note here is the difference between a
+        # column read and a document parse.
+        "agent_note": doc.agent_note,
     })

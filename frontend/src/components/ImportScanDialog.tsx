@@ -104,7 +104,9 @@ export function ImportScanDialog({ project, onClose }: {
 
   const row = (label: string, value: number, colour: string = neon.text) => (
     value === 0 ? null : (
-      <Stack key={label} direction="row" spacing={1} justifyContent="space-between">
+      <Stack key={label} direction="row" spacing={1} sx={{
+        justifyContent: "space-between"
+      }}>
         <Typography sx={{ fontSize: 12, color: neon.muted }}>{label}</Typography>
         <Typography sx={{ fontSize: 12, color: colour, fontWeight: 600 }}>{value}</Typography>
       </Stack>
@@ -149,7 +151,13 @@ export function ImportScanDialog({ project, onClose }: {
           {result ? (
             <Box sx={{ p: 2, borderRadius: 1, background: alpha(neon.bgDeep, 0.5),
                        border: `1px solid ${alpha(neon.green, 0.35)}` }}>
-              <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.2 }}>
+              <Stack
+                direction="row"
+                spacing={1}
+                sx={{
+                  alignItems: "center",
+                  mb: 1.2
+                }}>
                 <Chip size="small" label={result.format} sx={{
                   height: 19, fontSize: 10, bgcolor: alpha(neon.cyan, 0.15),
                   color: neon.cyan, border: `1px solid ${alpha(neon.cyan, 0.5)}` }} />
@@ -178,6 +186,15 @@ export function ImportScanDialog({ project, onClose }: {
                                   wordBreak: 'break-all' }}>
                   {result.command}
                 </Typography>
+              )}
+              {/* Above the per-line errors, because it is the one
+                  that changes how everything else should be read: a
+                  clean set of zeros means nothing if the file could
+                  not be understood in the first place. */}
+              {result.parsed_nothing && (
+                <Alert severity="error" variant="outlined" sx={{ mt: 1.5, fontSize: 11.5 }}>
+                  {result.parsed_nothing}
+                </Alert>
               )}
               {result.errors.length > 0 && (
                 <Alert severity="warning" variant="outlined" sx={{ mt: 1.5, fontSize: 11.5 }}>
@@ -261,5 +278,5 @@ export function ImportScanDialog({ project, onClose }: {
         )}
       </DialogActions>
     </Dialog>
-  )
+  );
 }

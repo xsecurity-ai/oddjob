@@ -19,6 +19,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { SEVERITY_COLOUR } from '../lib/severity'
 import { TRIAGE } from '../lib/triage'
+import { LIFECYCLE_COLOUR, LIFECYCLE_LABEL } from '../lib/lifecycle'
 import { neon, glow } from '../theme'
 
 /** A long scanner paragraph, shown as written rather than reflowed:
@@ -82,8 +83,14 @@ function SecretField({ vulnId }: { vulnId: number }) {
                         letterSpacing: '0.16em', color: neon.red, mb: 0.75 }}>
         CREDENTIAL
       </Typography>
-      <Stack direction="row" spacing={1} alignItems="center"
-        sx={{ flexWrap: 'wrap', gap: 1 }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{
+          alignItems: "center",
+          flexWrap: 'wrap',
+          gap: 1
+        }}>
         <Typography component="pre" sx={{
           fontFamily: `'Share Tech Mono', monospace`, fontSize: 12.5,
           color: shown ? neon.red : neon.muted, m: 0,
@@ -115,7 +122,7 @@ function SecretField({ vulnId }: { vulnId: number }) {
           : 'Hidden by default. Revealing is recorded in the audit log.')}
       </Typography>
     </Box>
-  )
+  );
 }
 
 export function VulnModal({ id, onClose, onHost }: {
@@ -151,7 +158,9 @@ export function VulnModal({ id, onClose, onHost }: {
         border: `1px solid ${alpha(neon.cyan, 0.45)}`,
       } } }}>
       <DialogTitle sx={{ pr: 6 }}>
-        <Stack direction="row" spacing={1.25} alignItems="flex-start">
+        <Stack direction="row" spacing={1.25} sx={{
+          alignItems: "flex-start"
+        }}>
           {data && (
             <Chip size="small" label={data.severity.toUpperCase()} sx={{
               height: 20, fontSize: 10, fontWeight: 700, mt: 0.25,
@@ -187,7 +196,13 @@ export function VulnModal({ id, onClose, onHost }: {
 
         {data && (
           <Stack spacing={2.5}>
-            <Stack direction="row" spacing={2} flexWrap="wrap" rowGap={1}>
+            <Stack
+              direction="row"
+              spacing={2}
+              sx={{
+                flexWrap: "wrap",
+                rowGap: 1
+              }}>
               {([
                 ['status', data.status],
                 ['first seen on', data.host],
@@ -258,10 +273,68 @@ export function VulnModal({ id, onClose, onHost }: {
               </Typography>
             )}
 
+            {/* What the last scan said about this, and on what
+                basis. Above the affected systems because it changes
+                how the whole finding should be read: "still there on
+                14 hosts" and "nothing has looked since March" are
+                different reports. */}
+            <Box sx={{ p: 1.2, borderRadius: 1,
+                       border: `1px solid ${alpha(
+                         LIFECYCLE_COLOUR[data.lifecycle] ?? neon.muted,
+                         0.35)}` }}>
+              <Stack direction="row" spacing={1}
+                sx={{ alignItems: 'baseline', flexWrap: 'wrap' }}>
+                <Typography sx={{ fontFamily: `'Orbitron', sans-serif`,
+                                  fontSize: 10.5, letterSpacing: '0.16em',
+                                  color: LIFECYCLE_COLOUR[data.lifecycle]
+                                         ?? neon.muted }}>
+                  {(LIFECYCLE_LABEL[data.lifecycle]
+                    ?? data.lifecycle).toUpperCase()}
+                </Typography>
+                {data.scanner && (
+                  <Typography sx={{ fontSize: 11, color: neon.muted }}>
+                    reported by {data.scanner}
+                  </Typography>
+                )}
+              </Stack>
+              {/* The sentence, always. `Resolved` is a claim about a
+                  client's estate and a word on its own is not one a
+                  reader can check. */}
+              {data.lifecycle_why && (
+                <Typography sx={{ fontSize: 11.5, color: neon.text, mt: 0.6 }}>
+                  {data.lifecycle_why}.
+                </Typography>
+              )}
+              {/* "The configuration changed" is a dead end without
+                  this. It is the whole reason the manifest detail is
+                  stored rather than only its hash. */}
+              {data.configuration_changed?.length > 0 && (
+                <Box sx={{ mt: 0.8 }}>
+                  <Typography sx={{ fontSize: 10.5, color: neon.muted }}>
+                    What changed between the run that found it and the run
+                    that did not:
+                  </Typography>
+                  {data.configuration_changed.map((c, i) => (
+                    <Typography key={i} sx={{ fontSize: 11.5,
+                                              fontFamily: 'monospace',
+                                              color: neon.yellow }}>
+                      {c}
+                    </Typography>
+                  ))}
+                </Box>
+              )}
+            </Box>
+
             <Divider sx={{ borderColor: alpha(neon.purple, 0.25) }} />
 
             <Box>
-              <Stack direction="row" alignItems="baseline" spacing={1} sx={{ mb: 1 }}>
+              <Stack
+                direction="row"
+                spacing={1}
+                sx={{
+                  alignItems: "baseline",
+                  mb: 1
+                }}>
                 <Typography sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 10.5,
                                   letterSpacing: '0.16em', color: neon.pink }}>
                   AFFECTED SYSTEMS
@@ -337,5 +410,5 @@ export function VulnModal({ id, onClose, onHost }: {
         )}
       </DialogContent>
     </Dialog>
-  )
+  );
 }

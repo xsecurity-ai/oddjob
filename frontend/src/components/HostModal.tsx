@@ -49,7 +49,13 @@ const dash = <Box component="span" sx={{ color: alpha(neon.muted, 0.4) }}>—</B
 function Section({ title, count, children }: { title: string; count: number; children: ReactNode }) {
   return (
     <Box sx={{ mt: 3 }}>
-      <Stack direction="row" spacing={1} alignItems="baseline" sx={{ mb: 1 }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{
+          alignItems: "baseline",
+          mb: 1
+        }}>
         <Typography sx={{
           fontFamily: `'Orbitron', sans-serif`, fontSize: 11, letterSpacing: '0.16em',
           textTransform: 'uppercase', color: neon.pink, textShadow: glow(neon.pink, 0.5),
@@ -60,7 +66,7 @@ function Section({ title, count, children }: { title: string; count: number; chi
         ? <Typography sx={{ color: alpha(neon.muted, 0.6), fontSize: 12.5 }}>None recorded.</Typography>
         : children}
     </Box>
-  )
+  );
 }
 
 const headSx = {
@@ -124,7 +130,14 @@ function Body({ project, host }: { project: string; host: string }) {
         </Field>
         <Field label="Operating System">
           {t.os
-            ? <Stack direction="row" spacing={0.8} alignItems="baseline" flexWrap="wrap" useFlexGap>
+            ? <Stack
+            direction="row"
+            spacing={0.8}
+            useFlexGap
+            sx={{
+              alignItems: "baseline",
+              flexWrap: "wrap"
+            }}>
                 <span>{t.os}</span>
                 {/* A fingerprint is a guess; printing the name alone turns an
                     87% match into a statement of fact. */}
@@ -158,7 +171,9 @@ function Body({ project, host }: { project: string; host: string }) {
           <Box sx={{ color: neon.cyan, fontWeight: 700 }}>{t.total_ports}</Box>
         </Field>
         <Field label="Findings">
-          <Stack direction="row" spacing={0.8} flexWrap="wrap" useFlexGap>
+          <Stack direction="row" spacing={0.8} useFlexGap sx={{
+            flexWrap: "wrap"
+          }}>
             {(['critical', 'high'] as const).map((k) => {
               const n = k === 'critical' ? t.total_criticals : t.total_highs
               const c = SEV_COLOUR[k]
@@ -181,7 +196,14 @@ function Body({ project, host }: { project: string; host: string }) {
         </Field>
         {t.mac_address && (
           <Field label="MAC">
-            <Stack direction="row" spacing={0.8} alignItems="baseline" flexWrap="wrap" useFlexGap>
+            <Stack
+              direction="row"
+              spacing={0.8}
+              useFlexGap
+              sx={{
+                alignItems: "baseline",
+                flexWrap: "wrap"
+              }}>
               <span>{t.mac_address}</span>
               {t.mac_vendor && (
                 <Typography component="span" sx={{ fontSize: 10.5, color: neon.muted }}>
@@ -205,6 +227,70 @@ function Body({ project, host }: { project: string; host: string }) {
           border: `1px solid ${alpha(neon.purple, 0.2)}`,
         }}>{t.notes}</Box>
       </Section>
+
+      {/* ---- where it came from ----
+          Shown for a managed resource whatever the answer, because
+          for one of those it is the first question: a bucket is in no
+          CIDR, nothing links to it and no port scan meets it, so the
+          file that named it is the only reason it is here at all.
+          For anything else, shown only when something recorded it. */}
+      {(t.kind === 'cloud' || data.origins.length > 0) && (
+        <Box sx={{ mt: 3 }}>
+          <Stack direction="row" spacing={1} sx={{ alignItems: 'baseline', mb: 1 }}>
+            <Typography sx={{
+              fontFamily: `'Orbitron', sans-serif`, fontSize: 11, letterSpacing: '0.16em',
+              textTransform: 'uppercase', color: neon.pink, textShadow: glow(neon.pink, 0.5),
+            }}>Discovered In</Typography>
+            <Typography sx={{ color: neon.muted, fontSize: 11 }}>
+              {data.origins.length}
+            </Typography>
+          </Stack>
+          {data.origins.length === 0 ? (
+            // Not "found nowhere". Nobody wrote it down, and saying
+            // the first when only the second is true is how a gap in
+            // our own records comes to read as a fact about the asset.
+            <Typography sx={{ color: alpha(neon.muted, 0.7), fontSize: 12.5 }}>
+              Not recorded. Nothing wrote down where this came from — it was
+              added by hand, loaded from an import, or created before
+              provenance was kept. That is not the same as having been found
+              nowhere.
+            </Typography>
+          ) : (
+            <Table size="small">
+              <TableHead><TableRow>
+                {['Found In', 'File', 'On Page(s)'].map((h) =>
+                  <TableCell key={h} sx={headSx}>{h}</TableCell>)}
+              </TableRow></TableHead>
+              <TableBody>
+                {data.origins.map((o) => (
+                  <TableRow key={o.id}>
+                    <TableCell sx={{ ...cellSx, wordBreak: 'break-all' }}>
+                      {o.asset_url ?? dash}
+                    </TableCell>
+                    <TableCell sx={{ ...cellSx, wordBreak: 'break-all' }}>
+                      {o.file_path ?? dash}
+                    </TableCell>
+                    <TableCell sx={{ ...cellSx, wordBreak: 'break-all' }}>
+                      {o.pages.length === 0
+                        ? <Box component="span" sx={{ color: alpha(neon.muted, 0.7) }}>
+                            no page recorded as loading it
+                          </Box>
+                        : <>
+                            {o.pages.join(', ')}
+                            {o.pages_total > o.pages.length && (
+                              <Box component="span" sx={{ color: alpha(neon.muted, 0.7) }}>
+                                {' '}+{o.pages_total - o.pages.length} more
+                              </Box>
+                            )}
+                          </>}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </Box>
+      )}
 
       {/* ---- ports ---- */}
       <Section title="Open Ports" count={open.length}>
@@ -340,7 +426,7 @@ function Body({ project, host }: { project: string; host: string }) {
       {/* ---- timeline ---- */}
       <Timeline project={project} host={host} canWrite={canWrite(project)} />
     </>
-  )
+  );
 }
 
 export function HostModalProvider({ children }: { children: ReactNode }) {

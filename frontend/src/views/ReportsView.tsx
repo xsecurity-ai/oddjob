@@ -6,7 +6,7 @@ import {
   Typography, alpha,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
-import DeleteIcon from '@mui/icons-material/DeleteOutline'
+import DeleteIcon from '@mui/icons-material/DeleteOutlined'
 import PdfIcon from '@mui/icons-material/PictureAsPdfOutlined'
 import DocIcon from '@mui/icons-material/ArticleOutlined'
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome'
@@ -97,7 +97,9 @@ export function ReportsView({ project }: { project: string | null }) {
       )}
 
       <Stack spacing={2} sx={{ maxWidth: 1100, mx: 'auto' }}>
-        <Stack direction="row" spacing={1.5} alignItems="center">
+        <Stack direction="row" spacing={1.5} sx={{
+          alignItems: "center"
+        }}>
           <Typography sx={{
             fontFamily: `'Orbitron', sans-serif`, fontSize: 12,
             letterSpacing: '0.16em', textTransform: 'uppercase',
@@ -143,8 +145,14 @@ export function ReportsView({ project }: { project: string | null }) {
                   <TableRow key={r.id} hover>
                     <TableCell sx={cellSx}>
                       <Box sx={{ color: neon.text }}>{r.title}</Box>
-                      <Stack direction="row" spacing={0.6} sx={{ mt: 0.4 }}
-                             flexWrap="wrap" useFlexGap>
+                      <Stack
+                        direction="row"
+                        spacing={0.6}
+                        useFlexGap
+                        sx={{
+                          flexWrap: "wrap",
+                          mt: 0.4
+                        }}>
                         <Chip size="small" label={r.kind} sx={tag(neon.purple)} />
                         {r.agent_edited && (
                           <Tooltip title={r.agent_note ?? 'Prose revised by the agent'}>
@@ -170,7 +178,9 @@ export function ReportsView({ project }: { project: string | null }) {
                     </TableCell>
 
                     <TableCell sx={{ ...cellSx, width: 170 }}>
-                      <Stack direction="row" spacing={0.8} alignItems="center">
+                      <Stack direction="row" spacing={0.8} sx={{
+                        alignItems: "center"
+                      }}>
                         {busy && <CircularProgress size={11} sx={{ color: st.colour }} />}
                         <Box sx={{ color: st.colour, textShadow: glow(st.colour, 0.4),
                                    fontSize: 11.5 }}>{st.label}</Box>
@@ -236,14 +246,14 @@ export function ReportsView({ project }: { project: string | null }) {
                       )}
                     </TableCell>
                   </TableRow>
-                )
+                );
               })}
             </TableBody>
           </Table>
         </Paper>
       </Stack>
     </Box>
-  )
+  );
 }
 
 function NewReportDialog({ project, onClose, onCreated }: {
@@ -325,7 +335,9 @@ function NewReportDialog({ project, onClose, onCreated }: {
                 onChange={(e) => setAgentic(e.target.checked)}
                 sx={{ color: neon.muted, '&.Mui-checked': { color: neon.pink } }} />}
               label={
-                <Stack direction="row" spacing={0.8} alignItems="center">
+                <Stack direction="row" spacing={0.8} sx={{
+                  alignItems: "center"
+                }}>
                   <AutoAwesomeIcon sx={{ fontSize: 15,
                     color: agentic && agentReady ? neon.pink : alpha(neon.muted, 0.7) }} />
                   <Typography sx={{ fontSize: 13 }}>Use Agentic Support</Typography>
@@ -352,7 +364,7 @@ function NewReportDialog({ project, onClose, onCreated }: {
         </Button>
       </DialogActions>
     </Dialog>
-  )
+  );
 }
 
 const tag = (c: string) => ({

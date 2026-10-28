@@ -81,3 +81,4 @@ __pycache__/
 # ghost/Makefile sets BINARY := ghost, so this is ghost/ghost now.
 /ghost/ghost
 /ghost/ghost.exe
+.serena/

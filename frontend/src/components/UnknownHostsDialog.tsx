@@ -122,7 +122,14 @@ export function UnknownHostsDialog({
             this and import it there.
           </Alert>
 
-          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+          <Stack
+            direction="row"
+            spacing={1}
+            useFlexGap
+            sx={{
+              alignItems: "center",
+              flexWrap: "wrap"
+            }}>
             <Typography sx={{ fontSize: 11, color: neon.muted }}>Set all:</Typography>
             {(['reject', 'add'] as Action[]).map((a) => (
               <Button key={a} size="small" onClick={() => setAll(a)}
@@ -171,7 +178,9 @@ export function UnknownHostsDialog({
                       </TableCell>
 
                       <TableCell sx={{ ...cellSx, width: 280 }}>
-                        <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                        <Stack direction="row" spacing={0.5} useFlexGap sx={{
+                          flexWrap: "wrap"
+                        }}>
                           {([['web', 'URLs', neon.cyan],
                              ['services', 'services', neon.green],
                              ['vulns', 'findings', neon.orange],
@@ -218,7 +227,7 @@ export function UnknownHostsDialog({
                         )}
                       </TableCell>
                     </TableRow>
-                  )
+                  );
                 })}
               </TableBody>
             </Table>
@@ -235,7 +244,13 @@ export function UnknownHostsDialog({
 
       {busy && (
         <Box sx={{ px: 3, pb: 1 }}>
-          <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{
+              alignItems: "center",
+              mb: 0.5
+            }}>
             <CircularProgress
               size={13} thickness={6}
               variant={progress && progress.loaded < progress.total
@@ -285,7 +300,7 @@ export function UnknownHostsDialog({
         </Tooltip>
       </DialogActions>
     </Dialog>
-  )
+  );
 }
 
 const tag = (c: string) => ({

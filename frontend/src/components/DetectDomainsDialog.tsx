@@ -220,8 +220,14 @@ export function DetectDomainsDialog({ project, onClose, seed = [], onQueued }: {
               offering to type out by hand the thing the checkbox was
               just ticked to do. */}
           {!kitchenSink && suggestions.length > 0 && (
-            <Stack direction="row" spacing={0.6} useFlexGap flexWrap="wrap"
-                   alignItems="center">
+            <Stack
+              direction="row"
+              spacing={0.6}
+              useFlexGap
+              sx={{
+                flexWrap: "wrap",
+                alignItems: "center"
+              }}>
               <Typography sx={{ fontSize: 10.5, color: neon.muted,
                                 letterSpacing: '0.08em' }}>
                 ALREADY IN THIS PROJECT
@@ -255,7 +261,9 @@ export function DetectDomainsDialog({ project, onClose, seed = [], onQueued }: {
             </Alert>
           )}
 
-          <Stack direction="row" spacing={1} alignItems="center">
+          <Stack direction="row" spacing={1} sx={{
+            alignItems: "center"
+          }}>
             <Typography sx={{ fontSize: 12, color: neon.muted }}>Mode</Typography>
             {/* Passive is the default and stays the default. Active
                 sends traffic to the client's own infrastructure, which
@@ -358,5 +366,5 @@ export function DetectDomainsDialog({ project, onClose, seed = [], onQueued }: {
         </Button>
       </DialogActions>
     </EnumerateDialog>
-  )
+  );
 }

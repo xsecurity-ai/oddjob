@@ -22,6 +22,17 @@ export interface WebAsset {
   /** The pages that pull this in. The asset holds the bytes once;
    *  these are the sightings. */
   loaded_by: string[]
+  /** What this asset is CARRYING: findings raised out of its own
+   *  bytes, not findings on the host that serves it. A CDN bundle's
+   *  host is somebody else's infrastructure; the bundle is ours to
+   *  answer for. */
+  vulns: number
+  criticals: number
+  highs: number
+  /** Counted apart from the total. A stored credential is not a
+   *  severity — it is the one finding somebody goes looking for by
+   *  name, and burying it in a total is how it gets missed. */
+  secrets: number
 }
 
 export interface Project {
@@ -44,12 +55,34 @@ export interface Project {
    *  not, so neither covers the other. */
   auto_web: string
   auto_nuclei: string
+  /** Ask each web origin what OTHER names it answers to. */
+  auto_vhost: boolean
+  /** Probe every URL the project knows. */
+  auto_httpx: boolean
+  /** Everything on, at its most thorough. Resolved by the server when
+   *  the policies are read rather than copied into the fields above,
+   *  so turning it off returns the project to whatever was set
+   *  before. Does NOT imply the lookups that send the client's domain
+   *  to a third party. */
+  kitchen_sink: boolean
   /** Extra content-discovery paths, one per line. APPENDED to the
    *  wordlist the agent carries, never replacing it. */
   url_wordlist: string | null
   /** What tools that send a User-Agent should call themselves. null
    *  means the agent's own attributable default. */
   user_agent: string | null
+  /** The other two sentences in the authorisation letter. The scope
+   *  list has always been enforced config; these are now too.
+   *
+   *  null at either end means UNBOUNDED — which is what every project
+   *  had before this existed, and is not the same as "starts now". */
+  engagement_starts_at: string | null
+  engagement_ends_at: string | null
+  /** The most intrusive technique this engagement permits:
+   *  read_only | state_changing | destructive. Defaults to
+   *  `destructive`, i.e. everything, because this arrived after
+   *  engagements were already running. */
+  max_impact: string
   /** The token itself is never returned — only whether an override exists. */
   slack_token_set: boolean
   /** Whether a notification posted now would reach a channel: a token
@@ -96,6 +129,20 @@ export interface Target {
   /** Anything the scanner reported that has no column: uptime, traceroute,
    *  competing OS matches, host-level NSE output. */
   extra: Record<string, unknown>
+  /** Which provider naming template this host's NAME matches, e.g.
+   *  `gcp-compute`, or null for a name somebody chose.
+   *
+   *  Derived server-side from the hostname — see
+   *  backend/app/cloudnames.py. It says nothing about whether the
+   *  host matters: a `*.bc.googleusercontent.com` with an open port
+   *  is a finding, the PTR just is not its name. */
+  cloud_family: string | null
+  /** Which cloud, when the name is a provider template. */
+  cloud_provider: string | null
+  /** True when the provider assigns the name per address, so it
+   *  carries no information about who is using it. These are the
+   *  rows worth condensing; a name chosen inside a cloud is not. */
+  cloud_ephemeral: boolean
   /** ISO code of the first located address, or null when none has
    *  been. Read `geo_pending` before reading null as "not known": a
    *  null with addresses still unlooked-up means nobody asked. */
@@ -161,6 +208,39 @@ export interface Vuln {
   description: string | null; remediation: string | null
   external_id: string | null
   created_at: string; updated_at: string
+
+  /** Which tool reported it. null for a finding somebody typed in,
+   *  and for anything imported before the lifecycle existed. */
+  scanner: string | null
+  /** When a scan first reported it and when one last did. NOT
+   *  created_at/updated_at, which move when somebody edits a
+   *  severity or writes a remediation. */
+  first_seen_at: string | null
+  last_seen_at: string | null
+  /** new | present | resolved | unconfirmed.
+   *
+   *  Four, not three. `unconfirmed` means nothing that reports this
+   *  kind of finding has looked since it was last seen — it is a
+   *  real answer and not a hedged `resolved`. */
+  lifecycle: string
+  /** The sentence behind that word. `resolved` is a claim, and a
+   *  reader is entitled to see what it rests on. */
+  lifecycle_why: string | null
+  /** When a tool that reports this kind of finding last looked at
+   *  this host. null means never. */
+  last_looked_at: string | null
+}
+
+/** What changed between the last scan and the one before it. */
+export interface VulnLifecycle {
+  project_code: string
+  counts: Record<string, number>
+  meaning: Record<string, string>
+  /** Per scanner: when it last looked, and at how many hosts. Makes
+   *  the counts readable — "0 resolved" from a tool that has not run
+   *  in six weeks is not good news. */
+  scanners: { scanner: string; hosts: number; last_looked_at: string | null }[]
+  unconfirmed_hosts: string[]
 }
 
 /** One host carrying the same finding. */
@@ -247,6 +327,11 @@ export interface VulnDetail extends Vuln {
   occurrences: VulnOccurrence[]
   /** Whether the hosts were grouped by identifier or by title. */
   grouped_by: string
+  /** When a later scan could not clear this finding because it was
+   *  configured differently, WHICH part changed. Empty when there is
+   *  nothing to say — "the configuration changed" on its own is a
+   *  dead end for whoever reads it. */
+  configuration_changed: string[]
 }
 
 export interface Poc {
@@ -256,9 +341,47 @@ export interface Poc {
   created_at: string; updated_at: string
 }
 
+/** One place a target was discovered in.
+ *
+ *  A cloud resource is in no CIDR, nothing links to it and no port
+ *  scan meets it — the file that named it is the only reason we know
+ *  it exists, and this is that file.
+ *
+ *  **An empty list means NOT RECORDED, never "found nowhere".** Only
+ *  the code that discovers a target writes provenance, and only the
+ *  asset sweep does: a target typed in by hand, loaded from a scan
+ *  import or created before this existed has none, and nothing in the
+ *  system knows where it came from. Rendering that as an absence of
+ *  sources would state a fact nobody established. */
+export interface TargetOrigin {
+  id: number; target_id: number
+  /** `asset` — named in the code of a web asset this project fetched. */
+  source: string
+  /** The bundle the identifier was read out of. Snapshotted at
+   *  discovery, so it outlives the asset being refetched or deleted. */
+  asset_url: string | null
+  /** Which recovered file inside that bundle. `src/config.ts` out of a
+   *  source map says far more than "somewhere in app.min.js". */
+  file_path: string | null
+  /** The page that bundle was first seen on. */
+  page_url: string | null
+  /** Every page known to load that bundle, capped — read live from
+   *  the page references, because a page crawled later genuinely is
+   *  another site this resource was found on. */
+  pages: string[]
+  pages_total: number
+  /** Hostname of the page it was found on, for a one-value cell.
+   *  Null when no page is known, which is not the same as none. */
+  site: string | null
+  created_at: string
+}
+
 export interface TargetDetail {
   target: Target; services: Service[]; vulns: Vuln[]; pocs: Poc[]
   implants: Implant[]
+  /** Where this target came from. Empty means nothing recorded it —
+   *  see `TargetOrigin`. */
+  origins: TargetOrigin[]
 }
 
 /** Worst-first. Severity is a string in the DB, so every sort needs this —
@@ -336,6 +459,44 @@ export interface SettingsBundle {
   /** Secrets are never sent back — only whether one is stored. */
   secrets_set: Record<string, boolean>
 }
+/** A name pointing at a service that hands out subdomains to whoever
+ *  asks first.
+ *
+ *  `verdict` is not a severity, and the four values do not point the
+ *  same way. `dangling` and `fingerprint` are evidence the name is
+ *  unclaimed; `live` is evidence it is claimed and serving, which is
+ *  the answer most of the time; `candidate` is the absence of all
+ *  three, kept visible because "points at Heroku, could not check"
+ *  is a real state and not a finding. See backend/app/takeover.py. */
+export interface Takeover {
+  id: number
+  hostname: string
+  cname: string
+  cname_chain: string[]
+  provider: string
+  /** False when the name is not freely re-registerable — the record
+   *  still dangles, but it is hygiene rather than a hostile takeover. */
+  claimable: boolean
+  verdict: 'dangling' | 'fingerprint' | 'live' | 'candidate'
+  evidence: string | null
+  state: string
+  note: string | null
+  target_id: number | null
+  seen_at: string | null
+}
+
+/** A SOCKS5 credential for one ghost. Never carries the password:
+ *  that is returned once, by the call that makes it. */
+export interface ProxyGrant {
+  id: number
+  username: string
+  note: string | null
+  created_at: string | null
+  expires_at: string | null
+  last_used_at: string | null
+  revoked_at: string | null
+}
+
 export interface WebAddress {
   id: number; target_id: number; service_id: number | null
   host: string; project_code: string
@@ -374,10 +535,56 @@ export interface AgentStatus {
   allow_writes: boolean; max_steps: number; tools: string[]
   detail: string | null
 }
+/** One message in a shared agent thread. */
+export interface AgentTurn {
+  id: number
+  seq: number
+  role: 'user' | 'assistant'
+  text: string
+  steps: AgentStep[]
+  /** Who typed it, for a user turn. The point of sharing the thread
+   *  is knowing which of you already asked. */
+  author: string | null
+  at: string | null
+}
+
+/** An agent conversation, owned by the ENGAGEMENT rather than by the
+ *  browser that started it. Switching project lands on that
+ *  project's threads, never carries this one across. */
+export interface AgentSession {
+  id: number
+  project_code: string
+  title: string | null
+  opened_by: string | null
+  closed: boolean
+  at: string | null
+  turns: AgentTurn[]
+}
+
+/** One thread without its turns — what a tab is drawn from.
+ *
+ *  The list is the ENGAGEMENT's open threads, not this browser's
+ *  tabs: a thread a colleague opened is one you can pick up, which
+ *  is the same reason the transcript itself lives on the server. */
+export interface AgentSessionBrief {
+  id: number
+  project_code: string
+  title: string | null
+  opened_by: string | null
+  closed: boolean
+  at: string | null
+  turn_count: number
+}
+
 export interface AgentReply {
   text: string; provider: string; model: string
   steps: AgentStep[]; stop_reason: string
   usage: Record<string, number>; history: unknown[]
+  /** Which thread it landed in. Null only in the all-engagements
+   *  mode, which has no single project to own a thread. Needed when
+   *  the first message of a project opens one: that is the only way
+   *  the client learns the id it must then address. */
+  session_id: number | null
 }
 export interface Report {
   id: number; project_code: string; kind: string; title: string
@@ -475,6 +682,13 @@ export interface GhostAgent {
   version: string | null
   hostname: string | null
   privileged: boolean
+  /** Whether this ghost will carry proxied browser traffic. Off
+   *  unless somebody turned it on, per ghost. */
+  proxy_enabled: boolean
+  /** Whether its tunnel is up right now. Not stored anywhere — a
+   *  tunnel is only true while its socket is, so this is false
+   *  after a server restart until the ghost redials. */
+  proxy_connected: boolean
   tools: Record<string, string>
   call_in_url: string | null
   last_seen: string | null
@@ -600,7 +814,34 @@ export interface WebPacket {
   /** The capture was cut at the import cap; this is not the whole thing. */
   truncated: boolean
   sources: string | null; notes: string | null
+  /** The picture a ghost took of this URL, if one is on file.
+   *  Metadata only — the image is its own request. */
+  screenshot: WebShot | null
 }
+
+/** A stored screenshot, minus the bytes. */
+export interface WebShot {
+  id: number
+  url: string
+  /** Where the browser ended up, when it is not where it was sent. */
+  final_url: string | null
+  status_code: number | null
+  title: string | null
+  width: number | null
+  height: number | null
+  bytes: number
+  sha256: string | null
+  /** When the shutter went, not when the row was written. A picture
+   *  is only as good as its date. */
+  captured_at: string | null
+  sources: string | null
+}
+
+/** Where the PNG itself lives. Fetched by the browser with the
+ *  session cookie, like any other same-origin image. */
+export const screenshotUrl = (id: number) =>
+  `/api/web/screenshots/${id}/image`
+
 /** A URL, standing for every exchange recorded against it. */
 export interface WebGroup extends WebAddress {
   hits: number
@@ -608,8 +849,25 @@ export interface WebGroup extends WebAddress {
   statuses: number[]
 }
 
+/** Where a replayed request went, and — once the ghost reports — what
+ *  came back.
+ *
+ *  The POST answers the first half only. A replay leaves from a ghost
+ *  inside the client's estate, never from the Oddjob server, so at the
+ *  moment Send is pressed there is a task waiting for an agent and no
+ *  response yet. `replayStatus` fills in the rest. */
 export interface ReplayResult {
-  web: WebAddress
+  task_id: number
+  /** Which ghost. Part of the result: the egress address the packet
+   *  leaves from is the whole reason this is not sent from the server. */
+  agent: string
+  agent_id: number
+  /** idle | busy | absent — how far ahead of it the queue was. */
+  dispatch: string
+  /** queued | claimed | running | done | failed | cancelled */
+  state: string
+  note: string
+  web: WebAddress | null
   status_code: number | null
   elapsed_ms: number
   error: string | null
@@ -653,6 +911,13 @@ export interface ImportResult {
   implants_created: number; implants_updated: number
   hosts_flagged: number
   scripts_captured: number; notes_recorded: number
+  /**
+   * Set when a document with real size in it parsed to nothing at all.
+   * "Found nothing" and "could not read it" are different answers;
+   * this is the one that is usually a changed output format rather
+   * than a clean estate.
+   */
+  parsed_nothing?: string | null
   errors: string[]
   /** Present when the server is holding the file for a decision. */
   upload_id?: string | null
@@ -910,6 +1175,13 @@ export const api = {
   vulns: (project?: string) => req<Page<Vuln>>('/api/vulns' + qs({ project, limit: 100000 })),
   /** One finding, with its full text and every host it appears on. */
   vuln: (id: number) => req<VulnDetail>(`/api/vulns/${id}`),
+  /** New since the last scan, still present, resolved — and unknown.
+   *
+   *  Derived on the server per request from the sweep table, so a
+   *  scan that finds something again revives it with nothing to
+   *  clear first. */
+  vulnLifecycle: (project: string) =>
+    req<VulnLifecycle>('/api/vulns/lifecycle' + qs({ project })),
   /** Exact-match service lookup — distinct from `q`, which is a substring
    *  search across every column and would also match a banner. */
   servicesWhere: (o: { project?: string; port?: number; name?: string }) =>
@@ -918,6 +1190,14 @@ export const api = {
     req<Explore>('/api/explore' + qs(o)),
   targetDetail: (project: string, host: string) =>
     req<TargetDetail>(`/api/targets/${encodeURIComponent(project)}/${encodeURIComponent(host)}/detail`),
+  /** Where the project's targets came from, keyed by target id.
+   *
+   *  One request for a whole page of rows: the Targets view renders
+   *  thousands and a fetch per row is a fetch per row. A target
+   *  MISSING from the map has no recorded origin — not an origin of
+   *  nowhere. */
+  targetOrigins: (project?: string) =>
+    req<Record<string, TargetOrigin[]>>('/api/targets/origins' + qs({ project })),
   stats: (project?: string) => req<Stats>('/api/stats' + qs({ project })),
 
   credentials: (project?: string) =>
@@ -995,12 +1275,63 @@ export const api = {
   webByUrl: (target_id: number, url: string) =>
     req<Page<WebAddress>>('/api/web/by-url' + qs({ target_id, url, limit: 500 })),
 
-  /** Send an edited request again. The result is a NEW row, so the
-   *  original and the edit sit side by side under the same URL. */
+  /** Turn SOCKS proxying on or off for one ghost. Admin only, and
+   *  switching it off drops the live tunnel immediately. */
+  setGhostProxy: (project: string, agentId: number, enabled: boolean) =>
+    req<GhostAgent>(`/api/ghosts/${agentId}/proxy` + qs({ project }),
+               { method: 'PATCH', body: JSON.stringify({ enabled }) }),
+
+  /** Credentials issued for one ghost. Never the secrets. */
+  proxyGrants: (project: string, agentId: number) =>
+    req<ProxyGrant[]>(`/api/ghosts/${agentId}/proxy/grants` + qs({ project })),
+
+  /** Issue one. The password comes back ONCE and is never retrievable. */
+  newProxyGrant: (project: string, agentId: number,
+                  body: { note?: string; expires_days?: number } = {}) =>
+    req<{ grant: ProxyGrant; username: string; password: string }>(
+      `/api/ghosts/${agentId}/proxy/grants` + qs({ project }),
+      { method: 'POST', body: JSON.stringify(body) }),
+
+  /** Revoke one. It stops working on the next connection. */
+  revokeProxyGrant: (project: string, agentId: number, grantId: number) =>
+    req<ProxyGrant>(
+      `/api/ghosts/${agentId}/proxy/grants/${grantId}` + qs({ project }),
+      { method: 'DELETE' }),
+
+  /** Names in this engagement pointing at something unclaimed.
+   *  Reads rows already decided; it resolves nothing itself. */
+  takeovers: (p: { project?: string; verdict?: string; state?: string
+                   q?: string; sort?: string; order?: string } = {}) =>
+    req<Page<Takeover>>('/api/web/takeovers' + qs({ limit: 1000, ...p })),
+
+  /** Re-derive the table from the CNAMEs currently on record. Sends
+   *  nothing anywhere — the chains are already here. */
+  refreshTakeovers: (project: string) =>
+    req<{ counts: Record<string, number>; total: number }>(
+      '/api/web/takeovers/refresh' + qs({ project }), { method: 'POST' }),
+
+  /** Triage one row. Only state and note — the rest is DNS. */
+  updateTakeover: (id: number, project: string,
+                   body: { state?: string; note?: string }) =>
+    req<Takeover>(`/api/web/takeovers/${id}` + qs({ project }),
+                  { method: 'PATCH', body: JSON.stringify(body) }),
+
+  /** Queue an edited request for a ghost to send. The result is a NEW
+   *  row, so the original and the edit sit side by side under the same
+   *  URL — but it exists only once the ghost has reported, so this
+   *  returns the task to poll with `replayStatus`.
+   *
+   *  No `follow_redirects`: the ghost writes the request to a socket
+   *  byte for byte, and following a redirect means building a second
+   *  request out of the first one's parsed fields, which is the one
+   *  thing that path must not do. A 302 is the answer. */
   replay: (id: number, raw: string, opts: {
-    follow_redirects?: boolean; verify_tls?: boolean; timeout?: number } = {}) =>
+    verify_tls?: boolean; timeout?: number } = {}) =>
     req<ReplayResult>(`/api/web/${id}/replay`, {
       method: 'POST', body: JSON.stringify({ raw, ...opts }) }),
+  /** Has the ghost sent it yet, and what came back. */
+  replayStatus: (taskId: number) =>
+    req<ReplayResult>(`/api/web/replays/${taskId}`),
   /** Whether a Web view would have anything to show here. */
   webApplicable: (project?: string) =>
     req<{ applicable: boolean; web_services: number; web_addresses: number
@@ -1080,9 +1411,36 @@ export const api = {
 
   agentStatus: (project: string) =>
     req<AgentStatus>('/api/agent/status' + qs({ project })),
-  agentChat: (project: string, message: string, history: unknown[]) =>
-    req<AgentReply>('/api/agent/chat' + qs({ project }),
+  /** Ask in one thread. `thread` omitted means the newest open one,
+   *  which is what a caller with no tab strip gets. */
+  agentChat: (project: string, message: string, history: unknown[],
+              thread?: number) =>
+    req<AgentReply>('/api/agent/chat' + qs({ project, thread }),
       { method: 'POST', body: JSON.stringify({ message, history }) }),
+  /** This engagement's open threads, newest activity first. Everyone
+   *  on the project sees the same list. */
+  agentSessions: (project: string) =>
+    req<AgentSessionBrief[]>('/api/agent/sessions' + qs({ project })),
+  /** One of this engagement's agent threads, as everyone on it sees
+   *  it. Null when the project has not been asked anything yet —
+   *  which is different from an empty thread somebody started. */
+  agentSession: (project: string, thread?: number) =>
+    req<AgentSession | null>('/api/agent/session' + qs({ project, thread })),
+  /** Open a fresh thread. `closeCurrent` true replaces the
+   *  conversation, closing the one that was open — closing, never
+   *  deleting: what was asked during an engagement is part of it.
+   *  False leaves it running and opens one alongside, which is what
+   *  a new tab is. */
+  newAgentSession: (project: string, closeCurrent = true) =>
+    req<AgentSession>('/api/agent/session/new'
+                      + qs({ project, close_current: closeCurrent }),
+      { method: 'POST', body: '{}' }),
+  /** Close one thread, for everyone on the engagement — it is the
+   *  engagement's thread, not your tab. It stays readable by id. */
+  closeAgentSession: (project: string, thread: number) =>
+    req<AgentSessionBrief>(`/api/agent/session/${thread}/close`
+                           + qs({ project }),
+      { method: 'POST', body: '{}' }),
   importReport: (project: string, content: string, format = 'auto',
                  mode: 'strict' | 'open' = 'strict',
                  decisions: Record<string, HostDecision> = {}) =>
@@ -1691,10 +2049,40 @@ export const api = {
     auto_amass?: boolean; auto_resolve_ips?: boolean
     auto_reverse_dns?: boolean; auto_nmap?: string; auto_web?: string;
     auto_nuclei?: string
+    auto_vhost?: boolean; auto_httpx?: boolean; kitchen_sink?: boolean
     url_wordlist?: string | null; user_agent?: string | null
+    /** The rules of engagement. ISO-8601 UTC for the dates.
+     *
+     *  `null` here means LEAVE ALONE, not clear — the server skips
+     *  it deliberately, so a form that posts every field cannot
+     *  remove an engagement's expiry on the way past while saving
+     *  something else. Use `clearEngagementWindow`. */
+    engagement_starts_at?: string | null
+    engagement_ends_at?: string | null
+    /** read_only | state_changing | destructive. */
+    max_impact?: string
   }) =>
     req<Project>(`/api/projects/${encodeURIComponent(project)}`,
       { method: 'PATCH', body: JSON.stringify(body) }),
+
+  /** What the standing orders that are ON have still not done.
+   *
+   *  An empty list means nothing is outstanding. It does NOT mean the
+   *  estate is fully enumerated — a policy that is off has no gap by
+   *  definition, which is why each entry names its policy. */
+  standingOrderGaps: (project: string) =>
+    req<{ policy: string; what: string; outstanding: number }[]>(
+      `/api/projects/${encodeURIComponent(project)}/standing-orders/gaps`),
+
+  /** Remove both engagement dates, leaving testing unbounded by date.
+   *
+   *  Its own call because a PATCH cannot do it: taking the bound off
+   *  an authorisation has to be something somebody meant, and the
+   *  server audits who did. */
+  clearEngagementWindow: (project: string) =>
+    req<void>(
+      `/api/projects/${encodeURIComponent(project)}/engagement-window`,
+      { method: 'DELETE' }),
 
   /** Append entries. `included` picks the list; a line's own leading `!`
    *  still wins, because that is how scope documents are pasted.

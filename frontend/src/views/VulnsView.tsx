@@ -9,9 +9,13 @@ import { useHostModal } from '../components/HostModal'
 import { VulnModal } from '../components/VulnModal'
 import { SEVERITY_COLOUR as SEV_COLOUR } from '../lib/severity'
 import { TRIAGE, TRIAGE_COLOUR } from '../lib/triage'
+import {
+  LIFECYCLE, LIFECYCLE_COLOUR, LIFECYCLE_LABEL, LIFECYCLE_RANK,
+} from '../lib/lifecycle'
 import { useAuth } from '../lib/auth'
 import { useStoredChoice } from '../lib/useStoredChoice'
 import { SecretsPanel } from '../components/SecretsPanel'
+import { LifecycleStrip } from '../components/LifecycleStrip'
 import { neon, glow, TAB_SX } from '../theme'
 
 /** Module-level so the stored-choice hook gets a stable reference,
@@ -86,6 +90,32 @@ export function VulnsView({ project }: { project: string | null }) {
           {p.value}
         </Box>
       ),
+    },
+    {
+      // What the last scan SAW, as distinct from Status (what has
+      // been done about it) and Triage (what a person concluded).
+      // Three different questions, and this is the one nothing could
+      // answer before: a finding from March sat at `open` for ever
+      // through re-scans that no longer saw it.
+      field: 'lifecycle', headerName: 'Last scan', width: 128,
+      type: 'singleSelect',
+      valueOptions: [...LIFECYCLE],
+      sortComparator: (a, b) =>
+        (LIFECYCLE_RANK[a as string] ?? 9) - (LIFECYCLE_RANK[b as string] ?? 9),
+      renderCell: (p) => {
+        const c = LIFECYCLE_COLOUR[p.value] ?? neon.muted
+        return (
+          // The sentence behind the word, on hover. `Resolved` is a
+          // claim about a client's estate and a reader is entitled
+          // to see what it rests on without opening the finding.
+          <Chip size="small" label={LIFECYCLE_LABEL[p.value] ?? p.value}
+            title={p.row.lifecycle_why ?? ''} sx={{
+              height: 20, fontSize: 10, letterSpacing: '0.06em',
+              bgcolor: alpha(c, 0.14), color: c,
+              border: `1px solid ${alpha(c, 0.55)}`, cursor: 'help',
+            }} />
+        )
+      },
     },
     {
       field: 'status', headerName: 'Status', width: 104,
@@ -185,48 +215,56 @@ export function VulnsView({ project }: { project: string | null }) {
 
   return (
     <>
-    {strip}
-    <DataTable
-      rows={data?.items ?? []}
-      columns={columns as ColumnDef[]}
-      loading={isLoading}
-      error={error as Error | null}
-      initialSort={{ field: 'severity', sort: 'asc' }}   // asc on rank = worst first
-      hiddenColumns={project ? { project_code: false } : undefined}
-      kind="vulns"
-      project={project}
-      canWrite={canWrite(project)}
-      note={canWrite(project) ? undefined : 'read-only'}
-      onSelectionChange={setSelected}
-      extraActions={canWrite(project) ? (
-        <Stack direction="row" spacing={1} alignItems="center">
-          {selected.length > 0 && (
-            <TextField select size="small" value=""
-              disabled={mark.isPending}
-              onChange={(e) => mark.mutate({
-                ids: selected, triage: e.target.value,
-              })}
-              sx={{ minWidth: 210 }}
-              slotProps={{ inputLabel: { shrink: true } }}
-              label={`Mark ${selected.length} selected`}>
-              {TRIAGE.map((t) => (
-                <MenuItem key={t.value} value={t.value}
-                  sx={{ fontSize: 12.5, color: t.colour }}>{t.label}</MenuItem>
-              ))}
-            </TextField>
-          )}
-          {refused > 0 && (
-            <Box sx={{ fontSize: 11.5, color: neon.red }}>
-              {refused} could not be changed — no write access on that
-              engagement.
-            </Box>
-          )}
-          <ImportReportButton project={project} />
-        </Stack>
-      ) : undefined}
-    />
-    <VulnModal id={detail} onClose={() => setDetail(null)}
-      onHost={(proj, h) => { setDetail(null); open(proj, h) }} />
+      {strip}
+      {/* Inside a plain Box with its own padding, NOT a flex child:
+          the DataTable below has to stay the only thing that grows,
+          or it sizes to its content and the table stops scrolling. */}
+      <Box sx={{ px: 2, pt: 1 }}>
+        <LifecycleStrip project={project} />
+      </Box>
+      <DataTable
+        rows={data?.items ?? []}
+        columns={columns as ColumnDef[]}
+        loading={isLoading}
+        error={error as Error | null}
+        initialSort={{ field: 'severity', sort: 'asc' }}   // asc on rank = worst first
+        hiddenColumns={project ? { project_code: false } : undefined}
+        kind="vulns"
+        project={project}
+        canWrite={canWrite(project)}
+        note={canWrite(project) ? undefined : 'read-only'}
+        onSelectionChange={setSelected}
+        extraActions={canWrite(project) ? (
+          <Stack direction="row" spacing={1} sx={{
+            alignItems: "center"
+          }}>
+            {selected.length > 0 && (
+              <TextField select size="small" value=""
+                disabled={mark.isPending}
+                onChange={(e) => mark.mutate({
+                  ids: selected, triage: e.target.value,
+                })}
+                sx={{ minWidth: 210 }}
+                slotProps={{ inputLabel: { shrink: true } }}
+                label={`Mark ${selected.length} selected`}>
+                {TRIAGE.map((t) => (
+                  <MenuItem key={t.value} value={t.value}
+                    sx={{ fontSize: 12.5, color: t.colour }}>{t.label}</MenuItem>
+                ))}
+              </TextField>
+            )}
+            {refused > 0 && (
+              <Box sx={{ fontSize: 11.5, color: neon.red }}>
+                {refused} could not be changed — no write access on that
+                engagement.
+              </Box>
+            )}
+            <ImportReportButton project={project} />
+          </Stack>
+        ) : undefined}
+      />
+      <VulnModal id={detail} onClose={() => setDetail(null)}
+        onHost={(proj, h) => { setDetail(null); open(proj, h) }} />
     </>
-  )
+  );
 }

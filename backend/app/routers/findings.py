@@ -5,12 +5,15 @@ them. Full CRUD so the API is complete and bulk import has somewhere to land.
 """
 from __future__ import annotations
 
+import contextlib
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import assetfetch, audit, slack
+from .. import assetfetch, assetwork, audit, lifecycle, manifest, slack
 from ..db import get_session
 from ..events import broker
 from ..hosts import normalise_host
@@ -20,9 +23,11 @@ from ..models import (
     FindingSecret,
     Poc,
     Project,
+    RunManifest,
     Target,
     User,
     Vuln,
+    WebAddress,
     WebAsset,
     WebAssetFile,
 )
@@ -46,14 +51,40 @@ def _base(model):
             .join(Project, Project.id == Target.project_id))
 
 
-def _vuln_out(row) -> VulnOut:
+def _vuln_out(row, sweeps: dict | None = None) -> VulnOut:
+    """One finding, with its lifecycle worked out.
+
+    `sweeps` is the (target, scanner) -> last-looked table for the
+    rows being returned, loaded once for the page. Without it every
+    finding answers `unconfirmed`, which is the correct answer to
+    "has anybody looked since" when nobody has consulted the table —
+    not a silent default.
+    """
     v = row[0]
+    sweeps = sweeps if sweeps is not None else {}
+    vd = lifecycle.verdict_for(v, sweeps)
     return VulnOut(
         **{k: getattr(v, k) for k in
            ("id", "target_id", "title", "severity", "status", "triage",
             "port", "protocol", "description", "remediation",
-            "external_id", "created_at", "updated_at")},
-        host=row[1], project_code=row[2])
+            "external_id", "created_at", "updated_at",
+            "scanner", "first_seen_at", "last_seen_at")},
+        host=row[1], project_code=row[2],
+        lifecycle=vd.state, lifecycle_why=vd.why,
+        last_looked_at=vd.last_looked)
+
+
+async def _with_lifecycle(session, rows) -> list[VulnOut]:
+    """A page of finding rows, each with its lifecycle.
+
+    One query for the whole page rather than one per finding: a
+    listing of 20,000 findings would otherwise be 20,000 round trips
+    to answer a question the sweep table holds in one row per host
+    per tool.
+    """
+    sweeps = await lifecycle.sweeps_for_targets(
+        session, [r[0].target_id for r in rows])
+    return [_vuln_out(r, sweeps) for r in rows]
 
 
 def _poc_out(row) -> PocOut:
@@ -81,6 +112,12 @@ async def list_vulns(
     q: str | None = Query(None),
     host: str | None = Query(None),
     severity: str | None = Query(None),
+    state: str | None = Query(
+        None, pattern="^(new|present|resolved|unconfirmed)$",
+        description="Lifecycle: what the most recent scan said about "
+                    "this finding. Applied to the page after it is "
+                    "built, because the value is derived rather than "
+                    "stored — `total` still counts the unfiltered query."),
     sort: str | None = Query("host"),
     order: str = Query("asc", pattern="^(asc|desc)$"),
     limit: int = Query(20000, ge=0),
@@ -109,8 +146,101 @@ async def list_vulns(
         "updated_at": Vuln.updated_at,
     }).order_by(Vuln.id)
     rows, total = await paginate(session, stmt, limit, offset)
-    return Page[VulnOut](items=[_vuln_out(r) for r in rows], total=total,
+    items = await _with_lifecycle(session, rows)
+    if state:
+        # Filtered AFTER the page is built, because the lifecycle is
+        # derived and not a column — there is nothing in SQL to put a
+        # WHERE on. `total` therefore still describes the unfiltered
+        # query, and saying so here is better than reporting a count
+        # that does not match what a second page would return.
+        items = [i for i in items if i.lifecycle == state]
+    return Page[VulnOut](items=items, total=total,
                          limit=limit, offset=offset)
+
+
+class LifecycleOut(BaseModel):
+    """What changed between the last scan and the one before it.
+
+    The answer to the question recurring scanning is bought for.
+    """
+    project_code: str
+    #: state -> how many findings are in it. Every state is present
+    #: even at zero: a summary that omitted `resolved` because
+    #: nothing was resolved would read as a tool that cannot answer
+    #: the question.
+    counts: dict[str, int]
+    #: What each word means, so a report can carry the definition
+    #: next to the number. `resolved` in particular is a claim, and
+    #: a reader is entitled to know exactly what is being claimed.
+    meaning: dict[str, str]
+    #: Per scanner: when it last looked at anything on this project,
+    #: and at how many hosts. The thing that makes the rest
+    #: interpretable -- "0 resolved" from a tool that has not run in
+    #: six weeks is not good news.
+    scanners: list[dict]
+    #: Hosts carrying findings that no tool has revisited. Named
+    #: rather than counted, because the action is to go and scan
+    #: them.
+    unconfirmed_hosts: list[str]
+
+
+@router.get("/vulns/lifecycle", response_model=LifecycleOut)
+async def vuln_lifecycle(
+    project: str = Query(..., description="Engagement code."),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """New since the last scan, still present, resolved — and unknown.
+
+    Four numbers rather than three. The fourth is the one that keeps
+    the other three honest: a finding nothing has looked for since it
+    was last seen is not resolved and not confirmed present, and
+    rolling it into either would be the tool making up an answer.
+
+    Nothing here is stored. The states are derived from the sweep
+    table on every request, so a scan that finds something again
+    revives it with no column to clear first.
+    """
+    pr = await resolve_project(session, project)
+    vis = await visible_project_ids(session, user)
+    if vis is not None and pr.id not in vis:
+        raise HTTPException(404, f"no project {project!r}")
+
+    rows = (await session.execute(
+        select(Vuln, Target.host)
+        .join(Target, Target.id == Vuln.target_id)
+        .where(Target.project_id == pr.id))).all()
+    sweeps = await lifecycle.sweeps_for(session, pr.id)
+
+    counts = dict.fromkeys(lifecycle.STATES, 0)
+    unconfirmed: set[str] = set()
+    for v, host in rows:
+        vd = lifecycle.verdict_for(v, sweeps)
+        counts[vd.state] = counts.get(vd.state, 0) + 1
+        if vd.state == lifecycle.UNCONFIRMED:
+            unconfirmed.add(host)
+
+    # Per scanner, so "0 resolved" can be read correctly. A tool that
+    # has not run since March has not resolved anything and has not
+    # failed to -- it has not looked.
+    by_scanner: dict[str, dict] = {}
+    for (_tid, name), at in sweeps.items():
+        cur = by_scanner.setdefault(name, {"scanner": name, "hosts": 0,
+                                           "last_looked_at": None})
+        cur["hosts"] += 1
+        if cur["last_looked_at"] is None or at > cur["last_looked_at"]:
+            cur["last_looked_at"] = at
+
+    return LifecycleOut(
+        project_code=pr.code,
+        counts=counts,
+        meaning=dict(lifecycle.MEANING),
+        scanners=sorted(by_scanner.values(),
+                        key=lambda r: r["scanner"]),
+        # Capped: this is a prompt to go and scan, and a list of
+        # four thousand hostnames is not one.
+        unconfirmed_hosts=sorted(unconfirmed)[:200],
+    )
 
 
 class VulnOccurrence(BaseModel):
@@ -142,6 +272,15 @@ class VulnDetail(VulnOut):
     #: Whether the match was by identifier or by title, so a reader can
     #: judge how much to trust the grouping.
     grouped_by: str = "title"
+    #: When a sweep could not clear this finding because it was
+    #: configured differently, WHICH part of the configuration
+    #: changed -- `-severity: 'critical,high' -> 'critical'`.
+    #:
+    #: Empty whenever there is nothing to say, which is most of the
+    #: time. "The configuration changed" on its own is a dead end for
+    #: whoever reads it; the whole reason the manifest detail is
+    #: stored is so this list can exist.
+    configuration_changed: list[str] = []
     #: Whether there is a credential stored against this finding.
     #:
     #: Asked of the database rather than guessed from the detector's
@@ -182,8 +321,25 @@ async def get_vuln(vuln_id: int,
         select(FindingSecret.id).where(
             FindingSecret.vuln_id == vuln.id))).scalar_one_or_none() is not None
 
+    out = _vuln_out(row, await lifecycle.sweeps_for_targets(
+        session, [vuln.target_id]))
+    # Only looked up when the verdict actually turned on it. Two
+    # extra rows per finding detail for a case that does not arise on
+    # most of them.
+    changed: list[str] = []
+    vd = lifecycle.verdict_for(vuln, await lifecycle.sweeps_for_targets(
+        session, [vuln.target_id]))
+    if vd.found_by and vd.looked_with and vd.found_by != vd.looked_with:
+        a = await session.get(RunManifest, vd.found_by)
+        b = await session.get(RunManifest, vd.looked_with)
+        if a is not None and b is not None:
+            with contextlib.suppress(ValueError):
+                changed = manifest.differences(json.loads(a.detail),
+                                               json.loads(b.detail))
+
     return VulnDetail(
-        **_vuln_out(row).model_dump(),
+        **out.model_dump(),
+        configuration_changed=changed,
         grouped_by=grouped,
         has_secret=has_secret,
         # `_base` selects (Vuln, Target.host, Project.code) — the second
@@ -425,6 +581,80 @@ class SecretSourceOut(BaseModel):
     located: str
 
 
+def _locate(body: str, sec, is_recorded: bool):
+    """Where the credential sits in this text, and a window round it.
+
+    Shared by the asset path and the page path. They differ in how
+    the text was obtained and in nothing else, and two copies of
+    this would be two chances for `located` to come to mean
+    different things in the two places a reader compares.
+
+    -> (body, total, start, end, located, offset, truncated, first_line)
+    """
+    total = len(body)
+    lines = body.split("\n")
+    start = end_ = None
+    located = "absent"
+    if is_recorded and sec.line and 1 <= sec.line <= len(lines):
+        at = lines[sec.line - 1].find(sec.secret)
+        if at >= 0:
+            start = sum(len(x) + 1 for x in lines[:sec.line - 1]) + at
+            end_ = start + len(sec.secret)
+            located = "confirmed"
+    if start is None:
+        at = body.find(sec.secret)
+        if at >= 0:
+            start, end_ = at, at + len(sec.secret)
+            located = "moved" if is_recorded else "found"
+
+    # Window around the match when the file is too big to send. An
+    # unlocated secret in a huge file windows from the top: there is
+    # nothing better to centre on, and `located` already says so.
+    offset, truncated, first_line = 0, False, 1
+    if total > SOURCE_WINDOW:
+        truncated = True
+        centre = start if start is not None else 0
+        offset = max(0, centre - SOURCE_WINDOW // 2)
+        whole = body
+        body = whole[offset:offset + SOURCE_WINDOW]
+        if start is not None:
+            start, end_ = start - offset, (end_ or 0) - offset
+        # Which line the window opens on, so the gutter counts from
+        # the file's numbering and not from the window's.
+        first_line = whole[:offset].count("\n") + 1
+    return body, total, start, end_, located, offset, truncated, first_line
+
+
+async def _page_source(session, user, vuln_id: int, target, sec,
+                       body: str) -> SecretSourceOut:
+    """The captured page a credential was found in.
+
+    One view and no choice of renderings: a page body is the bytes
+    the client's server sent, there is no source map behind it and
+    no minified sibling to offer. Saying so with a single `page`
+    view is better than presenting an empty switcher.
+
+    The line number IS meaningful here -- `scan_pages` hands the
+    scanner the stripped response body, which is exactly this -- so
+    the recorded line is trusted the same way a recorded file's is.
+    """
+    body, total, start, end_, located, offset, truncated, first_line = \
+        _locate(body, sec, True)
+    await audit.record(
+        session, "ui", "finding.secret.source", user=user, commit=True,
+        project_code=None,
+        detail=(f"read the source around the credential on finding {vuln_id} "
+                f"(captured page) on {target.host or target.id}"))
+    view = SourceView(origin="page", path=sec.path or sec.asset_url,
+                      bytes=total, generated=False, recorded=True)
+    return SecretSourceOut(
+        path=view.path, origin="page", generated=False,
+        recorded_origin="page", views=[view], asset_url=sec.asset_url,
+        line=sec.line, body=body, total=total, offset=offset,
+        first_line=first_line, truncated=truncated,
+        match_start=start, match_end=end_, located=located)
+
+
 @router.get("/vulns/{vuln_id}/secret/source", response_model=SecretSourceOut)
 async def secret_source(vuln_id: int,
                         view: str | None = Query(
@@ -485,10 +715,40 @@ async def secret_source(vuln_id: int,
     asset = (await session.execute(select(WebAsset).where(
         WebAsset.project_id == target.project_id,
         WebAsset.url == sec.asset_url))).scalar_one_or_none()
+
+    # A finding from a PAGE, not from an asset file.
+    #
+    # `scan_pages` runs the same scanners over the body of every
+    # captured 2xx exchange and files what they find through the same
+    # `_file_vuln`, which stores the PAGE's url in `asset_url`. That
+    # url is a `web_addresses` row and will never be in `web_assets`,
+    # so this lookup could not possibly succeed for one of them --
+    # and the 404 below told the operator the asset "was removed, or
+    # the project was re-imported", which is a confident explanation
+    # of something that never happened.
+    #
+    # On the live estate that was 87 of 1,588 stored credentials:
+    # every one of them findable, none of them viewable, and all of
+    # them blamed on a deletion. The evidence was in the captured
+    # response the whole time.
     if asset is None:
-        raise HTTPException(
-            404, "the asset this came from is no longer recorded: it was "
-                 "removed, or the project was re-imported since the scan")
+        page = (await session.execute(select(WebAddress).where(
+            WebAddress.target_id == row.target_id,
+            WebAddress.url == sec.asset_url,
+            WebAddress.response.is_not(None))
+            # The scanner read `assetwork.response_body` of whichever
+            # capture it was handed; newest wins here because that is
+            # the one a re-scan would read now.
+            .order_by(WebAddress.id.desc()).limit(1))).scalar_one_or_none()
+        if page is None:
+            raise HTTPException(
+                404, "this credential's origin is not recorded any more: "
+                     "neither an asset nor a captured page at that URL is "
+                     "in the project now. It was removed, or the project "
+                     "was re-imported since the scan")
+        return await _page_source(
+            session, user, vuln_id, target, sec,
+            assetwork.response_body(page.response or ""))
 
     # Every stored file of this asset that has contents. Ordered so a
     # scanned row comes first, which is the one a line number came
@@ -555,7 +815,6 @@ async def secret_source(vuln_id: int,
         f = chosen[want]
         body, shown_path, shown_generated = (f.body or ""), f.path, False
     is_recorded = (not shown_generated) and chosen.get(want) is recorded
-    total = len(body)
 
     # Where the value actually is, rather than where it was recorded.
     # The recorded line is checked FIRST, and only on the recorded
@@ -564,36 +823,8 @@ async def secret_source(vuln_id: int,
     # for it. Checking the line first also means an unchanged file
     # reports `confirmed` when the same value appears more than once,
     # instead of resolving to whichever copy came first.
-    lines = body.split("\n")
-    start = end_ = None
-    located = "absent"
-    if is_recorded and sec.line and 1 <= sec.line <= len(lines):
-        at = lines[sec.line - 1].find(sec.secret)
-        if at >= 0:
-            start = sum(len(x) + 1 for x in lines[:sec.line - 1]) + at
-            end_ = start + len(sec.secret)
-            located = "confirmed"
-    if start is None:
-        at = body.find(sec.secret)
-        if at >= 0:
-            start, end_ = at, at + len(sec.secret)
-            located = "moved" if is_recorded else "found"
-
-    # Window around the match when the file is too big to send. An
-    # unlocated secret in a huge file windows from the top: there is
-    # nothing better to centre on, and `located` already says so.
-    offset, truncated, first_line = 0, False, 1
-    if total > SOURCE_WINDOW:
-        truncated = True
-        centre = start if start is not None else 0
-        offset = max(0, centre - SOURCE_WINDOW // 2)
-        whole = body
-        body = whole[offset:offset + SOURCE_WINDOW]
-        if start is not None:
-            start, end_ = start - offset, (end_ or 0) - offset
-        # Which line the window opens on, so the gutter counts from
-        # the file's numbering and not from the window's.
-        first_line = whole[:offset].count("\n") + 1
+    body, total, start, end_, located, offset, truncated, first_line = \
+        _locate(body, sec, is_recorded)
 
     await audit.record(
         session, "ui", "finding.secret.source", user=user, commit=True,
@@ -735,7 +966,12 @@ async def create_vuln(body: VulnCreate, project: str = Query(...),
         session, pr, severity=v.severity, host=t.host, title=v.title,
         port=v.port, protocol=v.protocol, detail=v.description)
 
-    return _vuln_out((await session.execute(_base(Vuln).where(Vuln.id == v.id))).first())
+    # A finding somebody typed in. No scanner is responsible for
+    # looking for it again, so its lifecycle reads `unconfirmed` and
+    # no sweep will ever close it -- which is the point: a person's
+    # finding is not something a tool gets to resolve.
+    return _vuln_out(
+        (await session.execute(_base(Vuln).where(Vuln.id == v.id))).first())
 
 
 @router.delete("/vulns/{vuln_id}", status_code=204)

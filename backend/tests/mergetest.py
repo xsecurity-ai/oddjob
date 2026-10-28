@@ -139,6 +139,59 @@ st, _ = call("/api/enumerate/merge?project=MRG&host=198.51.100.50", "POST",
 check("a target in another engagement is not even found", st == 404,
       f"status={st}")
 
+print("== where each side was discovered ==")
+# Provenance is the one thing nothing else in the system records: the
+# bundle that named a bucket is the only account of why that row
+# exists. A cascade would take it on the merge, and nothing would say
+# so -- which is the exact failure this suite exists to catch.
+import asyncio  # noqa: E402
+
+from sqlalchemy import select  # noqa: E402
+
+from app.db import SessionLocal  # noqa: E402
+from app.models import Project, Target, TargetOrigin  # noqa: E402
+from app.weburl import origin_key  # noqa: E402
+
+SHARED = "https://www.acme.example/static/shared.js"
+ONLY_IP = "https://www.acme.example/static/legacy.js"
+
+
+async def _seed_origins():
+    async with SessionLocal() as s:
+        pr = (await s.execute(select(Project).where(
+            Project.code == "MRG"))).scalar_one()
+        by = {t.host: t for t in (await s.execute(select(Target).where(
+            Target.project_id == pr.id))).scalars().all()}
+        # One place both records were found in, and one only the
+        # address was. The first is a duplicate after the merge; the
+        # second is the one that must survive it.
+        for host, url in ((("198.51.100.50"), SHARED),
+                          (("web.acme.example"), SHARED),
+                          (("198.51.100.50"), ONLY_IP)):
+            s.add(TargetOrigin(
+                project_id=pr.id, target_id=by[host].id, source="asset",
+                asset_url=url, file_path="src/config.ts",
+                page_url="https://www.acme.example/",
+                origin_hash=origin_key("asset", url, "src/config.ts")))
+        await s.commit()
+
+
+async def _origins_of(host):
+    async with SessionLocal() as s:
+        t = (await s.execute(select(Target).where(
+            Target.host == host))).scalar_one_or_none()
+        if t is None:
+            return None
+        return sorted(o.asset_url for o in (await s.execute(
+            select(TargetOrigin).where(
+                TargetOrigin.target_id == t.id))).scalars().all())
+
+
+asyncio.run(_seed_origins())
+check("both records carry where they were found",
+      asyncio.run(_origins_of("198.51.100.50")) == sorted([SHARED, ONLY_IP]),
+      str(asyncio.run(_origins_of("198.51.100.50"))))
+
 print("== the merge ==")
 st, done = call("/api/enumerate/merge?project=MRG&host=198.51.100.50", "POST",
                 {"into": "web.acme.example", "confirm": True}, token=admin)
@@ -172,6 +225,12 @@ check("and the product both agreed on", four43.get("product") == "nginx",
 st, v = call("/api/vulns?project=MRG&page_size=100", token=admin)
 titles = [x["title"] for x in (v or {}).get("items", [])]
 check("the finding came with it", "Weak SSH ciphers" in titles, str(titles))
+
+_prov = asyncio.run(_origins_of("web.acme.example"))
+check("the place only the losing record was found in came with it",
+      _prov == sorted([SHARED, ONLY_IP]), str(_prov))
+check("...and the place BOTH were found in is there once, not twice",
+      (_prov or []).count(SHARED) == 1, str(_prov))
 
 st, tl = call("/api/targets/MRG/web.acme.example/timeline", token=admin)
 events = tl if isinstance(tl, list) else (tl or {}).get("items", [])

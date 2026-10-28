@@ -241,6 +241,13 @@ jobs:
         working-directory: frontend
         run: node test/hooks.check.mjs
 
+      # A DataTable in a non-flex parent clips instead of scrolling,
+      # so the rows past the fold are simply unreachable. Shipped
+      # twice; a typecheck cannot see it and neither can review.
+      - name: Tables can scroll
+        working-directory: frontend
+        run: node test/table.scroll.check.mjs
+
       - name: Logic tests
         working-directory: frontend
         run: npm run test:logic --if-present
@@ -530,7 +537,16 @@ jobs:
           # get wrong.
           if over["ghost"].get("network_mode") != "host":
               fail.append("the overlay dropped host networking")
-          if set(over["ghost"].get("cap_add") or []) != {"NET_RAW", "NET_ADMIN"}:
+          # NET_BIND_SERVICE is expected, and it is NOT about binding a
+          # port: the nmap package ships its binary with file capabilities,
+          # and the kernel refuses to exec a file whose capabilities it
+          # cannot grant from the bounding set. Dropping it brings back
+          # `fork/exec /usr/bin/nmap: operation not permitted`. The full
+          # reasoning is in ghost/docker-compose.yml, where it was added in
+          # #68 -- this guard was simply never updated to match, and has
+          # failed every run since. Still compared as an exact set, so a
+          # capability nobody meant to grant still fails the build.
+          if set(over["ghost"].get("cap_add") or []) != {"NET_RAW", "NET_ADMIN", "NET_BIND_SERVICE"}:
               fail.append(f"cap_add is now {over['ghost'].get('cap_add')}")
 
           if LABEL in base["ghost"].get("labels", {}):
@@ -632,11 +648,37 @@ jobs:
             exit 1
           fi
 
+      # Polled, not asserted once.
+      #
+      # The wait above is on the container's HEALTH, and health is the
+      # API answering. Neither of these two facts is guaranteed to be
+      # observable at that instant: the entrypoint may still be
+      # finishing its alembic run, and `docker compose logs` reads a
+      # buffer that the daemon flushes on its own schedule. Asking
+      # once and failing turned both into a coin toss — this job
+      # failed on a PR and passed on re-run with no code change, more
+      # than once, which is the kind of flake people stop reading.
+      #
+      # Fifteen seconds is far longer than either needs and still
+      # fails fast when the migration genuinely did not run.
       - name: Migrations ran, and against Postgres
         run: |
           set -euo pipefail
-          docker compose exec -T app alembic current | grep -q '(head)'
-          docker compose logs app | grep -q 'db: postgresql'
+          for i in $(seq 1 15); do
+            at_head=$(docker compose exec -T app alembic current 2>/dev/null \
+                      | grep -c '(head)' || true)
+            on_pg=$(docker compose logs app 2>/dev/null \
+                    | grep -c 'db: postgresql' || true)
+            if [ "$at_head" -gt 0 ] && [ "$on_pg" -gt 0 ]; then
+              echo "migrations are at head, against postgres"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::after 15s: at_head=$at_head on_pg=$on_pg" >&2
+          docker compose exec -T app alembic current || true
+          docker compose logs app | tail -60
+          exit 1
 
       # Asked of python, not of `id`. The runtime image is distroless:
       # no shell and no coreutils, so `id -u` is not in it to run.
@@ -717,7 +759,7 @@ jobs:
       # fetch-depth: 0 — a key removed in the next commit is still
       # disclosed, and that is the case worth catching.
       - name: TruffleHog
-        uses: trufflesecurity/trufflehog@e76dff8a7e57d6df0c60ad8cbf5d5cba505a8fc9 # v3.99.2
+        uses: trufflesecurity/trufflehog@e63326d6545de8f425d93ce24078c6e68d83f70e # v3.99.3
         with:
           path: ./
           extra_args: --only-verified

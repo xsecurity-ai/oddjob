@@ -49,6 +49,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from . import blocked
+
 log = logging.getLogger("oddjob.assetfetch")
 
 #: Biggest body we will hold. Bundles are routinely megabytes and
@@ -78,6 +80,11 @@ _SOURCEMAP = re.compile(
 class Recovered:
     """What one fetch produced."""
     status: int | None = None
+    #: Which bot filter refused this, if one did. Distinct from
+    #: `error`, which is prose: this is the thing a count can be
+    #: taken of, and "nine assets refused by Cloudflare" is a
+    #: different report from nine unrelated failures.
+    blocked_by: str | None = None
     content_type: str | None = None
     error: str | None = None
     minified: bool | None = None
@@ -205,7 +212,17 @@ async def fetch(client: httpx.AsyncClient, url: str, *,
     out.status = r.status_code
     out.content_type = (r.headers.get("content-type") or "")[:128] or None
     if r.status_code >= 400:
-        out.error = f"HTTP {r.status_code}"
+        # Say which it is. `HTTP 403` on an asset reads as "the
+        # client's server refuses this file", and when the refusal
+        # came from a bot filter that is a claim about their
+        # application made from a fact about our TLS stack. See
+        # app/blocked.py.
+        who = blocked.blocked_by(
+            r.status_code, r.headers,
+            r.text[:4000] if r.status_code in blocked.REFUSING else None)
+        out.error = (blocked.describe(r.status_code, who) if who
+                     else f"HTTP {r.status_code}")[:300]
+        out.blocked_by = who
         return out
 
     raw = r.content[:MAX_BYTES]

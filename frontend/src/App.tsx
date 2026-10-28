@@ -15,7 +15,7 @@ import DescriptionIcon from '@mui/icons-material/DescriptionOutlined'
 import MemoryIcon from '@mui/icons-material/MemoryOutlined'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import SmartToyIcon from '@mui/icons-material/SmartToyOutlined'
-import PersonIcon from '@mui/icons-material/PersonOutline'
+import PersonIcon from '@mui/icons-material/PersonOutlined'
 import SettingsIcon from '@mui/icons-material/SettingsOutlined'
 import MonitorHeartIcon from '@mui/icons-material/MonitorHeartOutlined'
 import GroupIcon from '@mui/icons-material/GroupOutlined'
@@ -42,9 +42,9 @@ import { HealthView } from './views/HealthView'
 import { WebView } from './views/WebView'
 import { ImportView } from './views/ImportView'
 import { ReportsView } from './views/ReportsView'
-import { GhostDebugView } from './views/GhostDebugView'
 import { GhostsView } from './views/GhostsView'
 import { ProjectConfigView } from './views/ProjectConfigView'
+import { StandingOrdersButton } from './components/StandingOrders'
 import { useHostModal } from './components/HostModal'
 import { AgentPanel } from './components/AgentPanel'
 import { UsersView } from './views/UsersView'
@@ -68,7 +68,9 @@ function LiveDot({ state }: { state: LiveState }) {
     : 'Offline — no change stream'
   return (
     <Tooltip title={label}>
-      <Stack direction="row" spacing={0.9} alignItems="center">
+      <Stack direction="row" spacing={0.9} sx={{
+        alignItems: "center"
+      }}>
         <Box sx={{ width: 9, height: 9, borderRadius: '50%', bgcolor: c,
                    boxShadow: `0 0 8px ${c}`,
                    animation: state === 'live' ? 'neonPulse 2.4s ease-out infinite' : 'none' }} />
@@ -78,7 +80,7 @@ function LiveDot({ state }: { state: LiveState }) {
         </Typography>
       </Stack>
     </Tooltip>
-  )
+  );
 }
 
 function StatChip({ label, value, colour }: { label: string; value: number; colour: string }) {
@@ -95,7 +97,7 @@ function StatChip({ label, value, colour }: { label: string; value: number; colo
 }
 
 export default function App() {
-  const { me, loading, setupRequired, signOut, isAdmin } = useAuth()
+  const { me, loading, setupRequired, signOut } = useAuth()
   // Initialised FROM the URL, so a theme switch — which remounts the
   // tree to recompute alpha() colours — lands back where you were
   // instead of resetting to Targets.
@@ -294,24 +296,13 @@ export default function App() {
     // Its own entry, directly below Reports rather than nested inside
     // it. Nesting cost a click to reach a view an operator checks while
     // a scan is running, and hid it entirely until Reports was open.
-    // A group rather than a leaf, for the same reason Services is
-    // one: Debug is a second view of the same fleet, and an operator
-    // reaches for it while a scan is running.
-    {
-      key: 'ghosts', label: 'Ghosts', icon: <MemoryIcon fontSize="small" />,
-      children: [
-        { key: 'ghosts', label: 'Fleet', icon: <MemoryIcon fontSize="small" /> },
-        // Administrators of this engagement only, matching the
-        // endpoint. A tab that is always visible and answers 403 for
-        // most of the people who can see it teaches them to ignore
-        // the ones that do not -- and the view behind it refuses on
-        // its own account too, because a sidebar is not a control.
-        ...(isAdmin(scope)
-          ? ([{ key: 'ghost-debug', label: 'Debug',
-               icon: <BugReportIcon fontSize="small" /> }] satisfies NavLeaf[])
-          : []),
-      ],
-    },
+    // A LEAF, not a group. Debug was a child behind a dropdown,
+    // which cost a click to reach a view an operator checks while a
+    // scan is running and hid it until the group was open. It is a
+    // second view of the same fleet, so it is a tab on that page
+    // now. The `ghost-debug` route still resolves and opens that
+    // tab, so existing links keep working.
+    { key: 'ghosts', label: 'Ghosts', icon: <MemoryIcon fontSize="small" /> },
     // No sidebar entry for Project Config: it is reached from the edit
     // button on its own row in Projects, which is where you already are
     // when you want it. The route still resolves, so existing links and
@@ -356,7 +347,11 @@ export default function App() {
     import: <ImportView project={project === ALL ? null : project} />,
     reports: <ReportsView project={project === ALL ? null : project} />,
     ghosts: <GhostsView project={project === ALL ? null : project} />,
-    'ghost-debug': <GhostDebugView project={project === ALL ? null : project} />,
+    // Kept so bookmarks and existing links resolve. It is the same
+    // page with the Debug tab open, not a second view -- the
+    // admin check lives there, because a route is not a control.
+    'ghost-debug': <GhostsView project={project === ALL ? null : project}
+                              tab="debug" />,
     settings: <ProjectConfigView project={project === ALL ? null : project} />,
     config: <SiteConfigView />,
     health: <HealthView />,
@@ -581,10 +576,24 @@ export default function App() {
               </Tooltip>
             )}
 
+            {/* Beside the project's own configuration, because that is
+                what these are: settings on the engagement, not a
+                property of the Targets table they used to sit above.
+                They moved here from a strip of seven controls wedged
+                over that table, where they ate the height the table
+                needed and explained themselves only on hover.
+
+                The running count stays on the button. These policies
+                scan a client's estate unattended, so "three running"
+                has to be readable without opening anything. */}
+            {scope && <StandingOrdersButton project={scope} />}
+
             <Box sx={{ flex: 1 }} />
 
             {wide && stats && (
-              <Stack direction="row" spacing={1} alignItems="center">
+              <Stack direction="row" spacing={1} sx={{
+                alignItems: "center"
+              }}>
                 <StatChip label="TARGETS" value={stats.targets} colour={neon.pink} />
                 <StatChip label="PWNED" value={stats.hacked} colour={neon.red} />
                 <StatChip label="OPEN" value={stats.open_ports} colour={neon.cyan} />
@@ -623,5 +632,5 @@ export default function App() {
       <AgentPanel project={project === ALL ? null : project}
         open={agentOpen} onClose={() => setAgentOpen(false)} />
     </Box>
-  )
+  );
 }

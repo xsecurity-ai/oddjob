@@ -178,6 +178,229 @@ async def sync_exploitdb(session: AsyncSession) -> dict:
         return {"source": "exploitdb", "ok": False, "error": st.error}
 
 
+# --------------------------------------------------------- kev / epss
+#
+# Two small feeds that answer the question CVSS cannot.
+#
+# A findings list sorted by CVSS puts a 9.8 that nobody has ever used
+# above a 7.5 that is being exploited this week. Both of these are
+# published, free, cacheable and tiny next to NVD, and together they
+# turn that ordering the right way up:
+#
+#   KEV   CISA's Known Exploited Vulnerabilities. Binary and
+#         conservative -- an entry means somebody has been SEEN using
+#         it against somebody. About 1,300 CVEs, a few hundred KB.
+#   EPSS  FIRST's probability that a CVE will be exploited in the
+#         next 30 days. Scores every CVE, refreshed daily, ~250k
+#         rows as a gzipped CSV.
+#
+# Both are stored ON the CVE row rather than in tables of their own:
+# one fact per CVE, always wanted together with the CVE, and a join
+# per finding to answer "how should I sort this" is a join nobody
+# needs.
+#
+# **Neither names a target.** These are whole-corpus downloads, like
+# NVD and Exploit-DB: we fetch the entire list and match locally, so
+# nothing about the client's estate leaves. That is the same reason
+# the rest of this module exists and it is not an accident that the
+# shape repeats.
+
+#: CISA's KEV catalogue, the JSON form.
+KEV_JSON = ("https://www.cisa.gov/sites/default/files/feeds/"
+            "known_exploited_vulnerabilities.json")
+
+#: FIRST's EPSS, current scores, gzipped CSV. The dated URL exists
+#: too; this one is the rolling latest, which is what a daily sync
+#: wants.
+EPSS_CSV_GZ = "https://epss.empiricalsecurity.com/epss_scores-current.csv.gz"
+
+
+def _day(value: str | None) -> datetime | None:
+    """A CISA `YYYY-MM-DD` into an aware datetime, or None."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value.strip()[:10], "%Y-%m-%d").replace(
+            tzinfo=UTC)
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_kev(doc: dict) -> dict[str, dict]:
+    """CISA's catalogue into {CVE: fields}. -> {} if it is not one.
+
+    An empty result from a document that parsed is treated by the
+    caller as a format change rather than an empty catalogue, for the
+    same reason `sync_exploitdb` does: CISA has never published zero.
+    """
+    out: dict[str, dict] = {}
+    for item in (doc.get("vulnerabilities") or []):
+        cve = str(item.get("cveID") or "").strip().upper()
+        if not cve.startswith("CVE-"):
+            continue
+        out[cve] = {
+            "kev": True,
+            "kev_added": _day(item.get("dateAdded")),
+            "kev_due": _day(item.get("dueDate")),
+        }
+    return out
+
+
+def parse_epss(text: str) -> dict[str, tuple[float, float]]:
+    """The EPSS CSV into {CVE: (score, percentile)}.
+
+    The file opens with a `#model_version` comment line and then a
+    header, both of which `csv` will happily hand back as data; rows
+    that do not start with a CVE id are skipped rather than trusted.
+    """
+    out: dict[str, tuple[float, float]] = {}
+    for row in csv.reader(io.StringIO(text)):
+        if len(row) < 3:
+            continue
+        cve = row[0].strip().upper()
+        if not cve.startswith("CVE-"):
+            continue
+        try:
+            out[cve] = (float(row[1]), float(row[2]))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+async def sync_kev(session: AsyncSession) -> dict:
+    """Mark which CVEs CISA says are being exploited. -> status dict."""
+    st = await _state(session, "kev")
+    st.last_attempt_at = datetime.now(UTC)
+    st.running = True
+    await session.commit()
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT,
+                                     headers={"User-Agent": _UA},
+                                     follow_redirects=True) as c:
+            r = await c.get(KEV_JSON)
+            r.raise_for_status()
+            found = parse_kev(r.json())
+
+        if not found:
+            raise ValueError("the KEV feed parsed to zero entries — the "
+                             "format has probably changed; keeping the "
+                             "existing data")
+
+        # Cleared first, so a CVE REMOVED from the catalogue stops
+        # being marked. CISA does withdraw entries, and a flag that
+        # only ever goes on would quietly overstate the list for ever.
+        #
+        # False rather than NULL: "synced, and not on the list" is a
+        # different answer from "never synced", which is the
+        # distinction the column exists for.
+        await session.execute(
+            CveRecord.__table__.update().values(
+                kev=False, kev_added=None, kev_due=None))
+
+        marked = 0
+        ids = sorted(found)
+        for i in range(0, len(ids), 500):
+            batch = ids[i:i + 500]
+            res = await session.execute(
+                CveRecord.__table__.update()
+                .where(CveRecord.id.in_(batch))
+                .values(kev=True))
+            marked += res.rowcount or 0
+            # The dates differ per CVE, so they go one at a time --
+            # only over the ~1,300 that are actually listed.
+            for cve in batch:
+                f = found[cve]
+                await session.execute(
+                    CveRecord.__table__.update()
+                    .where(CveRecord.id == cve)
+                    .values(kev_added=f["kev_added"], kev_due=f["kev_due"]))
+            await session.flush()
+
+        st.records = len(found)
+        st.last_success_at = datetime.now(UTC)
+        st.error = None
+        st.running = False
+        await session.commit()
+        # `marked` is the overlap, not the catalogue size, and the gap
+        # between them is information: a KEV entry for a CVE this NVD
+        # mirror has not got yet means the mirror is behind.
+        log.info("kev: %d listed, %d matched a CVE we hold",
+                 len(found), marked)
+        return {"source": "kev", "ok": True, "records": len(found),
+                "matched": marked}
+    except Exception as e:                       # noqa: BLE001
+        await session.rollback()
+        st = await _state(session, "kev")
+        st.running = False
+        st.error = f"{type(e).__name__}: {e}"[:500]
+        await session.commit()
+        log.warning("kev sync failed: %s", e)
+        return {"source": "kev", "ok": False, "error": st.error}
+
+
+async def sync_epss(session: AsyncSession) -> dict:
+    """Store FIRST's exploit-probability per CVE. -> status dict."""
+    import gzip
+
+    st = await _state(session, "epss")
+    st.last_attempt_at = datetime.now(UTC)
+    st.running = True
+    await session.commit()
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT,
+                                     headers={"User-Agent": _UA},
+                                     follow_redirects=True) as c:
+            r = await c.get(EPSS_CSV_GZ)
+            r.raise_for_status()
+            raw = r.content
+        # Served gzipped; httpx transparently decodes a
+        # `Content-Encoding: gzip` but NOT a body that is simply a
+        # .gz file, which this is. Try both rather than assume.
+        try:
+            text = gzip.decompress(raw).decode("utf-8", "replace")
+        except (OSError, EOFError):
+            text = raw.decode("utf-8", "replace")
+        scores = parse_epss(text)
+
+        if not scores:
+            raise ValueError("the EPSS feed parsed to zero rows — the "
+                             "format has probably changed; keeping the "
+                             "existing data")
+
+        # Only CVEs we hold. EPSS scores everything; writing rows for
+        # CVEs this mirror has never seen would be inventing records
+        # with no summary, no CPE and nothing to match a service on.
+        held = {c for (c,) in (await session.execute(
+            select(CveRecord.id))).all()}
+        touch = sorted(held & set(scores))
+        for i in range(0, len(touch), 1000):
+            for cve in touch[i:i + 1000]:
+                sc, pct = scores[cve]
+                await session.execute(
+                    CveRecord.__table__.update()
+                    .where(CveRecord.id == cve)
+                    .values(epss=sc, epss_percentile=pct))
+            await session.flush()
+
+        st.records = len(touch)
+        st.last_success_at = datetime.now(UTC)
+        st.error = None
+        st.running = False
+        await session.commit()
+        log.info("epss: %d scored, %d matched a CVE we hold",
+                 len(scores), len(touch))
+        return {"source": "epss", "ok": True, "records": len(touch),
+                "scored": len(scores)}
+    except Exception as e:                       # noqa: BLE001
+        await session.rollback()
+        st = await _state(session, "epss")
+        st.running = False
+        st.error = f"{type(e).__name__}: {e}"[:500]
+        await session.commit()
+        log.warning("epss sync failed: %s", e)
+        return {"source": "epss", "ok": False, "error": st.error}
+
+
 # ----------------------------------------------------------------- nvd
 def _cvss(metrics: dict) -> tuple[float | None, str | None, str | None]:
     """Score, vector and severity, preferring the newest CVSS present."""
@@ -414,15 +637,26 @@ async def status(session: AsyncSession) -> dict:
     """
     out: dict = {"feeds": {}, "usable": True, "warnings": []}
     now = datetime.now(UTC)
-    for source in ("exploitdb", "nvd"):
+    for source in ("exploitdb", "nvd", "kev", "epss"):
         st = await session.get(FeedState, source)
         if st is None or st.last_success_at is None:
             out["feeds"][source] = {"synced": None, "records": 0,
                                     "error": st.error if st else None}
-            out["usable"] = False
+            # `usable` is about whether a CVE lookup can answer at
+            # all, which is NVD and Exploit-DB. KEV and EPSS only
+            # affect ORDERING: without them a findings list is sorted
+            # less well, not wrongly, and blocking the whole feature
+            # on them would be the wrong trade.
+            if source in ("exploitdb", "nvd"):
+                out["usable"] = False
             out["warnings"].append(
                 f"{source} has never synced — a result from it means "
-                f"'nothing is recorded here', not 'nothing exists'")
+                f"'nothing is recorded here', not 'nothing exists'"
+                if source in ("exploitdb", "nvd") else
+                f"{source} has never synced, so findings are ordered by "
+                f"severity alone — nothing is marked as being exploited "
+                f"in the wild, which is not the same as nothing being "
+                f"exploited")
             continue
         age = now - st.last_success_at
         out["feeds"][source] = {
@@ -436,6 +670,38 @@ async def status(session: AsyncSession) -> dict:
                 f"{source} last synced {age.days} day(s) ago"
                 + (f"; last attempt failed: {st.error}" if st.error else ""))
     return out
+
+
+#: How a findings list should be ordered, worst-first.
+#:
+#: CVSS alone puts "a 9.8 nobody has ever used" above "a 7.5 being
+#: exploited this week", which is the wrong way round for somebody
+#: deciding what to fix on a Tuesday. The order is:
+#:
+#:   1. on CISA's KEV list      somebody has been SEEN using it
+#:   2. EPSS, descending        how likely it is to be used next
+#:   3. CVSS, descending        how bad it would be if it were
+#:
+#: KEV first and binary, because "observed in the wild" is a
+#: different kind of claim from "probably will be" and should not be
+#: averaged with it. EPSS before CVSS because likelihood is the thing
+#: CVSS cannot express at all.
+#:
+#: A CVE with no EPSS sorts as though it were 0 rather than being
+#: dropped: an unscored CVE is unscored, not harmless.
+def triage_order(rows: list) -> list:
+    """Sort CVE-ish rows worst-first. Pure, so it is testable.
+
+    Takes anything with `.kev`, `.epss` and `.cvss_score`, or the
+    mapping equivalent -- the findings list and the agent's lead tool
+    hold different shapes and should not need two orderings.
+    """
+    def key(r):
+        get = (r.get if isinstance(r, dict) else lambda k: getattr(r, k, None))
+        return (0 if get("kev") else 1,
+                -(get("epss") or 0.0),
+                -(get("cvss_score") or 0.0))
+    return sorted(rows, key=key)
 
 
 # ------------------------------------------------------------ matching
@@ -634,7 +900,16 @@ async def leads_for_service(session: AsyncSession, product: str | None,
                          "severity": c.severity,
                          "summary": (c.summary or "")[:300],
                          "matched_on": term,
-                         "version_match": match})
+                         "version_match": match,
+                         # Tri-state, deliberately. False means CISA
+                         # has not listed it; None means the KEV feed
+                         # has never synced here, and a reader must
+                         # not be shown those the same way.
+                         "kev": c.kev,
+                         "kev_added": (c.kev_added.date().isoformat()
+                                       if c.kev_added else None),
+                         "epss": c.epss,
+                         "epss_percentile": c.epss_percentile})
             if len(cves) >= limit:
                 break
         if len(cves) >= limit:
@@ -643,9 +918,16 @@ async def leads_for_service(session: AsyncSession, product: str | None,
     # Exact version matches first. Ordering by score alone buries the
     # one CVE that names this exact release under a dozen wildcard CPEs
     # that happen to score 9.8, which is the wrong thing to read first.
+    #
+    # Within that, KEV then EPSS then CVSS -- see `triage_order` for
+    # why likelihood comes before severity. Version match still wins
+    # over both: a CVE that names this exact release is evidence
+    # about THIS host, and one being exploited elsewhere is not yet.
     _rank = {"exact": 0}
     cves.sort(key=lambda c: (
         _rank.get(str(c["version_match"]).split(" ")[0], 1),
+        0 if c.get("kev") else 1,
+        -(c.get("epss") or 0.0),
         -(c["score"] or 0)))
 
     # Exploits by CVE first — a cited CVE is a real link — then by
@@ -694,3 +976,97 @@ async def leads_for_service(session: AsyncSession, product: str | None,
         "caveat": caveat,
         "feeds": await status(session),
     }
+
+
+# ------------------------------------------- confirmation, not discovery
+#
+# Which CVEs are worth asking nuclei about on a given origin.
+#
+# The vulnerability run is already filtered -- `-severity
+# critical,high -tags cve -etags authenticated` -- so this is not
+# about taming an unfiltered scan. It is a different question:
+# instead of asking every critical CVE template whether it applies,
+# ask only the ones the local corpus has ALREADY matched to a
+# service on that host.
+#
+# That turns nuclei from discovery into confirmation, and the two
+# want different template sets:
+#
+#   discovery      every critical/high CVE template. Finds things the
+#                  version banner never mentioned, and costs a full
+#                  template run per URL.
+#   confirmation   `-id CVE-…,CVE-…` for the suspected ones. Seconds
+#                  rather than minutes, and every hit is evidence for
+#                  a lead that already existed rather than a new
+#                  claim to triage.
+#
+# Neither replaces the other, which is why this is a separate task
+# kind rather than a change to the existing one: a CPE match needs a
+# version to have been detected, and plenty of services do not give
+# one.
+
+#: Most CVE ids to put on one command line. nuclei takes `-id` as a
+#: comma list and an argv has a length limit; past this the run is
+#: not a confirmation of anything in particular anyway.
+MAX_CONFIRM_IDS = 40
+
+
+async def suspected_cves(session: AsyncSession, project_id: int,
+                         origins: dict[str, str],
+                         limit: int = MAX_CONFIRM_IDS,
+                         ) -> dict[str, list[str]]:
+    """-> {origin: [CVE, …]} the corpus already links to that host.
+
+    `origins` is {origin: host}, as `webtargets.discoverable` gives
+    it. Read once per cycle so the planner stays pure data.
+
+    Only services with BOTH a product and a version are asked about.
+    Without a version a CPE match is product-wide, which is every CVE
+    that vendor has ever had -- a confirmation run built from that
+    would be the unfiltered scan this exists to avoid.
+    """
+    from .models import Service, Target
+
+    if not origins:
+        return {}
+    hosts = {h for h in origins.values() if h}
+    if not hosts:
+        return {}
+
+    rows = (await session.execute(
+        select(Target.host, Service.product, Service.version, Service.name)
+        .join(Service, Service.target_id == Target.id)
+        .where(Target.project_id == project_id,
+               Target.host.in_(sorted(hosts)),
+               Service.product.is_not(None),
+               Service.version.is_not(None)))).all()
+
+    # Per (product, version), not per service: an estate runs the same
+    # nginx on four hundred hosts and the lookup is identical for all
+    # of them.
+    by_pair: dict[tuple, list[str]] = {}
+    per_host: dict[str, set[str]] = {}
+    for host, product, version, name in rows:
+        key = (product, version, name)
+        if key not in by_pair:
+            leads = await leads_for_service(session, product, version, name,
+                                            limit=limit)
+            by_pair[key] = [c["cve"] for c in (leads.get("cves") or [])
+                            # Only an exact CPE version match. "Product
+                            # only" means the CPE covers every release,
+                            # which is not evidence about this one and
+                            # would put a confirmation run back where
+                            # it started.
+                            if str(c.get("version_match", "")).startswith(
+                                "exact")]
+        if by_pair[key]:
+            per_host.setdefault(host, set()).update(by_pair[key])
+
+    out: dict[str, list[str]] = {}
+    for origin, host in origins.items():
+        got = per_host.get(host)
+        if got:
+            # Sorted so the same estate produces the same command line
+            # twice, which is what makes two runs comparable.
+            out[origin] = sorted(got)[:limit]
+    return out

@@ -5,7 +5,7 @@ import {
   Stack, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
-import DeleteIcon from '@mui/icons-material/DeleteOutline'
+import DeleteIcon from '@mui/icons-material/DeleteOutlined'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { neon, glow } from '../theme'
@@ -47,7 +47,7 @@ const DELIVERY_HELP: Record<Delivery, string> = {
 function normaliseChannel(raw: string): string {
   return raw.trim().replace(/^#/, '').toLowerCase()
     .replace(/[^a-z0-9_-]+/g, '-').replace(/-{2,}/g, '-')
-    .replace(/^-+|-+$/g, '').slice(0, 80)
+    .replace(/^-+|-+$/g, '').slice(0, 80);
 }
 
 /** Mirrors `derive_code` in backend/app/routers/projects.py.
@@ -60,7 +60,7 @@ function deriveCode(name: string): string {
   return name.normalize('NFKD').replace(/\p{Diacritic}/gu, '')
     .trim().toUpperCase().replace(/ /g, '-')
     .replace(/[^A-Z0-9-]+/g, '-').replace(/-{2,}/g, '-')
-    .replace(/^-+|-+$/g, '').slice(0, 56) || 'ENGAGEMENT'
+    .replace(/^-+|-+$/g, '').slice(0, 56) || 'ENGAGEMENT';
 }
 
 type Contact = { name: string; email: string; phone: string; title: string; primary_contact: boolean }
@@ -242,8 +242,15 @@ export function NewProjectDialog({ onClose, onCreated }: {
             analyse={scopeAnalyse} accent={neon.cyan} minRows={5}
             placeholder="203.0.113.0/24, 2001:db8::/32, portal.acme.example, !203.0.113.5"
             helperText="One per line." />
-          <Stack direction="row" spacing={2} alignItems="center"
-                 flexWrap="wrap" useFlexGap sx={{ mt: -1 }}>
+          <Stack
+            direction="row"
+            spacing={2}
+            useFlexGap
+            sx={{
+              alignItems: "center",
+              flexWrap: "wrap",
+              mt: -1
+            }}>
             <FormControlLabel
               control={<Checkbox size="small" checked={scopeSubs}
                          onChange={(e) => setScopeSubs(e.target.checked)} />}
@@ -298,7 +305,9 @@ export function NewProjectDialog({ onClose, onCreated }: {
           <Divider sx={{ borderColor: alpha(neon.purple, 0.2) }} />
           {section('Points of contact', 'On the customer side.')}
           {contacts.map((c, i) => (
-            <Stack key={i} direction="row" spacing={1} alignItems="flex-start">
+            <Stack key={i} direction="row" spacing={1} sx={{
+              alignItems: "flex-start"
+            }}>
               <Stack spacing={1} sx={{ flex: 1 }}>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
                   <TextField size="small" fullWidth label="Name" value={c.name}
@@ -306,7 +315,9 @@ export function NewProjectDialog({ onClose, onCreated }: {
                   <TextField size="small" fullWidth label="Title" value={c.title}
                     onChange={(e) => setContacts(up(contacts, i, { title: e.target.value }))} />
                 </Stack>
-                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems="center">
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{
+                  alignItems: "center"
+                }}>
                   <TextField size="small" fullWidth label="Email" value={c.email}
                     onChange={(e) => setContacts(up(contacts, i, { email: e.target.value }))} />
                   <TextField size="small" fullWidth label="Phone" value={c.phone}
@@ -334,7 +345,9 @@ export function NewProjectDialog({ onClose, onCreated }: {
           {section('Team', 'You are the project admin. Add anyone else and their role; '
             + 'an unknown username is reported, not fatal.')}
           {members.map((m, i) => (
-            <Stack key={i} direction="row" spacing={1} alignItems="center">
+            <Stack key={i} direction="row" spacing={1} sx={{
+              alignItems: "center"
+            }}>
               <Autocomplete
                 freeSolo size="small" sx={{ flex: 1 }} options={sortedStrings(options)}
                 value={m.username}
@@ -377,7 +390,7 @@ export function NewProjectDialog({ onClose, onCreated }: {
         </Button>
       </DialogActions>
     </Dialog>
-  )
+  );
 }
 
 function up<T>(arr: T[], i: number, patch: Partial<T>): T[] {

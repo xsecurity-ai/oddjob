@@ -75,6 +75,128 @@ SPEC = [
              "MaxMind's own GeoIP.conf. City answers country too and is "
              "27 MB against Country's 3 MB, so an installation that only "
              "wants a country code can drop it."},
+    # ------------------------------------------------- socks proxy
+    # The only listener in this product that carries somebody else's
+    # traffic. Off, bound to loopback, and saying so where it is
+    # switched on rather than in a docstring nobody opens.
+    {"key": "proxy.enabled", "group": "Site",
+     "label": "SOCKS5 proxy through ghosts", "type": "bool",
+     "default": False,
+     "help": "Lets an operator point a browser at Oddjob and have the "
+             "requests come out of a Ghost — inside the estate, from the "
+             "address the client already sees. READ THIS BEFORE ENABLING: "
+             "this is a proxy INTO a client's network. Every connection "
+             "needs a per-ghost credential, is ruled on by the scope gate "
+             "and is recorded, and each ghost must be switched on "
+             "separately — but if a credential leaks, whoever has it "
+             "reaches whatever that ghost reaches. Off until somebody "
+             "decides otherwise."},
+    {"key": "proxy.bind", "group": "Site",
+     "label": "Proxy listen address", "type": "text",
+     "default": "0.0.0.0",
+     "help": "Which interface the listener binds INSIDE the container — "
+             "not on the host. That distinction is the whole of this "
+             "setting and it reads backwards: 127.0.0.1 here is the "
+             "CONTAINER's loopback, and Docker forwards a published port "
+             "to the container's bridge address, so a published 8443 "
+             "finds nothing listening and every connection is reset. "
+             "That is exactly what happened: the port looked open on the "
+             "host, `ss` showed it LISTEN, and nothing answered. "
+             "0.0.0.0 is therefore the default for a containerised "
+             "deployment, and it does NOT publish anything — what the "
+             "outside can reach is decided by the ports mapping in "
+             "docker-compose.yml, which binds the host's 127.0.0.1 "
+             "unless PROXY_BIND_ADDRESS says otherwise. Running Oddjob "
+             "directly on a host rather than in a container is the case "
+             "where 127.0.0.1 here means what it looks like it means."},
+    {"key": "proxy.port", "group": "Site",
+     "label": "Proxy port", "type": "number", "default": 8443,
+     "help": "Not 443. A browser pointed at a SOCKS proxy speaks raw "
+             "SOCKS5 — no TLS, no SNI — and nginx routes 443 by SNI, so "
+             "there is nothing for it to match on and the two cannot "
+             "share a port without a demuxer nginx does not have. This "
+             "port carries both SOCKS5 and CONNECT-over-TLS: Oddjob "
+             "demuxes them on the first byte, which nginx cannot do."},
+    {"key": "proxy.tls_port", "group": "Site",
+     "label": "Proxy TLS port", "type": "number", "default": 8444,
+     "help": "A SECOND port, which answers CONNECT inside TLS. Only "
+             "listens when a certificate is configured below. It is "
+             "separate from the plain port rather than sharing it, and "
+             "that is not a preference: telling SOCKS and TLS apart "
+             "means reading the first byte, and a TLS handshake cannot "
+             "survive having its first byte read by anything else — the "
+             "ClientHello is incomplete and the handshake hangs for "
+             "ever. Here asyncio wraps the socket from byte zero."},
+    {"key": "proxy.tls_cert", "group": "Site",
+     "label": "Proxy TLS certificate", "type": "text", "default": "",
+     "help": "Path, inside the container, to a certificate for this "
+             "host. Setting it turns on CONNECT-over-TLS on the same "
+             "port, which is what lets a browser be pointed straight at "
+             "Oddjob instead of through an SSH tunnel: the credential "
+             "then travels inside TLS instead of in clear, which is "
+             "what SOCKS5 cannot offer. It must be a certificate the "
+             "browser already trusts — there is no click-through for a "
+             "proxy the way there is for a page. Empty means SOCKS "
+             "only, reachable through a tunnel."},
+    {"key": "proxy.tls_key", "group": "Site",
+     "label": "Proxy TLS key", "type": "text", "default": "",
+     "help": "Path, inside the container, to the private key for the "
+             "certificate above. Both must be set or neither does "
+             "anything."},
+    # ----------------------------------------- certificate transparency
+    # The one source here that SENDS something. Everything else in
+    # this file either stays local (geoip looks up a database this
+    # host downloaded) or fetches a feed that carries no engagement
+    # data with it (NVD). A CT query names the client.
+    #
+    # So the help text says what leaves, where it goes, and who has
+    # to agree first -- in the place somebody turns it on, not in a
+    # module docstring they will never open.
+    {"key": "ct.enabled", "group": "Site",
+     "label": "Certificate Transparency lookups", "type": "bool",
+     "default": False,
+     "help": "Finds hostnames from public certificate logs — including "
+             "hosts that never resolved publicly and long-dead hosts whose "
+             "infrastructure is still up, which nothing else here can see. "
+             "READ THIS BEFORE ENABLING: unlike every other source in "
+             "Oddjob, a lookup SENDS THE CLIENT'S DOMAIN NAME to a third "
+             "party, which logs it. That is customer data leaving for an "
+             "external service, so it needs the same approval any other "
+             "vendor would — an engagement signoff covers testing the "
+             "client, not onboarding a supplier. Off until somebody "
+             "decides otherwise."},
+    {"key": "ct.source", "group": "Site",
+     "label": "Certificate Transparency source", "type": "text",
+     "default": "",
+     "help": "Which third party the domain is sent to. Deliberately has no "
+             "default: choosing it IS the decision. Currently supported: "
+             "crt.sh. Names found are reported for a person to rule on and "
+             "are never turned into targets on their own — a shared or "
+             "wildcard certificate names other people's hosts, and a name "
+             "in a log is not evidence anybody agreed to be scanned."},
+    {"key": "archive.enabled", "group": "Site",
+     "label": "Archived-URL lookups", "type": "bool",
+     "default": False,
+     "help": "Finds paths a site used to serve, from public web archives — "
+             "the admin panel that was unlinked rather than deleted, the "
+             "API version nobody retired. gobuster guesses paths, katana "
+             "follows links and httpx confirms them; all three need the "
+             "path to be reachable now, so none of them can see these. "
+             "READ THIS BEFORE ENABLING: like Certificate Transparency, a "
+             "lookup SENDS THE CLIENT'S DOMAIN NAME to a third party, "
+             "which logs it. That is customer data leaving for an external "
+             "service and needs the same approval any other vendor would — "
+             "an engagement signoff covers testing the client, not "
+             "onboarding a supplier. Off until somebody decides "
+             "otherwise."},
+    {"key": "archive.source", "group": "Site",
+     "label": "Archive source", "type": "text", "default": "",
+     "help": "Which third party the domain is sent to. Deliberately has no "
+             "default: choosing it IS the decision. Currently supported: "
+             "web.archive.org, urlscan.io. URLs found are reported for a "
+             "person to rule on and are never crawled on their own — an "
+             "archive records what a crawler saw, not what anybody "
+             "authorised, and a path that existed in 2019 may be gone."},
     {"key": "audit.retain_days", "group": "Site",
      "label": "Audit retention (days)", "type": "number", "default": 7,
      "help": "How long /audit/<type>/<format> keeps entries, where type is "

@@ -1213,6 +1213,152 @@ check("writes are off when no single project is in view",
       (wide or {}).get("allow_writes") is False,
       str((wide or {}).get("allow_writes")))
 
+
+print("\n== the agent thread belongs to the engagement ==")
+# It used to live in the browser. An engagement is worked by several
+# people, so "what have we already asked" is a fact about the
+# engagement rather than about whoever has the tab open.
+st, none_yet = call("/api/agent/session?project=ALPHA", token=admin)
+check("a project with no thread says so rather than inventing one",
+      st == 200 and none_yet is None, f"status={st} {str(none_yet)[:60]}")
+
+st, fresh = call("/api/agent/session/new?project=ALPHA", "POST", {},
+                 token=admin)
+check("a thread can be started", st == 200 and (fresh or {}).get("id"),
+      f"status={st} {str(fresh)[:90]}")
+check("...on the project it was asked for",
+      (fresh or {}).get("project_code") == "ALPHA", str(fresh)[:70])
+check("...and is empty", (fresh or {}).get("turns") == [], str(fresh)[:70])
+
+# The point of the change: the OTHER person on the engagement reads
+# the same thread, without having been the one who opened it.
+st, seen = call("/api/agent/session?project=ALPHA", token=ntok)
+check("a readonly member of the project sees the same thread",
+      st == 200 and (seen or {}).get("id") == (fresh or {}).get("id"),
+      f"status={st} {str(seen)[:80]}")
+check("...and is told who opened it",
+      (seen or {}).get("opened_by") == "root", str(seen)[:80])
+
+# Switching engagement must not carry a client's conversation into
+# another client's view. That is the one thing this app exists to
+# prevent.
+st, bravo = call("/api/agent/session?project=BRAVO", token=admin)
+check("another engagement has its own thread, not this one",
+      st == 200 and (bravo is None or
+                     (bravo or {}).get("id") != (fresh or {}).get("id")),
+      f"status={st} {str(bravo)[:70]}")
+st, _ = call("/api/agent/session?project=BRAVO", token=ntok)
+check("a project they cannot read is 404, not an empty thread", st == 404,
+      f"status={st} — anything else leaks that BRAVO exists")
+
+st, second = call("/api/agent/session/new?project=ALPHA", "POST", {},
+                  token=admin)
+check("starting a new thread gives a different one",
+      (second or {}).get("id") != (fresh or {}).get("id"),
+      f"{(fresh or {}).get('id')} -> {(second or {}).get('id')}")
+st, now = call("/api/agent/session?project=ALPHA", token=admin)
+check("...and it is the one the project is now on",
+      (now or {}).get("id") == (second or {}).get("id"), str(now)[:70])
+
+
+print("\n== several threads at once, and the list is the engagement's ==")
+# "What did the crawl find" and "is this credential worth anything"
+# are not one conversation. A second question must not end the first,
+# which may also be somebody else's.
+st, beside = call("/api/agent/session/new?project=ALPHA&close_current=false",
+                  "POST", {}, token=admin)
+check("a thread can be opened beside the one already open",
+      st == 200 and (beside or {}).get("id") != (second or {}).get("id"),
+      f"status={st} {str(beside)[:80]}")
+
+st, threads = call("/api/agent/sessions?project=ALPHA", token=admin)
+ids = [t["id"] for t in (threads or [])]
+check("both are listed as open",
+      st == 200 and (beside or {}).get("id") in ids
+      and (second or {}).get("id") in ids, f"status={st} {ids}")
+check("...and the one that was replaced is not",
+      (fresh or {}).get("id") not in ids,
+      f"{(fresh or {}).get('id')} must have stayed closed: {ids}")
+check("...newest activity first",
+      ids[0] == (beside or {}).get("id"), ids)
+check("...with the turn count, so a tab needs no transcript to label it",
+      all("turn_count" in t for t in (threads or [])), str(threads)[:90])
+
+# The list is the engagement's, exactly like the threads in it: a
+# question a colleague left running is one you can pick up.
+st, theirs = call("/api/agent/sessions?project=ALPHA", token=ntok)
+check("a readonly member of the project sees the same open threads",
+      st == 200 and [t["id"] for t in (theirs or [])] == ids,
+      f"status={st} {str(theirs)[:90]}")
+
+st, one = call(f"/api/agent/session?project=ALPHA"
+               f"&thread={(second or {}).get('id')}", token=ntok)
+check("a named thread is fetched by id, not only the newest",
+      st == 200 and (one or {}).get("id") == (second or {}).get("id"),
+      f"status={st} {str(one)[:70]}")
+
+# An id belonging to another engagement must not be reachable through
+# a project the caller can read -- that would be the one thing the
+# per-project thread exists to prevent, done with a number.
+st, bsess = call("/api/agent/session/new?project=BRAVO", "POST", {},
+                 token=admin)
+st, _ = call(f"/api/agent/session?project=ALPHA"
+             f"&thread={(bsess or {}).get('id')}", token=admin)
+check("another engagement's thread is 404 through this one, not readable",
+      st == 404, f"status={st} — a thread id must not cross projects")
+st, _ = call(f"/api/agent/session/{(bsess or {}).get('id')}/close"
+             f"?project=ALPHA", "POST", {}, token=admin)
+check("...and cannot be closed through it either", st == 404, f"status={st}")
+
+# Closing is not deleting. What was asked during an engagement is
+# part of the engagement.
+bid = (beside or {}).get("id")
+st, shut = call(f"/api/agent/session/{bid}/close?project=ALPHA", "POST", {},
+                token=admin)
+check("a thread can be closed", st == 200 and (shut or {}).get("closed") is True,
+      f"status={st} {str(shut)[:70]}")
+st, rest = call("/api/agent/sessions?project=ALPHA", token=admin)
+check("...and drops out of the open list",
+      bid not in [t["id"] for t in (rest or [])], str(rest)[:90])
+st, kept = call(f"/api/agent/session?project=ALPHA&thread={bid}", token=admin)
+check("...but is still readable by id, because it was kept",
+      st == 200 and (kept or {}).get("id") == bid
+      and (kept or {}).get("closed") is True, f"status={st} {str(kept)[:70]}")
+st, arch = call("/api/agent/sessions?project=ALPHA&closed=true", token=admin)
+check("...and is listed when closed threads are asked for",
+      bid in [t["id"] for t in (arch or [])], str(arch)[:90])
+check("closing one does not touch the others",
+      (second or {}).get("id") in [t["id"] for t in (rest or [])],
+      str(rest)[:90])
+
+print("\n== a credential never lands in a shared transcript ==")
+# `reveal_secret` releases a value only to a `user` role and only
+# with an audit entry naming who asked. A thread readable by
+# everyone on the project -- readonly included, which exists to be
+# handed out more freely -- would be a way around both.
+from app.routers import agent as _ag  # noqa: E402
+
+
+class _Step:
+    def __init__(self, tool, result):
+        self.kind, self.text, self.tool = "tool", "", tool
+        self.args, self.result = {}, result
+
+
+_red = _ag._redact_steps([
+    _Step("get_finding_secret", "hunter2-the-actual-password"),
+    _Step("list_findings", "three findings"),
+])
+check("the secret tool's result is not stored",
+      "hunter2" not in json.dumps(_red), json.dumps(_red)[:120])
+check("...and says where the value really is, rather than nothing",
+      "records who asked" in json.dumps(_red), json.dumps(_red)[:160])
+check("every other tool's result is kept",
+      any(d["result"] == "three findings" for d in _red), _red)
+check("the withholding is narrow, and stays narrow",
+      frozenset({"get_finding_secret"}) == _ag.SECRET_TOOLS,
+      _ag.SECRET_TOOLS)
+
 print("== read-only tools are available in read-only mode ==")
 # These four only read, and they are the ones an analyst actually asks
 # for: what is worth attacking, what runs PHP, what has a public
@@ -2606,6 +2752,57 @@ _first_nmap = _kinds.index("nmap") if "nmap" in _kinds else -1
 check("the scarce kind comes up early, not at the end",
       0 <= _first_nmap <= 2, _first_nmap)
 
+
+async def _queue_jump_drill():
+    """Priority has to beat BOTH orderings, not one of them.
+
+    The window reads DISPATCH_WINDOW rows, so ordering only the final
+    result is no use: a task sitting at position 3,000 of its own kind
+    is not in the window to be re-ordered in the first place. The row
+    number within a kind is computed with priority first, which puts a
+    jumping task at rn=1 for its kind and therefore inside the window,
+    and the outer ordering then puts it ahead of every other kind's
+    rn=1 as well.
+
+    So this is planted the hardest way round: newest of its kind,
+    behind a batch three times the window, of a kind that round-robin
+    would otherwise take first.
+    """
+    async with _Session() as db:
+        pid = (await db.execute(
+            _sel(_Pr.id).where(_Pr.code == "AGENT"))).scalar_one()
+        db.add_all([_Tk(project_id=pid, kind="katana", status="queued")
+                    for _ in range(300)])
+        await db.commit()
+        jump = _Tk(project_id=pid, kind="katana", status="queued",
+                   priority=100)
+        db.add(jump)
+        await db.commit()
+        jid = jump.id
+        rows = (await db.execute(_next_up(
+            _Tk.project_id == pid, _Tk.agent_id.is_(None),
+            _Tk.status == "queued"))).scalars().all()
+    return jid, [(t.id, t.kind) for t in rows]
+
+
+_jid, _order = _aio.run(_queue_jump_drill())
+check("a priority task is handed out first, ahead of everything older",
+      _order and _order[0][0] == _jid,
+      f"first was #{_order[0][0] if _order else None}, wanted #{_jid}")
+check("and is in the window at all, which plain ordering would not manage",
+      _jid in [i for i, _ in _order])
+# Nothing else moves. Age still orders within a kind -- asserted per
+# kind, not across the whole window, because round-robin interleaves
+# the kinds on purpose and a globally sorted list would mean THAT had
+# been broken instead.
+_rest = [(i, k) for i, k in _order[1:]]
+check("priority does not otherwise reshuffle the queue: within each kind "
+      "the rest is still oldest-first",
+      all([i for i, k in _rest if k == kind]
+          == sorted(i for i, k in _rest if k == kind)
+          for kind in {k for _, k in _rest}),
+      str(_order[:6]))
+
 # ------------------------------------------------- the ghost's own log
 # Diagnosing a ghost meant an account on the box it runs on, and this
 # fleet is a GCP VM behind IAP, a Windows host whose docker lives in
@@ -2804,6 +3001,129 @@ check("reading the log needs a session, allowlist or not",
 st, _ = call("/api/ghosts/debug?project=AGENT", key=DKEY)
 check("a ghost's own key does not open the operator's view",
       st in (302, 401, 403), st)
+
+
+# ================================= the agent can read a secret value
+# The assistant told an operator "the database doesn't hold the actual
+# secret values, only the findings recording that they exist". Half
+# right, in the way that stops the work: the value IS stored in
+# `finding_secrets` and the UI has always had a reveal button. There
+# was simply no tool, so the model reasoned correctly from a premise
+# nobody had told it was false.
+print("\n== reading a secret through the assistant ==")
+check("get_finding_secret exists at all", "get_finding_secret" in _ro,
+      sorted(_ro)[:5])
+# Reading a credential is reporting work's dangerous half, not its
+# ordinary one -- but it is a READ, so it must not need write mode.
+check("...without needing write mode", "get_finding_secret" in _ro)
+check("...and is there with writes too", "get_finding_secret" in _rw)
+
+_t = _ro.get("get_finding_secret")
+check("it takes a finding id", _t is not None
+      and "finding_id" in (_t.schema or {}).get("properties", {}),
+      _t and _t.schema)
+# The description is what the model reads before deciding whether the
+# capability exists. It saying the values ARE stored is the fix.
+check("...and its description says the values are stored",
+      _t is not None and "ARE stored" in (_t.description or ""),
+      _t and (_t.description or "")[:80])
+
+# Routed through the same endpoint the UI calls, so the role check and
+# the audit entry are not reimplemented here and cannot drift.
+import inspect as _inspect  # noqa: E402
+
+_src = _inspect.getsource(_build)
+check("it goes through the HTTP handler rather than its own query",
+      "reveal_secret" in _src, "reveal_secret" not in _src)
+
+
+# ================================================ the proxy endpoints
+# These exist because the three of them shipped over six pull requests
+# without one test that CALLED them. Every write path had
+# `audit.record(session, user, action, detail)` -- four positionals
+# against a signature of three plus keywords -- so enabling proxying,
+# issuing a credential and revoking one all raised TypeError and
+# returned 500. The protocol was tested to the byte; the HTTP in front
+# of it was not touched, and the button in the UI did nothing at all.
+#
+# So what is asserted here is deliberately shallow and deliberately
+# end-to-end: that each endpoint returns, with a real session, a real
+# project and a real ghost. A unit test of the SOCKS parser cannot
+# catch a bad argument list in a router.
+print("\n== the proxy endpoints answer at all ==")
+
+# Its own ghost: the one enrolled at the top of this suite has been
+# retired, killed and requeued by the time control reaches here, and
+# a 404 from a stale id would look exactly like the bug under test.
+_pg = call("/api/ghosts?project=AGENT", "POST",
+           {"name": "proxy-subject"}, token=admin)[1]
+PID = ((_pg or {}).get("agent") or {}).get("id")
+check("a ghost to proxy through", isinstance(PID, int), str(_pg)[:120])
+
+st, a = call(f"/api/ghosts/{PID}/proxy?project=AGENT", "PATCH",
+             {"enabled": True}, token=admin)
+check("enabling proxying on a ghost succeeds", st == 200,
+      f"status={st} {str(a)[:200]}")
+check("...and the ghost comes back with it on",
+      isinstance(a, dict) and a.get("proxy_enabled") is True, str(a)[:120])
+
+st, g = call(f"/api/ghosts/{PID}/proxy/grants?project=AGENT", "POST",
+             {"note": "a browser"}, token=admin)
+check("issuing a proxy credential succeeds", st in (200, 201),
+      f"status={st} {str(g)[:200]}")
+_user = (g or {}).get("username")
+_pass = (g or {}).get("password")
+check("...and hands back a username and a password",
+      isinstance(_user, str) and isinstance(_pass, str) and len(_pass) > 12,
+      str(_user))
+
+st, lst = call(f"/api/ghosts/{PID}/proxy/grants?project=AGENT", token=admin)
+check("the credential is listed", st == 200 and isinstance(lst, list)
+      and any(x.get("username") == _user for x in lst), str(lst)[:160])
+# The whole point of hashing it is undone if it comes back.
+check("...without the password, ever",
+      bool(_pass) and _pass not in json.dumps(lst),
+      "the password was readable")
+
+_gid = next((x["id"] for x in (lst or []) if x.get("username") == _user), None)
+st, r = call(f"/api/ghosts/{PID}/proxy/grants/{_gid}?project=AGENT",
+             "DELETE", token=admin)
+check("revoking it succeeds", st == 200, f"status={st} {str(r)[:200]}")
+check("...and it is marked revoked rather than deleted",
+      isinstance(r, dict) and r.get("revoked_at"), str(r)[:120])
+
+st, a = call(f"/api/ghosts/{PID}/proxy?project=AGENT", "PATCH",
+             {"enabled": False}, token=admin)
+check("switching proxying back off succeeds", st == 200,
+      f"status={st} {str(a)[:200]}")
+check("...and it is off", isinstance(a, dict)
+      and a.get("proxy_enabled") is False, str(a)[:120])
+
+# Admin, not user: this is the difference between a ghost that runs
+# its tasks and one that carries arbitrary traffic into a client
+# network.
+call("/api/auth/users", "POST",
+     {"username": "watcher", "password": "watcher-password-1",
+      "role": "user"}, token=admin)
+_w = call("/api/auth/login", "POST",
+          {"username": "watcher", "password": "watcher-password-1"})[1]
+_wt = (_w or {}).get("access_token")
+if _wt:
+    st, _ = call(f"/api/ghosts/{PID}/proxy?project=AGENT", "PATCH",
+                 {"enabled": True}, token=_wt)
+    check("a non-admin cannot switch proxying on", st in (401, 403, 404),
+          f"status={st}")
+
+# Every one of those writes an audit line, and a 500 in `audit.record`
+# was what broke them. Proving the entries landed proves the call
+# signature is right rather than merely that nothing raised.
+st, ev = call("/audit/json?limit=500", token=admin)
+_actions = {e.get("action") for e in ((ev or {}).get("entries") or [])}
+check("the audit trail has the proxy actions",
+      {"ghost.proxy", "ghost.proxy.grant",
+       "ghost.proxy.revoke"} <= _actions,
+      sorted(a for a in _actions if "proxy" in str(a)))
+
 
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

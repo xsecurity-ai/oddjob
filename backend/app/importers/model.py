@@ -256,11 +256,51 @@ class ParsedWebAddress(_Scrubbed):
 
 
 @dataclass
+class ParsedScreenshot(_Scrubbed):
+    """A picture of one URL, as a browser drew it.
+
+    `image` is bytes, not text, and that is the whole reason this is
+    its own record rather than a field on ParsedWebAddress. A PNG
+    contains NUL bytes; Postgres refuses them in a text column and
+    SQLite accepts them, which is the difference that has already
+    cost this project one import that worked on a laptop and failed
+    against the real database part-way through. Bytes never reach
+    `scrub`, because bytes are not a string.
+
+    `status` of None means the browser never reported one -- a
+    navigation that ended in its own error page. That is "could not
+    determine", not 200.
+    """
+    url: str
+    image: bytes
+    host: str | None = None
+    final_url: str | None = None
+    status_code: int | None = None
+    title: str | None = None
+    content_type: str = "image/png"
+    width: int | None = None
+    height: int | None = None
+    sha256: str | None = None
+    captured_at: datetime | None = None
+
+
+@dataclass
 class ParsedNote(_Scrubbed):
     host: str
     summary: str
     detail: str | None = None
     kind: str = "scan"
+
+
+#: Below this, an empty parse is unremarkable: a one-line masscan
+#: that found nothing, an nmap run against a host that was down, an
+#: empty JSON array. Above it there was something in the file to
+#: read, and reading none of it is worth saying.
+#:
+#: 2 KiB rather than a line count because the formats are not
+#: comparable -- one nmap host is 1.5 KiB of XML and one nuclei
+#: finding is one line of JSON.
+EMPTY_SUSPECT_BYTES = 2048
 
 
 @dataclass
@@ -276,6 +316,7 @@ class ParsedScan(_Scrubbed):
     implants: list[ParsedImplant] = field(default_factory=list)
     web: list[ParsedWebAddress] = field(default_factory=list)
     assets: list[ParsedAsset] = field(default_factory=list)
+    screenshots: list[ParsedScreenshot] = field(default_factory=list)
     notes: list[ParsedNote] = field(default_factory=list)
     #: What the scanner actually did, per protocol, as (technique,
     #: protocol, port-spec) — e.g. ("version", "tcp", "1-1024").
@@ -295,6 +336,44 @@ class ParsedScan(_Scrubbed):
     @property
     def label(self) -> str:
         return f"{self.tool} {self.version}" if self.version else self.tool
+
+    @property
+    def total(self) -> int:
+        """How many records of any kind came out of the document."""
+        return (len(self.hosts) + len(self.vulns) + len(self.credentials)
+                + len(self.implants) + len(self.web) + len(self.assets)
+                + len(self.screenshots) + len(self.notes))
+
+    def read_nothing(self, source_bytes: int) -> str | None:
+        """-> why an empty parse is suspicious, or None if it is not.
+
+        An importer that reads a real document and produces nothing
+        answers "absent" to a question it could not determine, which
+        is the one substitution this project treats as a bug rather
+        than a rounding error -- a scanner whose output format moved
+        under us runs green and finds nothing, and the run looks like
+        a clean bill of health.
+
+        It happens for a living: a nuclei template release changes
+        the JSON shape, a Burp export switches element names, an nmap
+        build renames an attribute. The tool still exits 0 and the
+        file still parses as XML.
+
+        Not an error, because an empty scan is a real thing -- a
+        masscan that found no open ports has nothing to report and is
+        correct. The difference is the SIZE of what was read: a file
+        with substance in it that yields no records and no errors is
+        the case that needs saying out loud.
+        """
+        if self.total or self.errors:
+            return None
+        if source_bytes < EMPTY_SUSPECT_BYTES:
+            return None
+        return (f"{self.label} parsed {source_bytes:,} bytes and produced no "
+                f"hosts, findings, URLs or errors. That is not the same as "
+                f"a scan that found nothing: it is what a changed output "
+                f"format looks like. Check the file against the format "
+                f"before reading this as a clean result.")
 
     def host_for(self, name: str) -> ParsedHost:
         """Find or create the host entry, so children can be attached by name."""

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -159,7 +160,12 @@ async def lifespan(app: FastAPI):
                         key = str(cfg.get("vulnfeed.nvd_api_key") or "").strip()
                         r1 = await vulnfeed.sync_exploitdb(s)
                         r2 = await vulnfeed.sync_nvd(s, key)
-                        for r in (r1, r2):
+                        # After NVD, not before: both of these mark
+                        # CVE rows, so they have nothing to mark until
+                        # the corpus they annotate is there.
+                        r3 = await vulnfeed.sync_kev(s)
+                        r4 = await vulnfeed.sync_epss(s)
+                        for r in (r1, r2, r3, r4):
                             if not r.get("ok"):
                                 print(f"vulnfeed: {r['source']} failed: "
                                       f"{r.get('error')}")
@@ -172,6 +178,34 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(24 * 60 * 60)
 
     vulnfeed_task = asyncio.create_task(_vulnfeeds())
+
+    # The NSE output already in the database. Every `-sV` the fleet
+    # runs carries `--script default,safe,vuln,ssl-cert` and the
+    # importer has always stored what came back; nothing read it, so
+    # the backlog is not an edge case but most of the data. The
+    # import path raises findings from here on -- this is the catch-up,
+    # and it is idempotent, so running it every start is the design
+    # rather than a cost.
+    async def _nse_backlog():
+        from . import nsefindings
+        # After the readiness window, because this touches every
+        # service row and a restart should answer requests first.
+        await asyncio.sleep(30)
+        try:
+            async with _Sess() as s:
+                seen, new = await nsefindings.sweep(s)
+                await s.commit()
+            # Said even when it is zero: "no finding" and "did not
+            # look" are different answers and a silent sweep is
+            # indistinguishable from one that never ran.
+            print(f"nse: read {seen} service(s) of stored script output, "
+                  f"{new} new finding(s)")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:                       # noqa: BLE001
+            print(f"nse: backlog sweep failed: {e}")
+
+    nse_task = asyncio.create_task(_nse_backlog())
 
     # A restart is the explanation for a lot of things an operator will
     # otherwise spend an hour on — a gap in the log, an agent that went
@@ -189,9 +223,58 @@ async def lifespan(app: FastAPI):
     # masked DSN is the honest answer and never shows the password.
     from .db import display_url
     print(f"Oddjob API ready — db: {display_url()}")
+    # The SOCKS listener, if somebody switched it on. Started here
+    # rather than as its own process so it shares the hub: a tunnel
+    # is a live socket in THIS process, and a listener somewhere else
+    # would have no way to reach one.
+    #
+    # Failure to bind is logged and not fatal. A port already in use
+    # should not stop Oddjob serving the UI that would let somebody
+    # fix it.
+    proxy_srv = None
+    proxy_tls_srv = None
+    try:
+        from . import proxyserver
+        from .routers.settings import load_all
+        async with SessionLocal() as s:
+            cfg = await load_all(s)
+        if cfg.get("proxy.enabled"):
+            # TLS is optional and additive: with a certificate the
+            # same port also answers CONNECT, so a browser can be
+            # pointed at the host directly. Without one it is SOCKS
+            # alone, which needs a tunnel. A cert that fails to load
+            # must NOT take the SOCKS listener down with it -- the
+            # tunnel path is what people are already using.
+            tls = None
+            cert = str(cfg.get("proxy.tls_cert") or "").strip()
+            key = str(cfg.get("proxy.tls_key") or "").strip()
+            if cert and key:
+                from . import proxyhttps
+                try:
+                    tls = proxyhttps.context(cert, key)
+                except Exception as e:               # noqa: BLE001
+                    print(f"proxy TLS off, certificate did not load: {e}")
+            bind = str(cfg.get("proxy.bind") or "0.0.0.0")
+            proxy_srv = await proxyserver.serve(
+                bind, int(cfg.get("proxy.port") or 8443), tls)
+            if tls is not None:
+                # Its own port. A demux has to read a byte to
+                # classify the connection and TLS cannot survive
+                # that -- see proxyserver.demux.
+                proxy_tls_srv = await proxyserver.serve_tls(
+                    bind, int(cfg.get("proxy.tls_port") or 8444), tls)
+    except Exception as e:                                   # noqa: BLE001
+        print(f"socks proxy did not start: {e}")
+
     yield
+    for srv in (proxy_srv, proxy_tls_srv):
+        if srv is not None:
+            srv.close()
+            with contextlib.suppress(Exception):
+                await srv.wait_closed()
     audit_task.cancel()
     vulnfeed_task.cancel()
+    nse_task.cancel()
     await worker.stop()
     await slack_worker.stop()
     await slack_digest.stop()
@@ -212,6 +295,7 @@ app = FastAPI(
 
 from . import headers as _headers  # noqa: E402
 from .audit import AuditTrail  # noqa: E402
+from .tracing import setup_tracing  # noqa: E402
 
 # ORDER. `add_middleware` prepends, so the LAST one added is the
 # outermost and therefore the last to touch a response on the way out.
@@ -302,6 +386,12 @@ app.add_middleware(ApiSlash)
 # It is inside SecurityHeaders only because it must not be the thing
 # that stops a response being stamped.
 app.add_middleware(AuditTrail)
+
+# Last, so it is OUTERMOST: a span should cover the whole request, including
+# the ones SecurityHeaders and Gatekeeper short-circuit. A trace that stops
+# at the gate cannot tell you why the gate refused. No-op unless
+# OTEL_EXPORTER_OTLP_ENDPOINT is set -- see tracing.py.
+setup_tracing(app)
 
 for r in (auth.router, google.router, magic.router, projects.router, targets.router,
           services.router, findings.router, credentials.router,

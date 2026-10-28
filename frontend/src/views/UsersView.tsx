@@ -3,7 +3,7 @@ import {
   Alert, Box, Button, Chip, Divider, IconButton, MenuItem, Paper, Select,
   Stack, Tooltip, Typography, alpha,
 } from '@mui/material'
-import DeleteIcon from '@mui/icons-material/DeleteOutline'
+import DeleteIcon from '@mui/icons-material/DeleteOutlined'
 import PersonAddIcon from '@mui/icons-material/PersonAddAlt'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
@@ -39,7 +39,12 @@ function Card({ title, action, children }: {
       p: 2.5, backgroundColor: alpha(neon.paper, 0.75), backdropFilter: 'blur(6px)',
       border: `1px solid ${alpha(neon.purple, 0.3)}`,
     }}>
-      <Stack direction="row" alignItems="center" sx={{ mb: 2 }}>
+      <Stack
+        direction="row"
+        sx={{
+          alignItems: "center",
+          mb: 2
+        }}>
         <Typography sx={{
           flex: 1, fontFamily: `'Orbitron', sans-serif`, fontSize: 11,
           letterSpacing: '0.16em', textTransform: 'uppercase',
@@ -49,7 +54,7 @@ function Card({ title, action, children }: {
       </Stack>
       {children}
     </Paper>
-  )
+  );
 }
 
 export function UsersView() {
@@ -132,12 +137,19 @@ export function UsersView() {
               {(users.data ?? []).map((u) => {
                 const self = u.id === me?.user.id
                 return (
-                  <Stack key={u.id} direction="row" spacing={1} alignItems="center" sx={{
-                    px: 1.3, py: 0.8, borderRadius: 0.6,
-                    background: alpha(neon.bgDeep, 0.5),
-                    border: `1px solid ${alpha(neon.purple, 0.2)}`,
-                    opacity: u.is_active ? 1 : 0.5,
-                  }}>
+                  <Stack
+                    key={u.id}
+                    direction="row"
+                    spacing={1}
+                    sx={{
+                      alignItems: "center",
+                      px: 1.3,
+                      py: 0.8,
+                      borderRadius: 0.6,
+                      background: alpha(neon.bgDeep, 0.5),
+                      border: `1px solid ${alpha(neon.purple, 0.2)}`,
+                      opacity: u.is_active ? 1 : 0.5
+                    }}>
                     <Box sx={{ minWidth: 140, color: neon.pink, fontSize: 13 }}>{u.username}</Box>
                     <Box sx={{ flex: 1, fontSize: 12, color: neon.muted,
                                overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -190,14 +202,16 @@ export function UsersView() {
                       </span>
                     </Tooltip>
                   </Stack>
-                )
+                );
               })}
             </Stack>
             {groups.data && groups.data.length > 0 && (
               <>
                 <Divider sx={{ my: 2, borderColor: alpha(neon.purple, 0.2) }} />
                 <Typography sx={{ fontSize: 11, color: neon.muted, mb: 1 }}>Groups</Typography>
-                <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                <Stack direction="row" spacing={1} useFlexGap sx={{
+                  flexWrap: "wrap"
+                }}>
                   {groups.data.map((g) => (
                     <Chip key={g.id} size="small" label={g.name} sx={chip(neon.purple)} />
                   ))}
@@ -209,7 +223,9 @@ export function UsersView() {
 
         {/* ---------------- project membership ---------------- */}
         <Card title="Project membership" action={
-          <Stack direction="row" spacing={1} alignItems="center">
+          <Stack direction="row" spacing={1} sx={{
+            alignItems: "center"
+          }}>
             {/* A project admin has no Accounts card to hold the button, but
                 the server lets them invite someone as long as the new
                 account lands on a project they administer. */}
@@ -239,7 +255,14 @@ export function UsersView() {
             </Typography>
           ) : (
             <>
-              <Stack direction="row" spacing={1} sx={{ mb: 2 }} flexWrap="wrap" useFlexGap>
+              <Stack
+                direction="row"
+                spacing={1}
+                useFlexGap
+                sx={{
+                  flexWrap: "wrap",
+                  mb: 2
+                }}>
                 <Select size="small" value={grantWho} displayEmpty sx={{ minWidth: 190, fontSize: 12.5 }}
                   onChange={(e) => setGrantWho(e.target.value)}>
                   <MenuItem value="" sx={{ fontSize: 12.5 }}>choose a person…</MenuItem>
@@ -272,11 +295,18 @@ export function UsersView() {
                 {(acl.data ?? []).map((a) => {
                   const c = ROLE_COLOUR[a.role] ?? neon.muted
                   return (
-                    <Stack key={a.id} direction="row" spacing={1} alignItems="center" sx={{
-                      px: 1.3, py: 0.7, borderRadius: 0.6,
-                      background: alpha(neon.bgDeep, 0.5),
-                      border: `1px solid ${alpha(neon.purple, 0.2)}`,
-                    }}>
+                    <Stack
+                      key={a.id}
+                      direction="row"
+                      spacing={1}
+                      sx={{
+                        alignItems: "center",
+                        px: 1.3,
+                        py: 0.7,
+                        borderRadius: 0.6,
+                        background: alpha(neon.bgDeep, 0.5),
+                        border: `1px solid ${alpha(neon.purple, 0.2)}`
+                      }}>
                       <Box sx={{ flex: 1, fontSize: 13,
                                  color: a.group ? neon.purple : neon.pink }}>
                         {a.username ?? `group: ${a.group}`}
@@ -289,7 +319,7 @@ export function UsersView() {
                         </IconButton>
                       </Tooltip>
                     </Stack>
-                  )
+                  );
                 })}
               </Stack>
             </>
@@ -314,7 +344,7 @@ export function UsersView() {
           }} />
       )}
     </Box>
-  )
+  );
 }
 
 const chip = (c: string, a = 0.14) => ({

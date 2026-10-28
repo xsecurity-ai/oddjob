@@ -75,7 +75,7 @@ const subjectPills: Analyse = (lines) => {
                           + 'check is what decides.' }
     }
     return { raw, kind: r.kind }
-  })
+  });
 }
 
 /** Mirrors the server's own parsing: one per line, or comma separated. */
@@ -335,7 +335,9 @@ export function ScanRangesDialog({ project, selected = [], onClose,
           {selected.length > 0 && (
             <Box sx={{ border: `1px solid ${alpha(neon.cyan, 0.4)}`,
                        borderRadius: 1, p: 1.2 }}>
-              <Stack direction="row" spacing={1} alignItems="center">
+              <Stack direction="row" spacing={1} sx={{
+                alignItems: "center"
+              }}>
                 <Checkbox size="small" checked={useSelected}
                   onChange={(e) => setUseSelected(e.target.checked)} />
                 <Box sx={{ flex: 1 }}>
@@ -366,7 +368,9 @@ export function ScanRangesDialog({ project, selected = [], onClose,
           {(unscanned.data?.count ?? 0) > 0 && (
             <Box sx={{ border: `1px solid ${alpha(neon.yellow, 0.4)}`,
                        borderRadius: 1, p: 1.2 }}>
-              <Stack direction="row" spacing={1} alignItems="center">
+              <Stack direction="row" spacing={1} sx={{
+                alignItems: "center"
+              }}>
                 <Checkbox size="small" checked={useUnscanned}
                   disabled={useAll}
                   onChange={(e) => setUseUnscanned(e.target.checked)} />
@@ -402,7 +406,9 @@ export function ScanRangesDialog({ project, selected = [], onClose,
           {(allKnown.data?.count ?? 0) > 0 && (
             <Box sx={{ border: `1px solid ${alpha(neon.pink, 0.45)}`,
                        borderRadius: 1, p: 1.2 }}>
-              <Stack direction="row" spacing={1} alignItems="center">
+              <Stack direction="row" spacing={1} sx={{
+                alignItems: "center"
+              }}>
                 <Checkbox size="small" checked={useAll}
                   onChange={(e) => {
                     setUseAll(e.target.checked)
@@ -594,7 +600,7 @@ export function ScanRangesDialog({ project, selected = [], onClose,
         </Button>
       </DialogActions>
     </EnumerateDialog>
-  )
+  );
 }
 
 const headSx = {

@@ -142,4 +142,60 @@ check("a masked value is recognised on the way back in", _is_masked(m))
 check("libpq keyword form accepted",
       _parse("host=h port=6 dbname=d user=u password=p").database == "d")
 
+
+# ======================================= certificate transparency gate
+# The one source in Oddjob that SENDS the client's name anywhere. The
+# tests that matter are the ones about it staying shut.
+import asyncio as _aio  # noqa: E402
+
+from app import ctlogs as _ct  # noqa: E402
+
+print("\n== CT is off until somebody decides otherwise ==")
+check("disabled by default", _ct.enabled({}) is False)
+check("...and with the key explicitly false", _ct.enabled({"ct.enabled": False}) is False)
+check("enabled only when set", _ct.enabled({"ct.enabled": True}) is True)
+check("no source is configured by default", _ct.source_url({}) is None)
+check("an unknown source is not accepted — the choice is which third party",
+      _ct.source_url({"ct.source": "some-random-aggregator"}) is None)
+check("a known source resolves",
+      (_ct.source_url({"ct.source": "crt.sh"}) or ("", ""))[0] == "crt.sh")
+
+print("\n== a lookup with the gate shut raises, and does not retry ==")
+err = None
+try:
+    _aio.run(_ct.lookup({}, "acme.example"))
+except _ct.Disabled as e:
+    err = str(e)
+except Exception as e:                                  # noqa: BLE001
+    err = f"WRONG TYPE: {type(e).__name__}"
+check("it is Disabled, not a network error a caller would back off and retry",
+      err is not None and not str(err).startswith("WRONG TYPE"), err)
+check("...and the message says what turning it on would send",
+      err is not None and "third party" in err, err)
+
+# Enabled but unconfigured must also refuse rather than pick a default
+# third party on the operator's behalf.
+err2 = None
+try:
+    _aio.run(_ct.lookup({"ct.enabled": True}, "acme.example"))
+except _ct.Disabled as e:
+    err2 = str(e)
+check("enabled with no source still refuses rather than choosing one",
+      err2 is not None and "source" in err2.lower(), err2)
+
+print("\n== what comes back from a log is cleaned, not trusted ==")
+names, bad = _ct.clean(["www.acme.example", "*.acme.example",
+                        "admin@acme.example", "not a hostname",
+                        "UAT.ACME.EXAMPLE", "www.acme.example"])
+check("a wildcard contributes its bare domain and nothing invented",
+      "acme.example" in names and "*.acme.example" not in names, names)
+check("names are lowercased, so one name is not two",
+      "uat.acme.example" in names and "UAT.ACME.EXAMPLE" not in names, names)
+check("duplicates collapse", names.count("www.acme.example") == 1, names)
+check("an email address is not a hostname", "admin@acme.example" not in names, names)
+check("free text is not a hostname", not any(" " in n for n in names), names)
+check("...and the junk is counted rather than listed — it is a fact "
+      "about the log, not about the client", bad == 2, bad)
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

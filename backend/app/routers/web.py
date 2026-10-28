@@ -7,19 +7,27 @@ question an operator actually has. A banner cannot answer it.
 """
 from __future__ import annotations
 
+import base64
+import json
 import re
 
 # At module scope, not inside the handler: the URL below is built from
 # components before the request is made, so the import has to precede
 # it, and a deferred import that is now needed in two places is just a
 # NameError waiting for whichever one runs first.
+#
+# `httpx` is still here and no longer sends anything. It is used for
+# `httpx.URL`, which assembles a destination from components without
+# ever letting a caller-controlled path reach the authority — see the
+# note at the call site. The client that used to put replayed traffic
+# on the wire from this server is gone; a ghost does that now.
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select, tuple_
+from sqlalchemy import case, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import assetscan, assetsearch, assetwork
+from .. import assetscan, assetsearch, assetwork, roe, takeover
 from ..db import get_session
 from ..events import broker
 from ..filtering import apply_filters
@@ -28,16 +36,30 @@ from ..hosts import InvalidHost, validate_host
 #: Same caps the importer uses, so a replayed exchange is stored on the
 #: same terms as a captured one.
 from ..importers.burphistory import REQ_CAP, RESP_CAP
+from ..importers.model import scrub
 from ..models import (
+    Agent,
+    AgentTask,
+    FindingSecret,
     Project,
     Service,
+    Takeover,
     Target,
     User,
+    Vuln,
     WebAddress,
     WebAsset,
     WebAssetRef,
+    WebScreenshot,
 )
-from ..schemas import Page, WebAddressCreate, WebAddressOut, WebAddressUpdate, WebPacket
+from ..schemas import (
+    Page,
+    WebAddressCreate,
+    WebAddressOut,
+    WebAddressUpdate,
+    WebPacket,
+    WebShot,
+)
 from ..scopegate import assert_allowed
 from ..security import (
     assert_role_for_target,
@@ -49,6 +71,20 @@ from ..timeline import record
 from ..webtargets import source_clause, web_service_clause
 from ..weburl import BadUrl, exchange_key, merge_sources, stable_response, url_key
 from ..weburl import parse as parse_url
+
+# The dispatcher, imported at module scope. `routers/agents.py` does
+# NOT import this file back at module scope -- it reaches `apply_replay`
+# with a deferred import inside the one handler that files a result --
+# so this direction is the acyclic one and the one a reader can follow
+# from the route to the queue.
+from .agents import (
+    DISPATCH_ABSENT,
+    DISPATCH_BUSY,
+    DISPATCH_IDLE,
+    PRIORITY_INTERACTIVE,
+    ROE_STATUS,
+    pick_ghost,
+)
 
 router = APIRouter(prefix="/api/web", tags=["web"])
 
@@ -371,10 +407,18 @@ async def web_by_url(
 
 
 class ReplayIn(BaseModel):
-    """An edited request to send again."""
+    """An edited request to send again.
+
+    `follow_redirects` used to be here and is gone. The request is now
+    sent byte for byte by a ghost over a socket it opened itself, and
+    following a redirect means BUILDING A SECOND REQUEST out of the
+    first one's parsed fields — which is the one thing this path must
+    not do. A 302 is the answer; replay the next hop by hand if that is
+    the thing being tested. Unknown fields are ignored rather than
+    refused, so a client that still sends it is not broken by this.
+    """
     raw: str = Field(description="The full request: request-line, headers, "
                                  "blank line, body")
-    follow_redirects: bool = False
     timeout: float = Field(20.0, ge=1, le=120)
     verify_tls: bool = Field(
         False,
@@ -384,10 +428,77 @@ class ReplayIn(BaseModel):
 
 
 class ReplayOut(BaseModel):
-    web: WebAddressOut
+    """Where a replay went, and — once the ghost reports — what it said.
+
+    The POST answers the first half only. The request leaves from a
+    ghost inside the client's estate, not from this server, so at the
+    moment the operator presses Send nothing has been sent yet: there
+    is a task, addressed to a named agent, waiting for that agent's
+    next heartbeat. `GET /api/web/replays/{task_id}` fills in the rest.
+
+    `web` is null until it exists, which is a different thing from an
+    empty row and is why it is nullable rather than defaulted.
+    """
+    #: The agent task carrying it. The handle for the status endpoint.
+    task_id: int
+    #: Which ghost, by name and id. Part of the result: the egress
+    #: address the packet leaves from is the reason this is not sent
+    #: from here, so "which one" is evidence and not decoration.
+    agent: str
+    agent_id: int
+    #: idle | busy | absent — see `agents.pick_ghost`.
+    dispatch: str
+    #: queued | claimed | running | done | failed | cancelled
+    state: str = "queued"
+    #: One sentence an operator can read without knowing any of the above.
+    note: str = ""
+    web: WebAddressOut | None = None
     status_code: int | None = None
     elapsed_ms: int = 0
     error: str | None = None
+
+
+def wire_form(raw: str) -> str:
+    """The request as it will go on the wire, from the text in the editor.
+
+    Exactly one transformation, and it is confined to the head: line
+    endings become CRLF. Nothing else is touched. Header order, header
+    casing, duplicate headers, odd whitespace, a `Content-Length` that
+    disagrees with the body and a deliberately malformed request line
+    all survive exactly as typed, because every one of those is a thing
+    somebody edits a packet in order to test — and a replay tool that
+    quietly repairs them is answering a question nobody asked.
+
+    **Why normalise anything at all.** The editor is a browser
+    textarea, and a textarea cannot emit a carriage return: everything
+    typed into one arrives with bare LF endings. Sending that is not
+    "the request as written", it is a different request — RFC 9112
+    wants CRLF, and a server lenient about it hides precisely the
+    behaviour a header edit is probing. So the one difference the
+    editor imposes is undone, and nothing else is.
+
+    **The head only.** A body is bytes. A multipart boundary, a
+    protobuf, an upload — none of them are line-oriented, and
+    rewriting LF to CRLF inside one corrupts it and changes its
+    length. The split is the first blank line, in whichever form it
+    appears, because a request pasted from a capture has CRLF and one
+    typed here has LF and a file may hold both.
+    """
+    text = raw or ""
+    i_crlf, i_lf = text.find("\r\n\r\n"), text.find("\n\n")
+    if i_crlf != -1 and (i_lf == -1 or i_crlf <= i_lf):
+        cut, width = i_crlf, 4
+    else:
+        cut, width = i_lf, 2
+    if cut == -1:
+        # No blank line: all head, no body. Sent with the terminator
+        # added rather than refused — a GET with no body is the common
+        # case and the editor's trailing newline is easy to lose.
+        head, body = text, ""
+    else:
+        head, body = text[:cut], text[cut + width:]
+    head = "\r\n".join(head.replace("\r\n", "\n").split("\n"))
+    return head + "\r\n\r\n" + body
 
 
 def parse_raw_request(raw: str) -> tuple[str, str, dict[str, str], bytes]:
@@ -428,12 +539,41 @@ async def replay(web_id: int, body: ReplayIn,
     the edited one sit side by side under the same URL, and the
     difference between the two responses is the finding.
 
-    **Where it may send.** The destination host must already be a
-    target in the same engagement. Without that this endpoint is an
-    authenticated open proxy — anyone with an account could use the
-    server to reach anything it can reach. Editing the path, the verb,
-    the headers and the body is unrestricted, which is the part that
-    matters for testing.
+    **The packet leaves from a ghost, not from here.** This used to
+    open an `httpx.AsyncClient` on the Oddjob server, which was wrong
+    for an engagement in three ways at once. The traffic arrived from
+    this server's egress address rather than from the one the client
+    authorised and allowlisted, so it could be dropped at the border
+    or, worse, accepted and attributed to the wrong place. It did not
+    appear in `agent_tasks`, so the single question "what did this
+    engagement send" had an answer that was missing exactly the
+    hand-crafted requests most worth having in it. And it could reach
+    only what this server can reach, which on an internal engagement is
+    nothing. So the request is handed to a ghost as a task, and this
+    route returns a handle rather than a response.
+
+    **Where it may send.** Unchanged, and still checked here before
+    anything is queued. The destination host must already be a target
+    in the same engagement. Without that this endpoint is an
+    authenticated open proxy — anyone with an account could use a ghost
+    inside a client's network to reach anything that ghost can reach,
+    which is a larger open proxy than the one it was before. Editing
+    the path, the verb, the headers and the body is unrestricted, which
+    is the part that matters for testing.
+
+    The Host header no longer decides where the bytes go, only what
+    they say. The ghost is told the address to dial as a separate
+    argument, read out of the target row; the header travels as typed.
+    That is a strengthening rather than a change of behaviour — the
+    smuggling checks below still refuse a header that could name a
+    second destination, because the header is still what nominates the
+    target, and a request whose Host no parser can agree on is not one
+    this tool should be sending at all.
+
+    **Both gates, both times.** Scope and the rules of engagement are
+    checked here, and again by the heartbeat before the task is handed
+    over, for the reason `app/roe.py` gives: a task queued inside the
+    window and dispatched later runs outside it.
     """
     row = (await session.execute(_base().where(WebAddress.id == web_id))).first()
     if row is None:
@@ -442,7 +582,13 @@ async def replay(web_id: int, body: ReplayIn,
     target = await session.get(Target, orig.target_id)
     code = await assert_role_for_target(session, user, orig.target_id, "user")
 
-    method, path, headers, payload = parse_raw_request(body.raw)
+    # The body is parsed out and deliberately not used: the bytes that
+    # go on the wire are the operator's text, not a reassembly of it.
+    # Parsing still happens because the Host header has to be read and
+    # validated before anything is queued, and because an unparseable
+    # request should be refused here rather than discovered by a
+    # process on somebody else's network.
+    method, path, headers, _parsed_body = parse_raw_request(body.raw)
 
     # The Host header decides where it goes, as it does on the wire.
     #
@@ -559,77 +705,300 @@ async def replay(web_id: int, body: ReplayIn,
     # there is no point at which a destination is re-parsed out of
     # text somebody could have shaped.
     url = str(dest)
-    # httpx sets these from the body it is given; a stale value from the
-    # captured request would contradict what is actually sent.
-    for drop in [k for k in headers if k.lower() in
-                 ("content-length", "host", "transfer-encoding")]:
-        headers.pop(drop)
+    # Which port the socket is opened on. The Host header's, when it
+    # named one; otherwise the scheme's default, which is what httpx
+    # used to supply silently from the same two values.
+    #
+    # Deliberately NOT `orig.port`, which is what the stored row keeps.
+    # The two differ when somebody edits the Host header's port, and
+    # they should: the row records the service this exchange belongs
+    # under, the dial port records where it actually went.
+    dial_port = int(port) if port is not None else (443 if scheme == "https" else 80)
 
-    import time as _time
-    started = _time.perf_counter()
-    status = None
-    err = None
-    resp_text = ""
+    # The bytes, settled here rather than on the ghost. The agent gets
+    # an opaque blob to write to a socket and no opportunity to form an
+    # opinion about it -- see `wire_form` for what the one
+    # transformation is and why there is exactly one.
+    wire = wire_form(body.raw)
+    if len(wire.encode("utf-8", "surrogatepass")) > REQ_CAP:
+        # Refused rather than truncated. Sending half a request is not
+        # a smaller version of the test, it is a different request —
+        # and the row would then record bytes that are not the ones
+        # that went out.
+        raise HTTPException(
+            413, f"this request is larger than the {REQ_CAP} byte cap a "
+                 f"stored exchange has. Replay records what it sent, and "
+                 f"it will not send more than it can record.")
+
+    # The rules of engagement, at queue time, exactly as `create_task`
+    # asks them. The heartbeat asks again before handing it over.
+    why = roe.refusal(await session.get(Project, target.project_id), "replay")
+    if why is not None:
+        raise HTTPException(ROE_STATUS,
+                            f"a replay on {code} was refused: {why}")
+
+    ghost, where = await pick_ghost(session, target.project_id)
+    if ghost is None:
+        # A fact about the engagement, reported as one. Not a 500, and
+        # NOT quietly sent from this server instead: "nothing is
+        # standing inside the client's estate to send this" is the
+        # true answer, and the operator is the one who can fix it by
+        # deploying a ghost.
+        raise HTTPException(
+            409,
+            f"{code} has no ghost, so there is nothing to send this from. "
+            f"A replayed request leaves from an agent inside the client's "
+            f"estate — from the egress address the engagement authorised — "
+            f"and never from the Oddjob server. Enroll a ghost on this "
+            f"project and send it again.")
+
+    args = {
+        # What to dial. Read out of the target row, never out of the
+        # request text: see the long note above on `known.host`.
+        "host": known.host,
+        "port": dial_port,
+        "scheme": scheme,
+        # The name to put in SNI, and in the certificate check when one
+        # is asked for. Same source, same reasoning.
+        "sni": hostname,
+        # `dest_url`, not `url`. `url` is one of `scopegate.TARGET_KEYS`,
+        # under which EVERY whitespace- or comma-separated token counts
+        # as a host whatever it looks like — so a perfectly ordinary
+        # path like `/report/a,b` would offer `b` to the scope gate as
+        # a hostname and have the task refused at dispatch on an
+        # engagement with an in-scope list. Under any other key the
+        # token has to look like a host to be tested, and a whole URL
+        # does, so the destination is still checked and the path is
+        # not mistaken for one.
+        "dest_url": url,
+        # Base64, for three reasons that happen to agree. A captured
+        # request is bytes and may hold NUL, which Postgres refuses in
+        # a text column and which `args` is. It travels through JSON
+        # unmangled. And `scopegate.task_hosts` reads every token of
+        # every argument looking for hosts — against the raw text it
+        # would find the `Referer`, the `Origin` and every domain in a
+        # cookie, and refuse the task at dispatch because one of them
+        # is not in the engagement. A base64 blob carries no dots and
+        # is not mistaken for a hostname.
+        "raw_b64": base64.b64encode(
+            wire.encode("utf-8", "surrogatepass")).decode("ascii"),
+        "timeout_s": max(1, int(body.timeout)),
+        "verify_tls": bool(body.verify_tls),
+        # How much of the answer to bring back. Sent rather than
+        # hardcoded on the agent so the cap has one definition, here,
+        # beside the column it has to fit in.
+        "resp_cap": RESP_CAP,
+        # For the summary line and for `apply_replay`. Parsed here, by
+        # the parser that just validated the request, rather than
+        # parsed a second time on the agent — two parsers would be free
+        # to disagree about which request was sent.
+        "method": method,
+        "path": path,
+        #: The port the row files under, which is the original's. See
+        #: `dial_port` above for why it is not always the same number.
+        "store_port": orig.port,
+    }
+    t = AgentTask(agent_id=ghost.id, project_id=target.project_id,
+                  requested_by=user.id, kind="replay",
+                  args=json.dumps(args),
+                  priority=PRIORITY_INTERACTIVE,
+                  # No scan file comes back, so no importer reads this.
+                  # `apply_replay` does, from `submit_result`.
+                  import_as=None, status="queued")
+    session.add(t)
+    await session.flush()
+    note = {
+        DISPATCH_IDLE: f"queued on {ghost.name}, which is idle — it will go "
+                       f"on that ghost's next heartbeat",
+        DISPATCH_BUSY: f"queued on {ghost.name}, which is mid-scan. It is "
+                       f"ahead of everything else in that ghost's queue and "
+                       f"goes as soon as a slot frees",
+        DISPATCH_ABSENT: f"queued on {ghost.name}, which is not currently "
+                         f"checking in. It will go when that ghost comes "
+                         f"back — nothing else in {code} is beating",
+    }[where]
+    await record(session, known.id, "web",
+                 f"request queued for replay via {ghost.name}: {method} {url}",
+                 actor=user)
+    await session.commit()
+    await broker.publish("agents", action="task", project=code)
+    return ReplayOut(task_id=t.id, agent=ghost.name, agent_id=ghost.id,
+                     dispatch=where, state="queued", note=note)
+
+
+@router.get("/replays/{task_id}", response_model=ReplayOut)
+async def replay_status(task_id: int,
+                        user: User = Depends(get_current_user),
+                        session: AsyncSession = Depends(get_session)):
+    """Has the ghost sent it yet, and what came back.
+
+    Polled by the dialog. Separate from the POST because the send is no
+    longer synchronous with the click — holding the HTTP request open
+    until a ghost beats, claims, runs and reports would be a wait of
+    unbounded length on a connection that nothing guarantees survives
+    it.
+
+    Authorised against the task's own project, not against the web row:
+    the task is the thing being read, and a task id is the handle
+    somebody could guess.
+    """
+    t = await session.get(AgentTask, task_id)
+    if t is None or t.kind != "replay":
+        raise HTTPException(404, "no such replay")
+    vis = await visible_project_ids(session, user)
+    if vis is not None and t.project_id not in vis:
+        raise HTTPException(404, "no such replay")
+    pr = await session.get(Project, t.project_id)
+    ghost = await session.get(Agent, t.agent_id) if t.agent_id else None
     try:
-        async with httpx.AsyncClient(verify=body.verify_tls,
-                                     follow_redirects=body.follow_redirects,
-                                     timeout=body.timeout) as client:
-            r = await client.request(method, dest, headers=headers,
-                                     content=payload or None,
-                                     extensions={"sni_hostname": hostname})
-            status = r.status_code
-            head = f"HTTP/{r.http_version.split('/')[-1]} {r.status_code} {r.reason_phrase}"
-            resp_text = (head + "\r\n"
-                         + "\r\n".join(f"{k}: {v}" for k, v in r.headers.items())
-                         + "\r\n\r\n" + r.text)[:RESP_CAP]
-    except Exception as e:                       # noqa: BLE001
-        # A replay that fails is a result, not a crash: "this host now
-        # refuses the connection" is worth recording.
-        err = f"{type(e).__name__}: {e}"[:500]
-    elapsed = int((_time.perf_counter() - started) * 1000)
+        res = json.loads(t.import_result) if t.import_result else {}
+    except ValueError:
+        res = {}
+    web = None
+    if isinstance(res, dict) and res.get("web_id"):
+        web = await _one(session, int(res["web_id"]))
+    # Three separate answers, kept apart. `error` on the task is the
+    # ghost failing to carry out the instruction; `error` in the filed
+    # result is the request going out and the host refusing it, which
+    # is a finding; neither being set while the state is still queued
+    # is "nobody has tried yet", which is not an error at all.
+    err = t.error or (res.get("error") if isinstance(res, dict) else None)
+    return ReplayOut(
+        task_id=t.id,
+        agent=ghost.name if ghost else "(no agent)",
+        agent_id=t.agent_id or 0,
+        dispatch=DISPATCH_IDLE if t.status in ("claimed", "running", "done")
+        else DISPATCH_BUSY,
+        state=t.status,
+        note=_replay_note(t.status, pr.code if pr else "", ghost),
+        web=web,
+        status_code=res.get("status_code") if isinstance(res, dict) else None,
+        elapsed_ms=int(res.get("elapsed_ms") or 0) if isinstance(res, dict) else 0,
+        error=err)
 
-    sent = body.raw[:REQ_CAP]
-    # `resp_text` above is the status line, every response header and the
-    # body — which means it carries this second's `Date`. Hashed raw, two
-    # byte-identical replays a second apart are two different exchanges
-    # and the dedup below never fires against a real server. The row still
-    # STORES the full text; only the identity is taken over the form with
-    # the clock removed. See `stable_response` for the exclusion list and
-    # for what choosing it costs.
+
+def _replay_note(state: str, code: str, ghost: Agent | None) -> str:
+    """One sentence about where a replay has got to."""
+    who = ghost.name if ghost else "no ghost"
+    return {
+        "queued": f"waiting for {who} to check in",
+        "claimed": f"handed to {who}",
+        "running": f"{who} is sending it",
+        "done": f"sent by {who}",
+        "failed": f"{who} could not carry it out",
+        "cancelled": "cancelled",
+    }.get(state, f"{state} on {who}")
+
+
+async def apply_replay(session: AsyncSession, task: AgentTask,
+                       *, actor: str) -> dict:
+    """File one ghost's replayed exchange as a new web row.
+
+    Called from `agents.submit_result`, which is the only place a
+    result arrives. The row is built here rather than there for the
+    same reason the importers are not in that file: this is what a web
+    exchange is, and `routers/web.py` is where that is known.
+
+    **Everything that decides WHERE comes from the task, not from the
+    ghost.** The agent reports what it received and how long it took,
+    and nothing else is read out of its payload. The host is looked up
+    again, in the task's own project, so a ghost cannot file an
+    exchange against a target in some other engagement — or invent one.
+    A ghost is a process on somebody else's network; it is the least
+    trusted thing that talks to this server.
+    """
+    args = json.loads(task.args or "{}")
+    out = json.loads(task.output or "{}")
+    if not isinstance(args, dict) or not isinstance(out, dict):
+        raise ValueError("replay task arguments or output are not an object")
+
+    known = (await session.execute(
+        select(Target).where(Target.project_id == task.project_id,
+                             Target.host == str(args.get("host") or "")))
+    ).scalar_one_or_none()
+    if known is None:
+        # The target was deleted between queueing and reporting. The
+        # exchange stays on the task, which is where the evidence is;
+        # there is no row to hang it under.
+        raise ValueError("the target this replay was queued against is gone")
+
+    scheme = str(args.get("scheme") or "http")
+    url = str(args.get("dest_url") or "")
+    method = str(args.get("method") or "GET")
+    path = str(args.get("path") or "/")
+    store_port = int(args.get("store_port") or 0) or None
+
+    # What was sent: the bytes this server handed the ghost, decoded
+    # back. Not anything the ghost echoed — the row is supposed to
+    # record what was asked for, and taking it from the reply would
+    # record whatever the agent chose to say it sent.
+    sent = base64.b64decode(args.get("raw_b64") or "").decode(
+        "utf-8", "replace")[:REQ_CAP]
+
+    resp_text = ""
+    if out.get("response_b64"):
+        resp_text = base64.b64decode(out["response_b64"]).decode(
+            "utf-8", "replace")[:RESP_CAP]
+    # Postgres refuses NUL in a text column and a response body is
+    # arbitrary bytes — a gzip or a PNG decodes to a string holding
+    # 0x00. Same substitution the file importers make, for the same
+    # reason; see `importers/model.scrub`.
+    sent, resp_text = scrub(sent), scrub(resp_text)
+    status = out.get("status")
+    status = int(status) if isinstance(status, (int, float)) and status else None
+    elapsed = int(out.get("elapsed_ms") or 0)
+    err = str(out["error"])[:500] if out.get("error") else None
+
+    # Identity over the response with the clock removed, exactly as
+    # before: hashed raw, two byte-identical replays a second apart
+    # differ only in `Date` and the dedup never fires against a real
+    # server. See `stable_response`.
     xk = exchange_key(method, url, sent, stable_response(resp_text) or None)
     existing = (await session.execute(
         select(WebAddress).where(WebAddress.target_id == known.id,
                                  WebAddress.exchange_hash == xk))).scalar_one_or_none()
     if existing is not None:
-        # Byte-identical to something already recorded. Returning it
+        # Byte-identical to something already recorded. Pointing at it
         # rather than failing on the unique constraint is the useful
         # answer: "you already have this exact exchange".
-        return ReplayOut(web=_out((existing, known.host, _code)),
-                         status_code=status, elapsed_ms=elapsed, error=err)
+        return {"web_id": existing.id, "status_code": status,
+                "elapsed_ms": elapsed, "error": err, "duplicate": True}
 
+    who = actor
+    if task.requested_by:
+        u = await session.get(User, task.requested_by)
+        if u is not None:
+            who = u.username
     svc = (await session.execute(
         select(Service).where(Service.target_id == known.id,
-                              Service.port == orig.port,
+                              Service.port == store_port,
                               Service.protocol == "tcp"))).scalar_one_or_none()
     new = WebAddress(
         target_id=known.id, service_id=svc.id if svc else None,
         url=url, url_hash=url_key(url), exchange_hash=xk,
-        scheme=scheme, port=orig.port, path=path.split("?")[0][:1024],
+        scheme=scheme, port=store_port, path=path.split("?")[0][:1024],
         method=method[:12], status_code=status,
         request=sent, response=resp_text or None,
         crawled=status is not None,
-        sources=f"replay:{user.username}",
-        notes=err or f"replayed by {user.username}",
+        sources=f"replay:{who}",
+        # Which ghost sent it belongs on the row, not only in the task.
+        # The egress address is part of the result, and a row that says
+        # only "replayed" cannot answer "from where".
+        notes=(f"{err} (replayed by {who} via {actor})" if err
+               else f"replayed by {who} via {actor}"),
     )
     session.add(new)
     await session.flush()
+    pr = await session.get(Project, task.project_id)
     await record(session, known.id, "web",
-                 f"request replayed: {method} {url} -> "
-                 f"{status if status is not None else err}", actor=user)
+                 f"request replayed via {actor}: {method} {url} -> "
+                 f"{status if status is not None else err}")
     await session.commit()
-    await broker.publish("web", action="create", host=known.host, project=code)
-    return ReplayOut(web=await _one(session, new.id), status_code=status,
-                     elapsed_ms=elapsed, error=err)
+    if pr is not None:
+        await broker.publish("web", action="create", host=known.host,
+                             project=pr.code)
+    return {"web_id": new.id, "status_code": status, "elapsed_ms": elapsed,
+            "error": err, "duplicate": False}
 
 
 @router.get("/stats")
@@ -723,6 +1092,36 @@ async def assets(project: str = Query(...),
         q.order_by(WebAsset.third_party.desc(), WebAsset.seen_on.desc(),
                    WebAsset.url))).scalars().all()
 
+    # What each asset is CARRYING. One grouped query rather than a
+    # count per row: an estate with four thousand assets would
+    # otherwise be four thousand round trips to answer a question
+    # that is four columns wide.
+    #
+    # Severity is counted alongside the total rather than instead of
+    # it. "14 findings" and "14 findings, 3 of them critical" are
+    # different sentences and only the second tells somebody where
+    # to start.
+    counts = (await session.execute(
+        select(Vuln.asset_id,
+               func.count(Vuln.id),
+               func.count(Vuln.id).filter(Vuln.severity == "critical"),
+               func.count(Vuln.id).filter(Vuln.severity == "high"))
+        .join(Target, Target.id == Vuln.target_id)
+        .where(Target.project_id == pr.id, Vuln.asset_id.is_not(None))
+        .group_by(Vuln.asset_id))).all()
+    by_id = {aid: (n, c, h) for aid, n, c, h in counts}
+
+    # Secrets separately, because a stored credential is not a
+    # severity -- it is the one finding somebody goes looking for
+    # by name, and burying it in a total is how it gets missed.
+    secret_rows = (await session.execute(
+        select(Vuln.asset_id, func.count(FindingSecret.id))
+        .join(FindingSecret, FindingSecret.vuln_id == Vuln.id)
+        .join(Target, Target.id == Vuln.target_id)
+        .where(Target.project_id == pr.id, Vuln.asset_id.is_not(None))
+        .group_by(Vuln.asset_id))).all()
+    secrets_by_id = dict(secret_rows)
+
     # Which pages load what. Sent alongside rather than as a second
     # request, because the two views of this are the same data read
     # from either end -- by library, or by page -- and fetching it
@@ -748,10 +1147,16 @@ async def assets(project: str = Query(...),
             "fetched": a.sha256 is not None,
             "first_page": a.first_page,
             "loaded_by": by_asset.get(a.id, []),
+            "vulns": by_id.get(a.id, (0, 0, 0))[0],
+            "criticals": by_id.get(a.id, (0, 0, 0))[1],
+            "highs": by_id.get(a.id, (0, 0, 0))[2],
+            "secrets": secrets_by_id.get(a.id, 0),
         } for a in rows],
         "total": len(rows),
         "third_party": sum(1 for a in rows if a.third_party),
         "versioned": sum(1 for a in rows if a.version),
+        "findings": sum(n for n, _, _ in by_id.values()),
+        "secrets": sum(secrets_by_id.values()),
         "hosts": len({a.host for a in rows if a.host}),
     }
 
@@ -899,9 +1304,24 @@ class SweepOut(BaseModel):
     #: a dozen were found and all belong to somebody else.
     cloud: int = 0
     cloud_refused: int = 0
+    #: Assets a bot filter refused rather than the origin, and which
+    #: products did it. Inside `failed` too -- the fetch did fail --
+    #: but a gap of a different kind, and one that reads as "the
+    #: client's servers refuse us" until it is named.
+    blocked: int = 0
+    blocked_by: dict[str, int] = {}
+    #: Entropy-only matches dropped from page results — see
+    #: assetwork.scan_pages. Visible so "we found nothing" and "we
+    #: discarded 118 of them on purpose" are different answers.
+    entropy_skipped: int = 0
     notes: list[str] = []
     unfetched: int = 0
     unscanned: int = 0
+    #: 2xx response bodies nothing has read yet. A separate backlog
+    #: from `unscanned`, which counts asset files, because the two
+    #: drain at different rates and one number covering both would
+    #: hide whichever is behind.
+    unscanned_pages: int = 0
 
 
 @router.get("/assets/pending", response_model=dict)
@@ -928,6 +1348,32 @@ async def assets_fetch(limit: int = 50,
     sw = await assetwork.fetch_project(
         session, pr.id, user_agent=(pr.user_agent or DEFAULT_UA),
         limit=max(1, min(int(limit), 500)))
+    rest = await assetwork.pending(session, pr.id)
+    return SweepOut(**sw.__dict__, **rest)
+
+
+@router.post("/pages/scan", response_model=SweepOut)
+async def pages_scan(limit: int = 200,
+                     pr: Project = Depends(require_project("user")),
+                     _: User = Depends(get_current_user),
+                     session: AsyncSession = Depends(get_session)):
+    """Run the same two scanners over 2xx response bodies.
+
+    The asset sweep reads the files a page pulls in. This reads the
+    page: an API key inlined in a `<script>` block or a token in a
+    JSON response is the same finding as the same string in a
+    bundle, and the bundle was the one being read.
+
+    2xx only. A 404 body is the server's error template, identical
+    across a thousand URLs, and reading it would file one finding a
+    thousand times.
+
+    Sends nothing anywhere: every response here was already
+    retrieved, by a ghost, against a target that cleared the scope
+    gate at the time. Both scanners run offline.
+    """
+    sw = await assetwork.scan_pages(
+        session, pr.id, limit=max(1, min(int(limit), 2000)))
     rest = await assetwork.pending(session, pr.id)
     return SweepOut(**sw.__dict__, **rest)
 
@@ -1148,4 +1594,218 @@ async def packet(wid: int, user: User = Depends(get_current_user),
     return WebPacket(
         id=row.id, url=row.url, method=row.method, status_code=row.status_code,
         host=t.host, request=row.request, response=row.response,
-        truncated=bool(row.truncated), sources=row.sources, notes=row.notes)
+        truncated=bool(row.truncated), sources=row.sources, notes=row.notes,
+        screenshot=await _shot_for(session, row))
+
+
+async def _shot_for(session: AsyncSession, row: WebAddress) -> WebShot | None:
+    """The picture of this URL, without its bytes.
+
+    Looked up by `(target, url_hash)` rather than by `web_address_id`,
+    and that is deliberate: `web_addresses` is keyed on the EXCHANGE,
+    so one URL has a row per capture, and the screenshot is linked to
+    whichever of them existed when it was imported. Keying the lookup
+    on the id would show the picture on one row of ten and leave the
+    other nine looking as though nothing had ever been photographed.
+
+    `image` is never selected here. It is a deferred column and this
+    builds the columns by hand, so neither path can drag a megabyte
+    into a listing by accident.
+    """
+    s = (await session.execute(
+        select(WebScreenshot).where(
+            WebScreenshot.target_id == row.target_id,
+            WebScreenshot.url_hash == row.url_hash))).scalar_one_or_none()
+    if s is None:
+        return None
+    return WebShot(
+        id=s.id, url=s.url, final_url=s.final_url, status_code=s.status_code,
+        title=s.title, width=s.width, height=s.height, bytes=s.bytes or 0,
+        sha256=s.sha256, sources=s.sources,
+        captured_at=s.captured_at.isoformat() if s.captured_at else None)
+
+
+@router.get("/screenshots/{shot_id}/image")
+async def screenshot_image(shot_id: int,
+                           user: User = Depends(get_current_user),
+                           session: AsyncSession = Depends(get_session)):
+    """The PNG itself.
+
+    Its own endpoint, serving bytes, because that is what an `<img>`
+    needs: the browser asks for it with the session cookie it already
+    has, and nothing base64-encodes a megabyte into a JSON document
+    to get it onto a page.
+
+    Access follows the project, like everything else here. A missing
+    row and a row in somebody else's project answer the same 404 --
+    an id that is not yours must not be distinguishable from an id
+    that does not exist.
+
+    `private` rather than public: this is a picture of a client's
+    internal application, and an intermediary caching it is a copy of
+    engagement data somewhere nobody chose.
+
+    Deliberately NOT `immutable`, and the max-age is short. A
+    re-shoot replaces the bytes under the same id -- that is the
+    whole point of keying one picture per URL -- so an id's content
+    does change, and telling the browser otherwise would show
+    yesterday's page after somebody re-photographed it to see what
+    had changed.
+    """
+    from fastapi.responses import Response
+    from sqlalchemy.orm import undefer
+
+    # `undefer`, explicitly. The column is deferred so that no other
+    # query drags it in, and on an async session a deferred attribute
+    # touched after the fact does not lazily load -- it raises,
+    # because the IO would happen outside the await. Asking for it in
+    # the query is the only way to have it here.
+    s = (await session.execute(
+        select(WebScreenshot)
+        .options(undefer(WebScreenshot.image))
+        .where(WebScreenshot.id == shot_id))).scalar_one_or_none()
+    if s is None:
+        raise HTTPException(404, "not found")
+    t = await session.get(Target, s.target_id)
+    from ..security import effective_role
+    if t is None or await effective_role(session, user, t.project_id) is None:
+        raise HTTPException(404, "not found")
+    return Response(
+        content=s.image, media_type=s.content_type or "image/png",
+        headers={"Cache-Control": "private, max-age=60",
+                 # Shown, never downloaded-as-something-else. The
+                 # filename is the row id and not the URL: a URL in a
+                 # Content-Disposition header is a client's hostname
+                 # in a filename on somebody's laptop.
+                 "Content-Disposition": f'inline; filename="shot-{s.id}.png"'})
+
+
+# ------------------------------------------------------------ takeovers
+# Under /web rather than in a router of its own because this is the
+# same question the Web view already answers -- what is reachable on
+# this engagement's names -- seen from the DNS side. The UI shows it
+# as a third tab beside URLs and Assets.
+
+class TakeoverOut(BaseModel):
+    id: int
+    hostname: str
+    cname: str
+    cname_chain: list[str] = Field(default_factory=list)
+    provider: str
+    claimable: bool
+    verdict: str
+    evidence: str | None = None
+    state: str
+    note: str | None = None
+    target_id: int | None = None
+    seen_at: str | None = None
+
+
+class TakeoverUpdate(BaseModel):
+    """What an operator may change. Everything else is re-derived."""
+    state: str | None = Field(None, pattern="^(needs_investigating|true_positive|false_positive)$")
+    note: str | None = None
+
+
+def _takeover_out(t) -> TakeoverOut:
+    return TakeoverOut(
+        id=t.id, hostname=t.hostname, cname=t.cname,
+        cname_chain=[x for x in (t.cname_chain or "").split("\n") if x],
+        provider=t.provider, claimable=bool(t.claimable),
+        verdict=t.verdict, evidence=t.evidence, state=t.state,
+        note=t.note, target_id=t.target_id,
+        seen_at=t.seen_at.isoformat() if t.seen_at else None)
+
+
+@router.get("/takeovers", response_model=Page[TakeoverOut])
+async def list_takeovers(
+    verdict: str | None = Query(
+        None, pattern="^(dangling|fingerprint|live|candidate)$"),
+    state: str | None = Query(None),
+    q: str | None = Query(None, description="search hostname, cname, provider"),
+    sort: str = Query("verdict"), order: str = Query("asc"),
+    limit: int = Query(1000, le=10000), offset: int = 0,
+    pr: Project = Depends(require_project("readonly")),
+    _: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Names in this engagement pointing at something unclaimed.
+
+    Read-only and resolves nothing: these rows were decided by
+    `app/takeover.py` from CNAMEs the agent already collected. Refresh
+    is a separate, explicit call.
+    """
+    stmt = select(Takeover).where(Takeover.project_id == pr.id)
+    if verdict:
+        stmt = stmt.where(Takeover.verdict == verdict)
+    if state:
+        stmt = stmt.where(Takeover.state == state)
+    if q:
+        like = f"%{q.strip()}%"
+        stmt = stmt.where(or_(Takeover.hostname.ilike(like),
+                              Takeover.cname.ilike(like),
+                              Takeover.provider.ilike(like)))
+    total = int((await session.execute(
+        select(func.count()).select_from(stmt.subquery()))).scalar_one())
+
+    # `verdict` sorts by strength, not alphabetically. "candidate"
+    # sorting above "dangling" would put the rows that prove nothing
+    # at the top of a findings table.
+    if sort == "verdict":
+        # `live` sorts BELOW `candidate`, which is not a typo: it is
+        # the only verdict that is a finished answer in the "nothing
+        # here" direction, so it is the one row an operator working
+        # down this table never needs to reach.
+        col = case({"dangling": 0, "fingerprint": 1, "candidate": 2,
+                    "live": 3},
+                   value=Takeover.verdict, else_=4)
+    else:
+        col = {"hostname": Takeover.hostname, "provider": Takeover.provider,
+               "state": Takeover.state,
+               "cname": Takeover.cname}.get(sort, Takeover.hostname)
+    stmt = stmt.order_by(col.desc() if order == "desc" else col.asc(),
+                         Takeover.hostname.asc())
+    rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
+    return Page[TakeoverOut](items=[_takeover_out(t) for t in rows],
+                             total=total, limit=limit, offset=offset)
+
+
+@router.post("/takeovers/refresh", response_model=dict)
+async def refresh_takeovers(
+    pr: Project = Depends(require_project("user")),
+    _: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Re-derive the table from the CNAMEs currently on record.
+
+    Sends nothing anywhere -- it reads chains the agent already
+    brought back and response bodies already captured. A `user`
+    action rather than readonly because it rewrites rows.
+    """
+    r = await takeover.refresh(session, pr.id)
+    await session.commit()
+    # `total` is the takeover count. The findings raised are their own
+    # number -- adding them in reported eight rows for four.
+    return {"counts": r.counts, "total": r.total, "findings_open": r.vulns}
+
+
+@router.patch("/takeovers/{takeover_id}", response_model=TakeoverOut)
+async def update_takeover(
+    takeover_id: int, body: TakeoverUpdate,
+    pr: Project = Depends(require_project("user")),
+    _: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Triage one row. Only `state` and `note` -- the rest is DNS."""
+    t = (await session.execute(
+        select(Takeover).where(Takeover.id == takeover_id,
+                               Takeover.project_id == pr.id))).scalar_one_or_none()
+    if t is None:
+        raise HTTPException(404, "no such takeover")
+    if body.state is not None:
+        t.state = body.state
+    if body.note is not None:
+        t.note = body.note or None
+    await session.commit()
+    await session.refresh(t)
+    return _takeover_out(t)

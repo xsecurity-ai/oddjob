@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import addresses, webtargets
+from .. import addresses, lifecycle, webtargets
 from ..db import get_session
 from ..events import broker
 from ..hosts import normalise_host
@@ -18,8 +18,10 @@ from ..models import (
     Service,
     Target,
     TargetAddress,
+    TargetOrigin,
     User,
     Vuln,
+    WebAssetRef,
     target_address_links,
 )
 from ..models import Poc as PocM
@@ -36,6 +38,7 @@ from ..schemas import (
     ServiceOut,
     TargetCreate,
     TargetDetail,
+    TargetOriginOut,
     TargetOut,
     TargetUpdate,
     VulnOut,
@@ -85,9 +88,20 @@ def _keys(model, *computed) -> tuple[str, ...]:
 _TARGET_KEYS = _keys(TargetOut, "project_code", "total_vulns", "total_criticals",
                      "total_highs", "total_pocs", "total_ports")
 _SERVICE_KEYS = _keys(ServiceOut, "host", "project_code")
-_VULN_KEYS = _keys(VulnOut, "host", "project_code")
+# The lifecycle three are DERIVED -- worked out from the sweep table
+# per request, not columns on the row -- so they are excluded here
+# alongside the query-supplied names and filled in below. Leaving them
+# in made `getattr(vuln, "lifecycle")` a 500 on every target detail,
+# which is `_keys` doing exactly its job: a field added to the schema
+# reaches the client without anyone remembering a tuple, and that cuts
+# both ways.
+_VULN_KEYS = _keys(VulnOut, "host", "project_code",
+                   "lifecycle", "lifecycle_why", "last_looked_at")
 _POC_KEYS = _keys(PocOut, "host", "project_code")
 _IMPLANT_KEYS = _keys(ImplantOut, "host", "project_code")
+# `pages` and `pages_total` are read from `web_asset_refs` per request,
+# not columns on the row.
+_ORIGIN_KEYS = _keys(TargetOriginOut, "pages", "pages_total")
 
 
 #: Sentinel for "the caller did not send this key". `None` cannot do
@@ -203,6 +217,97 @@ async def _find(session: AsyncSession, project: str, host: str) -> Target:
     if not t:
         raise HTTPException(404, f"no target {host!r} in project {pr.code}")
     return t
+
+
+#: How many pages one origin lists before it stops and says how many
+#: there are. One bundle is loaded by hundreds of pages; a row that
+#: printed all of them would be the whole panel.
+_ORIGIN_PAGES = 8
+
+
+async def _origins_for(session: AsyncSession,
+                       target_ids: list[int]) -> dict[int, list[TargetOriginOut]]:
+    """Where each of these targets came from. -> {target_id: [origin]}
+
+    A target missing from the result has NO recorded origin, which is
+    not the same as having come from nowhere: provenance is written
+    only by whatever discovered the target, and only the asset sweep
+    does so. Callers must keep the two apart — the UI says "not
+    recorded" for the first and would be lying if it said "none".
+
+    Two queries whatever the number of targets. The pages are read
+    live from `web_asset_refs` rather than snapshotted, because a page
+    added to the crawl later genuinely is another site this resource
+    was found on.
+    """
+    if not target_ids:
+        return {}
+    rows = (await session.execute(
+        select(TargetOrigin)
+        .where(TargetOrigin.target_id.in_(target_ids))
+        .order_by(TargetOrigin.target_id, TargetOrigin.id))).scalars().all()
+    if not rows:
+        return {}
+
+    asset_ids = {o.asset_id for o in rows if o.asset_id is not None}
+    pages: dict[int, list[str]] = {}
+    if asset_ids:
+        for aid, page in (await session.execute(
+                select(WebAssetRef.asset_id, WebAssetRef.page_url)
+                .where(WebAssetRef.asset_id.in_(asset_ids))
+                .order_by(WebAssetRef.asset_id, WebAssetRef.id))).all():
+            pages.setdefault(aid, []).append(page)
+
+    out: dict[int, list[TargetOriginOut]] = {}
+    for o in rows:
+        seen = pages.get(o.asset_id, []) if o.asset_id is not None else []
+        # `first_page` belongs in the list too — it is a page this was
+        # found on, and on an asset nothing has re-crawled it is the
+        # only one. Deduplicated, order preserved.
+        full: list[str] = []
+        for u in ([o.page_url] if o.page_url else []) + seen:
+            if u and u not in full:
+                full.append(u)
+        out.setdefault(o.target_id, []).append(TargetOriginOut(
+            **{k: getattr(o, k) for k in _ORIGIN_KEYS},
+            pages=full[:_ORIGIN_PAGES], pages_total=len(full)))
+    return out
+
+
+@router.get("/origins", response_model=dict[int, list[TargetOriginOut]])
+async def target_origins(
+    project: str | None = Query(None, description="project code or id; "
+                                                  "omit for every visible project"),
+    limit: int = Query(5000, ge=0, le=50000),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Where this project's targets came from, keyed by target id.
+
+    One request for a whole page of rows, because the Targets view
+    renders thousands and a fetch per row is a fetch per row.
+
+    **A target absent from the mapping has no recorded origin.** That
+    means nothing wrote down where it came from — a hand-made target,
+    a scan import, or any row created before provenance was kept. It
+    does NOT mean the target was found nowhere, and a client that
+    renders it that way is wrong.
+    """
+    stmt = select(Target.id)
+    vis = await visible_project_ids(session, user)
+    if vis is not None:
+        stmt = stmt.where(Target.project_id.in_(vis))
+    if project:
+        pr = await resolve_project(session, project)
+        if vis is not None and pr.id not in vis:
+            raise HTTPException(404, f"no project {project!r}")
+        stmt = stmt.where(Target.project_id == pr.id)
+    # Only the targets that HAVE one, so the cap is spent on rows that
+    # say something rather than on the thousands that do not.
+    stmt = stmt.where(select(TargetOrigin.id).where(
+        TargetOrigin.target_id == Target.id).exists()).limit(limit)
+    ids = [i for (i,) in (await session.execute(stmt)).all()]
+    return await _origins_for(session, ids)
 
 
 @router.get("/unscanned", response_model=dict)
@@ -545,16 +650,30 @@ async def target_detail(project: str, host: str,
                   Implant.framework))).scalars().all()
 
     code = (await session.get(Project, t.project_id)).code
+    # One query for this host's sweeps, then a verdict per finding.
+    # The target page is where "is this still there" gets asked most
+    # directly, so it is worth the one round trip.
+    sweeps = await lifecycle.sweeps_for_targets(session, [t.id])
+
+    def _vuln(x):
+        vd = lifecycle.verdict_for(x, sweeps)
+        return VulnOut(**{k: getattr(x, k) for k in _VULN_KEYS},
+                       host=t.host, project_code=code,
+                       lifecycle=vd.state, lifecycle_why=vd.why,
+                       last_looked_at=vd.last_looked)
+
     return TargetDetail(
         target=await _one(session, t.id),
         services=[ServiceOut(**{k: getattr(x, k) for k in _SERVICE_KEYS},
                              host=t.host, project_code=code) for x in svcs],
-        vulns=[VulnOut(**{k: getattr(x, k) for k in _VULN_KEYS},
-                       host=t.host, project_code=code) for x in vulns],
+        vulns=[_vuln(x) for x in vulns],
         pocs=[PocOut(**{k: getattr(x, k) for k in _POC_KEYS},
                      host=t.host, project_code=code) for x in pocs],
         implants=[ImplantOut(**{k: getattr(x, k) for k in _IMPLANT_KEYS},
                              host=t.host, project_code=code) for x in imps],
+        # Empty means nothing recorded where this target came from,
+        # not that it came from nowhere. The modal says which.
+        origins=(await _origins_for(session, [t.id])).get(t.id, []),
     )
 
 

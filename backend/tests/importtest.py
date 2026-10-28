@@ -382,6 +382,10 @@ HTTPX_TLS = "\n".join(json.dumps(x) for x in [
      "status_code": 200,
      "cdn": True, "cdn_name": "cloudfront", "cdn_type": "waf",
      "a": ["10.60.0.9", "10.60.0.10"],
+     "cname": ["edge.cdn.example"],
+     "favicon": "857403617", "favicon_md5": "9" * 32,
+     "favicon_path": "/static/favicon.ico",
+     "jarm_hash": "27d40d40d00040d1dc42d43d00041d6183ff1bfae51ebd88d70384363d525c",
      "asn": {"as_number": "AS64500", "as_name": "EXAMPLE-AS",
              "as_country": "GB", "as_range": ["10.60.0.0/16"]},
      "tls": {"tls_version": "tls13", "cipher": "TLS_AES_256_GCM_SHA384",
@@ -433,6 +437,69 @@ check("...without the range, which nothing reads",
       "as_range" not in (hx.get("asn") or {}), hx)
 check("every A record is kept, not just the one that became ip_address",
       hx.get("a") == ["10.60.0.9", "10.60.0.10"], hx)
+
+# The pivot fingerprints. These are the whole reason the agent now
+# passes `-favicon` and `-jarm`: the importer parsed `tech` and
+# `cname` for its whole life against an agent that never asked httpx
+# to emit either, so the keys were absent from every line and the
+# branches never fired once. A fixture that does not carry them
+# cannot tell that apart from a parser that drops them.
+check("the favicon hash is kept — it is what pivots to the rest of an estate",
+      hx.get("favicon_mmh3") == "857403617", hx)
+check("...with the path it came from, so the hash can be re-derived",
+      hx.get("favicon_path") == "/static/favicon.ico", hx)
+check("...and the md5 beside it", hx.get("favicon_md5") == "9" * 32, hx)
+check("the JARM fingerprint is kept — it clusters by TLS stack",
+      (hx.get("jarm") or "").startswith("27d40d40d00040d1"), hx)
+check("the CNAME is kept, which is what a takeover check reads",
+      hx.get("cname") == ["edge.cdn.example"], hx)
+
+# ================================================================= vhost
+# The collision this is mostly about: vhost output carries `found`,
+# `wordlist` AND `hits`, exactly as content discovery does. Shown to
+# gobuster's sniffer first it imports as paths, and hostnames land in
+# the URL column.
+VHOST = json.dumps({
+    "url": "https://10.60.0.50", "domain": "corp.local",
+    "wordlist": "built-in (SecLists common.txt)",
+    "found": ["intranet.corp.local", "staging.corp.local"],
+    "hits": [{"vhost": "intranet.corp.local", "status": 200, "size": 4096},
+             {"vhost": "staging.corp.local", "status": 401, "size": 120}],
+})
+print("\n== vhost ==")
+st, r = imp("VH", VHOST)
+check("it is detected as vhost and not as content discovery",
+      st == 200 and r["format"] == "vhost", f"{st} {r.get('format')}")
+d = detail("VH", "10.60.0.50")
+names = d["target"].get("hostnames") or []
+check("a discovered vhost becomes an alternate name on the address",
+      "intranet.corp.local" in names, names)
+check("...including one that answered 401, which is still a vhost",
+      "staging.corp.local" in names, names)
+# The judgement call this importer makes, asserted so it is not
+# quietly reversed: a vhost-only name does not resolve, so a URL
+# built from it would be one nobody who clicks it can reach.
+check("no web address is invented for a name that may not resolve",
+      not any("intranet.corp.local" in (w.get("url") or "")
+              for w in (d.get("web") or [])), d.get("web"))
+
+# A wildcard makes every word a hit. The agent measures it and the
+# importer has to carry that through, because "found nothing" and
+# "could not tell" are different answers.
+VHOST_WILDCARD = json.dumps({
+    "url": "https://10.60.0.51", "domain": "corp.local",
+    "wordlist": "built-in", "found": [], "hits": [],
+    "wildcard": {"answers": True, "status": 200, "size": 1432,
+                 "probe": "oddjob-no-such-vhost-7f3a1c.corp.local"},
+})
+st, r = imp("VH", VHOST_WILDCARD)
+check("a wildcard run still imports", st == 200, f"{st} {r}")
+d2 = detail("VH", "10.60.0.51")
+note = (d2["target"].get("notes") or "")
+check("...and says the address answers any Host header",
+      "ANY Host header" in note, note[:120])
+check("...so an empty list does not read as a clean zero",
+      "not that nothing is there" in note, note[:200])
 
 # A build of httpx that reports no `tls` must not become an error or
 # a host with invented certificate facts.
@@ -1745,5 +1812,168 @@ check("...nor one behind the short label",
 # The check must not be so eager it eats real names.
 check("a hostname that merely looks addressy is kept",
       _cn.san_names(["10.0.0.1.nodes.example"]) == ["10.0.0.1.nodes.example"])
+
+print("\n== a file that parsed to nothing says so ==")
+# The failure mode this exists for: a nuclei template release changes
+# the JSON shape, the tool still exits 0, the importer still succeeds,
+# and the run reports a clean estate. "Found nothing" and "could not
+# read it" are different answers and collapsing the second into the
+# first is how a finding gets missed.
+#
+# Shaped as the real thing: well-formed nmap XML whose host elements
+# the parser cannot use, with enough bytes in it to be a real file.
+_PADDING = "<!-- " + ("x" * 3000) + " -->"
+_MOVED = (
+    '<?xml version="1.0"?>\n'
+    '<nmaprun scanner="nmap" version="9.99" start="1700000000">\n'
+    + _PADDING + "\n"
+    # The elements a future nmap might emit instead. Well-formed, and
+    # nothing here knows what to do with them.
+    '<scantarget><reachable/><identity value="h1.acme.example"/>'
+    '<listening><entry num="443"/></listening></scantarget>\n'
+    "</nmaprun>\n")
+
+st, r = call("/api/scans/import?project=EMPTYP&format=nmap", "POST",
+             {"content": _MOVED}, token=admin)
+if st == 404:
+    call("/api/projects", "POST", {"code": "EMPTYP", "name": "Empty parse"},
+         token=admin)
+    st, r = call("/api/scans/import?project=EMPTYP&format=nmap", "POST",
+                 {"content": _MOVED}, token=admin)
+check("a document the parser cannot use still imports", st == 200, (st, r))
+check("...and nothing was written", (r or {}).get("hosts_seen") == 0, r)
+check("...but it is NOT reported as a clean nothing",
+      bool((r or {}).get("parsed_nothing")), r)
+if (r or {}).get("parsed_nothing"):
+    _w = r["parsed_nothing"]
+    check("...the warning says how much was read",
+          "bytes" in _w, _w)
+    check("...and names the format change as the likely cause",
+          "format" in _w.lower(), _w)
+
+# A genuinely empty scan is a real thing and must not be flagged. A
+# masscan that found no open ports has nothing to report and is right.
+_EMPTY = ('<?xml version="1.0"?>\n'
+          '<nmaprun scanner="nmap" version="7.94" start="1700000000">\n'
+          '</nmaprun>\n')
+st, r2 = call("/api/scans/import?project=EMPTYP&format=nmap", "POST",
+              {"content": _EMPTY}, token=admin)
+check("a small empty scan imports", st == 200, (st, r2))
+check("...and is NOT flagged, because there was nothing in it to read",
+      not (r2 or {}).get("parsed_nothing"), r2)
+
+# Nor is a file that parsed fine. The flag is about silence, not
+# about size.
+st, r3 = call("/api/scans/import?project=EMPTYP&format=nmap", "POST",
+              {"content": '<?xml version="1.0"?>'
+                          '<nmaprun scanner="nmap" version="7.94" start="1">'
+                          + _PADDING +
+                          '<host><status state="up"/>'
+                          '<address addr="198.51.100.44" addrtype="ipv4"/>'
+                          '<ports><port protocol="tcp" portid="443">'
+                          '<state state="open"/><service name="https"/>'
+                          '</port></ports></host></nmaprun>'},
+              token=admin)
+check("a large file that DID parse is not flagged",
+      st == 200 and not (r3 or {}).get("parsed_nothing"), (st, r3))
+
+# And a file whose unusable lines were reported is not flagged either:
+# the errors already say what happened, and two warnings about one
+# fact is noise.
+from app.importers.model import ParsedScan as _PS  # noqa: E402
+
+_withrr = _PS(tool="nuclei", errors=["line 4: could not be read"])
+check("a parse that reported errors is not also flagged",
+      _withrr.read_nothing(100_000) is None)
+check("a parse with records is not flagged",
+      _PS(tool="nmap", notes=[object()]).read_nothing(100_000) is None)
+check("a silent parse of a real file is",
+      _PS(tool="nmap").read_nothing(100_000) is not None)
+
+
+print("== a screenshot is read as bytes, or refused ==")
+# The one importer that produces binary. Everything else here reads a
+# document and writes text; this decodes base64 and must be able to
+# say, before anything is stored, whether what arrived is actually a
+# PNG. A field named `png_base64` holding something else would
+# otherwise put a file in the database that renders as nothing.
+import base64 as _b64  # noqa: E402
+
+from app.importers import screenshot as _shot  # noqa: E402
+
+_PNG = (b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+
+
+def _result(**over):
+    doc = {"browser": "/usr/bin/chromium",
+           "viewport": {"width": 1280, "height": 800},
+           "shots": [{"url": "https://portal.acme.example/",
+                      "status": 200, "title": "ACME",
+                      "png_base64": _b64.b64encode(_PNG).decode()}]}
+    doc.update(over)
+    return json.dumps(doc)
+
+
+check("a screenshot result is recognised without being told",
+      detect(_result()) == "screenshot", detect(_result()))
+# The two live next to each other in the registry and both are JSON
+# objects from the same agent. `vhost` and `gobuster` once read each
+# other's documents for exactly this reason.
+check("...and a crawl result is still a crawl",
+      detect(json.dumps({"sites": [], "urls": ["https://a.acme.example/"],
+                         "by_type": {}})) == "crawl")
+
+_s = _shot.parse(_result())
+check("the image arrives as bytes, not as text",
+      len(_s.screenshots) == 1 and isinstance(_s.screenshots[0].image, bytes),
+      type(_s.screenshots[0].image).__name__ if _s.screenshots else None)
+check("...and the URL is recorded as fetched beside it",
+      len(_s.web) == 1 and _s.web[0].crawled is True,
+      [(w.url, w.crawled) for w in _s.web])
+check("...with the image's own media type, not the page's",
+      _s.screenshots[0].content_type == "image/png",
+      _s.screenshots[0].content_type)
+
+_bad = _shot.parse(_result(shots=[
+    {"url": "https://ok.acme.example/",
+     "png_base64": _b64.b64encode(_PNG).decode()},
+    {"url": "https://gif.acme.example/",
+     "png_base64": _b64.b64encode(b"GIF89a").decode()},
+    {"url": "https://junk.acme.example/", "png_base64": "not base64 at all!"},
+    {"url": "https://empty.acme.example/"},
+]))
+check("one good image still imports when its neighbours are junk",
+      len(_bad.screenshots) == 1, [s.url for s in _bad.screenshots])
+# Each refusal is NAMED. Silently dropping three of four would leave
+# an operator comparing "4 captured" on the task with one row here
+# and nothing to explain the difference.
+for _who, _why in (("gif", "not a PNG"), ("junk", "not valid base64"),
+                   ("empty", "no image")):
+    check(f"...and the {_who} one says why",
+          any(_who in e and _why in e for e in _bad.errors), _bad.errors)
+
+# Checked on the ENCODED length, before decoding: a broken or hostile
+# agent must not be able to make this process allocate whatever it
+# felt like sending.
+_huge = _shot.parse(_result(shots=[
+    {"url": "https://ok.acme.example/",
+     "png_base64": _b64.b64encode(_PNG).decode()},
+    {"url": "https://huge.acme.example/",
+     "png_base64": "A" * (_shot.MAX_IMAGE_BYTES * 2)}]))
+check("an image past the cap is refused rather than stored",
+      [s.url for s in _huge.screenshots] == ["https://ok.acme.example/"],
+      [s.url for s in _huge.screenshots])
+check("...and says how big it was against what is allowed",
+      any("larger than" in e for e in _huge.errors), _huge.errors)
+
+# A task that photographed nothing is not an import of nothing. The
+# same rule the crawl importer follows, for the same reason.
+try:
+    _shot.parse(_result(shots=[]))
+    check("a screenshot task with no images is refused", False, "accepted")
+except Exception as e:                                       # noqa: BLE001
+    check("a screenshot task with no images is refused",
+          "no usable image" in str(e), str(e)[:80])
+
 
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

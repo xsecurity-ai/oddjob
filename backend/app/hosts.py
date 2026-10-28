@@ -30,8 +30,19 @@ class InvalidHost(ValueError):
 
 
 def normalise_host(raw: str) -> str:
-    """Lowercase, trim, drop a trailing root dot. Does not validate."""
-    return (raw or "").strip().rstrip(".").lower()
+    """Lowercase, trim, drop a trailing root dot. Does not validate.
+
+    A bracketed IPv6 literal loses its brackets. `[2001:db8::1]` and
+    `2001:db8::1` are one address, and keeping the brackets made the
+    first parse as no address at all -- so a scope check on it
+    consulted the NAME list and never the address list. The callers
+    that build a host out of a URL or a SOCKS frame strip them
+    already; this is the floor under the ones that do not.
+    """
+    h = (raw or "").strip().rstrip(".").lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    return h
 
 
 def validate_host(raw: str) -> str:
@@ -100,3 +111,49 @@ def validate_cloud_id(raw: str) -> str:
     if "*" in h or ".." in h:
         raise InvalidHost(f"cloud identifier {raw!r} looks like a pattern, not a resource")
     return h
+
+
+def dns_subject(kind: str | None) -> bool:
+    """Is a target of this kind IDENTIFIED BY a name DNS can be asked about?
+
+    `Target.kind` is `host`, `mobile` or `cloud`, and only the first
+    names a thing the DNS knows. This is the one place that says so,
+    because the rule was being applied in some paths and not others
+    and the two halves disagreed.
+
+    **A cloud resource is named by whatever the provider uses** — an
+    ARN, a bucket name, a subscription id, a resource path. It is not
+    a hostname, which is why `validate_cloud_id` above exists at all.
+    Two shapes, both wrong in their own way:
+
+      `arn:aws:s3:::acme-backups` has no dot, so `registrable()` hands
+      it back unchanged. No zone comes of it — but it was still being
+      handed to a RESOLVER as a name to look up, which is a query that
+      tells whoever answers it the client's resource names and cannot
+      come back with anything.
+
+      `backups.storage.example` — a bucket endpoint — is a perfectly
+      well-formed hostname and `registrable()` reports
+      `storage.example`. That is a zone, it is not the client's, and
+      amass was being pointed at it.
+
+    **A mobile app is named by its bundle id** — `com.acme.app`. That
+    has dots in it and nothing else in common with a hostname:
+    `registrable()` reports `acme.app` quite happily, a zone belonging
+    to somebody who has never heard of the engagement. Two call sites
+    already excluded mobile by hand for exactly this reason; they call
+    this instead now.
+
+    Note what this does NOT say. It is about the identifier in
+    `Target.host`, not about the asset. A cloud resource often does
+    resolve, and the names DISCOVERED for one — alternate names, TLS
+    SANs, the host of a captured URL — are observed facts and remain
+    good enumeration material. Only the identifier is untrustworthy as
+    a name, so only the identifier is dropped.
+
+    A missing kind reads as `host`. The column carries a server
+    default, so "no kind recorded" is an old row from when `host` was
+    the only kind there was — that is a known fact, not an unknown
+    one.
+    """
+    return (kind or "host") == "host"

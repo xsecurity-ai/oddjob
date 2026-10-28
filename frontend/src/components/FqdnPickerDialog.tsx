@@ -191,7 +191,14 @@ function Row({ row, project, onBusy }: {
   return (
     <Box sx={{ border: `1px solid ${alpha(neon.purple, 0.25)}`, borderRadius: 1,
                p: 1.2 }}>
-      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        useFlexGap
+        sx={{
+          alignItems: "center",
+          flexWrap: "wrap"
+        }}>
         <Box sx={{ fontFamily: `'Share Tech Mono', monospace`, fontSize: 12.5,
                    color: neon.cyan }}>{row.subject}</Box>
         <Chip size="small" label={row.kind} sx={chipSx(neon.purple)} />
@@ -210,8 +217,13 @@ function Row({ row, project, onBusy }: {
         </Typography>
       </Stack>
 
-      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}
-             alignItems="flex-start" sx={{ mt: 1 }}>
+      <Stack
+        direction={{ xs: 'column', sm: 'row' }}
+        spacing={1.5}
+        sx={{
+          alignItems: "flex-start",
+          mt: 1
+        }}>
         <TextField select size="small" value={pick} sx={{ flex: 1, minWidth: 260 }}
           onChange={(e) => setPick(e.target.value)}
           label={row.field === 'host' ? 'Use this name' : 'Use this address'}>
@@ -235,7 +247,13 @@ function Row({ row, project, onBusy }: {
             is a lead, so say what should happen to them.
           </Caveat>
           <Box sx={{ mt: 1 }}>
-            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{
+                alignItems: "center",
+                mb: 0.5
+              }}>
               <Typography sx={{ fontSize: 11, color: neon.muted }}>
                 The other {row.options.length - 1}:
               </Typography>
@@ -257,7 +275,9 @@ function Row({ row, project, onBusy }: {
             </Stack>
             <Stack spacing={0.3}>
               {row.options.filter((o) => o !== pick).map((o) => (
-                <Stack key={o} direction="row" spacing={0.5} alignItems="center">
+                <Stack key={o} direction="row" spacing={0.5} sx={{
+                  alignItems: "center"
+                }}>
                   <Tooltip title={`Add ${o} to the inventory as its own target. Scope still decides.`}>
                     <Checkbox size="small" checked={add.has(o)}
                       onChange={(e) => {
@@ -330,7 +350,7 @@ function Row({ row, project, onBusy }: {
           }} />
       )}
     </Box>
-  )
+  );
 }
 
 /** Merging straight out of a name collision.
@@ -468,7 +488,9 @@ function AddAllBar({ project, choices, autos, onBusy }: {
     <Box sx={{ border: `1px solid ${alpha(neon.green, 0.4)}`, borderRadius: 1,
                p: 1.2 }}>
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}
-             alignItems={{ sm: 'center' }}>
+             sx={{
+               alignItems: { sm: 'center' }
+             }}>
         <Button variant="outlined" disabled={run.isPending || !choices.length}
           onClick={() => run.mutate()}
           sx={{ color: neon.green, borderColor: alpha(neon.green, 0.6),
@@ -491,7 +513,7 @@ function AddAllBar({ project, choices, autos, onBusy }: {
                sx={{ mt: 1, fontSize: 11.5 }}>{err}</Alert>
       )}
     </Box>
-  )
+  );
 }
 
 export function FqdnPickerDialog({ project, rows, loading, error, auto,
@@ -599,8 +621,15 @@ export function FqdnPickerDialog({ project, rows, loading, error, auto,
               </Typography>
               <Stack spacing={0.6}>
                 {empty.map((r) => (
-                  <Stack key={`${r.kind}:${r.subject}`} direction="row" spacing={1}
-                         alignItems="center" flexWrap="wrap" useFlexGap>
+                  <Stack
+                    key={`${r.kind}:${r.subject}`}
+                    direction="row"
+                    spacing={1}
+                    useFlexGap
+                    sx={{
+                      alignItems: "center",
+                      flexWrap: "wrap"
+                    }}>
                     <Box sx={{ fontFamily: `'Share Tech Mono', monospace`,
                                fontSize: 12, color: neon.text }}>{r.subject}</Box>
                     <Chip size="small" label={r.kind} sx={chipSx(neon.muted)} />
@@ -635,5 +664,5 @@ export function FqdnPickerDialog({ project, rows, loading, error, auto,
         <Button onClick={onClose} sx={{ color: neon.muted }}>Close</Button>
       </DialogActions>
     </EnumerateDialog>
-  )
+  );
 }

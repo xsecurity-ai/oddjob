@@ -18,7 +18,7 @@ import os
 import secrets
 import tempfile
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -27,7 +27,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import addresses, importers, slack
+from .. import (
+    addresses,
+    importers,
+    lifecycle,
+    manifest,
+    nsefindings,
+    slack,
+)
 from ..db import SessionLocal, get_session
 from ..events import broker
 from ..hosts import InvalidHost, normalise_host
@@ -38,6 +45,7 @@ from ..importers.model import (
     ParsedHost,
     ParsedImplant,
     ParsedScan,
+    ParsedScreenshot,
     ParsedService,
     ParsedVuln,
     ParsedWebAddress,
@@ -54,6 +62,7 @@ from ..models import (
     User,
     Vuln,
     WebAddress,
+    WebScreenshot,
     implies_alive,
 )
 from ..portcoverage import parse_ports
@@ -133,9 +142,27 @@ class ImportResult(BaseModel):
     implants_updated: int = 0
     urls_created: int = 0
     urls_updated: int = 0
+    #: Pictures of pages, stored and replaced. Counted apart from the
+    #: URLs because a screenshot is one per URL and a URL row is one
+    #: per exchange -- the two numbers do not line up and showing
+    #: them as one would invite the reader to think they should.
+    screenshots_created: int = 0
+    screenshots_updated: int = 0
     hosts_flagged: int = Field(0, description="Targets newly marked compromised")
+    #: Ports dropped because their host answers indiscriminately. Not
+    #: an error and not silence: the number is what tells an operator
+    #: that a host's open ports mean nothing, which is a finding about
+    #: the host rather than about the ports.
+    ports_indiscriminate: int = 0
     scripts_captured: int = 0
     notes_recorded: int = 0
+    #: Set when a document with real size in it parsed to nothing at
+    #: all -- no records and no errors. "Found nothing" and "could not
+    #: read it" are different answers and this is the one that is
+    #: usually a format change rather than a clean estate. Carries the
+    #: sentence rather than a flag, because a bare boolean in a result
+    #: is something every caller has to remember to render.
+    parsed_nothing: str | None = None
     errors: list[str] = []
     #: Set when strict mode found hosts the project does not have. Nothing
     #: was written; the caller decides and posts again.
@@ -184,13 +211,25 @@ class FormatOut(BaseModel):
     label: str
 
 
+#: How many `tcpwrapped` ports on one host make it indiscriminate.
+#:
+#: Measured, not guessed. On the estate that produced this, 53 hosts
+#: carried 917,402 of them -- an average of 17,300 each -- while a
+#: host with a genuine tcpwrapper in front of a handful of services
+#: has a handful. There is no real configuration between "a few" and
+#: "most of the port range", so the threshold sits well clear of
+#: both.
+TCPWRAPPED_FLOOD = 100
+
+
 def _j(v) -> str | None:
     return json.dumps(v) if v else None
 
 
 # --------------------------------------------------------------- services
 async def _service(session: AsyncSession, target: Target, ps: ParsedService,
-                   res: ImportResult) -> list[str]:
+                   res: ImportResult,
+                   nse_manifest: str | None = None) -> list[str]:
     row = (await session.execute(
         select(Service).where(Service.target_id == target.id,
                               Service.port == ps.port,
@@ -202,6 +241,19 @@ async def _service(session: AsyncSession, target: Target, ps: ParsedService,
         "cpe": _j(ps.cpe), "scripts": _j(ps.scripts), "banner": ps.banner or None,
     }
     res.scripts_captured += len(ps.scripts)
+    # The scripts are not only stored, they are read. nmap has been
+    # told to run `vuln` and friends since the fleet was built, and
+    # until this call every "Anonymous FTP login allowed" it reported
+    # sat in a JSON column that nothing selected. No extra traffic:
+    # this is the answer already in hand.
+    # The manifest for NSE is the SCRIPT SET, taken from the nmap
+    # command line this scan reported. It is the one thing that
+    # decides what the scripts could have found, and a run with
+    # `--script default` genuinely cannot speak for a finding that
+    # `--script vuln` produced.
+    res.vulns_created += await nsefindings.record_service(
+        session, target.id, ps.port, ps.protocol, ps.scripts,
+        run_manifest=nse_manifest)
     if ps.state == "open" and ps.name == "UNKNOWN":
         res.services_unknown += 1
     # A service that answered is proof the host is up, whatever the host
@@ -319,9 +371,63 @@ async def _host(session: AsyncSession, project: Project, ph: ParsedHost,
                      if ph.extra.get("os_matches") else None,
                      actor=actor, source=source)
 
+    # NSE findings are attributed to `nse` and not to `nmap` (see
+    # nsefindings.SCANNER), so they need their OWN manifest: the
+    # script set, not the port range. A run with `--script default`
+    # cannot speak for a finding that `--script vuln` produced.
+    nse_manifest = nsefindings.manifest_for(scan.args)
+    # Stored as well as hashed, or "the script set changed" has
+    # nothing behind it when somebody opens the finding and asks
+    # which scripts.
+    await lifecycle.remember_manifest(
+        session, nsefindings.SCANNER, nse_manifest,
+        nsefindings.manifest_detail(scan.args), datetime.now(UTC))
+
+    # A host that answers EVERY port is not a host with ten thousand
+    # services on it.
+    #
+    # `tcpwrapped` is nmap saying the handshake completed and the far
+    # end closed the connection without a word. A handful of those is
+    # ordinary. Seventeen thousand on one host is a firewall or a load
+    # balancer SYN-ACKing indiscriminately, and recording each as a
+    # service is the same mistake this project already made once with
+    # `open|filtered` -- 42,890 rows against 13 genuinely open ports.
+    #
+    # On the estate this was found on it was 917,402 rows across 53
+    # hosts: 99.7% of every service record in the database, none of
+    # them carrying a product, a version or a banner, because a port
+    # that said nothing has nothing to carry. They buried the 2,348
+    # real ones.
+    #
+    # So above the threshold the ports are not recorded individually.
+    # The FACT is -- once, on the target, where it belongs: this host
+    # answers everything, so a port being open here means nothing.
+    # Coverage is still written, because the ports were still looked
+    # at and a later scan must not think otherwise.
+    wrapped = [x for x in ph.services if (x.name or "") == "tcpwrapped"]
+    indiscriminate = len(wrapped) >= TCPWRAPPED_FLOOD
+    if indiscriminate:
+        res.ports_indiscriminate += len(wrapped)
+        await record(
+            session, target.id, "scan",
+            f"answers on {len(wrapped)} ports without responding on any "
+            f"of them",
+            detail="Every one of these completed a TCP handshake and then "
+                   "closed the connection without sending a byte "
+                   "(nmap calls it `tcpwrapped`). A host that does this "
+                   "on thousands of ports is a firewall or load balancer "
+                   "answering indiscriminately, not a host running "
+                   "thousands of services — so an open port here is not "
+                   "evidence of anything listening. The individual ports "
+                   "were NOT recorded as services; they would bury the "
+                   "ones that are real.",
+            actor=actor, source=source)
+
     svc_changes: list[str] = []
     for ps in ph.services:
-        svc_changes += await _service(session, target, ps, res)
+        if indiscriminate and (ps.name or "") == "tcpwrapped":
+            continue
+        svc_changes += await _service(session, target, ps, res, nse_manifest)
         if ps.scripts:
             await record(
                 session, target.id, "scan",
@@ -349,23 +455,58 @@ async def _host(session: AsyncSession, project: Project, ph: ParsedHost,
 # ----------------------------------------------------------------- vulns
 async def _vuln(session: AsyncSession, target: Target, pv: ParsedVuln,
                 scan: ParsedScan, res: ImportResult, source: str,
-                announce: list | None = None) -> None:
+                announce: list | None = None,
+                scanner: str | None = None,
+                seen_at: datetime | None = None,
+                run_manifest: str | None = None) -> None:
+    """Record one finding, and that this scanner saw it now.
+
+    `seen_at` is passed in rather than taken here so every finding in
+    one import shares one timestamp. Two findings from the same file
+    with timestamps a millisecond apart would make one of them look
+    older than a sweep that covered both.
+    """
+    seen_at = seen_at or datetime.now(UTC)
     row = None
+    # Both lookups take the OLDEST match rather than demanding a unique
+    # one. `scalar_one_or_none()` raises MultipleResultsFound, and both of
+    # these can match more than one row in a healthy database:
+    #
+    #   (target_id, title, port) was never unique and was never meant to
+    #   be. A semgrep rule id IS the title, so one rule firing in six
+    #   hundred files on one target is six hundred rows that differ only
+    #   by external_id. That is real data, not duplication -- the worst
+    #   group in production is exactly six hundred rows -- so this lookup
+    #   has to pick one rather than refuse to answer.
+    #
+    #   (target_id, external_id) should be unique, but nothing enforces
+    #   it: there is no constraint, and a retried submit that raced an
+    #   in-flight one can insert the row twice. Until a unique constraint
+    #   exists, this cannot assume uniqueness either.
+    #
+    # Ordering by id makes the choice deterministic, and picking the
+    # oldest keeps repeated imports updating the same finding instead of
+    # alternating between duplicates and rewriting first_seen_at.
     if pv.external_id:
         row = (await session.execute(
             select(Vuln).where(Vuln.target_id == target.id,
-                               Vuln.external_id == pv.external_id))).scalar_one_or_none()
+                               Vuln.external_id == pv.external_id)
+            .order_by(Vuln.id).limit(1))).scalars().first()
     if row is None:
         row = (await session.execute(
             select(Vuln).where(Vuln.target_id == target.id,
                                Vuln.title == pv.title,
-                               Vuln.port == pv.port))).scalar_one_or_none()
+                               Vuln.port == pv.port)
+            .order_by(Vuln.id).limit(1))).scalars().first()
     if row is None:
         session.add(Vuln(target_id=target.id, title=pv.title[:1000],
                          severity=pv.severity, status=pv.status,
                          port=pv.port, protocol=pv.protocol,
                          description=pv.description, remediation=pv.remediation,
-                         external_id=pv.external_id))
+                         external_id=pv.external_id,
+                         scanner=scanner, first_seen_at=seen_at,
+                         last_seen_at=seen_at,
+                         found_by_manifest=run_manifest))
         res.vulns_created += 1
         # Findings are one of only two things that reach Slack. Gathered
         # here and posted after the commit: a finding announced and then
@@ -377,6 +518,26 @@ async def _vuln(session: AsyncSession, target: Target, pv: ParsedVuln,
                      f"{pv.severity.upper()}: {pv.title}"[:400],
                      detail=pv.description, actor=scan.tool, source=source)
         return
+    # Seen again. Recorded before anything else, and whether or not
+    # a single field changed: an unchanged finding reported by
+    # today's scan is still there, and that is the fact the lifecycle
+    # turns on. `vulns_updated` deliberately does not count it --
+    # "updated" means the content moved, and a report that called
+    # every unchanged finding an update would be noise.
+    row.last_seen_at = seen_at
+    if row.first_seen_at is None:
+        row.first_seen_at = seen_at
+    # The manifest of the run that LAST reported it, not the first.
+    # A finding seen again by a narrower run is a finding that
+    # narrower run can speak for, and holding the original would
+    # make a later identical sweep look incomparable.
+    row.found_by_manifest = run_manifest
+    # Never overwritten once set. A finding first reported by Nessus
+    # and later matched by title from an nmap import is still a
+    # Nessus finding, and reassigning it would let an nmap sweep
+    # resolve it.
+    if not row.scanner and scanner:
+        row.scanner = scanner
     changed = []
     if row.severity != pv.severity:
         changed.append(f"severity: {row.severity} → {pv.severity}")
@@ -582,6 +743,72 @@ async def _weburl(session: AsyncSession, target: Target, pw: ParsedWebAddress,
     return None
 
 
+async def _screenshot(session: AsyncSession, target: Target,
+                      ps: ParsedScreenshot, scan: ParsedScan,
+                      res: ImportResult) -> bool:
+    """One picture of one URL. -> whether it was stored.
+
+    Keyed on `(target, url_hash)`, which is NOT how `web_addresses` is
+    keyed, and the difference is the point. A URL row is one captured
+    exchange, because the same endpoint probed ten ways is ten pieces
+    of evidence. A picture is not evidence of that kind: ten pictures
+    of one URL are ten copies of one page, and across an estate that
+    has reached 51,000 URLs that is the difference between a database
+    and a problem. So a re-shoot REPLACES, and `captured_at` says how
+    old the one on file is.
+    """
+    try:
+        u = parse_url(ps.url, base_host=ps.host or target.host)
+    except BadUrl as e:
+        res.errors.append(str(e))
+        return False
+    key = url_key(u.url)
+
+    # The address row this is a picture of, when there is one. The
+    # oldest matching row rather than the newest: `web_addresses` is
+    # keyed on the exchange, so one URL can have many, and the first
+    # is the one the rest were found beside. It is a convenience for
+    # the viewer, never the identity -- a screenshot of a URL this
+    # project has never otherwise recorded is still worth keeping.
+    wa_id = (await session.execute(
+        select(WebAddress.id)
+        .where(WebAddress.target_id == target.id,
+               WebAddress.url_hash == key)
+        .order_by(WebAddress.id.asc()).limit(1))).scalar_one_or_none()
+
+    row = (await session.execute(
+        select(WebScreenshot).where(
+            WebScreenshot.target_id == target.id,
+            WebScreenshot.url_hash == key))).scalar_one_or_none()
+    if row is None:
+        session.add(WebScreenshot(
+            target_id=target.id, web_address_id=wa_id,
+            url=u.url, url_hash=key, final_url=ps.final_url,
+            status_code=ps.status_code, title=ps.title,
+            content_type=ps.content_type or "image/png",
+            image=ps.image, bytes=len(ps.image), sha256=ps.sha256,
+            width=ps.width, height=ps.height,
+            captured_at=ps.captured_at, sources=scan.tool))
+        res.screenshots_created += 1
+        return True
+
+    row.image = ps.image
+    row.bytes = len(ps.image)
+    row.sha256 = ps.sha256
+    row.content_type = ps.content_type or "image/png"
+    row.captured_at = ps.captured_at
+    row.web_address_id = wa_id or row.web_address_id
+    # The metadata is replaced rather than merged, unlike a URL row.
+    # It describes THIS picture: keeping the old title beside the new
+    # image would describe neither.
+    row.final_url, row.status_code, row.title = (
+        ps.final_url, ps.status_code, ps.title)
+    row.width, row.height = ps.width, ps.height
+    row.sources = merge_sources(row.sources, scan.tool)
+    res.screenshots_updated += 1
+    return True
+
+
 # ------------------------------------------------------- co-tenancy
 #: Most co-tenants one address may propagate to in a single import.
 #:
@@ -761,10 +988,46 @@ async def ingest(session: AsyncSession, project: Project, scan: ParsedScan,
         for t in cotenants:
             await _propagate_ports(session, project, t, idx, res)
 
+    # One timestamp for the whole import. Two findings from the same
+    # file stamped a millisecond apart would make one of them look
+    # older than the sweep that covered both, and `resolved` turns on
+    # exactly that comparison.
+    seen_at = datetime.now(UTC)
+
+    # What this run was configured to look FOR, from the tool's own
+    # record of itself. Without it `resolved` has a hole: a nuclei
+    # run with `-severity critical` does not report the high-severity
+    # finding the previous run found, and nothing about the tool
+    # name, the host or the timestamp says it was configured not to
+    # look. See app/manifest.py.
+    #
+    # `scan.args` is what the TOOL said it ran, not what somebody
+    # meant to run -- nmap asked for -sS without raw sockets performs
+    # a connect scan and says so. A format that records no arguments
+    # yields a manifest of the tool name alone, which compares equal
+    # to itself and to nothing else: honest, and no worse than the
+    # NULL every row had before this.
+    run_manifest, manifest_detail = manifest.build(fmt, scan.args)
+    await lifecycle.remember_manifest(session, fmt, run_manifest,
+                                      manifest_detail, seen_at)
+
     for pv in scan.vulns:
         t = await resolve(pv.host)
         if t is not None:
-            await _vuln(session, t, pv, scan, res, source, new_findings)
+            await _vuln(session, t, pv, scan, res, source, new_findings,
+                        scanner=fmt, seen_at=seen_at,
+                        run_manifest=run_manifest)
+
+    # Every host this scan READ, not only the ones it found something
+    # on. That is the whole point: a host swept by nuclei and reported
+    # clean is the evidence that a nuclei finding there has gone, and a
+    # sweep recorded only where findings landed could never say so.
+    #
+    # Recorded after the findings, so a failure writing one does not
+    # leave a sweep claiming a look that produced nothing.
+    for t in targets.values():
+        await lifecycle.record_sweep(session, project.id, t.id, fmt, seen_at,
+                                     run_manifest)
 
     for pc in scan.credentials:
         t = await resolve(pc.host) if pc.host else None
@@ -798,6 +1061,25 @@ async def ingest(session: AsyncSession, project: Project, scan: ParsedScan,
     # not become an address in the estate.
     if scan.assets:
         await _assets(session, project, scan, res, resolve)
+
+    # Pictures of pages. After the web addresses deliberately: the row
+    # a picture belongs to may have been created three lines ago, and
+    # linking it needs an id, which needs a flush.
+    if scan.screenshots:
+        await session.flush()
+        shot_hosts: dict[str, int] = {}
+        for ps in scan.screenshots:
+            t = await resolve(ps.host) if ps.host else None
+            if t is None:
+                continue
+            if await _screenshot(session, t, ps, scan, res):
+                shot_hosts[t.host] = shot_hosts.get(t.host, 0) + 1
+        for hostname, n in shot_hosts.items():
+            t = targets.get(hostname)
+            if t is not None:
+                await record(session, t.id, "web",
+                             f"{scan.label}: {n} page(s) photographed",
+                             actor=scan.tool, source=source)
 
     for pn in scan.notes:
         t = await resolve(pn.host)
@@ -1005,6 +1287,14 @@ async def _run(session: AsyncSession, project: Project, text: str, fmt: str,
     except ImportError_ as e:
         raise HTTPException(422, str(e)) from e
 
+    # A document with substance in it that yields no records and no
+    # errors is not an empty scan -- it is what a changed output
+    # format looks like. Carried through to the result rather than
+    # raised: the import is not wrong, and refusing it would be a
+    # stronger claim than this can make. It just must not be reported
+    # as a clean nothing.
+    _nothing = scan.read_nothing(len(text.encode("utf-8", "replace")))
+
     known = await _known(session, project)
     policy = Policy(mode=("open" if mode == "open" else "strict"), known=set(known),
                     scope=await index_for(session, project.id),
@@ -1026,10 +1316,14 @@ async def _run(session: AsyncSession, project: Project, text: str, fmt: str,
                 unknown_hosts=[UnknownHostOut(**{**u.__dict__, "total": u.total})
                                for u in unknown],
                 barred_hosts=dict(policy.barred),
+                parsed_nothing=_nothing,
                 errors=list(scan.errors))
 
-    return await ingest(session, project, scan, detected,
-                        f"{detected}:{source}", policy)
+    res = await ingest(session, project, scan, detected,
+                       f"{detected}:{source}", policy)
+    if _nothing:
+        res.parsed_nothing = _nothing
+    return res
 
 
 

@@ -5,7 +5,7 @@ import {
   Tooltip, Typography, alpha,
 } from '@mui/material'
 import ContentCopyIcon from '@mui/icons-material/ContentCopy'
-import DeleteIcon from '@mui/icons-material/DeleteOutline'
+import DeleteIcon from '@mui/icons-material/DeleteOutlined'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome'
@@ -51,7 +51,13 @@ function AppearanceCard() {
             ...sorted(themes.filter((t) => t.group === g), (t) => t.name)
               .map((t) => (
                 <MenuItem key={t.id} value={t.id} sx={{ fontSize: 13 }}>
-                  <Stack direction="row" spacing={1} alignItems="center" sx={{ width: '100%' }}>
+                  <Stack
+                    direction="row"
+                    spacing={1}
+                    sx={{
+                      alignItems: "center",
+                      width: '100%'
+                    }}>
                     <Swatch def={t} />
                     <Box sx={{ flex: 1 }}>{t.name}</Box>
                   </Stack>
@@ -70,7 +76,9 @@ function AppearanceCard() {
             onChange={(e) => setDreams(e.target.checked)}
             sx={{ '& .Mui-checked': { color: neon.pink } }} />}
           label={
-            <Stack direction="row" spacing={1} alignItems="center">
+            <Stack direction="row" spacing={1} sx={{
+              alignItems: "center"
+            }}>
               <AutoAwesomeIcon sx={{
                 fontSize: 16,
                 color: dreams && dreamsAvailable ? neon.pink : alpha(neon.muted, 0.7),
@@ -89,7 +97,7 @@ function AppearanceCard() {
         </Typography>
       </Box>
     </Stack>
-  )
+  );
 }
 
 /** Four dots: surface, primary, secondary, and the critical colour. Enough
@@ -189,7 +197,13 @@ export function ProfileView() {
         )}
 
         <Card title="Account">
-          <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2.5 }}>
+          <Stack
+            direction="row"
+            spacing={2}
+            sx={{
+              alignItems: "center",
+              mb: 2.5
+            }}>
             {u.avatar_url
               ? <Box component="img" src={u.avatar_url} alt="" referrerPolicy="no-referrer"
                      sx={{ width: 52, height: 52, borderRadius: '50%',
@@ -204,7 +218,14 @@ export function ProfileView() {
               <Typography sx={{ fontSize: 16, color: neon.pink, textShadow: glow(neon.pink, 0.4) }}>
                 {u.username}
               </Typography>
-              <Stack direction="row" spacing={0.7} sx={{ mt: 0.6 }} flexWrap="wrap" useFlexGap>
+              <Stack
+                direction="row"
+                spacing={0.7}
+                useFlexGap
+                sx={{
+                  flexWrap: "wrap",
+                  mt: 0.6
+                }}>
                 {u.is_site_admin && (
                   <Chip size="small" label="site admin" sx={{
                     height: 19, fontSize: 10, bgcolor: alpha(neon.red, 0.16), color: neon.red,
@@ -282,7 +303,9 @@ export function ProfileView() {
               A site administrator has to grant you access to a project.
             </Typography>
           ) : (
-            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+            <Stack direction="row" spacing={1} useFlexGap sx={{
+              flexWrap: "wrap"
+            }}>
               {roles.map(([code, role]) => {
                 const c = role === 'admin' ? neon.pink : role === 'user' ? neon.cyan : neon.muted
                 return <Chip key={code} size="small" label={`${code} · ${role}`} sx={{
@@ -296,7 +319,9 @@ export function ProfileView() {
             <>
               <Divider sx={{ my: 2, borderColor: alpha(neon.purple, 0.2) }} />
               <Typography sx={{ fontSize: 11, color: neon.muted, mb: 1 }}>Groups</Typography>
-              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              <Stack direction="row" spacing={1} useFlexGap sx={{
+                flexWrap: "wrap"
+              }}>
                 {u.groups.map((g) => (
                   <Chip key={g.id} size="small" label={g.name} sx={{
                     bgcolor: alpha(neon.purple, 0.13), color: neon.purple,
@@ -339,12 +364,19 @@ export function ProfileView() {
           </Stack>
           <Stack spacing={0.8}>
             {(keys.data ?? []).map((k) => (
-              <Stack key={k.id} direction="row" spacing={1} alignItems="center" sx={{
-                px: 1.2, py: 0.7, borderRadius: 0.5,
-                background: alpha(neon.bgDeep, 0.5),
-                border: `1px solid ${alpha(neon.purple, 0.2)}`,
-                opacity: k.revoked ? 0.45 : 1,
-              }}>
+              <Stack
+                key={k.id}
+                direction="row"
+                spacing={1}
+                sx={{
+                  alignItems: "center",
+                  px: 1.2,
+                  py: 0.7,
+                  borderRadius: 0.5,
+                  background: alpha(neon.bgDeep, 0.5),
+                  border: `1px solid ${alpha(neon.purple, 0.2)}`,
+                  opacity: k.revoked ? 0.45 : 1
+                }}>
                 <Box sx={{ flex: 1, fontSize: 12.5 }}>{k.name}</Box>
                 <Box sx={{ fontSize: 11.5, color: neon.muted }}>{k.prefix}…</Box>
                 {k.revoked
@@ -366,5 +398,5 @@ export function ProfileView() {
         </Card>
       </Stack>
     </Box>
-  )
+  );
 }

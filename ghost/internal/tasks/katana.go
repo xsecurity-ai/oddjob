@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	neturl "net/url"
@@ -23,6 +22,8 @@ import (
 	"github.com/weppos/publicsuffix-go/publicsuffix"
 
 	"github.com/xsecurity-ai/oddjob/ghost/internal/recon"
+
+	"github.com/xsecurity-ai/oddjob/ghost/internal/browserfetch"
 )
 
 // Crawling, in this process.
@@ -480,6 +481,17 @@ type asset struct {
 	ContentType string `json:"content_type,omitempty"`
 	Body        string `json:"body,omitempty"`
 	FetchError  string `json:"fetch_error,omitempty"`
+	// Which product refused a PLAIN request for this file, if one
+	// did. Kept even when the browser-handshake retry then
+	// succeeded: "this host is behind Cloudflare and refuses a
+	// plain client" is the difference between a quiet estate and
+	// one that is quietly filtering us, and it is not visible
+	// anywhere else.
+	BlockedBy string `json:"blocked_by,omitempty"`
+	// True when the bytes only arrived through the browser
+	// handshake. An operator reading a file that could not be
+	// fetched any other way should be told so.
+	UsedBrowser bool `json:"used_browser,omitempty"`
 }
 
 // : `jquery-3.6.0.min.js`, `bootstrap.bundle.min-5.3.2.js`,
@@ -607,19 +619,32 @@ func nameVersion(path, query string) (string, string) {
 // anybody can read.
 func fetchAssets(ctx context.Context, in []asset, args map[string]any,
 	maxBody, budget int) []asset {
-	cl := &http.Client{
-		Timeout: time.Duration(intOr(args, "asset_timeout_s", 20)) * time.Second,
+	timeout := time.Duration(intOr(args, "asset_timeout_s", 20)) * time.Second
+	redirects := func(_ *http.Request, via []*http.Request) error {
 		// Redirects followed: a CDN pointing at its own versioned
 		// path is the normal case, and refusing to follow would
 		// report the library as unreachable.
-		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return fmt.Errorf("too many redirects")
-			}
-			return nil
-		},
+		if len(via) >= 5 {
+			return fmt.Errorf("too many redirects")
+		}
+		return nil
 	}
 	ua := userAgent(args)
+	// A plain client first, always. The browser handshake is what
+	// happens when a refusal says it is needed, not what we do by
+	// default -- an engagement should look like what it is until
+	// looking like what it is stops the work. See
+	// internal/browserfetch.
+	fetch := &browserfetch.Fetcher{
+		Plain: &http.Client{Timeout: timeout, CheckRedirect: redirects},
+		Browser: func() *http.Client {
+			c := browserfetch.Client(timeout, true)
+			c.CheckRedirect = redirects
+			return c
+		}(),
+		UserAgent: ua,
+		Disabled:  !boolOr(args, "bypass_waf", true),
+	}
 	spent := 0
 	out := make([]asset, 0, len(in))
 	for _, a := range in {
@@ -627,21 +652,6 @@ func fetchAssets(ctx context.Context, in []asset, args map[string]any,
 			out = append(out, in[len(out):]...)
 			break
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.URL, nil)
-		if err != nil {
-			a.FetchError = err.Error()
-			out = append(out, a)
-			continue
-		}
-		req.Header.Set("User-Agent", ua)
-		resp, err := cl.Do(req)
-		if err != nil {
-			a.FetchError = tail(err.Error(), 200)
-			out = append(out, a)
-			continue
-		}
-		a.Status = resp.StatusCode
-		a.ContentType = resp.Header.Get("Content-Type")
 		// Read under the cap. The hash is of what was READ, and is
 		// therefore only meaningful for a file that arrived whole --
 		// see the truncation guard below.
@@ -652,10 +662,26 @@ func fetchAssets(ctx context.Context, in []asset, args map[string]any,
 		if lim < 0 {
 			lim = 0
 		}
-		body, rerr := io.ReadAll(io.LimitReader(resp.Body, int64(lim)+1))
-		_ = resp.Body.Close()
-		if rerr != nil {
-			a.FetchError = tail(rerr.Error(), 200)
+		fetch.MaxBody = int64(lim) + 1
+		res, err := fetch.Get(ctx, a.URL)
+		if err != nil {
+			a.FetchError = tail(err.Error(), 200)
+			out = append(out, a)
+			continue
+		}
+		a.Status = res.Status
+		a.ContentType = res.ContentType
+		a.BlockedBy = res.BlockedBy
+		a.UsedBrowser = res.UsedBrowser
+		body := res.Body
+		if res.StillBlocked {
+			// Not evidence about the file. Recorded as the refusal
+			// it is rather than stored as the library's contents,
+			// which is how a block page comes to be hashed as a
+			// version of jQuery.
+			a.FetchError = tail(fmt.Sprintf(
+				"refused by %s; the body is its block page, not the file",
+				res.BlockedBy), 200)
 			out = append(out, a)
 			continue
 		}

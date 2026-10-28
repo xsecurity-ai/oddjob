@@ -2,10 +2,12 @@ import { useState } from 'react'
 import {
   Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent,
   DialogTitle, Divider, IconButton, MenuItem, Select, Stack, Step, StepLabel,
+  Tab, Tabs,
   Stepper, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
 import DownloadIcon from '@mui/icons-material/Download'
+import LanIcon from '@mui/icons-material/Lan'
 import EditIcon from '@mui/icons-material/EditOutlined'
 import ContentCopyIcon from '@mui/icons-material/ContentCopy'
 import PowerSettingsNewIcon from '@mui/icons-material/PowerSettingsNew'
@@ -19,7 +21,9 @@ import { useAuth } from '../lib/auth'
 import { DataTable } from '../components/DataTable'
 import { GhostQueueDialog } from '../components/GhostQueueDialog'
 import { GhostTasksTable } from '../components/GhostTasksTable'
-import { neon, glow } from '../theme'
+import { neon, glow, TAB_SX } from '../theme'
+import { ProxySetupDialog } from '../components/ProxySetupDialog'
+import { GhostDebugView } from './GhostDebugView'
 import { CountryPicker } from '../components/CountryPicker'
 
 const STATUS_COLOUR: Record<string, string> = {
@@ -254,7 +258,12 @@ function DeployWizard({ project, onClose }:
             </Typography>
             <DownloadRow os={os} />
 
-            <Stack direction="row" alignItems="center" sx={{ mt: 2 }}>
+            <Stack
+              direction="row"
+              sx={{
+                alignItems: "center",
+                mt: 2
+              }}>
               <Typography variant="overline" sx={{ color: neon.cyan, flex: 1 }}>
                 Then, on the {OS_LABEL[os]} host
               </Typography>
@@ -294,7 +303,7 @@ function DeployWizard({ project, onClose }:
         )}
       </DialogActions>
     </Dialog>
-  )
+  );
 }
 
 // ---------------------------------------------------------- the routing
@@ -313,84 +322,86 @@ function Routing({ project, routing }:
   // a hook above it would change the order between renders.
   if (!routing) return null
   return (
-   <Stack spacing={1.25} sx={{ mb: 1.5 }}>
-    <Stack direction="row" spacing={1.5} alignItems="center">
-      <TextField select size="small" label="Routing" value={routing.mode}
-        disabled={!canWrite(project) || set.isPending}
-        onChange={(e) => set.mutate({ mode: e.target.value })} sx={{ width: 150 }}>
-        <MenuItem value="mesh">Mesh</MenuItem>
-        <MenuItem value="primary">Primary</MenuItem>
-        <MenuItem value="geo">By region</MenuItem>
-      </TextField>
-      <Box sx={{ color: neon.muted, fontSize: 12 }}>
-        {routing.mode === 'mesh' &&
-          'Whichever agent asks first takes the next pooled task.'}
-        {routing.mode === 'primary' && (routing.current_primary_name
-          ? <>Serving now: <Box component="span" sx={{ color: neon.green }}>
-              {routing.current_primary_name}</Box>. If it stops heartbeating
-              the next by priority takes over.</>
-          : 'No agent is online to be primary.')}
-        {routing.mode === 'geo' &&
-          'Pooled tasks run on an agent serving their region, or wait.'}
-      </Box>
-      {/* Always shown, including at zero. The queue depth is the
-          number an operator checks to know whether a submission landed,
-          and a chip that only appears when work is waiting cannot
-          answer "did anything queue?" — absence looked identical to
-          never having rendered. */}
-      <Tooltip title={routing.unassigned_tasks > 0
-        ? 'Open the queue: Oddjob holds these until an agent reports it is ready, and anything not yet started can be taken back out.'
-        : 'Nothing waiting for the pool. Open it to see work addressed to one agent that has not been picked up.'}>
-        <Chip size="small" clickable onClick={() => setQueueOpen(true)}
-          label={`${routing.unassigned_tasks} queued`}
-          sx={{ height: 21, fontSize: 11, fontWeight: 600,
-                color: routing.unassigned_tasks > 0 ? neon.yellow : neon.muted,
-                bgcolor: alpha(routing.unassigned_tasks > 0
-                               ? neon.yellow : neon.muted, 0.14),
-                border: `1px solid ${alpha(routing.unassigned_tasks > 0
-                                           ? neon.yellow : neon.muted, 0.45)}`,
-                '&:hover': { bgcolor: alpha(neon.yellow, 0.26) } }} />
-      </Tooltip>
-      <Tooltip title="How many tasks one agent may run at once on this engagement. A ceiling, not a target: each agent also works out what its own host can stand — cores, memory, what masscan managed to emit — and the lower of the two is what runs.">
-        <TextField select size="small" label="Parallel" sx={{ width: 110 }}
-          value={routing.max_parallel}
+    <Stack spacing={1.25} sx={{ mb: 1.5 }}>
+      <Stack direction="row" spacing={1.5} sx={{
+        alignItems: "center"
+      }}>
+        <TextField select size="small" label="Routing" value={routing.mode}
           disabled={!canWrite(project) || set.isPending}
-          onChange={(e) => set.mutate({ max_parallel: Number(e.target.value) })}>
-          {[1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 32].map((n) => (
-            <MenuItem key={n} value={n}>{n}</MenuItem>
-          ))}
+          onChange={(e) => set.mutate({ mode: e.target.value })} sx={{ width: 150 }}>
+          <MenuItem value="mesh">Mesh</MenuItem>
+          <MenuItem value="primary">Primary</MenuItem>
+          <MenuItem value="geo">By region</MenuItem>
         </TextField>
-      </Tooltip>
-      {queueOpen && (
-        <GhostQueueDialog project={project} onClose={() => setQueueOpen(false)} />
-      )}
-      {routing.unassigned_tasks > 0 && routing.eligible === 0 && (
-        // Waiting work and nobody able to take it is the one case
-        // where this number means something is wrong rather than
-        // merely in progress.
-        <Chip size="small" label="no agent online to take it" sx={{
-          height: 21, fontSize: 11, color: neon.red,
-          bgcolor: alpha(neon.red, 0.14),
-          border: `1px solid ${alpha(neon.red, 0.5)}` }} />
-      )}
+        <Box sx={{ color: neon.muted, fontSize: 12 }}>
+          {routing.mode === 'mesh' &&
+            'Whichever agent asks first takes the next pooled task.'}
+          {routing.mode === 'primary' && (routing.current_primary_name
+            ? <>Serving now: <Box component="span" sx={{ color: neon.green }}>
+                {routing.current_primary_name}</Box>. If it stops heartbeating
+                the next by priority takes over.</>
+            : 'No agent is online to be primary.')}
+          {routing.mode === 'geo' &&
+            'Pooled tasks run on an agent serving their region, or wait.'}
+        </Box>
+        {/* Always shown, including at zero. The queue depth is the
+            number an operator checks to know whether a submission landed,
+            and a chip that only appears when work is waiting cannot
+            answer "did anything queue?" — absence looked identical to
+            never having rendered. */}
+        <Tooltip title={routing.unassigned_tasks > 0
+          ? 'Open the queue: Oddjob holds these until an agent reports it is ready, and anything not yet started can be taken back out.'
+          : 'Nothing waiting for the pool. Open it to see work addressed to one agent that has not been picked up.'}>
+          <Chip size="small" clickable onClick={() => setQueueOpen(true)}
+            label={`${routing.unassigned_tasks} queued`}
+            sx={{ height: 21, fontSize: 11, fontWeight: 600,
+                  color: routing.unassigned_tasks > 0 ? neon.yellow : neon.muted,
+                  bgcolor: alpha(routing.unassigned_tasks > 0
+                                 ? neon.yellow : neon.muted, 0.14),
+                  border: `1px solid ${alpha(routing.unassigned_tasks > 0
+                                             ? neon.yellow : neon.muted, 0.45)}`,
+                  '&:hover': { bgcolor: alpha(neon.yellow, 0.26) } }} />
+        </Tooltip>
+        <Tooltip title="How many tasks one agent may run at once on this engagement. A ceiling, not a target: each agent also works out what its own host can stand — cores, memory, what masscan managed to emit — and the lower of the two is what runs.">
+          <TextField select size="small" label="Parallel" sx={{ width: 110 }}
+            value={routing.max_parallel}
+            disabled={!canWrite(project) || set.isPending}
+            onChange={(e) => set.mutate({ max_parallel: Number(e.target.value) })}>
+            {[1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 32].map((n) => (
+              <MenuItem key={n} value={n}>{n}</MenuItem>
+            ))}
+          </TextField>
+        </Tooltip>
+        {queueOpen && (
+          <GhostQueueDialog project={project} onClose={() => setQueueOpen(false)} />
+        )}
+        {routing.unassigned_tasks > 0 && routing.eligible === 0 && (
+          // Waiting work and nobody able to take it is the one case
+          // where this number means something is wrong rather than
+          // merely in progress.
+          <Chip size="small" label="no agent online to take it" sx={{
+            height: 21, fontSize: 11, color: neon.red,
+            bgcolor: alpha(neon.red, 0.14),
+            border: `1px solid ${alpha(neon.red, 0.5)}` }} />
+        )}
+      </Stack>
+      {/* The engagement's gate, not a routing preference: it says where
+          this engagement is authorised to test at all, and it applies
+          in every routing mode. Each ghost has its own list too, and
+          both have to allow a target. */}
+      <Box sx={{ maxWidth: 560 }}>
+        <CountryPicker
+          label="Countries this engagement may scan"
+          help={'Applies in every routing mode. While a list is set, a '
+                + 'target whose country is not known is refused — locate '
+                + 'it from Enumerate, or leave this empty.'}
+          available={routing.geoip_available}
+          disabled={!canWrite(project) || set.isPending}
+          value={routing.scan_countries}
+          onChange={(next) => set.mutate({ scan_countries: next })} />
+      </Box>
     </Stack>
-    {/* The engagement's gate, not a routing preference: it says where
-        this engagement is authorised to test at all, and it applies
-        in every routing mode. Each ghost has its own list too, and
-        both have to allow a target. */}
-    <Box sx={{ maxWidth: 560 }}>
-      <CountryPicker
-        label="Countries this engagement may scan"
-        help={'Applies in every routing mode. While a list is set, a '
-              + 'target whose country is not known is refused — locate '
-              + 'it from Enumerate, or leave this empty.'}
-        available={routing.geoip_available}
-        disabled={!canWrite(project) || set.isPending}
-        value={routing.scan_countries}
-        onChange={(next) => set.mutate({ scan_countries: next })} />
-    </Box>
-   </Stack>
-  )
+  );
 }
 
 /** Rename an agent, change where it sits in the running order, or say
@@ -444,7 +455,9 @@ function ParallelCell({ eff, own, reason, over, admin, busy, onPick }: {
   return (
     <Tooltip title={title} open={hover && !menuOpen}
       onOpen={() => setHover(true)} onClose={() => setHover(false)}>
-      <Stack direction="row" spacing={0.6} alignItems="center">
+      <Stack direction="row" spacing={0.6} sx={{
+        alignItems: "center"
+      }}>
         <Select size="small" variant="standard" disableUnderline
           value={over ?? 0}
           disabled={busy}
@@ -479,7 +492,7 @@ function ParallelCell({ eff, own, reason, over, admin, busy, onPick }: {
         )}
       </Stack>
     </Tooltip>
-  )
+  );
 }
 
 
@@ -616,11 +629,19 @@ function EditAgentDialog({ project, agent, mode, geoipAvailable, onClose }: {
 }
 
 // ------------------------------------------------------------- the view
-export function GhostsView({ project }: { project: string | null }) {
+export function GhostsView({ project, tab: initialTab = 'fleet' }: {
+  project: string | null
+  /** Which tab to open on. `ghost-debug` used to be its own route
+   *  and still resolves, so a bookmark lands on Debug rather than
+   *  on a page that no longer exists. */
+  tab?: 'fleet' | 'debug'
+}) {
+  const [tab, setTab] = useState<'fleet' | 'debug'>(initialTab)
   const qc = useQueryClient()
   const { canWrite, roleOn } = useAuth()
   const [wizard, setWizard] = useState(false)
   const [confirmKill, setConfirmKill] = useState<GhostAgent | null>(null)
+  const [proxyFor, setProxyFor] = useState<GhostAgent | null>(null)
   const [editing, setEditing] = useState<GhostAgent | null>(null)
   // A killed agent leaves the table, because the table answers "what
   // is deployed" and it no longer is. The record stays — it holds the
@@ -658,6 +679,18 @@ export function GhostsView({ project }: { project: string | null }) {
   // is not offered to anyone else — a dropdown that answers 403 teaches
   // people the app is broken.
   const admin = roleOn(project ?? null) === 'admin'
+
+  // Enabling opens the setup straight away: the credential is shown
+  // exactly once, and a dialog you have to go and find afterwards is
+  // one whose secret ends up written down somewhere worse.
+  const proxyToggle = useMutation({
+    mutationFn: ({ id, enabled }: { id: number; enabled: boolean }) =>
+      api.setGhostProxy(project as string, id, enabled),
+    onSuccess: (a) => {
+      void qc.invalidateQueries({ queryKey: ['agents'] })
+      if (a.proxy_enabled) setProxyFor(a)
+    },
+  })
   const setParallel = useMutation({
     mutationFn: ({ id, n }: { id: number; n: number }) =>
       api.patchAgent(project as string, id, { parallel_override: n }),
@@ -672,7 +705,9 @@ export function GhostsView({ project }: { project: string | null }) {
     {
       field: 'name', headerName: 'Ghost', flex: 1.1, minWidth: 150,
       renderCell: (p) => (
-        <Stack direction="row" spacing={0.9} alignItems="center">
+        <Stack direction="row" spacing={0.9} sx={{
+          alignItems: "center"
+        }}>
           <Box sx={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
             bgcolor: STATUS_COLOUR[p.row.status] ?? neon.muted,
             boxShadow: glow(STATUS_COLOUR[p.row.status] ?? neon.muted, 0.8) }} />
@@ -713,8 +748,13 @@ export function GhostsView({ project }: { project: string | null }) {
         // test from, and the two names are both true.
         const layered = host && p.row.platform && host !== p.row.platform
         return (
-          <Stack direction="row" spacing={0.7} alignItems="center"
-            sx={{ minWidth: 0 }}>
+          <Stack
+            direction="row"
+            spacing={0.7}
+            sx={{
+              alignItems: "center",
+              minWidth: 0
+            }}>
             <Tooltip title={
               `${p.row.platform ?? '?'}/${p.row.arch ?? '?'}` +
               (host ? `\nHost OS: ${OS_LABEL[host] ?? host}` +
@@ -746,7 +786,7 @@ export function GhostsView({ project }: { project: string | null }) {
               </Tooltip>
             ) : null}
           </Stack>
-        )
+        );
       },
     },
     {
@@ -784,8 +824,13 @@ export function GhostsView({ project }: { project: string | null }) {
           <Tooltip title={dev
             ? `${p.value}\nA development build, not a release.`
             : p.value}>
-            <Stack direction="row" spacing={0.6} alignItems="center"
-              sx={{ minWidth: 0 }}>
+            <Stack
+              direction="row"
+              spacing={0.6}
+              sx={{
+                alignItems: "center",
+                minWidth: 0
+              }}>
               <Box sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12,
                          color: dev ? neon.yellow : neon.text,
                          overflow: 'hidden', textOverflow: 'ellipsis',
@@ -799,7 +844,7 @@ export function GhostsView({ project }: { project: string | null }) {
               )}
             </Stack>
           </Tooltip>
-        )
+        );
       },
     },
     {
@@ -834,8 +879,13 @@ export function GhostsView({ project }: { project: string | null }) {
                     (differs ? '  (NAT, proxy or tunnel in between)' : '') : '') +
             (others.length ? `\nAlso on: ${others.join(', ')}` : '')
           }>
-            <Stack direction="row" spacing={0.6} alignItems="center"
-              sx={{ minWidth: 0 }}>
+            <Stack
+              direction="row"
+              spacing={0.6}
+              sx={{
+                alignItems: "center",
+                minWidth: 0
+              }}>
               <Box sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12,
                          color: inner ? neon.yellow
                                       : own ? neon.text : alpha(neon.muted, 0.7),
@@ -854,7 +904,7 @@ export function GhostsView({ project }: { project: string | null }) {
               )}
             </Stack>
           </Tooltip>
-        )
+        );
       },
     },
     {
@@ -921,7 +971,9 @@ export function GhostsView({ project }: { project: string | null }) {
           )
         }
         return (
-          <Stack direction="row" spacing={0.8} alignItems="baseline">
+          <Stack direction="row" spacing={0.8} sx={{
+            alignItems: "baseline"
+          }}>
             {running > 0 && (
               <Tooltip title={`${running} task(s) this agent has taken and is running`}>
                 <Box sx={{ color: neon.cyan, fontWeight: 600 }}>
@@ -941,7 +993,7 @@ export function GhostsView({ project }: { project: string | null }) {
               </Tooltip>
             )}
           </Stack>
-        )
+        );
       },
     },
     {
@@ -971,7 +1023,9 @@ export function GhostsView({ project }: { project: string | null }) {
           return <Box component="span" sx={{ color: alpha(neon.muted, 0.4) }}>—</Box>
         }
         return (
-          <Stack direction="row" spacing={0.7} alignItems="baseline">
+          <Stack direction="row" spacing={0.7} sx={{
+            alignItems: "baseline"
+          }}>
             <Box sx={{ color: done ? neon.green : alpha(neon.muted, 0.5),
                        fontWeight: done ? 600 : 400 }}>
               {done}
@@ -987,7 +1041,7 @@ export function GhostsView({ project }: { project: string | null }) {
               </Tooltip>
             )}
           </Stack>
-        )
+        );
       },
     },
     {
@@ -1075,6 +1129,30 @@ export function GhostsView({ project }: { project: string | null }) {
         }
         return (
           <Stack direction="row" spacing={0.2}>
+            {/* Proxying, per ghost and off by default. Admin only,
+                because this is the difference between a Ghost that
+                runs the tasks it is given and one that carries
+                arbitrary traffic into the client's network. */}
+            {admin && (
+              <Tooltip title={p.row.proxy_enabled
+                ? (p.row.proxy_connected
+                   ? 'Proxying on, tunnel up — open the browser setup'
+                   : 'Proxying on, but this Ghost has not dialled in yet')
+                : 'Route a browser through this Ghost (SOCKS5)'}>
+                <IconButton size="small"
+                  onClick={() => {
+                    if (p.row.proxy_enabled) { setProxyFor(p.row); return }
+                    proxyToggle.mutate({ id: p.row.id, enabled: true })
+                  }}
+                  disabled={proxyToggle.isPending}>
+                  <LanIcon sx={{
+                    fontSize: 17,
+                    color: !p.row.proxy_enabled ? alpha(neon.muted, 0.55)
+                      : p.row.proxy_connected ? neon.green : neon.yellow,
+                  }} />
+                </IconButton>
+              </Tooltip>
+            )}
             <Tooltip title="Edit this Ghost">
               <IconButton size="small" onClick={() => setEditing(p.row)}>
                 <EditIcon sx={{ fontSize: 16, color: neon.cyan }} />
@@ -1119,6 +1197,22 @@ export function GhostsView({ project }: { project: string | null }) {
     // tables off MUI's DataGrid, which did its own scrolling and did
     // not care what its parent was.
     <Box sx={{ p: 2, flex: 1, minHeight: 0, overflowY: 'auto' }}>
+      {/* One page, two tabs. Debug was a second sidebar entry behind
+          a dropdown, which cost a click to reach a view an operator
+          checks WHILE a scan is running -- and hid it entirely until
+          the group was open. It is a second view of the same fleet,
+          so it belongs beside it. */}
+      {admin && (
+        <Tabs value={tab} onChange={(_, v) => setTab(v)}
+          sx={{ minHeight: 34, mb: 1,
+                borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
+          <Tab value="fleet" label="Fleet" sx={TAB_SX} />
+          <Tab value="debug" label="Debug" sx={TAB_SX} />
+        </Tabs>
+      )}
+      {admin && tab === 'debug' && <GhostDebugView project={project} />}
+      {tab === 'debug' && admin ? null : (
+      <>
       <Routing project={project} routing={routing} />
       <Box sx={{ height: '60vh', minHeight: 320,
                  display: 'flex', flexDirection: 'column' }}>
@@ -1133,7 +1227,9 @@ export function GhostsView({ project }: { project: string | null }) {
               `Oddjob alone, takes tasking only from ${project}, and ` +
               `everything it finds imports into ${project}.`}
         extraActions={
-          <Stack direction="row" spacing={1} alignItems="center">
+          <Stack direction="row" spacing={1} sx={{
+            alignItems: "center"
+          }}>
             {canWrite(project) && (
               <Button size="small" startIcon={<AddIcon />}
                 onClick={() => setWizard(true)}
@@ -1166,8 +1262,17 @@ export function GhostsView({ project }: { project: string | null }) {
         <GhostTasksTable project={project} />
       </Box>
 
+      </>
+      )}
+
       {wizard && (
         <DeployWizard project={project} onClose={() => setWizard(false)} />
+      )}
+
+      {proxyFor && (
+        <ProxySetupDialog project={project} agent={proxyFor}
+          host={window.location.hostname}
+          onClose={() => setProxyFor(null)} />
       )}
 
       {editing && (
@@ -1214,5 +1319,5 @@ export function GhostsView({ project }: { project: string | null }) {
         </DialogActions>
       </Dialog>
     </Box>
-  )
+  );
 }

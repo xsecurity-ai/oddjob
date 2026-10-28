@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Box, Chip, Menu, MenuItem, Stack, Tab, Tabs, ToggleButton, ToggleButtonGroup,
-  Tooltip, Typography, alpha,
+  Alert, Box, Chip, Menu, MenuItem, Snackbar, Stack, Tab, Tabs, ToggleButton,
+  ToggleButtonGroup, Tooltip, Typography, alpha,
 } from '@mui/material'
 import LaunchIcon from '@mui/icons-material/Launch'
 import { WebAssetsPanel } from '../components/WebAssetsPanel'
 import ArticleIcon from '@mui/icons-material/ArticleOutlined'
 import ContentCopyIcon from '@mui/icons-material/ContentCopy'
 import ReplayIcon from '@mui/icons-material/Replay'
+import PhotoCameraIcon from '@mui/icons-material/PhotoCameraOutlined'
 import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import CircularProgress from '@mui/material/CircularProgress'
@@ -17,9 +18,11 @@ import { useQuery } from '@tanstack/react-query'
 import { useServerTable } from '../lib/useServerTable'
 import { api, type WebAddress, type WebGroup } from '../lib/api'
 import { DataTable } from '../components/DataTable'
+import { TakeoversPanel } from '../components/TakeoversPanel'
 import { useHostModal } from '../components/HostModal'
 import { PacketModal } from '../components/PacketModal'
 import { ReplayModal } from '../components/ReplayModal'
+import { queue } from '../components/ghostTasking'
 import { neon, glow, TAB_SX } from '../theme'
 
 /**
@@ -77,12 +80,41 @@ export function WebView({ project }: { project: string | null }) {
   // with 200/401/403/500, and folding them into one control would
   // make that combination unaskable.
   const [foundBy, setFoundBy] = useState<'any' | 'crawl' | 'discovery'>('any')
-  const [tab, setTab] = useState<'urls' | 'assets'>('urls')
+  const [tab, setTab] = useState<'urls' | 'assets' | 'takeovers'>('urls')
   // Which URLs are open, and what their exchanges are once fetched.
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [children, setChildren] = useState<Record<string, WebAddress[]>>({})
   const [loadingKey, setLoadingKey] = useState<string | null>(null)
   const [replay, setReplay] = useState<number | null>(null)
+  // What the last queue attempt did. A task queued from a context
+  // menu is otherwise entirely silent: the work goes to an agent
+  // somewhere else and nothing on this page changes for minutes.
+  const [notice, setNotice] = useState<string | null>(null)
+
+  /** Ask a ghost to photograph this URL.
+   *
+   *  Pooled rather than addressed to an agent: which ghost is the
+   *  routing policy's decision, and this menu has no business
+   *  overriding it. A ghost too small to hold chromium reports the
+   *  kind as unaffordable on its heartbeat and is simply not offered
+   *  the task -- which is why this does not ask whether the fleet can
+   *  do it before queueing.
+   *
+   *  The task is state-changing under the rules of engagement, since
+   *  a headless browser runs the page's own JavaScript, so a
+   *  read-only engagement refuses it HERE, at the server, and says
+   *  so. That refusal is worth reading rather than swallowing.
+   */
+  const photograph = async (url: string) => {
+    if (!project) return
+    try {
+      await queue(project, null, 'screenshot', { url }, '')
+      setNotice(`Queued a screenshot of ${url}. It appears on the packet `
+                + `view once a ghost reports back.`)
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   const toggle = async (g: WebGroup) => {
     const key = rowKey(g)
@@ -227,8 +259,14 @@ export function WebView({ project }: { project: string | null }) {
         const open = expanded.has(key)
         const many = !r.__child && (r.hits ?? 1) > 1
         return (
-          <Stack direction="row" alignItems="center" spacing={0.5}
-            sx={{ pl: r.__child ? 3 : 0, minWidth: 0 }}>
+          <Stack
+            direction="row"
+            spacing={0.5}
+            sx={{
+              alignItems: "center",
+              pl: r.__child ? 3 : 0,
+              minWidth: 0
+            }}>
             {many ? (
               <IconButton size="small" onClick={(e) => { e.stopPropagation(); toggle(r as WebGroup) }}
                 sx={{ p: 0.1, color: neon.pink }}>
@@ -260,7 +298,7 @@ export function WebView({ project }: { project: string | null }) {
                 border: `1px solid ${alpha(neon.pink, 0.45)}` }} />
             )}
           </Stack>
-        )
+        );
       },
     },
     {
@@ -347,7 +385,9 @@ export function WebView({ project }: { project: string | null }) {
     {
       field: 'sources', headerName: 'Found by', flex: 1, minWidth: 130,
       renderCell: (p) => (
-        <Stack direction="row" spacing={0.4} flexWrap="wrap" useFlexGap>
+        <Stack direction="row" spacing={0.4} useFlexGap sx={{
+          flexWrap: "wrap"
+        }}>
           {String(p.value || '').split(',').filter(Boolean).map((s) => (
             <Chip key={s} size="small" label={s} sx={{
               height: 17, fontSize: 9.5, bgcolor: alpha(neon.purple, 0.16),
@@ -370,7 +410,12 @@ export function WebView({ project }: { project: string | null }) {
     { field: 'project_code', headerName: 'Project', width: 120 },
   ]
 
-  if (tab === 'assets') {
+  // Both of the non-URL tabs are a whole panel that owns its own
+  // fetching, so they share one shell rather than each repeating the
+  // Tabs block. Everything above this line is a hook or a plain
+  // value; the early return stays below all of them, which is the
+  // rule test/hooks.check.mjs exists to enforce.
+  if (tab === 'assets' || tab === 'takeovers') {
     return (
       <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
         <Tabs value={tab} onChange={(_, v) => setTab(v)}
@@ -378,9 +423,12 @@ export function WebView({ project }: { project: string | null }) {
                 borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
           <Tab value="urls" label="URLs" sx={TAB_SX} />
           <Tab value="assets" label="Assets" sx={TAB_SX} />
+          <Tab value="takeovers" label="Subdomain Takeovers" sx={TAB_SX} />
         </Tabs>
         <Box sx={{ flex: 1, minHeight: 0 }}>
-          <WebAssetsPanel project={project} />
+          {tab === 'assets'
+            ? <WebAssetsPanel project={project} />
+            : <TakeoversPanel project={project} />}
         </Box>
       </Box>
     )
@@ -388,123 +436,141 @@ export function WebView({ project }: { project: string | null }) {
 
   return (
     <>
-    {/* Two readings of the same estate: what addresses exist, and
-        what those pages pull in to render themselves. They are
-        different questions with different answers, which is why
-        they are tabs rather than one table with more columns. */}
-    <Tabs value={tab} onChange={(_, v) => setTab(v)}
-      sx={{ minHeight: 34, px: 2, pt: 1,
-            borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
-      <Tab value="urls" label="URLs" sx={TAB_SX} />
-      <Tab value="assets" label="Assets" sx={TAB_SX} />
-    </Tabs>
-    {/* The packet view hands straight to the editor. It closes as the
-        editor opens, so the two are never stacked: they show the same
-        exchange, and two dialogs of one exchange is a guess about
-        which is live. */}
-    {packet !== null && (
-      <PacketModal id={packet} onClose={() => setPacket(null)}
-        onReplay={(pid) => { setPacket(null); setReplay(pid) }} />
-    )}
-    <Menu open={!!menu} onClose={() => setMenu(null)}
-      anchorReference="anchorPosition"
-      anchorPosition={menu ? { top: menu.y, left: menu.x } : undefined}
-      slotProps={{ paper: { sx: {
-        backgroundColor: alpha(neon.paper, 0.98), backgroundImage: 'none',
-        border: `1px solid ${alpha(neon.cyan, 0.4)}`,
-      } } }}>
-      <MenuItem
-        onClick={() => { setPacket(menu!.row.id); setMenu(null) }}
-        sx={{ fontSize: 12.5, color: neon.cyan }}>
-        <ArticleIcon sx={{ fontSize: 16, mr: 1 }} />
-        View packet
-      </MenuItem>
-      <MenuItem
-        onClick={() => { setReplay(menu!.row.id); setMenu(null) }}
-        sx={{ fontSize: 12.5, color: neon.orange }}>
-        <ReplayIcon sx={{ fontSize: 16, mr: 1 }} />
-        Edit and resend
-      </MenuItem>
-      {/* `href` is kept so middle-click and "copy link address" still
-          work, but the navigation is done explicitly rather than left
-          to the anchor's default. Closing the menu in the same handler
-          unmounts that anchor, and an <a> removed during its own click
-          never navigates — which is why this did nothing at all. */}
-      <MenuItem
-        component="a" href={menu?.row.url ?? '#'}
-        target="_blank" rel="noopener noreferrer"
-        onClick={(e) => {
-          e.preventDefault()
-          const u = menu?.row.url
-          setMenu(null)
-          if (u) window.open(u, '_blank', 'noopener,noreferrer')
+      {/* Two readings of the same estate: what addresses exist, and
+          what those pages pull in to render themselves. They are
+          different questions with different answers, which is why
+          they are tabs rather than one table with more columns. */}
+      <Tabs value={tab} onChange={(_, v) => setTab(v)}
+        sx={{ minHeight: 34, px: 2, pt: 1,
+              borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
+        <Tab value="urls" label="URLs" sx={TAB_SX} />
+        <Tab value="assets" label="Assets" sx={TAB_SX} />
+        <Tab value="takeovers" label="Subdomain Takeovers" sx={TAB_SX} />
+      </Tabs>
+      {/* The packet view hands straight to the editor. It closes as the
+          editor opens, so the two are never stacked: they show the same
+          exchange, and two dialogs of one exchange is a guess about
+          which is live. */}
+      {packet !== null && (
+        <PacketModal id={packet} onClose={() => setPacket(null)}
+          onReplay={(pid) => { setPacket(null); setReplay(pid) }} />
+      )}
+      <Menu open={!!menu} onClose={() => setMenu(null)}
+        anchorReference="anchorPosition"
+        anchorPosition={menu ? { top: menu.y, left: menu.x } : undefined}
+        slotProps={{ paper: { sx: {
+          backgroundColor: alpha(neon.paper, 0.98), backgroundImage: 'none',
+          border: `1px solid ${alpha(neon.cyan, 0.4)}`,
+        } } }}>
+        <MenuItem
+          onClick={() => { setPacket(menu!.row.id); setMenu(null) }}
+          sx={{ fontSize: 12.5, color: neon.cyan }}>
+          <ArticleIcon sx={{ fontSize: 16, mr: 1 }} />
+          View packet
+        </MenuItem>
+        <MenuItem
+          onClick={() => { setReplay(menu!.row.id); setMenu(null) }}
+          sx={{ fontSize: 12.5, color: neon.orange }}>
+          <ReplayIcon sx={{ fontSize: 16, mr: 1 }} />
+          Edit and resend
+        </MenuItem>
+        <MenuItem
+          onClick={() => { const u = menu!.row.url; setMenu(null); void photograph(u) }}
+          sx={{ fontSize: 12.5, color: neon.purple }}>
+          <PhotoCameraIcon sx={{ fontSize: 16, mr: 1 }} />
+          Photograph this page
+        </MenuItem>
+        {/* `href` is kept so middle-click and "copy link address" still
+            work, but the navigation is done explicitly rather than left
+            to the anchor's default. Closing the menu in the same handler
+            unmounts that anchor, and an <a> removed during its own click
+            never navigates — which is why this did nothing at all. */}
+        <MenuItem
+          component="a" href={menu?.row.url ?? '#'}
+          target="_blank" rel="noopener noreferrer"
+          onClick={(e) => {
+            e.preventDefault()
+            const u = menu?.row.url
+            setMenu(null)
+            if (u) window.open(u, '_blank', 'noopener,noreferrer')
+          }}
+          sx={{ fontSize: 12.5, color: neon.text }}>
+          <LaunchIcon sx={{ fontSize: 16, mr: 1 }} />
+          Open in browser
+        </MenuItem>
+        <MenuItem
+          onClick={() => { navigator.clipboard?.writeText(menu!.row.url); setMenu(null) }}
+          sx={{ fontSize: 12.5, color: neon.muted }}>
+          <ContentCopyIcon sx={{ fontSize: 16, mr: 1 }} />
+          Copy URL
+        </MenuItem>
+      </Menu>
+
+      <Snackbar open={!!notice} autoHideDuration={8000}
+        onClose={() => setNotice(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
+        <Alert severity="info" variant="outlined"
+          onClose={() => setNotice(null)} sx={{ fontSize: 12.5 }}>
+          {notice}
+        </Alert>
+      </Snackbar>
+
+      <ReplayModal
+        id={replay} onClose={() => setReplay(null)}
+        onCreated={() => {
+          // The new exchange belongs under the same URL, so drop the
+          // cached children: leaving them would show a group whose hit
+          // count and contents disagree.
+          setChildren({})
+        }} />
+      <DataTable
+        tableId="web"
+        rows={rows}
+        columns={columns as ColumnDef[]}
+        loading={isLoading}
+        error={error as Error | null}
+        initialSort={{ field: 'url', sort: 'asc' }}
+        hiddenColumns={{
+          path: false, content_type: false, notes: false,
+          ...(project ? { project_code: false } : {}),
         }}
-        sx={{ fontSize: 12.5, color: neon.text }}>
-        <LaunchIcon sx={{ fontSize: 16, mr: 1 }} />
-        Open in browser
-      </MenuItem>
-      <MenuItem
-        onClick={() => { navigator.clipboard?.writeText(menu!.row.url); setMenu(null) }}
-        sx={{ fontSize: 12.5, color: neon.muted }}>
-        <ContentCopyIcon sx={{ fontSize: 16, mr: 1 }} />
-        Copy URL
-      </MenuItem>
-    </Menu>
+        server={table}
+        // A group row and the exchange it stands for share an id — the
+        // group IS that exchange. The grid keys rows by id, so without a
+        // distinct key the parent vanishes the moment it is expanded.
+        // Verified: expanding produced three indented rows and no parent,
+        // with a duplicate key in the DOM.
+        getRowId={(r) => {
+          const w = r as unknown as WebRow
+          return w.__child ? `c${w.id}` : `g${rowKey(w)}`
+        }}
+        extraActions={
+          <Stack direction="row" spacing={1} sx={{
+            alignItems: "center"
+          }}>
+            <ToggleButtonGroup size="small" exclusive value={filter}
+              onChange={(_, v) => v && setFilter(v)}>
+              <ToggleButton value="all" sx={tbSx}>All</ToggleButton>
+              <ToggleButton value="crawled" sx={tbSx}>Fetched</ToggleButton>
+              <ToggleButton value="interesting" sx={tbSx}>200/401/403/500</ToggleButton>
+            </ToggleButtonGroup>
 
-    <ReplayModal
-      id={replay} onClose={() => setReplay(null)}
-      onCreated={() => {
-        // The new exchange belongs under the same URL, so drop the
-        // cached children: leaving them would show a group whose hit
-        // count and contents disagree.
-        setChildren({})
-      }} />
-    <DataTable
-      tableId="web"
-      rows={rows}
-      columns={columns as ColumnDef[]}
-      loading={isLoading}
-      error={error as Error | null}
-      initialSort={{ field: 'url', sort: 'asc' }}
-      hiddenColumns={{
-        path: false, content_type: false, notes: false,
-        ...(project ? { project_code: false } : {}),
-      }}
-      server={table}
-      // A group row and the exchange it stands for share an id — the
-      // group IS that exchange. The grid keys rows by id, so without a
-      // distinct key the parent vanishes the moment it is expanded.
-      // Verified: expanding produced three indented rows and no parent,
-      // with a duplicate key in the DOM.
-      getRowId={(r) => {
-        const w = r as unknown as WebRow
-        return w.__child ? `c${w.id}` : `g${rowKey(w)}`
-      }}
-      extraActions={
-        <Stack direction="row" spacing={1} alignItems="center">
-          <ToggleButtonGroup size="small" exclusive value={filter}
-            onChange={(_, v) => v && setFilter(v)}>
-            <ToggleButton value="all" sx={tbSx}>All</ToggleButton>
-            <ToggleButton value="crawled" sx={tbSx}>Fetched</ToggleButton>
-            <ToggleButton value="interesting" sx={tbSx}>200/401/403/500</ToggleButton>
-          </ToggleButtonGroup>
+            {/* A SECOND, independent filter, and the wording works hard
+                to keep it apart from "Fetched" above. "Fetched" is
+                whether we retrieved the URL; this is who found it in
+                the first place. A path gobuster guessed and we then
+                retrieved is Fetched AND Discovery-only. */}
+            <SourceFilter value={foundBy} onChange={setFoundBy}
+              counts={counts.data} />
 
-          {/* A SECOND, independent filter, and the wording works hard
-              to keep it apart from "Fetched" above. "Fetched" is
-              whether we retrieved the URL; this is who found it in
-              the first place. A path gobuster guessed and we then
-              retrieved is Fetched AND Discovery-only. */}
-          <SourceFilter value={foundBy} onChange={setFoundBy}
-            counts={counts.data} />
-
-          <Typography sx={{ fontSize: 11, color: neon.muted, whiteSpace: 'nowrap' }}>
-            {rows.length} of {data?.total ?? 0}
-          </Typography>
-        </Stack>
-      }
-    />
+            <Typography sx={{ fontSize: 11, color: neon.muted, whiteSpace: 'nowrap' }}>
+              {rows.length} of {data?.total ?? 0}
+            </Typography>
+          </Stack>
+        }
+      />
     </>
-  )
+  );
 }
 
 const tbSx = {
@@ -570,7 +636,9 @@ function SourceFilter({ value, onChange, counts }: {
             onClick={() => { onChange(o.value); setAt(null) }}
             sx={{ fontSize: 12, alignItems: 'flex-start', maxWidth: 330 }}>
             <Box>
-              <Stack direction="row" spacing={1} alignItems="baseline">
+              <Stack direction="row" spacing={1} sx={{
+                alignItems: "baseline"
+              }}>
                 <Box sx={{ color: neon.cyan }}>{o.label}</Box>
                 {countOf(o.value) !== undefined && (
                   <Box sx={{ fontSize: 10.5, color: neon.muted }}>
@@ -586,5 +654,5 @@ function SourceFilter({ value, onChange, counts }: {
         ))}
       </Menu>
     </>
-  )
+  );
 }

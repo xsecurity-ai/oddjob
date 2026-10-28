@@ -30,6 +30,7 @@ import SearchIcon from '@mui/icons-material/Search'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   api, type AuditFilter, type GhostFleetVersions, type HealthBlock, type HealthState,
+  type SiteHealth,
 } from '../lib/api'
 import { neon, glow } from '../theme'
 
@@ -159,8 +160,12 @@ function Sparkline({ points, mode, colour, label }: {
 
   return (
     <Box sx={{ mt: 1.2 }}>
-      <Stack direction="row" justifyContent="space-between"
-        alignItems="baseline">
+      <Stack
+        direction="row"
+        sx={{
+          justifyContent: "space-between",
+          alignItems: "baseline"
+        }}>
         <Typography sx={{ fontSize: 10, opacity: 0.55,
                           letterSpacing: '0.08em',
                           textTransform: 'uppercase' }}>
@@ -201,6 +206,51 @@ function Sparkline({ points, mode, colour, label }: {
             ))}
       </Box>
     </Box>
+  );
+}
+
+/** Whether anything needs attention, in one line. */
+function Summary({ h }: { h: SiteHealth }) {
+  const states: HealthState[] = [
+    h.database.state, h.ghosts.state, h.cve_feed.state,
+    h.exploit_feed.state, h.maxmind.state, h.slack.state,
+    h.smtp.state, h.server.state,
+  ].filter(Boolean) as HealthState[]
+  const failing = states.filter((s) => s === 'failing').length
+  const idle = states.filter((s) => s === 'idle').length
+  const unused = states.filter((s) => s === 'unused').length
+  const worst: HealthState =
+    failing ? 'failing' : idle ? 'idle' : 'ok'
+  const colour = STATE[worst].colour
+  const said = failing
+    ? `${failing} subsystem${failing === 1 ? '' : 's'} failing`
+    : idle
+      ? `${idle} idle`
+      : 'everything reporting ok'
+  return (
+    <Box sx={{
+      display: 'flex', alignItems: 'center', gap: 1.2, mb: 1.5,
+      px: 1.6, py: 1, borderRadius: 1.5,
+      border: `1px solid ${alpha(colour, 0.45)}`,
+      background: alpha(colour, 0.07),
+    }}>
+      <Box sx={{ width: 8, height: 8, borderRadius: '50%',
+                 background: colour, boxShadow: glow(colour, 0.9) }} />
+      <Typography sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 12,
+                        letterSpacing: '0.12em', textTransform: 'uppercase',
+                        color: colour }}>
+        {said}
+      </Typography>
+      {/* Counted separately rather than folded into ok or idle.
+          "Never used" is a fact about configuration, not a degree
+          of health, and a green line that quietly included four
+          unconfigured subsystems would be the page lying. */}
+      {unused > 0 && (
+        <Typography sx={{ fontSize: 11.5, color: alpha(neon.muted, 0.9) }}>
+          · {unused} never used
+        </Typography>
+      )}
+    </Box>
   )
 }
 
@@ -216,12 +266,28 @@ function Card({ title, state, lines, error, children }: {
   children?: React.ReactNode
 }) {
   return (
+    // A grid cell, not a flex item. `flex: 1 1 300px` gave every row
+    // a different number of cards at a different width and left the
+    // last row stretched across the page, which is most of why this
+    // looked untidy. The grid below sizes every column the same and
+    // this fills its cell top to bottom.
     <Paper elevation={0} sx={{
-      p: 2, minWidth: 260, flex: '1 1 300px',
+      p: 2, height: '100%', display: 'flex', flexDirection: 'column',
       backgroundColor: alpha(neon.paper, 0.75), backdropFilter: 'blur(6px)',
       border: `1px solid ${alpha(STATE[state]?.colour ?? neon.purple, 0.35)}`,
+      borderRadius: 1.5,
+      // The state is the first thing worth seeing from across a
+      // room. A hairline in its colour does that without another
+      // chip competing with the one already there.
+      borderTop: `2px solid ${alpha(STATE[state]?.colour ?? neon.purple, 0.75)}`,
     }}>
-      <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1.2 }}>
+      <Stack
+        direction="row"
+        sx={{
+          alignItems: "center",
+          justifyContent: "space-between",
+          mb: 1.2
+        }}>
         <Typography sx={{
           fontFamily: `'Orbitron', sans-serif`, fontSize: 11, letterSpacing: '0.14em',
           textTransform: 'uppercase', color: neon.cyan, textShadow: glow(neon.cyan, 0.4),
@@ -230,9 +296,20 @@ function Card({ title, state, lines, error, children }: {
       </Stack>
       <Stack spacing={0.4}>
         {lines.map(([k, v]) => (
-          <Stack key={k} direction="row" justifyContent="space-between" spacing={2}>
-            <Typography sx={{ fontSize: 12, opacity: 0.65 }}>{k}</Typography>
-            <Typography sx={{ fontSize: 12, textAlign: 'right', wordBreak: 'break-word' }}>
+          <Stack key={k} direction="row" spacing={2} sx={{
+            justifyContent: "space-between"
+          }}>
+            <Typography sx={{ fontSize: 12, opacity: 0.6,
+                               whiteSpace: 'nowrap' }}>{k}</Typography>
+            {/* Tabular figures, so a column of counts and latencies
+                lines up on the digit instead of drifting with the
+                glyph widths. The whole reason these read as a mess
+                is that nothing in them was aligned. */}
+            <Typography sx={{
+              fontSize: 12, textAlign: 'right', wordBreak: 'break-word',
+              fontVariantNumeric: 'tabular-nums',
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+            }}>
               {v}
             </Typography>
           </Stack>
@@ -245,7 +322,7 @@ function Card({ title, state, lines, error, children }: {
       ) : null}
       {children}
     </Paper>
-  )
+  );
 }
 
 /** A subsystem's three counters, rendered the same way everywhere. */
@@ -319,12 +396,20 @@ export function HealthView() {
     // scroll: a flex child's default `min-height: auto` refuses to
     // shrink below its contents, so the overflow never triggers.
     <Box sx={{ p: 2, flex: 1, minHeight: 0, overflowY: 'auto' }}>
-      <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1.5 }}>
+      <Stack
+        direction="row"
+        sx={{
+          alignItems: "center",
+          justifyContent: "space-between",
+          mb: 1.5
+        }}>
         <Typography sx={{
           fontFamily: `'Orbitron', sans-serif`, fontSize: 13, letterSpacing: '0.18em',
           textTransform: 'uppercase', color: neon.cyan, textShadow: glow(neon.cyan, 0.5),
         }}>Site health</Typography>
-        <Stack direction="row" spacing={1} alignItems="center">
+        <Stack direction="row" spacing={1} sx={{
+          alignItems: "center"
+        }}>
           <Typography sx={{ fontSize: 11, opacity: 0.55 }}>
             checked {when(h.generated_at)}
           </Typography>
@@ -337,7 +422,24 @@ export function HealthView() {
       </Stack>
       {health.isFetching ? <LinearProgress sx={{ mb: 1, height: 2 }} /> : null}
 
-      <Stack direction="row" flexWrap="wrap" gap={1.5}>
+      {/* The answer, before the detail.
+
+          Eight cards is eight things to read before knowing whether
+          anything needs attention, and on a page somebody opens
+          precisely to ask that, the answer should not be assembled
+          by eye. `failing` wins over `idle` wins over `ok`; `never
+          used` is not a degree of healthy and is counted separately
+          rather than folded into either. */}
+      <Summary h={h} />
+
+      <Box sx={{
+        display: 'grid',
+        // Equal columns that reflow, rather than flex items that
+        // each take a different share of the last row.
+        gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
+        gap: 1.5,
+        alignItems: 'stretch',
+      }}>
         <Card title="Database" state={db.state}
           error={db.last_error as string | null}
           lines={[
@@ -489,8 +591,14 @@ export function HealthView() {
             // somebody who has not read scripts/version.sh, and
             // "unreleased build" means the same thing to everybody.
             ['version', (
-              <Stack direction="row" spacing={0.6} alignItems="center"
-                justifyContent="flex-end" sx={{ flexWrap: 'wrap' }}>
+              <Stack
+                direction="row"
+                spacing={0.6}
+                sx={{
+                  alignItems: "center",
+                  justifyContent: "flex-end",
+                  flexWrap: 'wrap'
+                }}>
                 <Box component="span" sx={{ fontFamily: 'monospace', fontSize: 12 }}>
                   {h.server.version || 'unknown'}
                 </Box>
@@ -503,7 +611,7 @@ export function HealthView() {
             ['audit newest', h.audit.newest ? ago(h.audit.age_seconds as number) : 'nothing recorded'],
             ['audit retention', `${String(h.audit.retain_days ?? '?')} days`],
           ]} />
-      </Stack>
+      </Box>
 
       <Divider sx={{ my: 2, borderColor: alpha(neon.purple, 0.25) }} />
 
@@ -520,7 +628,7 @@ export function HealthView() {
         <AuditTable />
       </Collapse>
     </Box>
-  )
+  );
 }
 
 /** Which versions the fleet is actually running, and how many on each.
@@ -556,10 +664,22 @@ function GhostVersionsCard({ fleet }: { fleet: GhostFleetVersions }) {
       ]}>
       <Stack spacing={0.4} sx={{ mt: 1.2 }}>
         {rows.map((r) => (
-          <Stack key={r.version} direction="row" alignItems="center"
-            justifyContent="space-between" spacing={1}>
-            <Stack direction="row" alignItems="center" spacing={0.6}
-              sx={{ minWidth: 0, flexWrap: 'wrap' }}>
+          <Stack
+            key={r.version}
+            direction="row"
+            spacing={1}
+            sx={{
+              alignItems: "center",
+              justifyContent: "space-between"
+            }}>
+            <Stack
+              direction="row"
+              spacing={0.6}
+              sx={{
+                alignItems: "center",
+                minWidth: 0,
+                flexWrap: 'wrap'
+              }}>
               <Box component="span" sx={{
                 fontFamily: 'monospace', fontSize: 12,
                 // Greyed, not hidden. A version we cannot order is
@@ -585,8 +705,13 @@ function GhostVersionsCard({ fleet }: { fleet: GhostFleetVersions }) {
           </Stack>
         ))}
         {fleet.unreported > 0 ? (
-          <Stack direction="row" alignItems="center"
-            justifyContent="space-between" spacing={1}>
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{
+              alignItems: "center",
+              justifyContent: "space-between"
+            }}>
             <Typography sx={{ fontSize: 12, opacity: 0.6, fontStyle: 'italic' }}>
               no version reported
             </Typography>
@@ -606,7 +731,7 @@ function GhostVersionsCard({ fleet }: { fleet: GhostFleetVersions }) {
         <Typography sx={{ fontSize: 11, opacity: 0.7, mt: 1 }}>{fleet.note}</Typography>
       ) : null}
     </Card>
-  )
+  );
 }
 
 /** The log, searchable. Server-side: the table is capped by retention,
@@ -639,12 +764,21 @@ function AuditTable() {
 
   return (
     <Box sx={{ mt: 1.5 }}>
-      <Stack direction="row" flexWrap="wrap" gap={1} alignItems="center" sx={{ mb: 1 }}>
+      <Stack
+        direction="row"
+        sx={{
+          flexWrap: "wrap",
+          gap: 1,
+          alignItems: "center",
+          mb: 1
+        }}>
         <TextField
           size="small" placeholder="search action, user, detail, path, ip…"
           value={q} onChange={(e) => setQ(e.target.value)}
-          InputProps={{ startAdornment: <SearchIcon fontSize="small" sx={{ mr: 0.8, opacity: 0.5 }} /> }}
           sx={{ minWidth: 300, flex: '1 1 300px' }}
+          slotProps={{
+            input: { startAdornment: <SearchIcon fontSize="small" sx={{ mr: 0.8, opacity: 0.5 }} /> }
+          }}
         />
         <TextField select size="small" label="source" value={source}
           onChange={(e) => setSource(e.target.value)} sx={{ minWidth: 130 }}>
@@ -734,5 +868,5 @@ function AuditTable() {
         </Table>
       </TableContainer>
     </Box>
-  )
+  );
 }

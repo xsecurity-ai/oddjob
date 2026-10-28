@@ -63,7 +63,13 @@ export function ProjectSlackCard({ project }: { project: string }) {
   return (
     <Paper variant="outlined" sx={{ p: 2, mb: 2.5,
                                     borderColor: alpha(neon.cyan, 0.3) }}>
-      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{
+          alignItems: "center",
+          mb: 1.5
+        }}>
         <Typography sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 12,
                           letterSpacing: '0.14em', textTransform: 'uppercase',
                           color: neon.cyan, textShadow: glow(neon.cyan, 0.5) }}>
@@ -110,7 +116,9 @@ export function ProjectSlackCard({ project }: { project: string }) {
         </Alert>
       )}
 
-      <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap>
+      <Stack direction="row" spacing={1.5} useFlexGap sx={{
+        flexWrap: "wrap"
+      }}>
         <TextField size="small" label="Channel" value={channel}
           disabled={!writable} sx={{ minWidth: 230 }}
           placeholder={data.channel}
@@ -175,5 +183,5 @@ export function ProjectSlackCard({ project }: { project: string }) {
         open this engagement, using the Slack handle on their profile.
       </Box>
     </Paper>
-  )
+  );
 }

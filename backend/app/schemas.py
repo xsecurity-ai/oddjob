@@ -15,10 +15,19 @@ import json
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
+from . import cloudnames
 from .hosts import InvalidHost, validate_cloud_id, validate_host
 from .models import (
+    IMPACT_CHOICES,
     NMAP_CHOICES,
     NUCLEI_CHOICES,
     PROJECT_STATUSES,
@@ -147,12 +156,42 @@ class ProjectUpdate(BaseModel):
     auto_web: str | None = None
     #: "off" | "vuln" | "tech" | "both".
     auto_nuclei: str | None = None
+    auto_vhost: bool | None = None
+    auto_httpx: bool | None = None
+    kitchen_sink: bool | None = None
     #: Extra content-discovery paths, one per line. Appended to the
     #: agent's wordlist, never replacing it.
     url_wordlist: str | None = None
     #: What tools that send a User-Agent should call themselves.
     #: None or "" leaves the agent's own attributable default alone.
     user_agent: str | None = None
+
+    #: The rules of engagement. None means "leave it alone", like
+    #: every other field here, so there is no way to CLEAR a date
+    #: through this -- which is deliberate: removing the end date of
+    #: a live engagement is not something a partial update should do
+    #: by accident. `DELETE /projects/{code}/engagement-window`
+    #: clears them explicitly.
+    engagement_starts_at: datetime | None = None
+    engagement_ends_at: datetime | None = None
+    max_impact: str | None = None
+
+    @field_validator("max_impact")
+    @classmethod
+    def _max_impact(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = (v or "").strip().lower()
+        # Refused rather than coerced. The coercion that would feel
+        # natural here is "unknown means strictest", and it is the
+        # wrong one: an operator who typed `readonly` and got a
+        # project that refuses every scan has no idea why, while an
+        # operator who gets a 422 naming the three values does.
+        if v not in IMPACT_CHOICES:
+            raise ValueError(
+                f"max_impact must be one of {', '.join(IMPACT_CHOICES)} — "
+                f"{v!r} is not a technique ceiling this tool knows")
+        return v
 
     @field_validator("auto_nmap")
     @classmethod
@@ -258,8 +297,24 @@ class ProjectOut(ProjectBase):
     # API. The round trip is what was untested, and is what is tested
     # now.
     auto_web: str = "off"
+    auto_vhost: bool = False
+    auto_httpx: bool = False
+    #: Everything on, at its most thorough. Resolved when the
+    #: policies are read rather than copied into the fields above, so
+    #: turning it off returns the project to whatever was set before.
+    #: Deliberately does not imply the two lookups that send a
+    #: client's domain to a third party.
+    kitchen_sink: bool = False
     url_wordlist: str | None = None
     user_agent: str | None = None
+    #: The authorisation letter's other two sentences. See app/roe.py.
+    #: NULL dates mean unbounded, which is what every project had
+    #: before these existed -- not "starts now".
+    engagement_starts_at: datetime | None = None
+    engagement_ends_at: datetime | None = None
+    #: read_only | state_changing | destructive. The most intrusive
+    #: technique this engagement permits.
+    max_impact: str = "destructive"
     # The token itself is never returned — only whether an override exists.
     slack_token_set: bool = False
     # Whether a notification posted now would reach a channel: a token
@@ -472,6 +527,37 @@ class TargetOut(_TargetFields):
                                "null country means not asked, which is not "
                                "the same as asked and not known.")
 
+    # Whether this row's NAME is a cloud provider's own template
+    # rather than something somebody chose. Derived, not stored: it
+    # is a pure function of `host`, so a column would mean a
+    # migration, a backfill and a second copy that goes stale the
+    # day a provider adds a suffix. See app/cloudnames.py.
+    #
+    # This says nothing about whether the host matters. A
+    # `*.bc.googleusercontent.com` with an open port is a finding and
+    # the UI shows it as one; the PTR simply is not its name.
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Provider naming template this host's name matches, "
+                    "e.g. 'gcp-compute'. Null for a name somebody chose.")
+    @property
+    def cloud_family(self) -> str | None:
+        return cloudnames.classify(self.host)[0]
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Which cloud the name belongs to, when it is a "
+                    "provider template.")
+    def cloud_provider(self) -> str | None:
+        return cloudnames.classify(self.host)[1]
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="True when the provider assigns this name per address, "
+                    "so it carries no information about who is using it. "
+                    "These are the rows worth condensing; a name chosen "
+                    "inside a cloud is not.")
+    def cloud_ephemeral(self) -> bool:
+        return cloudnames.classify(self.host)[2]
+
     # Both are stored as JSON strings. A column that failed to parse must not
     # sink the whole row — the rest of the target is still worth returning —
     # so each falls back to its own empty value.
@@ -608,6 +694,31 @@ class VulnOut(_VulnFields):
     project_code: str
     created_at: datetime
     updated_at: datetime
+
+    # ---- lifecycle. See app/lifecycle.py ----------------------------
+    #: Which tool reported it. NULL for a finding somebody typed in,
+    #: and for anything imported before this existed.
+    scanner: str | None = None
+    #: When a scan first reported it and when one last did. NOT
+    #: `created_at`/`updated_at`, which move when somebody edits a
+    #: severity or writes a remediation.
+    first_seen_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    #: new | present | resolved | unconfirmed.
+    #:
+    #: Derived per request rather than stored, so a re-scan that finds
+    #: a thing again revives it without anything having to clear a
+    #: column first. `unconfirmed` is a real answer and not a hedge:
+    #: it means nothing that reports this kind of finding has looked
+    #: since it was last seen.
+    lifecycle: str = "unconfirmed"
+    #: The sentence behind that word. A `resolved` shown without one
+    #: is a claim the reader has to take on trust, and it is the
+    #: claim that most deserves not to be.
+    lifecycle_why: str | None = None
+    #: When a tool that reports this kind of finding last looked at
+    #: this host. None means never.
+    last_looked_at: datetime | None = None
 
 
 # ------------------------------------------------------------------ pocs
@@ -836,6 +947,28 @@ class WebAddressOut(BaseModel):
         return _as(v, list)
 
 
+class WebShot(BaseModel):
+    """What is known about a stored screenshot, minus the image.
+
+    `captured_at` is here because a picture is only as good as its
+    date: a page photographed three weeks ago may have been rebuilt
+    twice since, and a viewer that shows the image without saying
+    when it was taken invites it to be read as current.
+    """
+    id: int
+    url: str
+    #: Where the browser ended up, when that differs from `url`.
+    final_url: str | None = None
+    status_code: int | None = None
+    title: str | None = None
+    width: int | None = None
+    height: int | None = None
+    bytes: int = 0
+    sha256: str | None = None
+    captured_at: str | None = None
+    sources: str | None = None
+
+
 class WebPacket(BaseModel):
     """One exchange, fetched on demand.
 
@@ -853,6 +986,11 @@ class WebPacket(BaseModel):
     truncated: bool = False
     sources: str | None = None
     notes: str | None = None
+    #: The picture of this URL, when a ghost has taken one. Metadata
+    #: only -- the image itself is a separate request, for the same
+    #: reason the exchange is: nobody wants a megabyte of PNG inside
+    #: a JSON document they opened to read a status code.
+    screenshot: WebShot | None = None
 
 
 class WebAddressCreate(BaseModel):
@@ -965,6 +1103,57 @@ class EventCreate(BaseModel):
     source: str | None = None
 
 
+class TargetOriginOut(BaseModel):
+    """One place a target was discovered in.
+
+    **An empty list is "not recorded", never "found nowhere".** Only
+    the code that discovers a target can say where it came from, and
+    only the asset sweep does so today: a target typed in by hand,
+    loaded from a scan import or created before provenance was kept
+    has no row here and nothing in the system knows its origin. The
+    UI is required to say that rather than render a blank as an
+    absence of sources.
+    """
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    target_id: int
+    #: How it was found. "asset" — named in the code of a web asset.
+    source: str
+    #: The asset the identifier was read out of. Snapshotted at
+    #: discovery, so it survives the asset being re-fetched or deleted.
+    asset_url: str | None = None
+    #: Which recovered file inside that asset. `src/config.ts` out of
+    #: a source map says far more than "somewhere in app.min.js".
+    file_path: str | None = None
+    #: The page that asset was first seen on.
+    page_url: str | None = None
+    #: Every page known to load that asset, newest query wins — this
+    #: is read live from `web_asset_refs` rather than stored, because
+    #: a page added to the crawl later genuinely adds a site this came
+    #: from. Capped; `pages_total` is the full count.
+    pages: list[str] = []
+    pages_total: int = 0
+    created_at: datetime
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Hostname of the page this was found on, for a "
+                    "one-value cell. Null when no page is known, which "
+                    "is not the same as no page existing.")
+    @property
+    def site(self) -> str | None:
+        from urllib.parse import urlsplit
+        for u in (self.page_url, *self.pages, self.asset_url):
+            if not u:
+                continue
+            try:
+                h = urlsplit(u).hostname
+            except ValueError:
+                continue
+            if h:
+                return h.lower()
+        return None
+
+
 class TargetDetail(BaseModel):
     """Everything about one target, in a single round trip.
 
@@ -977,6 +1166,9 @@ class TargetDetail(BaseModel):
     vulns: list[VulnOut]
     pocs: list[PocOut]
     implants: list[ImplantOut] = []
+    #: Where this target came from, when anything recorded it. Empty
+    #: means nothing did — see `TargetOriginOut`.
+    origins: list[TargetOriginOut] = []
 
 
 # --------------------------------------------------------------- explore
