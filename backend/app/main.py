@@ -295,6 +295,7 @@ app = FastAPI(
 
 from . import headers as _headers  # noqa: E402
 from .audit import AuditTrail  # noqa: E402
+from .tracing import setup_tracing  # noqa: E402
 
 # ORDER. `add_middleware` prepends, so the LAST one added is the
 # outermost and therefore the last to touch a response on the way out.
@@ -385,6 +386,12 @@ app.add_middleware(ApiSlash)
 # It is inside SecurityHeaders only because it must not be the thing
 # that stops a response being stamped.
 app.add_middleware(AuditTrail)
+
+# Last, so it is OUTERMOST: a span should cover the whole request, including
+# the ones SecurityHeaders and Gatekeeper short-circuit. A trace that stops
+# at the gate cannot tell you why the gate refused. No-op unless
+# OTEL_EXPORTER_OTLP_ENDPOINT is set -- see tracing.py.
+setup_tracing(app)
 
 for r in (auth.router, google.router, magic.router, projects.router, targets.router,
           services.router, findings.router, credentials.router,
