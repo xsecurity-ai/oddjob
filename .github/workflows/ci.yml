@@ -537,7 +537,16 @@ jobs:
           # get wrong.
           if over["ghost"].get("network_mode") != "host":
               fail.append("the overlay dropped host networking")
-          if set(over["ghost"].get("cap_add") or []) != {"NET_RAW", "NET_ADMIN"}:
+          # NET_BIND_SERVICE is expected, and it is NOT about binding a
+          # port: the nmap package ships its binary with file capabilities,
+          # and the kernel refuses to exec a file whose capabilities it
+          # cannot grant from the bounding set. Dropping it brings back
+          # `fork/exec /usr/bin/nmap: operation not permitted`. The full
+          # reasoning is in ghost/docker-compose.yml, where it was added in
+          # #68 -- this guard was simply never updated to match, and has
+          # failed every run since. Still compared as an exact set, so a
+          # capability nobody meant to grant still fails the build.
+          if set(over["ghost"].get("cap_add") or []) != {"NET_RAW", "NET_ADMIN", "NET_BIND_SERVICE"}:
               fail.append(f"cap_add is now {over['ghost'].get('cap_add')}")
 
           if LABEL in base["ghost"].get("labels", {}):
