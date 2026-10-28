@@ -1575,4 +1575,146 @@ check("...and still raises nothing", len(cdn2) == 0,
       [v["title"] for v in cdn2])
 
 
+# ======================================================== screenshots
+print("== a ghost's screenshot lands, and can be read back ==")
+# The picture is the only artefact here that answers "what IS this"
+# rather than "what did it say", and it travels as base64 because the
+# agent's result is one JSON document in a text column -- a PNG
+# contains NUL bytes, which Postgres refuses in text outright. So the
+# round trip worth testing is: base64 in, bytes out, served as an
+# image.
+import struct as _struct  # noqa: E402
+import zlib as _zlib  # noqa: E402
+
+# `_b64` is already imported further up this file, where the exchange
+# capture needed it.
+
+
+def _png(w=4, h=3):
+    """A real, valid PNG. Built rather than pasted, so the test says
+    what makes it valid instead of carrying an opaque blob."""
+    def chunk(tag, data):
+        c = tag + data
+        return (_struct.pack(">I", len(data)) + c
+                + _struct.pack(">I", _zlib.crc32(c) & 0xFFFFFFFF))
+    raw = b"".join(b"\x00" + b"\xff\x00\x80" * w for _ in range(h))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", _struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", _zlib.compress(raw))
+            + chunk(b"IEND", b""))
+
+
+SHOT_URL = "https://portal.acme.example/login"
+SHOT = json.dumps({
+    "browser": "/usr/bin/chromium",
+    "viewport": {"width": 1280, "height": 800},
+    "shots": [{
+        "url": SHOT_URL,
+        "final_url": "https://sso.acme.example/login?rd=portal",
+        "status": 200, "title": "ACME portal",
+        "server": "acme-httpd/1.0", "page_content_type": "text/html",
+        "width": 1280, "height": 800,
+        "bytes": len(_png()), "sha256": "0" * 64,
+        "png_base64": _b64.b64encode(_png()).decode(),
+    }],
+    "failed": [{"url": "https://dead.acme.example/",
+                "error": "net::ERR_CONNECTION_REFUSED"}],
+})
+
+st, rep = imp(SHOT)
+check("a screenshot result is recognised without being told",
+      st == 200 and (rep or {}).get("format") == "screenshot", (st, rep))
+check("the picture is stored", (rep or {}).get("screenshots_created") == 1,
+      (rep or {}).get("screenshots_created"))
+# The page that could not be photographed is NAMED. "1 of 2" with no
+# account of the other is the substitution this codebase treats as a
+# bug rather than a rounding error.
+check("...and the page that failed is reported rather than dropped",
+      any("dead.acme.example" in e for e in (rep or {}).get("errors") or []),
+      (rep or {}).get("errors"))
+# A photographed URL is a FETCHED URL: a browser asked for it and drew
+# the answer. That is stronger evidence than a crawl's "something
+# linked to this", and it gives the picture a row to be shown on.
+st, rows = call("/api/web?project=WEB&q=portal.acme.example&limit=50",
+                token=admin)
+shot_row = [r for r in (rows or {}).get("items", [])
+            if r["url"] == SHOT_URL]
+check("the URL itself reaches the inventory", len(shot_row) == 1,
+      [r["url"] for r in (rows or {}).get("items", [])])
+check("...recorded as fetched, not merely linked to",
+      shot_row and shot_row[0]["crawled"] is True)
+check("...carrying what the browser saw",
+      shot_row and shot_row[0]["status_code"] == 200
+      and shot_row[0]["title"] == "ACME portal",
+      shot_row and (shot_row[0]["status_code"], shot_row[0]["title"]))
+
+st, pk = call(f"/api/web/{shot_row[0]['id']}/packet", token=admin)
+shot = (pk or {}).get("screenshot")
+check("the packet view knows the picture exists", st == 200 and bool(shot),
+      (st, pk))
+check("...and says when it was taken, because a picture carries no date",
+      bool((shot or {}).get("captured_at")), shot)
+check("...and where the browser ended up, which the image cannot show",
+      ((shot or {}).get("final_url") or "").startswith("https://sso.acme.example"),
+      (shot or {}).get("final_url"))
+# The image itself is bytes from its own endpoint. An <img> cannot
+# send an Authorization header, and nothing base64-encodes a megabyte
+# into JSON to get a picture onto a page.
+_req = urllib.request.Request(
+    f"{BASE}/api/web/screenshots/{shot['id']}/image")
+_req.add_header("Authorization", f"Bearer {admin}")
+with urllib.request.urlopen(_req, timeout=60) as _r:
+    _body = _r.read()
+    _ctype = _r.headers.get("Content-Type", "")
+check("the image comes back as a PNG",
+      _body.startswith(b"\x89PNG\r\n\x1a\n") and _ctype == "image/png",
+      (_ctype, _body[:8]))
+check("...byte for byte what the agent sent", _body == _png(),
+      (len(_body), len(_png())))
+
+# A second capture REPLACES. Ten pictures of one URL are ten copies of
+# one page, and across an estate that has reached 51,000 URLs that is
+# the difference between a database and a problem.
+AGAIN = json.loads(SHOT)
+AGAIN["shots"][0]["title"] = "ACME portal (maintenance)"
+st, rep2 = imp(json.dumps(AGAIN))
+check("a re-shoot replaces rather than accumulating",
+      (rep2 or {}).get("screenshots_updated") == 1
+      and (rep2 or {}).get("screenshots_created") == 0, rep2)
+st, pk2 = call(f"/api/web/{shot_row[0]['id']}/packet", token=admin)
+check("...and the metadata describes THIS picture, not the last one",
+      ((pk2 or {}).get("screenshot") or {}).get("title")
+      == "ACME portal (maintenance)",
+      ((pk2 or {}).get("screenshot") or {}).get("title"))
+
+# A field called png_base64 holding something else is not a picture,
+# and the one thing worse than no screenshot is one that renders as
+# nothing and explains itself to nobody.
+NOTPNG = json.dumps({
+    "browser": "/usr/bin/chromium", "viewport": {"width": 800, "height": 600},
+    "shots": [{"url": "https://fake.acme.example/",
+               "png_base64": _b64.b64encode(b"GIF89a not a png").decode()}],
+})
+st, rep3 = imp(NOTPNG)
+check("something that is not a PNG is refused, with a reason",
+      st != 200 or (rep3 or {}).get("screenshots_created") == 0,
+      (st, rep3))
+
+# An operator reading the task afterwards must still be able to see
+# what it did -- but not a second copy of every image.
+from app.importers import screenshot as _shotmod  # noqa: E402
+
+_stripped = json.loads(_shotmod.without_images(SHOT))
+check("the stored result keeps everything but the payload",
+      "png_base64" not in _stripped["shots"][0]
+      and _stripped["shots"][0]["url"] == SHOT_URL
+      and _stripped["shots"][0]["sha256"] == "0" * 64
+      and _stripped["failed"][0]["url"] == "https://dead.acme.example/",
+      _stripped["shots"][0])
+check("...and says where the bytes went",
+      _stripped["shots"][0].get("stored_in_database") is True)
+check("stripping something that is not a screenshot result changes nothing",
+      _shotmod.without_images("not json at all") == "not json at all")
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

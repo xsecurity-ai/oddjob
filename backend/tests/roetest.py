@@ -87,6 +87,16 @@ check("nmap is state-changing, because `vuln` is outside nmap's own "
       "`safe` category", roe.impact_of("nmap") == "state_changing")
 check("a crawl is state-changing, because a link can be /logout",
       roe.impact_of("katana") == "state_changing")
+# The judgement this one turns on: a headless browser does not fetch
+# the page, it RUNS it. Whatever the author wrote to happen on load
+# happens -- beacons, sockets, an XHR that writes a row. "It is only
+# a screenshot" is how a read-only engagement would end up running a
+# browser over a client's estate.
+check("a screenshot is state-changing, because the browser executes "
+      "the page's JavaScript",
+      roe.impact_of("screenshot") == "state_changing")
+check("...so a read-only engagement refuses it",
+      roe.impact_refusal("screenshot", "read_only") is not None)
 check("nuclei is state-changing", roe.impact_of("nuclei") == "state_changing")
 check("confirming a CVE is state-changing, because confirming means "
       "sending the trigger",

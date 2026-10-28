@@ -15,7 +15,7 @@ with one scope list, one queue and one inventory.
 ```
    Oddjob ──── tasking ────►  Ghost  ────►  nmap · masscan · amass
       ▲                         │           nuclei · gobuster · httpx
-      └──────── results ────────┘           gospider
+      └──────── results ────────┘           katana · vhost · screenshot
 ```
 
 **A Ghost is tied to one project.** It enrolls against a single
@@ -391,9 +391,34 @@ address.
 
 ## What it runs
 
-`nmap`, `masscan`, `gobuster`, `gospider`, `nuclei`, `httpx`, plus name
-and address lookups using the Go resolver directly, and **amass linked
-into the agent** rather than executed.
+`nmap`, `masscan`, `gobuster`, `katana`, `vhost`, `nuclei`, `httpx`,
+`screenshot`, plus name and address lookups using the Go resolver
+directly, and **amass linked into the agent** rather than executed.
+
+### screenshot drives a real browser
+
+A picture of the page, captured by headless Chromium over the DevTools
+protocol. It is the only task here that reports what a page *looks
+like* rather than what it said, which is the question an operator
+actually has first when an estate runs to tens of thousands of URLs.
+
+Two things to know before using it.
+
+**It needs a browser, and the agent will not install one.** The image
+ships Chromium, which costs it 191 MB → 587 MB — measured by building
+it both ways, and the single largest line in the Dockerfile. A ghost
+installed by hand on a host that has none reports
+`screenshot` as unavailable on its heartbeat and is never offered the
+work, rather than failing tasks one at a time.
+
+**It is state-changing under the rules of engagement**, and that is
+not pedantry: a browser *runs* the page's JavaScript, so whatever the
+author wrote to happen on load happens. A project whose technique
+ceiling is `read_only` refuses it, like `nuclei` and a crawl.
+
+It is also the heaviest thing this agent does — budgeted at 512 MB a
+task — so a small host is simply not offered it. See
+`internal/capacity/afford.go` for the measurement.
 
 ### amass is a library here, not a binary
 

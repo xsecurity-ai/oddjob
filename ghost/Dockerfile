@@ -229,7 +229,39 @@ FROM cgr.dev/chainguard/wolfi-base:latest@sha256:05d24163df148be377275af8374c165
 # first packet with "failed to load libpcap shared library". `ldd`
 # shows nothing, because there is no link-time dependency to show:
 # the only way to find this is to run the thing.
+#
+# `chromium` is the screenshot task, and it is the most expensive line
+# in this file by a wide margin. Measured, by building this image with
+# and without it on the same machine:
+#
+#	without  191 MB
+#	with     587 MB      (+396 MB, a little over three times)
+#
+# apk reports 376 MiB as the package itself; the rest is nss, the
+# fonts and what else a browser drags behind it. That is not a
+# rounding error, so it is worth being explicit about why it is paid
+# rather than letting it arrive quietly:
+#
+#   - A screenshot is the one artefact that answers "what IS this"
+#     across tens of thousands of URLs, and it is the evidence a
+#     report shows rather than describes. See
+#     internal/tasks/screenshot.go.
+#   - It has to be baked in, like everything else here. An agent that
+#     fetched several hundred megabytes of browser from inside a
+#     client's network the first time somebody asked for a picture is
+#     exactly what the note at the top of this file rules out.
+#   - There is no smaller package to take instead. Wolfi has no
+#     headless-shell build -- `apk search chromium` offers chromium,
+#     its language packs, and two selenium compat shims -- so the
+#     choice is this or no screenshots.
+#
+# The agent does NOT install it on demand and it is deliberately not
+# in `tools.Known`: putting a browser on a host inside a client's
+# estate is a decision for whoever built that host, not for a task.
+# A ghost without one reports the kind as unaffordable and is never
+# offered the work.
 RUN apk add --no-cache nmap gobuster bind-tools ca-certificates libpcap \
+      chromium \
  && ln -sf libpcap.so.1 /usr/lib/libpcap.so
 
 COPY --from=masscan /src/bin/masscan /usr/local/bin/masscan
@@ -257,6 +289,65 @@ RUN masscan -p80 198.51.100.1 --rate 10 --wait 0 > /tmp/mv 2>&1 || true; \
       cat /tmp/mv; exit 1; \
     fi; \
     rm -f /tmp/mv
+
+# Make the browser START, and speak the protocol the agent drives it
+# with. Same reasoning as the masscan check above: `chromium
+# --version` prints happily on an image where the browser cannot
+# actually run, and the ways this one fails are all at launch.
+#
+# NOT `--screenshot` or `--dump-dom`. Both exit 0 and produce nothing
+# at all in this build -- tested -- so a guard written against either
+# would pass on an image with no working browser, which is the exact
+# trap the masscan note describes. What the agent needs is DevTools,
+# so DevTools is what is checked: the port file chromium writes once
+# the protocol is listening.
+#
+# `--no-sandbox` is here for the same reason the runner passes it,
+# and this line is where it is proved rather than assumed: this image
+# runs as uid 0 (see the note at the foot of this file) and chromium
+# refuses to start as root with the sandbox on -- "Running as root
+# without --no-sandbox is not supported". The container is run with
+# `--cap-drop=ALL`, which also leaves no CAP_SYS_ADMIN for the
+# user-namespace sandbox to be built with. The reasoning, and what
+# the flag costs, is written out in internal/tasks/screenshot.go.
+# DL3001 objects to `kill` in a build, on the grounds that process
+# management belongs outside the container. Here the process being
+# killed is one this very RUN started, and leaving it running would
+# be the actual mistake: the check starts a browser on purpose and
+# has to put it away again. (The pragma has to be the line
+# immediately above the instruction, so it goes below this note
+# rather than above it.)
+# hadolint ignore=DL3001
+RUN set -eu; \
+    chromium --headless --no-sandbox --disable-gpu --disable-dev-shm-usage \
+      --no-first-run --no-default-browser-check \
+      --disable-background-networking \
+      --user-data-dir=/tmp/chromecheck --remote-debugging-port=0 \
+      >/tmp/chrome.log 2>&1 & \
+    pid=$!; i=0; \
+    while [ "$i" -lt 60 ]; do \
+      [ -s /tmp/chromecheck/DevToolsActivePort ] && break; \
+      i=$((i+1)); sleep 0.5; \
+    done; \
+    kill "$pid" 2>/dev/null || true; \
+    : "Waited for, not just signalled. A killed browser goes on"; \
+    : "writing its profile out for a moment, and the cleanup below"; \
+    : "then races it -- CI caught exactly that: \`rm\` failed with"; \
+    : "'/tmp/chromecheck/Default: Directory not empty' and \`set -e\`"; \
+    : "turned a successful check into a failed build."; \
+    wait "$pid" 2>/dev/null || true; \
+    if [ ! -s /tmp/chromecheck/DevToolsActivePort ]; then \
+      echo "chromium did not come up: no DevTools port after 30s."; \
+      echo "The screenshot task drives it over that protocol, so a"; \
+      echo "browser that starts without it is a browser the agent"; \
+      echo "cannot use."; \
+      cat /tmp/chrome.log; exit 1; \
+    fi; \
+    : "And tolerated if it still fails. The browser came up -- that"; \
+    : "is what this step exists to prove -- and a leftover temporary"; \
+    : "profile is not a reason to fail a build."; \
+    rm -rf /tmp/chromecheck /tmp/chrome.log || true; \
+    chromium --version
 
 COPY --from=build /out/ghost /usr/local/bin/ghost
 COPY --from=build /out/gospider /usr/local/bin/gospider
@@ -303,7 +394,7 @@ COPY --from=build /nuclei-templates /opt/nuclei-templates
 # one case a glob gets wrong: no match leaves the pattern itself in $1,
 # which would otherwise count as one file.
 RUN set -eu; \
-    for b in ghost gospider nuclei httpx masscan nmap gobuster dig; do \
+    for b in ghost gospider nuclei httpx masscan nmap gobuster dig chromium; do \
       command -v "$b" >/dev/null || { echo "missing: $b"; exit 1; }; \
     done; \
     set -- /usr/share/nmap/scripts/*.nse; n=$#; \

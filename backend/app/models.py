@@ -43,6 +43,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Table,
     Text,
@@ -1450,6 +1451,119 @@ class WebAddress(Base, TimestampMixin):
         DateTime(timezone=True))
 
     target: Mapped[Target] = relationship(back_populates="web_addresses")
+
+
+class WebScreenshot(Base, TimestampMixin):
+    """A picture of one URL, as a browser drew it.
+
+    Taken by a ghost (`ghost/internal/tasks/screenshot.go`), because
+    the ghost is the thing standing inside the engagement: a capture
+    made from this server would come from the wrong egress address
+    and might be a photograph of a different front door.
+
+    # One row per URL, not per capture
+
+    `web_addresses` is keyed on the EXCHANGE, because the same
+    endpoint probed ten ways is ten pieces of evidence. A picture is
+    not evidence of that kind: ten captures of the same URL are ten
+    copies of one page, at ~200 KB each, across an estate that has
+    reached 51,000 URLs. So this is keyed on `(target_id, url_hash)`
+    and a re-shoot REPLACES the image, with `captured_at` saying how
+    old the one on file is. Keeping the history would be the single
+    biggest thing in the database and would answer a question nobody
+    asked.
+
+    # Why the bytes are in the database
+
+    The alternative is a directory on disk, and it loses on every
+    count that matters here. This application has no file store: the
+    only thing it ever writes outside the database is a spooled
+    upload that is deleted when the import finishes. A directory
+    would be a second durability story -- another thing to back up,
+    another thing to restore in the right order, a path to configure
+    per deployment, and orphaned files to reap when a project is
+    deleted. In the database, `ON DELETE CASCADE` is the reaper and
+    the existing backup is the backup.
+
+    The usual argument against blobs is that they bloat the rows the
+    planner walks, and Postgres already answers it: a `bytea` this
+    size is TOASTed out of line, so a row here is a few hundred bytes
+    plus a pointer, and nothing but the image endpoint ever selects
+    the column (it is `deferred`, so an ORM load does not drag it in
+    by accident). The precedent is beside it: `web_addresses.response`
+    holds up to 2 MB of captured body per row already.
+
+    What keeps the total bounded is the CAP, not the storage choice:
+    one image per URL, a hard size limit on the way in (see
+    `importers/screenshot.py`), and a task that photographs a page at
+    a time by request rather than a standing order that photographs
+    an estate nobody asked about.
+    """
+    __tablename__ = "web_screenshots"
+    __table_args__ = (
+        # One picture per URL per target. The uniqueness rides on the
+        # hash, never on `url`: a Postgres btree entry caps near
+        # 2.7 KB and a real URL in this database has reached 8,221
+        # characters, so an index on the text itself fails the INSERT
+        # rather than the query.
+        UniqueConstraint("target_id", "url_hash", name="uq_screenshot_url"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Indexed because rows are deleted THROUGH it. An unindexed FK is
+    #: the landmine this codebase has already stepped on once:
+    #: clearing 46,811 services scanned 294,251 web addresses per
+    #: delete and did not finish in ten minutes.
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"), index=True)
+    #: The address this is a picture of, where one is on file. SET
+    #: NULL rather than CASCADE, and indexed for the same reason as
+    #: above: a URL row can be re-keyed or removed by a later import,
+    #: and losing the photograph because the exchange beside it
+    #: changed would throw away the evidence to keep the bookkeeping
+    #: tidy.
+    web_address_id: Mapped[int | None] = mapped_column(
+        ForeignKey("web_addresses.id", ondelete="SET NULL"), index=True)
+    url: Mapped[str] = mapped_column(Text)
+    url_hash: Mapped[str] = mapped_column(String(64), index=True)
+    #: Where the browser ended up. A page that redirects to an SSO
+    #: host is a different answer from one that serves its own login
+    #: form, and the picture alone cannot say which happened.
+    final_url: Mapped[str | None] = mapped_column(Text)
+    #: The main document's status, as the browser saw it. NULL means
+    #: the browser never reported one -- a navigation that ended in
+    #: its own error page -- which is "could not determine" and not
+    #: 200.
+    status_code: Mapped[int | None] = mapped_column(Integer)
+    title: Mapped[str | None] = mapped_column(String(512))
+    #: The image. `image/png` today; a column rather than an
+    #: assumption so a later JPEG capture is a value and not a
+    #: migration.
+    content_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="image/png",
+        default="image/png")
+    #: Deferred: nothing but the image endpoint should ever pull
+    #: megabytes off this table, and a listing that forgets to say so
+    #: would pull every one of them.
+    image: Mapped[bytes] = mapped_column(LargeBinary, deferred=True)
+    #: Carried as its own column so a list can show the size without
+    #: loading the bytes to measure them.
+    bytes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0", default=0)
+    #: Of the image, not of the page. Two URLs with the same digest
+    #: are the same picture -- which is how a wildcard host serving
+    #: one holding page to 400 names announces itself.
+    sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    #: When the shutter went, not when the row was written. A picture
+    #: is only as good as its date and an import can be days later.
+    captured_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    #: What took it, for the same reason `web_addresses.sources`
+    #: exists: a reader needs to know whether this came from a ghost
+    #: inside the estate or from somewhere else.
+    sources: Mapped[str | None] = mapped_column(String(255))
 
 
 class AgentSession(Base, TimestampMixin):
