@@ -312,6 +312,7 @@ check("a readonly member cannot delete",
       call(f"/api/reports/{full['id']}", "DELETE", token=ne)[0] == 403)
 check("an admin can", call(f"/api/reports/{ex['id']}", "DELETE", token=admin)[0] == 204)
 
+
 print("\n== listing reports must not read the documents ==")
 # `content` is the whole report as JSON -- twelve megabytes on a real
 # engagement. The list used to load it with the ORM object AND parse
@@ -377,6 +378,98 @@ if _a9.run(_plant_big(6)) is not None:
           all("content" not in r for r in _big), list(_big[0])[:6])
 else:
     check("skipped: no REP project to plant against", True)
+
+# --- their block below ---
+
+print("\n== a download is a byte read, not a build ==")
+# `download` called `render(doc, fmt)` on EVERY request -- seconds
+# of work over a document that runs to twelve megabytes, repeated
+# for every click, every retry and every person who opened the link.
+#
+# The generator was already rendering the PDF to measure
+# `size_bytes` and throwing the bytes away, so the work was being
+# done twice over and discarded once.
+import asyncio as _a8  # noqa: E402
+import time as _t8  # noqa: E402
+
+from sqlalchemy import select as _s8  # noqa: E402
+
+from app.db import SessionLocal as _S8  # noqa: E402
+from app.models import Report as _R8  # noqa: E402
+from app.models import ReportRender as _RR8  # noqa: E402
+
+
+async def _renders_for(rid):
+    async with _S8() as s:
+        return [(r.fmt, r.bytes) for r in (await s.execute(
+            _s8(_RR8).where(_RR8.report_id == rid))).scalars().all()]
+
+
+# `_ready_id` is a report this suite has already generated.
+
+
+async def _find_ready():
+    async with _S8() as s:
+        r = (await s.execute(_s8(_R8).where(
+            _R8.status == "ready").order_by(_R8.id.desc()))).scalars().first()
+        return r.id if r else None
+
+_rid = _a8.run(_find_ready())
+if _rid:
+    _have = dict(_a8.run(_renders_for(_rid)))
+    # Both formats, from one build. That is the property the old
+    # late-rendering was protecting: the PDF and the DOCX a client
+    # receives are the same report, not two produced separately.
+    check("generating a report renders both formats and keeps them",
+          set(_have) == {"pdf", "docx"}, sorted(_have))
+    check("...and the stored sizes are real", all(v > 0 for v in _have.values()),
+          _have)
+
+    # The first download must not rebuild what generation already built.
+    _t0 = _t8.monotonic()
+    st, _body, _hdr = call(f"/api/reports/{_rid}/download?format=pdf",
+                       token=admin, raw=True)
+    _first = _t8.monotonic() - _t0
+    check("the first download succeeds", st == 200, st)
+    # The bytes served are the bytes that were kept, not a rebuild.
+    check("...and serves exactly what was stored",
+          len(_body) == _have["pdf"], (len(_body), _have["pdf"]))
+    check("...as a PDF", _body[:5] == b"%PDF-", _body[:8])
+    check(f"...and is fast, because nothing was rendered ({_first:.2f}s)",
+          _first < 1.5, f"{_first:.2f}s")
+
+    # And it did not grow a second copy.
+    check("downloading does not add another render",
+          len(_a8.run(_renders_for(_rid))) == 2,
+          _a8.run(_renders_for(_rid)))
+
+    st, _body, _hdr = call(f"/api/reports/{_rid}/download?format=docx",
+                       token=admin, raw=True)
+    check("the other format downloads too", st == 200, st)
+    check("...and is a DOCX, not the PDF again",
+          _body[:2] == b"PK", _body[:8])
+
+    # A report with no cached render -- an old one -- still works.
+    # It renders once, keeps it, and is fast from then on.
+    async def _forget(rid):
+        async with _S8() as s:
+            for r in (await s.execute(_s8(_RR8).where(
+                    _RR8.report_id == rid))).scalars().all():
+                await s.delete(r)
+            await s.commit()
+
+    _a8.run(_forget(_rid))
+    check("a report with no cached render has none",
+          _a8.run(_renders_for(_rid)) == [])
+    st, _body, _hdr = call(f"/api/reports/{_rid}/download?format=pdf",
+                       token=admin, raw=True)
+    check("...downloads anyway, by rendering once", st == 200, st)
+    check("...and keeps what it built",
+          [f for f, _ in _a8.run(_renders_for(_rid))] == ["pdf"],
+          _a8.run(_renders_for(_rid)))
+else:
+    check("skipped: no ready report to download", True)
+
 
 
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
