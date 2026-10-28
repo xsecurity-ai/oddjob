@@ -41,6 +41,20 @@ dependencies = [
     "maxminddb>=2.6",
 ]
 
+# Tracing is opt-in and so are its dependencies: an install that never sets
+# OTEL_EXPORTER_OTLP_ENDPOINT should not carry an exporter, an SDK and four
+# instrumentation packages it will never import. `uv sync --extra tracing`
+# turns it on; app/tracing.py degrades to a warning if it is missing.
+[project.optional-dependencies]
+tracing = [
+    "opentelemetry-sdk>=1.29",
+    "opentelemetry-exporter-otlp-proto-http>=1.29",
+    "opentelemetry-instrumentation-fastapi>=0.50b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.50b0",
+    "opentelemetry-instrumentation-asyncpg>=0.50b0",
+    "opentelemetry-instrumentation-httpx>=0.50b0",
+]
+
 [dependency-groups]
 dev = [
     "httpx>=0.28",
