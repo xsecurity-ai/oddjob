@@ -151,6 +151,7 @@ Oddjob says so on its row rather than leaving you to wonder.
 docker run -d --name ghost --restart unless-stopped \
   --network host \
   --cap-drop=ALL --cap-add=NET_RAW --cap-add=NET_ADMIN \
+  --cap-add=NET_BIND_SERVICE \
   -e GHOST_SERVER=https://oddjob.internal \
   -e GHOST_ENROLL_TOKEN=ghost_... \
   -v ghost-state:/var/lib/ghost/work \
@@ -216,6 +217,7 @@ networks:
 ```bash
 docker run -d --name ghost --restart unless-stopped \
   --cap-drop=ALL --cap-add=NET_RAW --cap-add=NET_ADMIN \
+  --cap-add=NET_BIND_SERVICE \
   -e GHOST_SERVER=https://oddjob.internal \
   -e GHOST_ENROLL_TOKEN=ghost_... \
   -v ghost-state:/var/lib/ghost/work \
