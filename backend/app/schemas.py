@@ -893,14 +893,18 @@ class AgentOverride(BaseModel):
     agent_anthropic_token: str | None = None
     agent_openai_token: str | None = None
     agent_model: str | None = None
+    #: For provider='local': the server URL (e.g. http://llm.helms.world:8000/v1).
+    agent_local_base_url: str | None = None
+    #: For provider='local': optional bearer token for the local server.
+    agent_local_token: str | None = None
 
     @field_validator("agent_provider")
     @classmethod
     def _prov(cls, v):
         if v in (None, ""):
             return None
-        if v not in ("anthropic", "openai"):
-            raise ValueError("provider must be 'anthropic' or 'openai'")
+        if v not in ("anthropic", "openai", "local"):
+            raise ValueError("provider must be 'anthropic', 'openai' or 'local'")
         return v
 
 
