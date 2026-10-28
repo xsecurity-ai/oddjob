@@ -468,15 +468,36 @@ async def _vuln(session: AsyncSession, target: Target, pv: ParsedVuln,
     """
     seen_at = seen_at or datetime.now(UTC)
     row = None
+    # Both lookups take the OLDEST match rather than demanding a unique
+    # one. `scalar_one_or_none()` raises MultipleResultsFound, and both of
+    # these can match more than one row in a healthy database:
+    #
+    #   (target_id, title, port) was never unique and was never meant to
+    #   be. A semgrep rule id IS the title, so one rule firing in six
+    #   hundred files on one target is six hundred rows that differ only
+    #   by external_id. That is real data, not duplication -- the worst
+    #   group in production is exactly six hundred rows -- so this lookup
+    #   has to pick one rather than refuse to answer.
+    #
+    #   (target_id, external_id) should be unique, but nothing enforces
+    #   it: there is no constraint, and a retried submit that raced an
+    #   in-flight one can insert the row twice. Until a unique constraint
+    #   exists, this cannot assume uniqueness either.
+    #
+    # Ordering by id makes the choice deterministic, and picking the
+    # oldest keeps repeated imports updating the same finding instead of
+    # alternating between duplicates and rewriting first_seen_at.
     if pv.external_id:
         row = (await session.execute(
             select(Vuln).where(Vuln.target_id == target.id,
-                               Vuln.external_id == pv.external_id))).scalar_one_or_none()
+                               Vuln.external_id == pv.external_id)
+            .order_by(Vuln.id).limit(1))).scalars().first()
     if row is None:
         row = (await session.execute(
             select(Vuln).where(Vuln.target_id == target.id,
                                Vuln.title == pv.title,
-                               Vuln.port == pv.port))).scalar_one_or_none()
+                               Vuln.port == pv.port)
+            .order_by(Vuln.id).limit(1))).scalars().first()
     if row is None:
         session.add(Vuln(target_id=target.id, title=pv.title[:1000],
                          severity=pv.severity, status=pv.status,
