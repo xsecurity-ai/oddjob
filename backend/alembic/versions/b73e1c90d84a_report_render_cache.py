@@ -18,7 +18,7 @@ byte read from then on. A backfill would mean rendering every
 report in the database during a deploy, to save one download each.
 
 Revision ID: b73e1c90d84a
-Revises: a91c4f7b0e23
+Revises: a1c7e4f20b95
 """
 from collections.abc import Sequence
 
@@ -27,7 +27,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "b73e1c90d84a"
-down_revision: str | Sequence[str] | None = "a91c4f7b0e23"
+down_revision: str | Sequence[str] | None = "a1c7e4f20b95"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
