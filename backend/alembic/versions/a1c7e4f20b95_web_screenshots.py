@@ -28,13 +28,13 @@ accepts -- the exact difference that has bitten this schema before.
 The agent sends base64 and the server decodes it once, here.
 
 Revision ID: a1c7e4f20b95
-Revises: a1c7e4d20b93
+Revises: a9c3f41d70b6
 """
 import sqlalchemy as sa
 from alembic import op
 
 revision = "a1c7e4f20b95"
-down_revision = "a1c7e4d20b93"
+down_revision = "a9c3f41d70b6"
 branch_labels = None
 depends_on = None
 

@@ -395,7 +395,6 @@ import time as _t8  # noqa: E402
 from sqlalchemy import select as _s8  # noqa: E402
 
 from app.db import SessionLocal as _S8  # noqa: E402
-from app.models import Report as _R8  # noqa: E402
 from app.models import ReportRender as _RR8  # noqa: E402
 
 
@@ -405,16 +404,13 @@ async def _renders_for(rid):
             _s8(_RR8).where(_RR8.report_id == rid))).scalars().all()]
 
 
-# `_ready_id` is a report this suite has already generated.
-
-
-async def _find_ready():
-    async with _S8() as s:
-        r = (await s.execute(_s8(_R8).where(
-            _R8.status == "ready").order_by(_R8.id.desc()))).scalars().first()
-        return r.id if r else None
-
-_rid = _a8.run(_find_ready())
+# The full report THIS suite generated, named rather than searched
+# for. "the newest ready report" is not the same thing: the block
+# above plants `status="ready"` rows straight into the database with
+# a stub document and no renders, and those now carry the highest
+# ids -- so the search returned a row that generation never touched,
+# and the properties below are about generation.
+_rid = full["id"]
 if _rid:
     _have = dict(_a8.run(_renders_for(_rid)))
     # Both formats, from one build. That is the property the old
