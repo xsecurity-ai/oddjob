@@ -40,6 +40,8 @@ SUITES = [
     # the harness sets ODDJOB_ALLOW_LOOPBACK_TARGETS and this is what
     # the predicate does without it. The db path is unused.
     ("tests/hosttest.py",     TMP / "ms-host.db"),
+    # Also no server: a pure function over a message list.
+    ("tests/budgettest.py",   TMP / "ms-budget.db"),
     ("tests/projecttest.py",  TMP / "ms-proj.db"),
     ("tests/scantest.py",     TMP / "ms-scan.db"),
     ("tests/importtest.py",   TMP / "ms-imp.db"),
