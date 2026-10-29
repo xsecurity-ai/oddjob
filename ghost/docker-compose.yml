@@ -24,7 +24,11 @@ services:
     # A published tag is also what `docker-compose.autoupdate.yaml`
     # needs. Auto-update against the default `ghost-agent` compares
     # the local image to nothing and quietly never fires.
-    image: ${GHOST_IMAGE:-ghost-agent}
+    # Prefer a tagged image so watchtower can detect digest updates.
+    # `ghost-agent` (the local build default) has no upstream reference,
+    # so watchtower never fires for it. Set GHOST_IMAGE explicitly when
+    # deploying to ensure the container always checks the registry.
+    image: ${GHOST_IMAGE:-cr0n1cx/ghost:develop}
     build: .
     container_name: ghost
     restart: unless-stopped

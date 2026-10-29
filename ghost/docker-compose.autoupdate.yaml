@@ -110,6 +110,12 @@ services:
       # the client asked — and starting it again from a registry poll
       # would be sending packets nobody authorised.
       WATCHTOWER_INCLUDE_STOPPED: false
+      # Always compare against the registry digest, not just the tag
+      # name. This catches cases where the local image was built from
+      # the same tag but the registry has a newer digest (e.g., after
+      # a retag or rebuild), and also ensures ghosts using locally-
+      # built images pick up updates when the remote digest changes.
+      WATCHTOWER_MONITOR_INTERVAL: 300
 
     logging:
       driver: json-file
