@@ -788,6 +788,11 @@ export interface GhostRouting {
   current_primary_name: string | null
   eligible: number
   unassigned_tasks: number
+  /** What the fleet is doing now and what it got through in the last
+   *  hour. A queue depth alone cannot say whether anything is
+   *  happening — these turn a number into a direction. */
+  running_tasks: number
+  completed_last_hour: number
   /** The engagement's ceiling on simultaneous tasks per agent. An
    *  agent's own assessment of its host still applies; the lower of
    *  the two is what runs. */
