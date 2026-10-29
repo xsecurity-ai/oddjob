@@ -2280,6 +2280,53 @@ check("...nor is one word among numbers",
 check("three words joined are", _asx._compound_identifier("Foo_Bar_Baz"))
 
 
+# ---------------------------------------------------------- memory bounds
+#
+# A sweep used to be bounded by COUNT and by nothing else, and
+# assetfetch keeps up to 8 MB of each file: 200 of them is 1.6 GB of
+# bundle resident here before opengrep reads the same corpus again.
+# That pair OOM-killed the container 126 times in a row on
+# 2026-10-28 and every page served 502 while it did. These assert the
+# two ceilings that replaced it.
+import types as _types
+
+from app.assetwork import SCAN_BUDGET_BYTES as _BUDGET
+from app.assetwork import _within_budget as _wb
+
+
+def _row(size):
+    r = _types.SimpleNamespace()
+    r.body = "x" * size
+    return r
+
+
+_big = _wb([_row(1_000_000) for _ in range(100)])
+check("a 100 MB batch is trimmed to the budget",
+      0 < sum(len(r.body) for r in _big) <= _BUDGET,
+      sum(len(r.body) for r in _big))
+# The file that is bigger than the whole budget is the interesting
+# one: refusing it would park it at the head of the queue for ever,
+# because the next sweep selects the same row and refuses it again.
+check("one oversized file is still handed over rather than stalled",
+      len(_wb([_row(_BUDGET * 3)])) == 1)
+check("a batch under the budget is passed through whole",
+      len(_wb([_row(1000) for _ in range(5)])) == 5)
+check("an empty batch stays empty", _wb([]) == [])
+
+# opengrep defaults to 16 workers, each with its own copy of the
+# compiled rule state, which is where most of the 1.8 GB came from.
+check("opengrep is given a job count well under its default of 16",
+      0 < _asx.JOBS <= 8, _asx.JOBS)
+check("opengrep's own per-file cap sits under the hard rlimit",
+      _asx.MAX_MEMORY_MB * 1024 * 1024 < _asx.MEM_LIMIT_BYTES)
+# Not that the limit is APPLIED -- macOS refuses RLIMIT_AS and the
+# ceiling is for the Linux container. What must hold everywhere is
+# that the spawn still works, because an exception raised inside
+# preexec_fn fails the spawn itself and would break every scan.
+_asx._bound_memory()
+check("the memory bound degrades instead of raising where unsupported", True)
+
+
 srv.shutdown()
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

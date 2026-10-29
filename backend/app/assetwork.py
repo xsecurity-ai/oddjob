@@ -102,6 +102,39 @@ def _host_lock(host: str) -> asyncio.Lock:
     return lk
 SCAN_BATCH = 200          # one invocation covers all of them
 
+#: Bytes of file body one sweep may hold, beside the count above.
+#:
+#: `SCAN_BATCH` bounds how MANY files a sweep takes and says nothing
+#: about how big they are, and assetfetch keeps up to 8 MB of each
+#: (`assetfetch.MAX_BYTES`) -- so 200 of them is legitimately 1.6 GB
+#: of minified bundle resident in this process before a scanner has
+#: been started, and opengrep then reads the same corpus again. That
+#: pair is what OOM-killed the container in a loop on 2026-10-28.
+#:
+#: Files past the budget are not dropped, only deferred: their
+#: `scanned_at` stays NULL, so the next sweep selects them again.
+SCAN_BUDGET_BYTES = 24 * 1024 * 1024
+
+
+def _within_budget(rows: list, budget: int = SCAN_BUDGET_BYTES) -> list:
+    """The longest run of `rows` whose bodies fit inside `budget`.
+
+    Always at least one row, even where that row alone is over it:
+    refusing it would leave it at the head of the queue for ever,
+    because the next sweep selects the same file and refuses it
+    again. One oversized file is survivable -- the rlimit in
+    `assetscan` is what stops it taking the process with it.
+    """
+    kept: list = []
+    used = 0
+    for r in rows:
+        size = len(r.body or "")
+        if kept and used + size > budget:
+            break
+        kept.append(r)
+        used += size
+    return kept
+
 
 @dataclass
 class Swept:
@@ -484,6 +517,7 @@ async def scan_project(session: AsyncSession, project_id: int, *,
                WebAssetFile.scanned_at.is_(None),
                WebAssetFile.body.is_not(None))
         .order_by(WebAssetFile.id).limit(limit))).scalars().all()
+    rows = _within_budget(rows)
 
     # One index for the batch. Built here rather than per file
     # because it is a SELECT over the project's scope rows and the
@@ -634,7 +668,9 @@ async def scan_batch(items: list[tuple[int, str, str]]
                     rules.append(r)
 
         if have.get("opengrep") and rules:
-            argv = [assetscan.OPENGREP, "scan", "--json"]
+            argv = [assetscan.OPENGREP, "scan", "--json",
+                    f"--max-memory={assetscan.MAX_MEMORY_MB}",
+                    f"--jobs={assetscan.JOBS}"]
             argv += [f"--config={r}" for r in rules]
             argv.append(d)
             rc, so, se = await assetscan._run(

@@ -44,6 +44,7 @@ import json
 import logging
 import os
 import re
+import resource
 import shutil
 from dataclasses import dataclass
 
@@ -102,6 +103,63 @@ OPENGREP_ENV = {
 #: batch, so this is the ceiling on a sweep's slow half rather than
 #: on one file.
 TIMEOUT = 300.0
+
+#: Address space ceiling for a scanner subprocess.
+#:
+#: Nothing bounded opengrep before this. On a batch of large bundles
+#: opengrep-core reached 1.8G resident and 2.7G virtual while this
+#: process was holding the same bodies, and the container's 2G cgroup
+#: killed whichever of the two the kernel picked -- 126 times in a
+#: row, so oddjob.helms.world served 502 to everything for forty
+#: minutes. A ceiling HERE turns a scan that will not fit into one
+#: failed batch instead of an outage.
+#:
+#: Against ADDRESS SPACE, not resident size: Linux has not enforced
+#: RLIMIT_RSS since 2.6, so RLIMIT_AS is the only one the kernel will
+#: honour. That means the number has to clear opengrep's real virtual
+#: footprint rather than its resident one, or every scan fails
+#: instead -- 2.7G was the figure measured, so 3.5G here.
+MEM_LIMIT_BYTES = 3584 * 1024 * 1024
+
+#: What opengrep will spend on one rule against one file, in MiB.
+#:
+#: Its own cap, and the gentler of the two: opengrep gives up on that
+#: file and carries on with the batch, where RLIMIT_AS kills the
+#: process and loses the lot. This is the one that should normally
+#: fire; the rlimit is there for when it does not.
+MAX_MEMORY_MB = 1024
+
+#: How many files opengrep works on at once.
+#:
+#: It defaults to 16, which is the real driver of the figure above:
+#: each worker holds its own compiled copy of the rule state, so the
+#: default multiplies peak memory by sixteen on a container that was
+#: given two cores and cannot use them anyway. Four is enough to keep
+#: the batch moving and takes the peak down with it.
+JOBS = 4
+
+
+def _bound_memory() -> None:
+    """Cap the child's address space. Runs in the forked child.
+
+    Best effort, and silent when it cannot be done. macOS does not let
+    a process set RLIMIT_AS, and an exception raised in `preexec_fn`
+    does not merely skip the limit -- it makes the spawn itself fail,
+    so a strict version of this turned every scan on a developer's
+    machine into `SubprocessError` while looking like a hardening
+    change. The container this actually protects is Linux, where it
+    works; everywhere else the scan simply runs unbounded, as it did
+    before this existed.
+
+    Nothing is logged here: this runs between fork and exec, where the
+    logging lock may be held by another thread and the child would
+    deadlock holding it.
+    """
+    try:
+        resource.setrlimit(resource.RLIMIT_AS,
+                           (MEM_LIMIT_BYTES, MEM_LIMIT_BYTES))
+    except (AttributeError, ValueError, OSError):
+        pass
 
 
 #: Which rule directories apply to a file, by extension.
@@ -687,7 +745,10 @@ async def _run(argv: list[str], stdin: bytes,
     proc = await asyncio.create_subprocess_exec(
         *argv, stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        env={**os.environ, **(env or {})})
+        env={**os.environ, **(env or {})},
+        # Applied in the child between fork and exec, so the ceiling
+        # is on the scanner and not on this process.
+        preexec_fn=_bound_memory)
     try:
         so, se = await asyncio.wait_for(proc.communicate(stdin),
                                         timeout=TIMEOUT)
