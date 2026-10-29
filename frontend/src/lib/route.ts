@@ -56,7 +56,14 @@ export const GLOBAL_VIEWS = ['projects', 'config', 'users', 'profile',
  *  that page. */
 export const SCOPED_VIEWS = ['targets', 'services', 'web', 'vulns',
                              'credentials', 'reports', 'ghosts',
-                             'ghost-debug', 'import', 'settings'] as const
+                             'ghost-debug', 'import', 'settings',
+                             // The agent's conversations filling a page.
+                             // Not in the nav: it is reached from the
+                             // panel's pop-out, which opens it in a window
+                             // of its own. It is a route because a window
+                             // needs a URL, and because being one means
+                             // the window survives a refresh.
+                             'agent'] as const
 
 export type GlobalView = (typeof GLOBAL_VIEWS)[number]
 export type ScopedView = (typeof SCOPED_VIEWS)[number]

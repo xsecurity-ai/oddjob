@@ -46,7 +46,7 @@ import { GhostsView } from './views/GhostsView'
 import { ProjectConfigView } from './views/ProjectConfigView'
 import { StandingOrdersButton } from './components/StandingOrders'
 import { useHostModal } from './components/HostModal'
-import { AgentPanel } from './components/AgentPanel'
+import { AgentPanel, AgentView } from './components/AgentPanel'
 import { UsersView } from './views/UsersView'
 import { neon, glow } from './theme'
 import { sorted } from './lib/sortOptions'
@@ -352,6 +352,11 @@ export default function App() {
     // admin check lives there, because a route is not a control.
     'ghost-debug': <GhostsView project={project === ALL ? null : project}
                               tab="debug" />,
+    // The agent's own window. Reached from the panel's pop-out rather
+    // than from the nav: it is the same conversations the sidebar
+    // shows, read on a screen of their own, and a nav entry for it
+    // would read as a second agent.
+    agent: <AgentView project={project === ALL ? null : project} />,
     settings: <ProjectConfigView project={project === ALL ? null : project} />,
     config: <SiteConfigView />,
     health: <HealthView />,

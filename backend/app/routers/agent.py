@@ -451,6 +451,14 @@ class SessionBrief(BaseModel):
     closed: bool = False
     at: str | None = None
     turn_count: int = 0
+    #: Which thread this was on the project, counting from 1 in the
+    #: order they were opened. The label for a thread nobody has named
+    #: and nobody has asked anything in yet, and it has to be STABLE:
+    #: numbering by position in the tab strip would renumber every tab
+    #: the moment one of them closed, so "Session 3" in the morning
+    #: and "Session 3" in the afternoon would be different
+    #: conversations. Derived from the id order, which never moves.
+    ordinal: int = 0
 
 
 def _redact_steps(steps) -> list[dict]:
@@ -572,12 +580,13 @@ async def list_sessions(project: str = Query(...),
     if ids:
         who = {u.id: u.username for u in (await session.execute(
             select(User).where(User.id.in_(ids)))).scalars().all()}
+    nth = await _ordinals(session, pr.id)
     return [SessionBrief(
         id=s.id, project_code=pr.code, title=s.title,
         opened_by=who.get(s.opened_by_id or -1), closed=bool(s.closed),
         at=(s.last_at or s.created_at).isoformat()
         if (s.last_at or s.created_at) else None,
-        turn_count=n) for s, n in rows]
+        turn_count=n, ordinal=nth.get(s.id, 0)) for s, n in rows]
 
 
 @router.get("/session", response_model=SessionOut | None)
@@ -641,6 +650,71 @@ async def new_session(project: str = Query(...),
     return await _session_out(session, sess, pr.code)
 
 
+async def _ordinals(session: AsyncSession, project_id: int) -> dict[int, int]:
+    """thread id -> which one it was on this project, counting from 1.
+
+    Counts CLOSED threads too, deliberately. The number is a name, and
+    a name that gets reused the moment its holder closes is worse than
+    no name: "Session 3" has to mean one conversation for the life of
+    the engagement, not whichever is third today.
+
+    Ids only, so this is an index-only scan of a column that is never
+    reordered.
+    """
+    rows = (await session.execute(
+        select(AgentSession.id).where(AgentSession.project_id == project_id)
+        .order_by(AgentSession.id))).scalars().all()
+    return {sid: i for i, sid in enumerate(rows, start=1)}
+
+
+class RenameRequest(BaseModel):
+    """What to call a thread. Blank puts it back to its number."""
+    title: str = ""
+
+
+@router.post("/session/{thread}/rename", response_model=SessionBrief)
+async def rename_session(thread: int, body: RenameRequest,
+                         project: str = Query(...),
+                         pr: Project = Depends(require_project("readonly")),
+                         user: User = Depends(get_current_user),
+                         session: AsyncSession = Depends(get_session)):
+    """Name a thread.
+
+    The default name is the first question asked, trimmed, which is a
+    good label right up until a conversation stops being about the
+    thing it started with. Renaming is how somebody running four at
+    once tells them apart.
+
+    **A name, once given, is kept.** The automatic title is only ever
+    written to a thread that has none (see `chat`), so asking a
+    question in a renamed thread does not overwrite the name.
+
+    Blank clears it rather than storing an empty string: an empty
+    title and no title are the same fact, and a thread with no title
+    falls back to its number. A cleared thread can therefore be
+    auto-titled again by its next question, which is the behaviour
+    somebody who cleared it is asking for.
+
+    Renames for EVERYONE on the project, like closing: the thread is
+    the engagement's and not one person's tab.
+    """
+    sess = await _pick(session, pr, user, thread, create=False)
+    if sess is None:
+        raise HTTPException(404, f"no thread {thread} on {pr.code}")
+    sess.title = (body.title or "").strip()[:200] or None
+    n = (await session.execute(
+        select(func.count(AgentTurn.id))
+        .where(AgentTurn.session_id == sess.id))).scalar_one()
+    await session.commit()
+    nth = await _ordinals(session, pr.id)
+    return SessionBrief(
+        id=sess.id, project_code=pr.code, title=sess.title,
+        closed=bool(sess.closed), turn_count=n,
+        at=(sess.last_at or sess.created_at).isoformat()
+        if (sess.last_at or sess.created_at) else None,
+        ordinal=nth.get(sess.id, 0))
+
+
 @router.post("/session/{thread}/close", response_model=SessionBrief)
 async def close_session(thread: int, project: str = Query(...),
                         pr: Project = Depends(require_project("readonly")),
@@ -664,11 +738,13 @@ async def close_session(thread: int, project: str = Query(...),
         select(func.count(AgentTurn.id))
         .where(AgentTurn.session_id == sess.id))).scalar_one()
     await session.commit()
+    nth = await _ordinals(session, pr.id)
     return SessionBrief(
         id=sess.id, project_code=pr.code, title=sess.title,
         closed=True, turn_count=n,
         at=(sess.last_at or sess.created_at).isoformat()
-        if (sess.last_at or sess.created_at) else None)
+        if (sess.last_at or sess.created_at) else None,
+        ordinal=nth.get(sess.id, 0))
 
 
 @router.post("/chat", response_model=ChatResponse)

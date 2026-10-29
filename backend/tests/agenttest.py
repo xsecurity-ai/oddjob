@@ -1348,6 +1348,61 @@ check("closing one does not touch the others",
       (second or {}).get("id") in [t["id"] for t in (rest or [])],
       str(rest)[:90])
 
+print("\n== threads are numbered, and can be named ==")
+# A tab needs a label before anybody has asked it anything, and
+# "New thread" three times over labels nothing. The number is that
+# label.
+st, nums = call("/api/agent/sessions?project=ALPHA&closed=true", token=admin)
+by_id = {t["id"]: t for t in (nums or [])}
+check("every thread carries which one it was on the project",
+      all(t.get("ordinal", 0) > 0 for t in (nums or [])), str(nums)[:200])
+# Counting CLOSED threads too is the point: a number handed to a
+# second conversation when the first closes is worse than no number,
+# because "Session 3" would mean different things on Tuesday and
+# Wednesday.
+_ord = sorted((t["ordinal"], t["id"]) for t in (nums or []))
+check("...in the order they were opened, and never reused",
+      [o for o, _ in _ord] == list(range(1, len(_ord) + 1)), str(_ord))
+check("...which is the id order, so it cannot drift",
+      [i for _, i in _ord] == sorted(i for _, i in _ord), str(_ord))
+check("...and a closed thread keeps its number rather than freeing it",
+      by_id.get(bid, {}).get("ordinal", 0) > 0, str(by_id.get(bid))[:120])
+
+sid = (second or {}).get("id")
+st, named = call(f"/api/agent/session/{sid}/rename?project=ALPHA", "POST",
+                 {"title": "  Credential triage  "}, token=admin)
+check("a thread can be named", st == 200, f"status={st} {str(named)[:120]}")
+check("...trimmed, because a name with edges is a name somebody pasted",
+      (named or {}).get("title") == "Credential triage", str(named)[:120])
+st, seen = call("/api/agent/sessions?project=ALPHA", token=ntok)
+check("...and everyone on the engagement sees it, like the thread itself",
+      next((t["title"] for t in (seen or []) if t["id"] == sid), None)
+      == "Credential triage", str(seen)[:200])
+
+# The automatic title is only written to a thread that HAS none, so a
+# name somebody chose is not overwritten by their next question. This
+# asserts the rule rather than the chat path, which needs a provider.
+st, again = call(f"/api/agent/session/{sid}/rename?project=ALPHA", "POST",
+                 {"title": ""}, token=admin)
+check("an empty name clears it rather than storing an empty string",
+      (again or {}).get("title") is None, str(again)[:120])
+check("...so the thread falls back to its number",
+      (again or {}).get("ordinal", 0) > 0, str(again)[:120])
+
+_long = "x" * 400
+st, cut = call(f"/api/agent/session/{sid}/rename?project=ALPHA", "POST",
+               {"title": _long}, token=admin)
+check("a name longer than the column is cut, not refused",
+      len((cut or {}).get("title") or "") == 200, len((cut or {}).get("title") or ""))
+
+# Same boundary as reading and closing. A thread id must not cross
+# projects, whatever is being done to it.
+st, _ = call(f"/api/agent/session/{(bsess or {}).get('id')}/rename"
+             f"?project=ALPHA", "POST", {"title": "nope"}, token=admin)
+check("another engagement's thread cannot be renamed through this one",
+      st == 404, f"status={st}")
+
+
 print("\n== a credential never lands in a shared transcript ==")
 # `reveal_secret` releases a value only to a `user` role and only
 # with an audit entry naming who asked. A thread readable by

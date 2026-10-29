@@ -8,9 +8,11 @@ import SendIcon from '@mui/icons-material/Send'
 import BuildIcon from '@mui/icons-material/BuildCircle'
 import AddIcon from '@mui/icons-material/Add'
 import OpenInFullIcon from '@mui/icons-material/OpenInFull'
+import OpenInNewIcon from '@mui/icons-material/OpenInNew'
 import CloseFullscreenIcon from '@mui/icons-material/CloseFullscreen'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type AgentSessionBrief, type AgentStep } from '../lib/api'
+import { api, type AgentSessionBrief, type AgentStatus,
+         type AgentStep } from '../lib/api'
 import { SlackHandlePrompt } from './SlackHandlePrompt'
 import { useStoredFlag } from '../lib/useStoredFlag'
 import { neon, glow, TAB_SX } from '../theme'
@@ -77,69 +79,18 @@ const READING_WIDTH = 920
 export function AgentPanel({ project, open, onClose }: {
   project: string | null; open: boolean; onClose: () => void
 }) {
-  const qc = useQueryClient()
   // Popped out or docked, remembered per device. Whoever reads long
   // answers full-screen reads the next one that way too, and having
   // to say so on every page load is the kind of friction that makes
   // the feature not get used.
   const [full, toggleFull] = useStoredFlag('oddjob.agent.fullscreen', false)
-  const [active, setActive] = useState<number | null>(null)
 
   const status = useQuery({
     queryKey: ['agent-status', project],
     queryFn: () => api.agentStatus(project!),
     enabled: open && !!project,
   })
-
-  // The engagement's open threads, not this tab's. Keyed on the
-  // project so switching lands on that project's conversations rather
-  // than carrying one client's into another's view.
-  const sessions = useQuery({
-    queryKey: ['agent-sessions', project],
-    queryFn: () => api.agentSessions(project!),
-    enabled: open && !!project,
-  })
-  const list = useMemo<AgentSessionBrief[]>(
-    () => sessions.data ?? [], [sessions.data])
-
-  const fresh = useMutation({
-    mutationFn: () => api.newAgentSession(project!, false),
-    onSuccess: (sess) => {
-      // Alongside, not instead of: `close_current=false`. A second
-      // question is a second thread, and the one already open may be
-      // somebody else's.
-      qc.setQueryData(['agent-session', project, sess.id], sess)
-      void qc.invalidateQueries({ queryKey: ['agent-sessions', project] })
-      setActive(sess.id)
-    },
-  })
-
-  const shut = useMutation({
-    mutationFn: (id: number) => api.closeAgentSession(project!, id),
-    onSuccess: (brief) => {
-      qc.removeQueries({ queryKey: ['agent-session', project, brief.id] })
-      void qc.invalidateQueries({ queryKey: ['agent-sessions', project] })
-      // Null rather than a guess at the neighbour: the effect below
-      // settles on whichever thread the refreshed list puts first.
-      setActive((cur) => (cur === brief.id ? null : cur))
-    },
-  })
-
-  // A stale selection must not survive a project change even for the
-  // moment before the new list lands — an id from one engagement can
-  // never address a thread in another.
-  useEffect(() => { setActive(null) }, [project])
-
-  // Keep the selection on a thread that still exists. Newest first,
-  // so a panel opened cold lands on the most recent conversation.
-  useEffect(() => {
-    if (!list.length) { setActive((cur) => (cur === null ? cur : null)); return }
-    setActive((cur) => (cur !== null && list.some((s) => s.id === cur)
-                        ? cur : list[0].id))
-  }, [list])
-
   const s = status.data
-  const configured = !!s?.configured
 
   return (
     <>
@@ -180,27 +131,28 @@ export function AgentPanel({ project, open, onClose }: {
               height: 18, fontSize: 10, bgcolor: alpha(neon.pink, 0.14),
               color: neon.pink, border: `1px solid ${alpha(neon.pink, 0.45)}` }} />}
             <Box sx={{ flex: 1 }} />
-            {/* Opens a thread beside the others rather than replacing
-                the one in front of you. The conversation is the
-                engagement's and somebody else may be mid-question in
-                it, so ending theirs to start yours is not a thing a
-                "new chat" button should do. */}
+            {/* A real second window, not a wider drawer: the threads
+                are the ENGAGEMENT's and live on the server, so one
+                opened here is the same conversation read there. That
+                is what makes a second window worth having — the agent
+                on one screen while the table it is talking about
+                stays on the other.
+
+                Named, so clicking twice focuses the window already
+                open rather than opening a second copy of it. */}
             {project && (
-              <Tooltip title="Start another conversation. The ones already
-                              open stay open — they belong to the
-                              engagement, and others on it may be using
-                              them.">
-                <span>
-                  <IconButton size="small" disabled={fresh.isPending}
-                    onClick={() => fresh.mutate()}
-                    sx={{ color: neon.muted, '&:hover': { color: neon.cyan } }}>
-                    <AddIcon sx={{ fontSize: 18 }} />
-                  </IconButton>
-                </span>
+              <Tooltip title="Open the conversations in a window of their own.
+                              They are the engagement's threads either way —
+                              the same ones, in both places.">
+                <IconButton size="small"
+                  onClick={() => { popOut(project) }}
+                  sx={{ color: neon.muted, '&:hover': { color: neon.cyan } }}>
+                  <OpenInNewIcon sx={{ fontSize: 16 }} />
+                </IconButton>
               </Tooltip>
             )}
             <Tooltip title={full ? 'Dock the agent back to the side'
-                                 : 'Pop the agent out to the full window'}>
+                                 : 'Fill this window with the agent'}>
               <IconButton size="small" onClick={toggleFull}
                 sx={{ color: full ? neon.cyan : neon.muted,
                       '&:hover': { color: neon.cyan } }}>
@@ -213,128 +165,347 @@ export function AgentPanel({ project, open, onClose }: {
             </IconButton>
           </Stack>
 
-          {/* provider line */}
-          {s && (
-            <Stack
-              direction="row"
-              spacing={0.8}
-              useFlexGap
-              sx={{
-                alignItems: "center",
-                flexWrap: "wrap",
-                px: 1.5,
-                py: 0.8,
-                borderBottom: `1px solid ${alpha(neon.purple, 0.18)}`
-              }}>
-              <Chip size="small" label={s.provider} sx={tag(neon.cyan)} />
-              <Chip size="small" label={s.model} sx={tag(neon.purple)} />
-              {s.endpoint
-                ? <Tooltip title={`The Oddjob server calls ${s.endpoint}`}>
-                    <Chip size="small" label="local" sx={tag(neon.yellow)} />
-                  </Tooltip>
-                : <Chip size="small" label={`creds: ${s.source}`} sx={tag(neon.muted)} />}
-              {/* The kind matters: an OAuth token from `claude setup-token`
-                  and an API key go on different headers. */}
-              <Chip size="small" label={s.token_kind} sx={tag(
-                s.token_kind === 'not set' ? neon.red : neon.green)} />
-              <Chip size="small" label={s.allow_writes ? 'can write' : 'read-only'}
-                    sx={tag(s.allow_writes ? neon.orange : neon.muted)} />
-              <Tooltip title={s.tools.join(', ')}>
-                <Chip size="small" label={`${s.tools.length} tools`} sx={tag(neon.green)} />
-              </Tooltip>
-            </Stack>
-          )}
-
-          {/* One tab per OPEN thread on the engagement. A single
-              thread gets no strip: a tab bar with one tab in it is
-              chrome that explains nothing. */}
-          {list.length > 1 && (
-            <Tabs value={active ?? false} variant="scrollable"
-              scrollButtons="auto" allowScrollButtonsMobile
-              onChange={(_, v: number) => setActive(v)}
-              sx={{ minHeight: 34, borderBottom: `1px solid ${alpha(neon.cyan, 0.2)}`,
-                    '& .MuiTabs-indicator': { backgroundColor: neon.cyan } }}>
-              {list.map((t) => (
-                <Tab key={t.id} value={t.id}
-                  sx={{ ...TAB_SX, minWidth: 0, maxWidth: 220, pr: 0.5 }}
-                  label={
-                    <Stack direction="row" spacing={0.5}
-                      sx={{ alignItems: 'center', minWidth: 0 }}>
-                      <Tooltip title={threadTooltip(t)}>
-                        <Box component="span" sx={{
-                          maxWidth: 150, overflow: 'hidden',
-                          textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                        }}>{threadLabel(t)}</Box>
-                      </Tooltip>
-                      {/* A span, not a button: a Tab is already a
-                          button and nesting one inside it is invalid
-                          markup that browsers resolve by unnesting it. */}
-                      <Tooltip title="Close this conversation. It closes for
-                                      everyone on the engagement — it is the
-                                      engagement's, not your tab — and it is
-                                      kept, not deleted.">
-                        <Box component="span" role="button" aria-label="Close thread"
-                          onClick={(e) => { e.stopPropagation(); shut.mutate(t.id) }}
-                          sx={{ display: 'flex', alignItems: 'center',
-                                borderRadius: '50%', p: 0.2, color: alpha(neon.muted, 0.8),
-                                '&:hover': { color: neon.pink } }}>
-                          <CloseIcon sx={{ fontSize: 13 }} />
-                        </Box>
-                      </Tooltip>
-                    </Stack>
-                  } />
-              ))}
-            </Tabs>
-          )}
-
-          {/* body — one per open thread, only one of them visible */}
-          {!project && (
-            <Box sx={{ px: 1.5, py: 1.5 }}>
-              <Alert severity="info" variant="outlined" sx={{ fontSize: 12 }}>
-                Choose an engagement in the header — the agent works on one
-                project at a time, and cannot reach the others.
-              </Alert>
-            </Box>
-          )}
-          {project && s && !s.configured && (
-            <Box sx={{ px: 1.5, py: 1.5 }}>
-              <Alert severity="warning" variant="outlined" sx={{ fontSize: 12 }}>
-                {s.detail}
-              </Alert>
-            </Box>
-          )}
-          {project && list.map((t) => (
-            <AgentThread key={t.id} project={project} thread={t.id}
-              configured={configured} active={t.id === active} full={full} />
-          ))}
-          {/* Nothing has been asked on this project yet. The thread is
-              not created on load — a project with no conversation says
-              so rather than being given an empty one — so this stands
-              in until the first question opens one. */}
-          {project && !list.length && (
-            <AgentThread key="first" project={project} thread={null}
-              configured={configured} active full={full}
-              onOpened={() => {
-                void qc.invalidateQueries({
-                  queryKey: ['agent-sessions', project] })
-              }} />
-          )}
+          <ProviderLine s={s} />
+          <AgentConversations project={project} s={s} full={full}
+            enabled={open} />
         </Stack>
       </Drawer>
     </>
   );
 }
 
-/** What the tab says. The title is the first question asked, trimmed
- *  by the server; an unused thread has none yet. */
+/** The agent filling a page of its own, which is what the pop-out
+ *  window loads.
+ *
+ *  Not a second implementation of the panel: the same conversations
+ *  component, without the drawer around it. The threads are the
+ *  engagement's and live on the server, so this window and the docked
+ *  panel are two views of one thing — ask here and the answer is in
+ *  the sidebar on the other screen. */
+export function AgentView({ project }: { project: string | null }) {
+  const status = useQuery({
+    queryKey: ['agent-status', project],
+    queryFn: () => api.agentStatus(project!),
+    enabled: !!project,
+  })
+  // `flex: 1`, not `height: 100%`. App renders a view as a child of a
+  // column flex container that is itself sized by the window, so a
+  // percentage height here resolves against an auto-height parent and
+  // the composer slides off the bottom with no scrollbar to reach the
+  // transcript. Same shape, and the same failure, as DataTable's --
+  // see CLAUDE.md.
+  return (
+    <Stack sx={{ flex: 1, minHeight: 0 }}>
+      <ProviderLine s={status.data} />
+      <AgentConversations project={project} s={status.data} full enabled />
+    </Stack>
+  )
+}
+
+/** Open — or re-focus — the agent's own window for this engagement.
+ *
+ *  Named after the project, so a second click lands on the window
+ *  already open instead of stacking copies of it. Falls back to the
+ *  current tab when a popup blocker refuses: the alternative is a
+ *  button that silently does nothing. */
+function popOut(project: string): void {
+  const url = `/projects/${encodeURIComponent(project)}/agent`
+  // Deliberately NOT `noopener`: with it the call returns null and
+  // there is no handle to focus, so a second click would reopen
+  // rather than raise the window already there. Same origin, so the
+  // opener reference it keeps is our own page.
+  const w = window.open(url, `oddjob-agent-${project}`,
+                        'width=1100,height=900')
+  if (w) w.focus()
+  else window.location.assign(url)
+}
+
+/** The provider, model and tool count. Shown in both places, because
+ *  "read-only" and "13 tools" are what an answer has to be read
+ *  against and they are not worth guessing at. */
+function ProviderLine({ s }: { s: AgentStatus | undefined }) {
+  if (!s) return null
+  return (
+    <Stack
+      direction="row"
+      spacing={0.8}
+      useFlexGap
+      sx={{
+        alignItems: "center",
+        flexWrap: "wrap",
+        px: 1.5,
+        py: 0.8,
+        borderBottom: `1px solid ${alpha(neon.purple, 0.18)}`
+      }}>
+      <Chip size="small" label={s.provider} sx={tag(neon.cyan)} />
+      <Chip size="small" label={s.model} sx={tag(neon.purple)} />
+      {s.endpoint
+        ? <Tooltip title={`The Oddjob server calls ${s.endpoint}`}>
+            <Chip size="small" label="local" sx={tag(neon.yellow)} />
+          </Tooltip>
+        : <Chip size="small" label={`creds: ${s.source}`} sx={tag(neon.muted)} />}
+      {/* The kind matters: an OAuth token from `claude setup-token`
+          and an API key go on different headers. */}
+      <Chip size="small" label={s.token_kind} sx={tag(
+        s.token_kind === 'not set' ? neon.red : neon.green)} />
+      <Chip size="small" label={s.allow_writes ? 'can write' : 'read-only'}
+            sx={tag(s.allow_writes ? neon.orange : neon.muted)} />
+      <Tooltip title={s.tools.join(', ')}>
+        <Chip size="small" label={`${s.tools.length} tools`} sx={tag(neon.green)} />
+      </Tooltip>
+    </Stack>
+  )
+}
+
+/**
+ * The tab strip and every open thread under it.
+ *
+ * Shared by the docked panel and the pop-out window, which is the
+ * point: both are reading the ENGAGEMENT's threads off the server, so
+ * two windows on two screens are two views of one conversation rather
+ * than two conversations.
+ */
+function AgentConversations({ project, s, full, enabled }: {
+  project: string | null
+  s: AgentStatus | undefined
+  full: boolean
+  /** False while the docked panel is shut, so a closed sidebar is not
+   *  polling for threads nobody is looking at. */
+  enabled: boolean
+}) {
+  const qc = useQueryClient()
+  const [active, setActive] = useState<number | null>(null)
+  /** The thread being renamed, and what is in the box. Null is "not
+   *  renaming" — distinct from an empty draft, which is somebody
+   *  clearing the name back to its number. */
+  const [editing, setEditing] = useState<{ id: number; text: string } | null>(null)
+
+  // The engagement's open threads, not this tab's. Keyed on the
+  // project so switching lands on that project's conversations rather
+  // than carrying one client's into another's view.
+  const sessions = useQuery({
+    queryKey: ['agent-sessions', project],
+    queryFn: () => api.agentSessions(project!),
+    enabled: enabled && !!project,
+  })
+  const list = useMemo<AgentSessionBrief[]>(
+    () => sessions.data ?? [], [sessions.data])
+
+  const fresh = useMutation({
+    mutationFn: () => api.newAgentSession(project!, false),
+    onSuccess: (sess) => {
+      // Alongside, not instead of: `close_current=false`. A second
+      // question is a second thread, and the one already open may be
+      // somebody else's.
+      qc.setQueryData(['agent-session', project, sess.id], sess)
+      void qc.invalidateQueries({ queryKey: ['agent-sessions', project] })
+      setActive(sess.id)
+    },
+  })
+
+  const shut = useMutation({
+    mutationFn: (id: number) => api.closeAgentSession(project!, id),
+    onSuccess: (brief) => {
+      qc.removeQueries({ queryKey: ['agent-session', project, brief.id] })
+      void qc.invalidateQueries({ queryKey: ['agent-sessions', project] })
+      // Null rather than a guess at the neighbour: the effect below
+      // settles on whichever thread the refreshed list puts first.
+      setActive((cur) => (cur === brief.id ? null : cur))
+    },
+  })
+
+  const rename = useMutation({
+    mutationFn: (v: { id: number; title: string }) =>
+      api.renameAgentSession(project!, v.id, v.title),
+    // Invalidate rather than patch the row in place: the name is the
+    // engagement's, like the thread, so the list is the thing that
+    // settles it for everyone.
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['agent-sessions', project] })
+    },
+  })
+
+  const commitRename = () => {
+    if (!editing) return
+    const t = list.find((x) => x.id === editing.id)
+    // Unchanged is not a write. A double-click that turned out to be
+    // a mis-click should leave no trace on a thread other people are
+    // reading.
+    if (t && editing.text.trim() !== (t.title ?? '')) {
+      rename.mutate({ id: editing.id, title: editing.text.trim() })
+    }
+    setEditing(null)
+  }
+
+  // A stale selection must not survive a project change even for the
+  // moment before the new list lands — an id from one engagement can
+  // never address a thread in another.
+  useEffect(() => { setActive(null); setEditing(null) }, [project])
+
+  // Keep the selection on a thread that still exists. Newest first,
+  // so a panel opened cold lands on the most recent conversation.
+  useEffect(() => {
+    if (!list.length) { setActive((cur) => (cur === null ? cur : null)); return }
+    setActive((cur) => (cur !== null && list.some((s_) => s_.id === cur)
+                        ? cur : list[0].id))
+  }, [list])
+
+  const configured = !!s?.configured
+
+  return (
+    <>
+      {/* One tab per OPEN thread on the engagement, and a `+` at the
+          end that opens another.
+
+          The strip shows from the first thread rather than the
+          second, which it did not: the `+` lives in it now, and a
+          control that only appears once you already have two of the
+          thing it creates is a control nobody finds. */}
+      {project && list.length > 0 && (
+        <Tabs value={list.some((t) => t.id === active) ? active : false}
+          variant="scrollable"
+          scrollButtons="auto" allowScrollButtonsMobile
+          onChange={(_, v: number | 'new') => {
+            if (v === 'new') { fresh.mutate(); return }
+            setActive(v)
+          }}
+          sx={{ minHeight: 34, borderBottom: `1px solid ${alpha(neon.cyan, 0.2)}`,
+                '& .MuiTabs-indicator': { backgroundColor: neon.cyan } }}>
+          {list.map((t) => (
+            <Tab key={t.id} value={t.id}
+              sx={{ ...TAB_SX, minWidth: 0, maxWidth: 220, pr: 0.5 }}
+              label={
+                editing?.id === t.id ? (
+                  /* Renaming in place rather than in a dialog. The
+                     name is a label on a tab; asking for a modal to
+                     change one is more ceremony than the thing is
+                     worth. */
+                  <TextField
+                    autoFocus variant="standard" value={editing.text}
+                    onChange={(e) => setEditing({ id: t.id, text: e.target.value })}
+                    onClick={(e) => e.stopPropagation()}
+                    onBlur={commitRename}
+                    onKeyDown={(e) => {
+                      e.stopPropagation()
+                      if (e.key === 'Enter') { e.preventDefault(); commitRename() }
+                      // Escape abandons it. A rename is the kind of
+                      // thing people start and change their mind
+                      // about, and blur-to-save with no way out means
+                      // the mind-change is still a write.
+                      if (e.key === 'Escape') { e.preventDefault(); setEditing(null) }
+                    }}
+                    placeholder={`Session ${t.ordinal || ''}`.trim()}
+                    sx={{ width: 150,
+                          '& .MuiInput-input': { fontSize: 11, py: 0 } }} />
+                ) : (
+                <Stack direction="row" spacing={0.5}
+                  sx={{ alignItems: 'center', minWidth: 0 }}>
+                  <Tooltip title={threadTooltip(t)}>
+                    <Box component="span"
+                      onDoubleClick={(e) => {
+                        e.stopPropagation()
+                        setEditing({ id: t.id, text: t.title ?? '' })
+                      }}
+                      sx={{
+                        maxWidth: 150, overflow: 'hidden',
+                        textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>{threadLabel(t)}</Box>
+                  </Tooltip>
+                  {/* A span, not a button: a Tab is already a
+                      button and nesting one inside it is invalid
+                      markup that browsers resolve by unnesting it. */}
+                  <Tooltip title="Close this conversation. It closes for
+                                  everyone on the engagement — it is the
+                                  engagement's, not your tab — and it is
+                                  kept, not deleted.">
+                    <Box component="span" role="button" aria-label="Close thread"
+                      onClick={(e) => { e.stopPropagation(); shut.mutate(t.id) }}
+                      sx={{ display: 'flex', alignItems: 'center',
+                            borderRadius: '50%', p: 0.2, color: alpha(neon.muted, 0.8),
+                            '&:hover': { color: neon.pink } }}>
+                      <CloseIcon sx={{ fontSize: 13 }} />
+                    </Box>
+                  </Tooltip>
+                </Stack>
+                )
+              } />
+          ))}
+          {/* Last, and a Tab rather than a button beside the strip so
+              it scrolls with the tabs it belongs to. It opens a
+              thread ALONGSIDE the others: the conversation is the
+              engagement's and somebody else may be mid-question in
+              it, so ending theirs to start yours is not a thing a
+              "new chat" control should do. */}
+          <Tab value="new" disabled={fresh.isPending}
+            aria-label="New conversation"
+            sx={{ ...TAB_SX, minWidth: 40, px: 1 }}
+            label={
+              <Tooltip title={`Start another conversation — it will be Session
+                               ${list.length + 1} until you name it. The ones
+                               already open stay open; they belong to the
+                               engagement, and others on it may be using them.`}>
+                <AddIcon sx={{ fontSize: 16 }} />
+              </Tooltip>
+            } />
+        </Tabs>
+      )}
+
+      {/* body — one per open thread, only one of them visible */}
+      {!project && (
+        <Box sx={{ px: 1.5, py: 1.5 }}>
+          <Alert severity="info" variant="outlined" sx={{ fontSize: 12 }}>
+            Choose an engagement in the header — the agent works on one
+            project at a time, and cannot reach the others.
+          </Alert>
+        </Box>
+      )}
+      {project && s && !s.configured && (
+        <Box sx={{ px: 1.5, py: 1.5 }}>
+          <Alert severity="warning" variant="outlined" sx={{ fontSize: 12 }}>
+            {s.detail}
+          </Alert>
+        </Box>
+      )}
+      {project && list.map((t) => (
+        <AgentThread key={t.id} project={project} thread={t.id}
+          configured={configured} active={t.id === active} full={full} />
+      ))}
+      {/* Nothing has been asked on this project yet. The thread is
+          not created on load — a project with no conversation says
+          so rather than being given an empty one — so this stands
+          in until the first question opens one. */}
+      {project && !list.length && (
+        <AgentThread key="first" project={project} thread={null}
+          configured={configured} active full={full}
+          onOpened={() => {
+            void qc.invalidateQueries({
+              queryKey: ['agent-sessions', project] })
+          }} />
+      )}
+    </>
+  )
+}
+
+/** What the tab says.
+ *
+ *  The title is whatever somebody named it, or failing that the first
+ *  question asked, trimmed by the server. A thread with neither falls
+ *  back to its NUMBER — the ordinal, which counts closed threads too,
+ *  so "Session 3" means one conversation for the life of the
+ *  engagement rather than whichever is third today.
+ *
+ *  `'New thread'` was the old fallback and it was the same string for
+ *  every unused tab, which is the one case a label has to distinguish:
+ *  three of them side by side said nothing at all. */
 function threadLabel(t: AgentSessionBrief): string {
-  return (t.title || '').trim() || 'New thread'
+  return (t.title || '').trim() || (t.ordinal ? `Session ${t.ordinal}` : 'New thread')
 }
 
 function threadTooltip(t: AgentSessionBrief): string {
   const who = t.opened_by ? `opened by ${t.opened_by}` : 'opened by someone since removed'
   const n = t.turn_count === 1 ? '1 message' : `${t.turn_count} messages`
-  return `${threadLabel(t)} — ${who}, ${n}`
+  return `${threadLabel(t)} — ${who}, ${n}. `
+       + 'Double-click the name to rename it, for everyone on the engagement.'
 }
 
 /**

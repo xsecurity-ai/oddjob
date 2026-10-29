@@ -456,7 +456,8 @@ if _DIST.is_dir():
     # is here because that test is what caught it missing.
     SPA_ROUTES = ("projects", "targets", "services", "web", "vulns",
                   "credentials", "reports", "import", "config", "users",
-                  "profile", "ghosts", "ghost-debug", "settings", "health")
+                  "profile", "ghosts", "ghost-debug", "settings", "health",
+                  "agent")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(request: Request, full_path: str):
