@@ -1100,6 +1100,20 @@ class User(Base, TimestampMixin):
     #: may be in the client's workspace under another name.
     slack_handle: Mapped[str | None] = mapped_column(String(128))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    #: When this account last signed in successfully, by any method.
+    #:
+    #: NULL means it never has -- which is what an invited account
+    #: looks like until somebody uses the link. That distinction is
+    #: the point: an invite is an onboarding link, and offering it for
+    #: an account already in use sends a password-setting email to a
+    #: working user.
+    #:
+    #: Stored rather than derived from the `auth.login` audit entries,
+    #: which say the same thing and then expire. A signal that
+    #: disappears on a retention sweep would quietly re-enable the
+    #: button months later.
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
 
     groups: Mapped[list[Group]] = relationship(
         secondary=user_groups, back_populates="users", lazy="selectin")

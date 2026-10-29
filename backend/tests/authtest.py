@@ -538,6 +538,35 @@ st, r = call("/api/auth/login", "POST",
              {"username": "someone.else", "password": "anything-at-all"})
 check("an invited account cannot be signed into before redemption", st == 401, f"status={st}")
 
+print("\n== an invite is for an account that has never signed in ==")
+# An invite emails a link that sets a FIRST password. Sent to an
+# account already in use it is an unsolicited password-setting mail
+# to a working user, and that link is worth something to whoever
+# reads the mailbox. The UI greys the button out; this is the check
+# that the server does not rely on it.
+st, _before = call("/api/users", token=admin)
+_admin_row = [u for u in _before if u["username"] == "brandon"][0]
+check("the account doing the asking has signed in, so it reports a time",
+      _admin_row.get("last_login_at"), str(_admin_row)[:140])
+# `brandon` authenticated to get this far, so it is the one account
+# the suite can prove has logged in.
+st, r = call("/api/auth/invite/brandon", "POST", {}, token=admin)
+check("inviting an account that has signed in is refused",
+      st == 409, f"status={st} {str(r)[:110]}")
+check("...and the refusal says why rather than just failing",
+      "signed in before" in str(r), str(r)[:160])
+
+# The other half: an account that has NOT signed in is still invitable,
+# which is the whole point of the button.
+_fresh = [u for u in _before
+          if u["username"].startswith("someone.else") and not u.get("last_login_at")]
+check("an invited account reports no last sign-in", _fresh,
+      str([(u["username"], u.get("last_login_at")) for u in _before])[:200])
+if _fresh:
+    st, r = call(f"/api/auth/invite/{_fresh[0]['username']}", "POST", {}, token=admin)
+    check("...and can still be invited", st == 200, f"status={st} {str(r)[:110]}")
+
+
 print("\n== collisions are refused, never merged ==")
 st, r = call("/api/users/invite", "POST", {"email": "someone.else@other.example"}, token=admin)
 check("a different address deriving a taken username is refused",

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
@@ -117,6 +118,10 @@ async def login(body: LoginRequest, response: Response,
             username=body.username.strip().lower()[:128],
             detail="rejected", commit=True)
         raise HTTPException(401, "invalid username or password")
+    # Before the audit commit, so the two land together: the entry
+    # saying they signed in and the column the Invite button reads
+    # must not be able to disagree.
+    u.last_login_at = datetime.now(UTC)
     await audit.record(session, "ui", "auth.login", user=u, commit=True)
     token = create_access_token(u)
     response.set_cookie(

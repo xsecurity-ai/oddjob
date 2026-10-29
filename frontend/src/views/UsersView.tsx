@@ -172,11 +172,22 @@ export function UsersView() {
                       </span>
                     </Tooltip>
 
-                    <Tooltip title={u.email
-                      ? 'Email a sign-in link so they can set a password'
-                      : 'No email address on this account'}>
+                    {/* An invite is an ONBOARDING link: it emails a way to
+                        set a first password. Once the account has signed
+                        in, sending one mails a password-reset to somebody
+                        who is already working -- so it is offered only
+                        while `last_login_at` is null. Disabled rather than
+                        hidden, with the date in the tooltip, because a
+                        button that vanishes leaves the operator wondering
+                        whether they misremembered where it was. */}
+                    <Tooltip title={!u.email
+                      ? 'No email address on this account'
+                      : u.last_login_at
+                        ? `Already signed in on ${new Date(u.last_login_at).toLocaleString()} — an invite only sets a FIRST password`
+                        : 'Email a sign-in link so they can set a password'}>
                       <span>
-                        <Button size="small" disabled={!u.email || sendInvite.isPending}
+                        <Button size="small"
+                          disabled={!u.email || !!u.last_login_at || sendInvite.isPending}
                           onClick={() => sendInvite.mutate(u.username)}
                           sx={{ fontSize: 10.5, color: neon.cyan, minWidth: 0 }}>
                           Invite

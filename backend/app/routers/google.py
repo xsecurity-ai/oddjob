@@ -237,6 +237,10 @@ async def callback(request: Request, code: str | None = None, state: str | None 
 
     if not u.is_active:
         raise HTTPException(403, "this account is disabled")
+    # Google is a sign-in like any other, and the Invite button reads
+    # this. Set after the is_active check so a refused account is not
+    # recorded as having signed in.
+    u.last_login_at = datetime.now(UTC)
     await session.commit()
     if created:
         # No project: see events.py -- unlabelled means site admins only,

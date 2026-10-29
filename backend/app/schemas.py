@@ -830,6 +830,10 @@ class UserOut(BaseModel):
     # Which sign-in methods actually work for this account.
     has_password: bool = False
     has_google: bool = False
+    #: NULL until the account signs in for the first time. The Invite
+    #: button is an onboarding link, so it is offered only while this
+    #: is unset -- see `User.last_login_at`.
+    last_login_at: datetime | None = None
     groups: list[GroupOut] = []
     created_at: datetime
 
