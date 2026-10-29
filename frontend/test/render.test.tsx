@@ -149,9 +149,10 @@ console.log('\n== the agent panel keeps every open thread mounted ==')
 // scroll position and a question still in flight all survive. Unmount
 // the inactive ones and all three are silently thrown away, which
 // looks identical until someone loses a half-written question.
-const brief = (id: number, title: string): AgentSessionBrief => ({
+const brief = (id: number, title: string | null,
+               ordinal = id): AgentSessionBrief => ({
   id, project_code: 'ACME', title, opened_by: 'tester', closed: false,
-  at: null, turn_count: 2,
+  at: null, turn_count: 2, ordinal,
 })
 const thread = (id: number, text: string): AgentSession => ({
   id, project_code: 'ACME', title: text, opened_by: 'tester', closed: false,
@@ -220,15 +221,33 @@ check('every thread is mounted, not only the one in front of you — '
 check('and the one not in front of you is hidden rather than dropped',
       panel.includes('display:none'))
 
-// One thread needs no strip: a tab bar with a single tab in it is
-// chrome that explains nothing.
+// One thread used to get no strip, on the reasoning that a tab bar
+// with one tab in it is chrome that explains nothing. That was right
+// about the tab and wrong about the bar: the `+` lives in the strip
+// now, so hiding it at one thread hid the only control that makes the
+// second one -- which is to say the control was not in the thing it
+// creates, and you had to already have two to find out how to get two.
 const solo = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 solo.setQueryData(['agent-sessions', 'ACME'], [brief(1, 'the crawl')])
 solo.setQueryData(['agent-session', 'ACME', 1], thread(1, 'what did the crawl find'))
 const one = mount(solo)
-check('a single thread is shown without a tab strip',
-      closers(one) === 0 && threads(one) === 1,
+check('a single thread still gets the strip, because the + is in it',
+      one.includes('aria-label="New conversation"'),
       `${closers(one)} close buttons, ${threads(one)} threads`)
+check('...with its one tab, closable like any other',
+      closers(one) === 1 && threads(one) === 1,
+      `${closers(one)} close buttons, ${threads(one)} threads`)
+
+// A thread nobody has named is labelled by its NUMBER. `'New thread'`
+// was the label for every unused tab, which is the one case a label
+// has to distinguish -- three of them side by side said nothing.
+const unnamed = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+unnamed.setQueryData(['agent-sessions', 'ACME'],
+                     [brief(7, null, 3), brief(8, null, 4)])
+const nameless = mount(unnamed)
+check('an unnamed thread is labelled by its number, not "New thread"',
+      nameless.includes('Session 3') && nameless.includes('Session 4')
+      && !nameless.includes('New thread'), nameless.slice(0, 0))
 
 // Popping out is the same drawer at the width of the window. It is a
 // width swap rather than a different component for a reason: a Dialog
