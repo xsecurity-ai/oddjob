@@ -259,7 +259,18 @@ jobs:
   ghost:
     name: ghost builds for every target
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The comment above the job says thirteen minutes, and that is
+    # accurate on a healthy runner: six cross-compiles and one image
+    # build. Twenty left seven minutes of headroom, and a slow runner
+    # ate all of it twice in one afternoon -- 20m25s and 20m30s, both
+    # killed mid `Build the agent image`, with the tests and every
+    # cross-compile already green.
+    #
+    # A cap exists to stop a HUNG job holding a runner for six hours,
+    # not to enforce a build budget. It has to sit far enough above
+    # the real figure that a bad afternoon does not read as a broken
+    # agent -- which is what it read as, on a required check, twice.
+    timeout-minutes: 35
     needs: changes
     # NOT `if:` on the job. This is a required check on main, and a
     # job that reports `skipped` is one a pull request waits on for
