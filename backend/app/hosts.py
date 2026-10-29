@@ -13,6 +13,7 @@ unrelated findings accumulate in.
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 
 # A DNS label: alnum at each end, alnum/hyphen/underscore inside, <=63 chars.
@@ -27,6 +28,133 @@ _ALLOWED = re.compile(r"^[a-z0-9._-]+$")
 
 class InvalidHost(ValueError):
     pass
+
+
+#: Names RFC 6761 reserves to mean something other than a host on the
+#: internet. `localhost` and anything under it are defined to resolve to
+#: the loopback interface; `.invalid` is guaranteed never to exist.
+#:
+#: `.local` is deliberately NOT here. mDNS owns it, but so does a great
+#: many an Active Directory estate -- `corp.local` is somebody's real
+#: internal domain and refusing it would throw away a whole engagement's
+#: inventory. `.example` is not here either, for the obvious reason: the
+#: repository's own fixtures are built on it.
+_RESERVED_NAMES = ("localhost", "invalid")
+
+
+def address_refusal(value: str) -> str | None:
+    """Why this IP literal cannot be a target, or None if it can.
+
+    **An address is not automatically an asset.** Scanners, importers
+    and reverse lookups all produce addresses that name no machine
+    anybody can test, and until this existed every one of them got a
+    row. On the live instance that produced a `0.0.0.0` target in a
+    real engagement carrying four services and **175 findings** -- a
+    bucket that unrelated results accumulated in, which is the exact
+    failure the module docstring above describes for wildcards.
+
+    What is refused is "this cannot be a host", never "this is not
+    interesting":
+
+      0.0.0.0/8, ::      the unspecified address. `0.0.0.0` means "any"
+                         or "unknown" in every tool that emits it, and
+                         a scanner writing it is saying it does not
+                         know, which is not an address.
+      127.0.0.0/8, ::1   loopback. It resolves to whichever machine is
+                         asking, so as shared inventory it names a
+                         different host for every reader.
+      169.254.0.0/16     link-local, including the cloud metadata
+      fe80::/10          address. Not routable, and the same value on
+                         two links is two different endpoints.
+      224.0.0.0/4        multicast. A group, not a host.
+      ff00::/8
+      240.0.0.0/4        reserved for future use, which is where
+                         255.255.255.255 lives. Broadcast is every
+                         host, so it is no host.
+
+    **Private ranges are NOT refused**, and that is the point of
+    listing the above rather than leaning on `is_global`. An internal
+    engagement is the ordinary case here, so 10/8, 172.16/12,
+    192.168/16 and 100.64/10 are all perfectly good targets -- as are
+    the documentation ranges, which the test fixtures are built on and
+    which `is_private` would have swallowed.
+    """
+    head = (value or "").split("%", 1)[0]
+    try:
+        ip = ipaddress.ip_address(head)
+    except ValueError:
+        return None          # not an address; not this function's question
+    # An IPv4-mapped IPv6 literal is the IPv4 address wearing a hat.
+    # `::ffff:127.0.0.1` is loopback, and `is_loopback` on the v6 form
+    # says no -- so unwrap before asking anything.
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if ip.is_unspecified or (ip.version == 4 and ip in _V4_THIS_NETWORK):
+        return (f"{value} is the unspecified address — a scanner writing "
+                f"it is saying it does not know, which is not a host")
+    if ip.is_loopback:
+        if _loopback_allowed():
+            return None
+        return (f"{value} is loopback: it names whichever machine is "
+                f"asking, so it is a different host for every reader")
+    if ip.is_link_local:
+        # 169.254.169.254 is the one that actually turns up, and it
+        # turns up because it is worth reaching -- so the message says
+        # where that finding belongs rather than only saying no.
+        meant = ("  If you meant the cloud metadata endpoint, the finding "
+                 "belongs on the host that can reach it, not on the address "
+                 "itself." if ip.version == 4 else "")
+        return (f"{value} is link-local: not routable, and the same value on "
+                f"two links is two different endpoints.{meant}")
+    if ip.is_multicast:
+        return f"{value} is multicast — a group, not a host"
+    if ip.version == 4 and ip in _V4_RESERVED:
+        if ip == _V4_BROADCAST:
+            return f"{value} is the broadcast address: every host, so no host"
+        return f"{value} is in 240.0.0.0/4, reserved and unroutable"
+    return None
+
+
+def _loopback_allowed() -> bool:
+    """Is loopback permitted as a target on this process?
+
+    **This exists for the test suite and nothing else.** `webtest.py`
+    replays a request over a real TCP socket to the suite's own API,
+    which lives on 127.0.0.1 — the bytes going over a real socket and
+    coming back off it is the whole point of those assertions, and
+    there is nowhere else for that server to be.
+
+    Read every time rather than cached, so a test can set it and unset
+    it, and deliberately covering ONLY loopback. `0.0.0.0`, broadcast,
+    multicast, link-local and the reserved ranges are never a host on
+    any machine and no switch turns them into one.
+
+    `runtests.py` sets it. Nothing in a deployment should: an operator
+    who sets this gets an inventory row that means a different machine
+    to every person reading it, which is the thing being prevented.
+    """
+    return os.environ.get("ODDJOB_ALLOW_LOOPBACK_TARGETS") == "1"
+
+
+_V4_THIS_NETWORK = ipaddress.ip_network("0.0.0.0/8")
+_V4_RESERVED = ipaddress.ip_network("240.0.0.0/4")
+_V4_BROADCAST = ipaddress.ip_address("255.255.255.255")
+
+
+def name_refusal(host: str) -> str | None:
+    """Why this hostname cannot be a target, or None if it can."""
+    labels = host.split(".")
+    for reserved in _RESERVED_NAMES:
+        if host == reserved or labels[-1] == reserved:
+            if reserved == "localhost":
+                if _loopback_allowed():
+                    return None
+                return (f"{host!r} is reserved to mean the loopback "
+                        f"interface, so it names a different machine for "
+                        f"every reader")
+            return f"{host!r} is in .invalid, which is reserved never to exist"
+    return None
 
 
 def normalise_host(raw: str) -> str:
@@ -56,9 +184,13 @@ def validate_host(raw: str) -> str:
     # IP literals short-circuit: they legitimately contain ':' and '%'.
     try:
         ipaddress.ip_address(h.split("%", 1)[0])
-        return h
     except ValueError:
         pass
+    else:
+        why = address_refusal(h)
+        if why:
+            raise InvalidHost(why)
+        return h
 
     if not _ALLOWED.match(h):
         bad = sorted({c for c in h if not re.match(r"[a-z0-9._-]", c)})
@@ -70,6 +202,9 @@ def validate_host(raw: str) -> str:
         raise InvalidHost(f"host {raw!r} is not a well-formed hostname")
     if not _HOSTNAME.match(h):
         raise InvalidHost(f"host {raw!r} is not a well-formed hostname")
+    why = name_refusal(h)
+    if why:
+        raise InvalidHost(why)
     return h
 
 

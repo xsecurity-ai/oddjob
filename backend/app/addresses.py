@@ -33,6 +33,7 @@ import ipaddress
 from sqlalchemy import delete, func, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .hosts import address_refusal
 from .models import Target, TargetAddress, target_address_links
 
 
@@ -100,11 +101,23 @@ async def _row(session: AsyncSession, project_id: int,
 
 async def attach(session: AsyncSession, target: Target,
                  values) -> tuple[list[str], list[str]]:
-    """Add addresses to `target`. -> (newly attached, not an address).
+    """Add addresses to `target`. -> (newly attached, not recorded).
 
     Idempotent: an address the target already carries is not reported
     as newly attached, which is what lets an importer run twice without
     writing a timeline entry the second time.
+
+    The second list is everything that did not become an address, with
+    the reason attached where there is one. Two kinds end up there and
+    the caller does not have to care which: a value that is not an IP
+    literal at all, and one that is an address but cannot be a host --
+    loopback, `0.0.0.0`, broadcast, multicast, link-local. See
+    `hosts.address_refusal`, which is the one place that decides.
+
+    That second kind used to be attached like any other. A scan that
+    reported `0.0.0.0` for a host it could not resolve wrote it to the
+    inventory, and on the live instance one such row had accumulated
+    four services and 175 findings.
 
     **The scope gate is not called here and must not be.** The gate
     needs to name what it is refusing ("adding 203.0.113.9 to FALCON-1")
@@ -122,6 +135,10 @@ async def attach(session: AsyncSession, target: Target,
             text = (raw if isinstance(raw, str) else str(raw)).strip()
             if text:
                 invalid.append(text)
+            continue
+        why = address_refusal(value)
+        if why:
+            invalid.append(why)
             continue
         if value in have:
             continue

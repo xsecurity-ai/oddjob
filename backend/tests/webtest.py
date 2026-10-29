@@ -673,17 +673,20 @@ check("an empty request is refused", st == 422, f"{st} {str(bad)[:80]}")
 # and a row is filed for it beside the original so the two can be
 # compared. The ghost reports `done` with the failure in its payload,
 # which is exactly what the Go runner does.
-call(f"/api/targets?project={_X}", "POST", {"host": "127.0.0.2"}, token=admin)
+# A documentation address, not loopback: the ghost's reply is
+# fabricated below, so nothing here actually dials. Loopback is refused
+# as a target now -- it names a different machine for every reader.
+call(f"/api/targets?project={_X}", "POST", {"host": "203.0.113.77"}, token=admin)
 _dead = [t for t in call(f"/api/targets?project={_X}&limit=50", token=admin)[1]["items"]
-         if t["host"] == "127.0.0.2"][0]
+         if t["host"] == "203.0.113.77"][0]
 st, seed2 = call("/api/web", "POST",
-                 {"target_id": _dead["id"], "url": "http://127.0.0.2:9/x",
+                 {"target_id": _dead["id"], "url": "http://203.0.113.77:9/x",
                   "method": "GET"}, token=admin)
 st, _dq = call(f"/api/web/{seed2['id']}/replay", "POST",
-               {"raw": "GET /x HTTP/1.1\r\nHost: 127.0.0.2:9\r\n\r\n",
+               {"raw": "GET /x HTTP/1.1\r\nHost: 203.0.113.77:9\r\n\r\n",
                 "timeout": 2}, token=admin)
 _, dead = _ghost_send(_dq["task_id"],
-                      {"error": "dial tcp 127.0.0.2:9: connection refused",
+                      {"error": "dial tcp 203.0.113.77:9: connection refused",
                        "elapsed_ms": 1, "response_b64": ""})
 check("a failed connection is recorded rather than raising",
       st == 200 and (dead or {}).get("error"), f"{st} {str(dead)[:120]}")

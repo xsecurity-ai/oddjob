@@ -36,6 +36,10 @@ SUITES = [
     ("tests/featuretest.py",  TMP / "ms-feat.db"),
     ("tests/settingstest.py", TMP / "ms-set.db"),
     ("tests/magictest.py",    TMP / "ms-m.db"),
+    # No server and no database: it calls `app.hosts` directly, because
+    # the harness sets ODDJOB_ALLOW_LOOPBACK_TARGETS and this is what
+    # the predicate does without it. The db path is unused.
+    ("tests/hosttest.py",     TMP / "ms-host.db"),
     ("tests/projecttest.py",  TMP / "ms-proj.db"),
     ("tests/scantest.py",     TMP / "ms-scan.db"),
     ("tests/importtest.py",   TMP / "ms-imp.db"),
@@ -105,6 +109,15 @@ def run(suite: str, db: pathlib.Path) -> tuple[int, int, str]:
            "ODDJOB_SECRET": "test-secret-not-for-use",
            "ODDJOB_TEST_BASE": f"http://127.0.0.1:{port}",
            "ODDJOB_TEST_SMTP_PORT": str(free_port()),
+           # The suite's own API lives on 127.0.0.1, and webtest replays
+           # a request over a real TCP socket to it — the bytes really
+           # going out and really coming back is what those assertions
+           # are for. A loopback TARGET is refused in a deployment (see
+           # hosts.address_refusal: it names a different machine for
+           # every reader), so the harness says so explicitly here.
+           # Loopback only; nothing relaxes 0.0.0.0, broadcast,
+           # multicast, link-local or the reserved ranges.
+           "ODDJOB_ALLOW_LOOPBACK_TARGETS": "1",
            # The five-minute target digest, off in the server under test.
            # slacktest drives `slack.digest.tick()` by hand against the
            # same database file, and a loop ticking inside the server
