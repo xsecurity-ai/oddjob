@@ -72,6 +72,7 @@ from ..models import (
     Setting,
     Target,
     User,
+    WebAsset,
 )
 from ..scopegate import as_host, check_task_targets, index_for, refuse
 from ..security import get_current_user, new_agent_key, require_project, verify_key
@@ -3655,6 +3656,59 @@ async def start_task(task_id: int, a: Agent = Depends(agent_from_key),
     t.started_at = datetime.now(UTC)
     await session.commit()
     return {"ok": True}
+
+
+#: Most asset URLs one `assets/held` question may carry. The agent
+#: chunks a bigger crawl rather than sending one enormous body: this
+#: is a lookup, and a request that takes a second to parse is a
+#: request the crawl is waiting on.
+MAX_HELD_QUERY = 2000
+
+
+class HeldQuery(BaseModel):
+    """Asset URLs an agent is about to fetch, asking which are new."""
+    urls: list[str] = Field(default_factory=list)
+
+
+@router.post("/assets/held", response_model=dict)
+async def assets_held(body: HeldQuery, a: Agent = Depends(agent_from_key),
+                      session: AsyncSession = Depends(get_session)):
+    """Which of these asset URLs does the project already hold the bytes of?
+
+    Asked by a crawl between finding the bundles a page loads and
+    fetching them, so a re-crawl pulls back only what is new.
+
+    **The saving is traffic at somebody else's host, not disk.** A
+    second crawl of a site re-requested every bundle it had already
+    stored -- the same hundreds of files, unchanged, from the client's
+    servers and from whatever CDN fronts them. Nothing here is a
+    probe, but it is still the engagement's egress asking a stranger
+    for a file it already has, every run, for ever.
+
+    `body` not null rather than the row existing: a row with a
+    `fetch_error` is an asset we know about and do NOT have, and
+    treating it as held would mean a file that failed once is never
+    tried again. Same for a body that was too large to carry -- the
+    limit may be raised, and then it is worth asking for.
+
+    Scoped to the agent's own project and nothing wider. An agent on
+    someone else's network must not be able to read whether a
+    DIFFERENT engagement has fetched a URL; that answer is a fact
+    about the other engagement.
+    """
+    want = [u.strip() for u in body.urls if (u or "").strip()]
+    if len(want) > MAX_HELD_QUERY:
+        raise HTTPException(
+            422, f"{len(want)} urls in one question; the cap is "
+                 f"{MAX_HELD_QUERY}. Ask in chunks.")
+    if not want or a.project_id is None:
+        return {"held": []}
+    rows = (await session.execute(
+        select(WebAsset.url).where(
+            WebAsset.project_id == a.project_id,
+            WebAsset.url.in_(want),
+            WebAsset.body.is_not(None)))).scalars().all()
+    return {"held": list(rows)}
 
 
 @router.post("/tasks/{task_id}/result", response_model=dict)

@@ -58,6 +58,16 @@ PUBLIC_EXACT = {
     # serving both would make the read public to this middleware and
     # leave it standing on its route dependency by itself.
     "/api/ghosts/debug-lines",
+    # A crawl asking which bundles its project already holds, so it
+    # fetches only what is new. Exact, like every entry here: the
+    # operator-facing asset routes live under /api/web/assets and must
+    # keep their session, and a "/api/ghosts/assets/" prefix would
+    # make the next thing added below it public by accident.
+    #
+    # The ROUTE still authenticates the agent and scopes the answer to
+    # its own project. This line only says the session middleware is
+    # not the thing doing it.
+    "/api/ghosts/assets/held",
     # The one-time token is the credential here; there is no identity yet.
     "/api/ghosts/enroll",
     "/api/ghosts/enrol",      # the old spelling, still answered

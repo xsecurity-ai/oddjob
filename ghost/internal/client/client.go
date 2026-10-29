@@ -411,6 +411,32 @@ func (c *Client) Heartbeat(ctx context.Context, req HeartbeatReq) (*HeartbeatRes
 	return &out, nil
 }
 
+// HeldAssets asks which of these asset URLs Oddjob already holds the
+// bytes of, so a re-crawl fetches only what is new.
+//
+// The saving is traffic at somebody else's host. A second crawl of a
+// site used to re-request every bundle it had already stored -- the
+// same hundreds of unchanged files, from the client's servers and
+// from whatever CDN fronts them, every run.
+//
+// Scoped by the callback key to this agent's own project, so the
+// answer is about this engagement and nothing wider.
+func (c *Client) HeldAssets(ctx context.Context, urls []string) ([]string, error) {
+	if len(urls) == 0 {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	var out struct {
+		Held []string `json:"held"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/api/ghosts/assets/held",
+		map[string]any{"urls": urls}, &out); err != nil {
+		return nil, err
+	}
+	return out.Held, nil
+}
+
 func (c *Client) StartTask(ctx context.Context, id int) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
