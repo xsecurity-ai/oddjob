@@ -3125,5 +3125,52 @@ check("the audit trail has the proxy actions",
       sorted(a for a in _actions if "proxy" in str(a)))
 
 
+print("\n== a stored thread goes back to the provider as messages ==")
+# A user turn is stored as ONE message object; an assistant turn as
+# the provider-shaped TAIL of the round, which is a LIST. Reading both
+# with `append` put a list where a message belongs, and it travelled
+# all the way to the provider, which answered the NEXT turn of any
+# thread that had called a tool with
+#
+#   HTTP 400: Invalid request format: 'list' object has no attribute 'get'
+#
+# It was reported against a local model and is not local: the same
+# thread breaks on any provider.
+import json as _json  # noqa: E402
+
+from app.routers.agent import thread_messages  # noqa: E402
+
+# The two shapes exactly as they are found in a real thread.
+_turns = [
+    _json.dumps({"role": "user", "content": "are any of these secrets bad?"}),
+    _json.dumps([
+        {"role": "assistant", "content": [{"type": "text", "text": "Let me look."}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "{}"},
+        {"role": "assistant", "content": "Two of them are live."},
+    ]),
+    _json.dumps({"role": "user", "content": "What is the current date?"}),
+    _json.dumps([{"content": "It is 2026-01-22.", "role": "assistant"}]),
+]
+_msgs = thread_messages(_turns)
+check("a tool-calling round is spread back out, not nested",
+      len(_msgs) == 6, f"{len(_msgs)} messages, expected 6")
+# The assertion that actually encodes the bug. Every element must be a
+# message; one list among them is what the provider choked on.
+check("...so every element is a message object",
+      all(isinstance(m, dict) for m in _msgs),
+      [type(m).__name__ for m in _msgs])
+check("...in the order they were said",
+      [m.get("role") for m in _msgs]
+      == ["user", "assistant", "tool", "assistant", "user", "assistant"],
+      [m.get("role") for m in _msgs])
+check("a turn that is not JSON is dropped rather than sent",
+      thread_messages(["{not json", _json.dumps({"role": "user"})])
+      == [{"role": "user"}])
+check("a list holding something that is not a message drops only that",
+      thread_messages([_json.dumps([{"role": "assistant"}, "oops", 3])])
+      == [{"role": "assistant"}])
+check("an empty thread is an empty conversation", thread_messages([]) == [])
+
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
