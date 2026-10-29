@@ -45,7 +45,11 @@ st, r = call("/api/projects", "POST", {
     "scope": ["10.0.0.0/24", "192.168.1.5", "2001:db8::/32", "2001:db8::1",
               "portal.acme.com", "https://vpn.acme.com/login", "  WWW.Acme.com. ",
               "!10.0.0.5", "-staging.acme.com",
-              "*.acme.com", "10.0.0.0/99", "localhost", ""],
+              # `intranet` is the single-label case: somebody typed a
+              # bare hostname. It used to be `localhost`, which is now
+              # refused one step earlier for being a reserved name --
+              # a better reason, but not the reason this line tests.
+              "*.acme.com", "10.0.0.0/99", "intranet", "localhost", ""],
     "contacts": [{"name": "Dana Reed", "email": "dana@acme.com",
                   "title": "CISO", "primary_contact": True},
                  {"name": "Sam Vale", "email": "sam@acme.com", "phone": "+1 555 0100"}],
@@ -70,13 +74,22 @@ check("fqdn incl. URL-stripped and normalised",
       str(sorted(kinds.get("fqdn", []))))
 excl = sorted(e["value"] for e in r["scope"] if not e["included"])
 check("exclusions preserved", excl == ["10.0.0.5", "staging.acme.com"], str(excl))
-check("bad lines named, not fatal", len(r["scope_errors"]) == 2, str(r["scope_errors"])[:120])
+check("bad lines named, not fatal", len(r["scope_errors"]) == 3, str(r["scope_errors"])[:160])
 # A wildcard is not a host and never will be, but it IS a scope entry —
 # scope documents are written with them, and the list is now enforced,
 # so refusing to record one meant refusing to enforce it.
 check("wildcard classified, not rejected",
       kinds.get("wildcard") == ["*.acme.com"], str(kinds.get("wildcard")))
-check("single label rejected", any("single label" in e for e in r["scope_errors"]))
+check("single label rejected", any("single label" in e for e in r["scope_errors"]),
+      str(r["scope_errors"])[:160])
+# `localhost` is also refused, but under the harness it is refused for
+# its SHAPE: runtests sets ODDJOB_ALLOW_LOOPBACK_TARGETS so that
+# webtest can replay over a real socket to the suite's own API. What it
+# is refused for when that switch is off is asserted directly in
+# hosttest.py, which calls the predicate with the switch cleared.
+check("...and localhost does not get through either",
+      any("localhost" in e for e in r["scope_errors"]),
+      str(r["scope_errors"])[:200])
 
 print("\n== contacts and members ==")
 check("contacts stored", len(r["contacts"]) == 2, str(len(r["contacts"])))
