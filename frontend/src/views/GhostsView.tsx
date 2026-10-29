@@ -322,9 +322,19 @@ function Routing({ project, routing }:
   // a hook above it would change the order between renders.
   if (!routing) return null
   return (
-    <Stack spacing={1.25} sx={{ mb: 1.5 }}>
-      <Stack direction="row" spacing={1.5} sx={{
-        alignItems: "center"
+    // One row: the routing controls and the country gate beside them.
+    // `useFlexGap` with `flexWrap` so the gate drops under the
+    // controls on a narrow window instead of forcing the page
+    // sideways -- a wrap is the only honest answer when the two will
+    // not fit, and `spacing` alone does not survive wrapping.
+    <Stack direction="row" spacing={1.5} useFlexGap
+      sx={{ mb: 1.5, flexWrap: 'wrap' }}>
+      {/* The controls keep their own vertical centring. Grouped
+          rather than left loose in the row because the gate is a
+          taller block -- label above, help text below -- and centring
+          each control against THAT would scatter them. */}
+      <Stack direction="row" spacing={1.5} useFlexGap sx={{
+        alignItems: "center", flexWrap: 'wrap', flex: '1 1 440px',
       }}>
         <TextField select size="small" label="Routing" value={routing.mode}
           disabled={!canWrite(project) || set.isPending}
@@ -389,7 +399,7 @@ function Routing({ project, routing }:
           this engagement is authorised to test at all, and it applies
           in every routing mode. Each ghost has its own list too, and
           both have to allow a target. */}
-      <Box sx={{ maxWidth: 560 }}>
+      <Box sx={{ flex: '1 1 320px', maxWidth: 560, minWidth: 0 }}>
         <CountryPicker
           label="Countries this engagement may scan"
           help={'Applies in every routing mode. While a list is set, a '
@@ -703,6 +713,71 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
 
   const columns: ColumnDef<GhostAgent>[] = [
     {
+      // First, not last. These are what an operator came to the row
+      // to press, and at the far right of twelve columns they sit
+      // past the edge on any normal window -- reachable only by
+      // scrolling a table whose horizontal bar is at the bottom of
+      // 60vh of rows.
+      //
+      // 86 was too narrow for its own contents and the overflow was
+      // SILENT. An admin gets three buttons -- proxy, edit, kill --
+      // at roughly 27px each plus the gaps, so about 84px of content
+      // in a track that leaves 66 after `px: 1.25` either side; cells
+      // are `overflow: hidden`, so the kill button was simply cut in
+      // half. A non-admin gets two and fits, which is why it looked
+      // intermittent rather than broken.
+      field: 'actions', headerName: '', width: 132, sortable: false,
+      filterable: false,
+      renderCell: (p) => {
+        if (!canWrite(project)) return null
+        if (p.row.status === 'disabled') {
+          return (
+            <Tooltip title="Already killed">
+              <Box component="span" sx={{ color: alpha(neon.muted, 0.35),
+                                          fontSize: 11 }}>killed</Box>
+            </Tooltip>
+          )
+        }
+        return (
+          <Stack direction="row" spacing={0.2}>
+            {/* Proxying, per ghost and off by default. Admin only,
+                because this is the difference between a Ghost that
+                runs the tasks it is given and one that carries
+                arbitrary traffic into the client's network. */}
+            {admin && (
+              <Tooltip title={p.row.proxy_enabled
+                ? (p.row.proxy_connected
+                   ? 'Proxying on, tunnel up — open the browser setup'
+                   : 'Proxying on, but this Ghost has not dialled in yet')
+                : 'Route a browser through this Ghost (SOCKS5)'}>
+                <IconButton size="small"
+                  onClick={() => {
+                    if (p.row.proxy_enabled) { setProxyFor(p.row); return }
+                    proxyToggle.mutate({ id: p.row.id, enabled: true })
+                  }}
+                  disabled={proxyToggle.isPending}>
+                  <LanIcon sx={{
+                    fontSize: 17,
+                    color: !p.row.proxy_enabled ? alpha(neon.muted, 0.55)
+                      : p.row.proxy_connected ? neon.green : neon.yellow,
+                  }} />
+                </IconButton>
+              </Tooltip>
+            )}
+            <Tooltip title="Edit this Ghost">
+              <IconButton size="small" onClick={() => setEditing(p.row)}>
+                <EditIcon sx={{ fontSize: 16, color: neon.cyan }} />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Kill this Ghost">
+              <IconButton size="small" onClick={() => setConfirmKill(p.row)}>
+                <PowerSettingsNewIcon sx={{ fontSize: 17, color: neon.red }} />
+              </IconButton>
+            </Tooltip>
+          </Stack>
+        )
+      },
+    },    {
       field: 'name', headerName: 'Ghost', flex: 1.1, minWidth: 150,
       renderCell: (p) => (
         <Stack direction="row" spacing={0.9} sx={{
@@ -1111,59 +1186,6 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
           <Tooltip title="No regions set, and this project does not route by region — so it is eligible for anything.">
             <Box sx={{ color: neon.muted, fontSize: 12 }}>all</Box>
           </Tooltip>
-        )
-      },
-    },
-    {
-      field: 'actions', headerName: '', width: 86, sortable: false,
-      filterable: false,
-      renderCell: (p) => {
-        if (!canWrite(project)) return null
-        if (p.row.status === 'disabled') {
-          return (
-            <Tooltip title="Already killed">
-              <Box component="span" sx={{ color: alpha(neon.muted, 0.35),
-                                          fontSize: 11 }}>killed</Box>
-            </Tooltip>
-          )
-        }
-        return (
-          <Stack direction="row" spacing={0.2}>
-            {/* Proxying, per ghost and off by default. Admin only,
-                because this is the difference between a Ghost that
-                runs the tasks it is given and one that carries
-                arbitrary traffic into the client's network. */}
-            {admin && (
-              <Tooltip title={p.row.proxy_enabled
-                ? (p.row.proxy_connected
-                   ? 'Proxying on, tunnel up — open the browser setup'
-                   : 'Proxying on, but this Ghost has not dialled in yet')
-                : 'Route a browser through this Ghost (SOCKS5)'}>
-                <IconButton size="small"
-                  onClick={() => {
-                    if (p.row.proxy_enabled) { setProxyFor(p.row); return }
-                    proxyToggle.mutate({ id: p.row.id, enabled: true })
-                  }}
-                  disabled={proxyToggle.isPending}>
-                  <LanIcon sx={{
-                    fontSize: 17,
-                    color: !p.row.proxy_enabled ? alpha(neon.muted, 0.55)
-                      : p.row.proxy_connected ? neon.green : neon.yellow,
-                  }} />
-                </IconButton>
-              </Tooltip>
-            )}
-            <Tooltip title="Edit this Ghost">
-              <IconButton size="small" onClick={() => setEditing(p.row)}>
-                <EditIcon sx={{ fontSize: 16, color: neon.cyan }} />
-              </IconButton>
-            </Tooltip>
-            <Tooltip title="Kill this Ghost">
-              <IconButton size="small" onClick={() => setConfirmKill(p.row)}>
-                <PowerSettingsNewIcon sx={{ fontSize: 17, color: neon.red }} />
-              </IconButton>
-            </Tooltip>
-          </Stack>
         )
       },
     },
