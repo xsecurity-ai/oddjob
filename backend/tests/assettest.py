@@ -327,6 +327,7 @@ print("\n== a finding knows which file it came from ==")
 # dropped: the scanners ran, found things, and the sweep recorded
 # nothing. 0 findings looked exactly like a clean estate.
 from app import assetscan as _asx  # noqa: E402
+from app import assetwork as _asw  # noqa: E402
 
 _og = ('{"results":[{"check_id":"js.eval","path":"/tmp/d/7__a.js",'
        '"extra":{"severity":"ERROR","message":"m"},"start":{"line":3}}]}')
@@ -2378,6 +2379,32 @@ check("the credential is carried separately, not in the prose",
 check("empty output is no findings", _asx.parse_trufflehog("") == [])
 check("availability reports trufflehog either way",
       "trufflehog" in _asx.available(), _asx.available())
+
+# The memory ceiling and the Go binary do not mix, and the failure is
+# silent in the worst way: trufflehog exits 2 during package init with
+# `panic: cannot allocate memory`, the batch is marked not-ok, nothing
+# is stamped scanned, and the sweep retries the same 62,031 files for
+# ever. Measured in the deployed image:
+#
+#     WITHOUT rlimit         rc=0  trufflehog 3.99.7
+#     WITH RLIMIT_AS=3.5G    rc=2  panic: cannot allocate memory
+#
+# RLIMIT_AS bounds ADDRESS SPACE; a Go runtime reserves a huge virtual
+# arena it never makes resident. opengrep is unaffected -- OCaml does
+# not reserve that way.
+import inspect as _inspect  # noqa: E402
+
+_src = _inspect.getsource(_asw.scan_batch)
+_th = _src[_src.index("TRUFFLEHOG"):] if "TRUFFLEHOG" in _src else ""
+check("trufflehog is run WITHOUT the address-space ceiling",
+      "bound_memory=False" in _th[:900], _th[:200])
+# And the ceiling is still the default for everything else, which is
+# the half that stops a runaway opengrep taking the API down.
+check("_run still bounds memory unless told not to",
+      _inspect.signature(_asx._run).parameters["bound_memory"].default is True)
+check("...and opengrep is NOT exempted",
+      "bound_memory=False" not in _src[:_src.index("TRUFFLEHOG")]
+      if "TRUFFLEHOG" in _src else False)
 
 
 srv.shutdown()
