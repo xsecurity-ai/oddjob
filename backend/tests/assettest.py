@@ -2327,6 +2327,59 @@ _asx._bound_memory()
 check("the memory bound degrades instead of raising where unsupported", True)
 
 
+# ------------------------------------------------------- trufflehog
+#
+# Additive to detect-secrets, not a replacement. detect-secrets finds
+# a string that LOOKS like a credential; trufflehog carries detectors
+# that know what a vendor's key is for and can ask the vendor whether
+# it is live. `Verified` is that answer and it is the field worth
+# having -- it separates a real finding from an example key in a
+# README, which is the difference between work and a wasted morning.
+_th_lines = "\n".join([
+    json.dumps({"DetectorName": "AWS", "Verified": True,
+                # Deliberately NOT credential-shaped. `parse_trufflehog`
+                # carries `Raw` through untouched, so the shape
+                # proves nothing -- and a realistic one trips the
+                # repo's own secret scanner, which is right to
+                # refuse it.
+                "Raw": "example-credential-value-not-real",
+                "SourceMetadata": {"Data": {"Filesystem": {
+                    "file": "/tmp/x/42__bundle.js", "line": 17}}}}),
+    json.dumps({"DetectorName": "Slack", "Verified": False,
+                "Raw": "xoxb-not-a-real-token",
+                "SourceMetadata": {"Data": {"Filesystem": {
+                    "file": "/tmp/x/43__app.js", "line": 3}}}}),
+    "this line is not json at all",
+])
+_th = _asx.parse_trufflehog(_th_lines)
+check("trufflehog output parses to findings", len(_th) == 2, len(_th))
+# A stream is one object PER LINE, so one malformed line must not
+# cost the rest -- which may hold a live credential.
+check("...a malformed line is skipped rather than failing the batch",
+      [f.rule for f in _th] == ["AWS", "Slack"], [f.rule for f in _th])
+check("a VERIFIED credential is critical",
+      _th[0].severity == "critical", _th[0].severity)
+check("...and says the provider accepted it",
+      "ACCEPTED" in _th[0].detail, _th[0].detail[:80])
+check("an UNVERIFIED one is not critical",
+      _th[1].severity == "medium", _th[1].severity)
+# The two must never be reported alike: that is the whole point of
+# running trufflehog beside detect-secrets.
+check("...so verified and unverified never share a severity",
+      _th[0].severity != _th[1].severity)
+check("the line number survives", (_th[0].line, _th[1].line) == (17, 3),
+      (_th[0].line, _th[1].line))
+# The credential rides on `secret`, never in the title or detail --
+# those get listed, exported and pasted into Slack.
+check("the credential is carried separately, not in the prose",
+      _th[0].secret == "example-credential-value-not-real"
+      and "example-credential-value-not-real"
+      not in (_th[0].title + _th[0].detail))
+check("empty output is no findings", _asx.parse_trufflehog("") == [])
+check("availability reports trufflehog either way",
+      "trufflehog" in _asx.available(), _asx.available())
+
+
 srv.shutdown()
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
