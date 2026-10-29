@@ -37,6 +37,7 @@ import re
 import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Protocol
 from urllib.parse import urlparse
 
 import httpx
@@ -351,7 +352,21 @@ def _severity_floor(sev: str) -> str:
     return sev if sev in ("critical", "high", "medium", "low", "info") else "info"
 
 
-async def _target_for(session: AsyncSession, asset: WebAsset) -> int | None:
+class _HasAssetId(Protocol):
+    """The two columns `_target_for` reads.
+
+    A Protocol rather than `WebAsset`, because the callers that run in
+    a loop deliberately select ONLY these columns -- `WebAsset.body`
+    averages 145 KB and reading it to find a target id is how a
+    background sweep came to hold 3 GB. Typing this as the full model
+    would make the cheap call look like the wrong one.
+    """
+    id: int
+    target_id: int | None
+
+
+async def _target_for(session: AsyncSession,
+                      asset: _HasAssetId) -> int | None:
     """A target to file findings against, or None.
 
     The asset's own target first, then the target of any page that
@@ -1529,16 +1544,28 @@ async def library_leads(session: AsyncSession, project_id: int,
         if not cves:
             continue
         out["with_cves"] += 1
+        # Every asset carrying this exact library, so the finding lands
+        # on each host that serves it rather than on one arbitrary page.
+        #
+        # Read ONCE per library, and without the file.
+        #
+        # This used to sit inside the CVE loop below and select whole
+        # `WebAsset` rows, which meant re-reading every copy of jQuery
+        # on the estate once per CVE, every worker cycle, for ever --
+        # and `body` is on that table, averaging 145 KB a row, so a
+        # library with ten CVEs and twenty copies moved ~29 MB of
+        # JavaScript into the process to use `url` and `target_id`.
+        # The set does not depend on the CVE and the bytes were never
+        # read. Measured on the live instance at 3 GB resident with
+        # nothing large having been imported: the allocator keeps the
+        # high-water mark, so churn this size never comes back down.
+        assets = (await session.execute(
+            select(WebAsset.id, WebAsset.target_id, WebAsset.url).where(
+                WebAsset.project_id == project_id,
+                WebAsset.name == name,
+                WebAsset.version == version))).all()
         # Worst first, now that "is it being exploited" is knowable.
         for c in triage_order(cves):
-            # Every asset carrying this exact library, so the finding
-            # lands on each host that serves it rather than on one
-            # arbitrary page.
-            assets = (await session.execute(
-                select(WebAsset).where(
-                    WebAsset.project_id == project_id,
-                    WebAsset.name == name,
-                    WebAsset.version == version))).scalars().all()
             for a in assets:
                 tid = await _target_for(session, a)
                 if tid is None:
