@@ -372,6 +372,34 @@ function Routing({ project, routing }:
                                              ? neon.yellow : neon.muted, 0.45)}`,
                   '&:hover': { bgcolor: alpha(neon.yellow, 0.26) } }} />
         </Tooltip>
+        {/* The queue depth on its own cannot answer "is anything
+            happening". 416 queued beside 8 running reads as stalled,
+            and on a fleet finishing 377 an hour with a median task of
+            25 seconds the rows churn too fast to watch -- which is
+            exactly how an operator came to conclude no ghost was
+            taking work. The rate, and how long the backlog has left
+            at that rate, is the answer. */}
+        {(routing.completed_last_hour > 0 || routing.running_tasks > 0) && (
+          <Tooltip title={
+            `${routing.running_tasks} task(s) running right now, and `
+            + `${routing.completed_last_hour} finished in the last hour. `
+            + (routing.unassigned_tasks > 0 && routing.completed_last_hour > 0
+              ? 'The estimate assumes the fleet keeps up that rate — it is '
+                + 'arithmetic on the last hour, not a prediction.'
+              : 'Nothing is waiting, so there is nothing to drain.')}>
+            <Chip size="small" sx={{
+              height: 21, fontSize: 11, color: neon.green,
+              bgcolor: alpha(neon.green, 0.12),
+              border: `1px solid ${alpha(neon.green, 0.4)}`,
+            }} label={
+              `${routing.running_tasks} running · ${routing.completed_last_hour}/h`
+              + (routing.unassigned_tasks > 0 && routing.completed_last_hour > 0
+                ? ` · ~${(routing.unassigned_tasks / routing.completed_last_hour)
+                    .toFixed(1)}h left`
+                : '')
+            } />
+          </Tooltip>
+        )}
         <Tooltip title="How many tasks one agent may run at once on this engagement. A ceiling, not a target: each agent also works out what its own host can stand — cores, memory, what masscan managed to emit — and the lower of the two is what runs.">
           <TextField select size="small" label="Parallel" sx={{ width: 110 }}
             value={routing.max_parallel}

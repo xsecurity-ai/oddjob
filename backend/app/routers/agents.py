@@ -511,6 +511,17 @@ class RoutingOut(BaseModel):
     current_primary_name: str | None = None
     eligible: int = 0
     unassigned_tasks: int = 0
+    #: What the fleet is actually getting through, and what it is
+    #: doing right now.
+    #:
+    #: A queue depth on its own cannot answer "is anything happening".
+    #: 416 queued beside 8 running reads as stalled -- and on a fleet
+    #: finishing 377 tasks an hour, with a median task of 25 seconds,
+    #: the rows churn too fast to see. An operator watching that
+    #: reasonably concluded no ghost was taking work. These two
+    #: numbers are the difference between a number and a direction.
+    running_tasks: int = 0
+    completed_last_hour: int = 0
     #: The engagement's ceiling on simultaneous tasks per agent.
     max_parallel: int = 5
 
@@ -2193,10 +2204,25 @@ async def read_routing(pr: Project = Depends(require_project("readonly")),
         select(func.count(AgentTask.id)).where(
             AgentTask.project_id == pr.id, AgentTask.agent_id.is_(None),
             AgentTask.status == "queued"))).scalar_one()
+    running = (await session.execute(
+        select(func.count(AgentTask.id)).where(
+            AgentTask.project_id == pr.id,
+            AgentTask.status.in_(("claimed", "running"))))).scalar_one()
+    # Finished within the hour, which is a RATE rather than a running
+    # total: a lifetime count climbs whether or not anything has
+    # happened since the operator last looked, which is the question
+    # being asked.
+    done_1h = (await session.execute(
+        select(func.count(AgentTask.id)).where(
+            AgentTask.project_id == pr.id,
+            AgentTask.finished_at.is_not(None),
+            AgentTask.finished_at >= datetime.now(UTC) - timedelta(hours=1)
+        ))).scalar_one()
     first = eligible[0] if eligible else None
     mode = (pr.ghost_mode or "mesh").lower()
     return RoutingOut(
         mode=mode, max_parallel=max(1, int(pr.ghost_max_parallel or 5)),
+        running_tasks=int(running), completed_last_hour=int(done_1h),
         scan_countries=sorted(countrygate.parse(pr.scan_countries)),
         geoip_available=await geoip.enabled(session),
         current_primary=first.id if (mode == "primary" and first) else None,

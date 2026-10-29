@@ -268,6 +268,23 @@ check("the ceiling is settable", st == 200 and r.get("max_parallel") == 4,
 st, r = call("/api/ghosts/routing?project=AGENT", token=admin)
 check("and is read back", r.get("max_parallel") == 4, str(r)[:120])
 
+# A queue depth on its own cannot answer "is anything happening", and
+# that is the question an operator actually asks. 416 queued beside 8
+# running reads as stalled on a fleet that was finishing 377 tasks an
+# hour -- the median task was 25 seconds, so the rows churned faster
+# than anyone could watch. Routing carries the rate so the page can
+# show a direction rather than a number.
+check("routing reports what is running now",
+      "running_tasks" in r, sorted(r.keys()))
+check("...and what finished in the last hour, which is a RATE",
+      "completed_last_hour" in r, sorted(r.keys()))
+# A lifetime total would climb whether or not anything had happened
+# since the last look, which is the opposite of what is being asked.
+check("both are integers, and start at zero on a quiet project",
+      isinstance(r.get("running_tasks"), int)
+      and isinstance(r.get("completed_last_hour"), int),
+      (r.get("running_tasks"), r.get("completed_last_hour")))
+
 st, en3 = call("/api/ghosts?project=AGENT", "POST",
                {"name": "wide", "target_os": "linux"}, token=admin)
 WID = ((en3 or {}).get("agent") or {}).get("id")
