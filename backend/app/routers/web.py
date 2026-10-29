@@ -1699,6 +1699,16 @@ class TakeoverOut(BaseModel):
     note: str | None = None
     target_id: int | None = None
     seen_at: str | None = None
+    #: How hard it would actually be to take the name: easy, medium,
+    #: hard or impossible. See `takeover.difficulty_for`.
+    difficulty: str = "medium"
+    #: The severity this difficulty implies, so a reader does not have
+    #: to hold the mapping in their head to know what a row means.
+    severity: str = "low"
+    #: What an operator would do, in order. Present whatever the
+    #: difficulty -- an impossible row carries the reason and what to
+    #: do instead.
+    steps: list[str] = Field(default_factory=list)
 
 
 class TakeoverUpdate(BaseModel):
@@ -1708,13 +1718,25 @@ class TakeoverUpdate(BaseModel):
 
 
 def _takeover_out(t) -> TakeoverOut:
+    # Difficulty is DERIVED here, not stored. It is a function of the
+    # provider, `claimable` and the verdict -- all of which are on the
+    # row -- so a column would be a fourth copy that can disagree with
+    # the other three. Deriving also means re-rating a provider in
+    # `app/takeover.py` corrects every existing row at once, instead of
+    # leaving a migration to backfill judgements made months ago.
+    cand = takeover.Candidate(
+        hostname=t.hostname, cname=t.cname, chain=[], provider=t.provider,
+        claimable=bool(t.claimable), verdict=t.verdict, evidence=t.evidence)
     return TakeoverOut(
         id=t.id, hostname=t.hostname, cname=t.cname,
         cname_chain=[x for x in (t.cname_chain or "").split("\n") if x],
         provider=t.provider, claimable=bool(t.claimable),
         verdict=t.verdict, evidence=t.evidence, state=t.state,
         note=t.note, target_id=t.target_id,
-        seen_at=t.seen_at.isoformat() if t.seen_at else None)
+        seen_at=t.seen_at.isoformat() if t.seen_at else None,
+        difficulty=takeover.difficulty_for(cand),
+        severity=takeover.severity_for(cand),
+        steps=takeover.steps_for(cand))
 
 
 @router.get("/takeovers", response_model=Page[TakeoverOut])

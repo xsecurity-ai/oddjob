@@ -36,6 +36,35 @@ from datetime import UTC, datetime
 VERDICTS = ("dangling", "fingerprint", "live", "candidate")
 
 
+#: How hard it is to ACTUALLY take the name, easiest first.
+#:
+#: This is a property of the PROVIDER's claim process, not of how
+#: certain we are -- those are two different questions and the second
+#: one caps the first (see `difficulty_for`).
+#:
+#: **Judged, not measured, and deliberately so.** Measuring it would
+#: mean attempting the registration: creating the bucket, claiming the
+#: repo, pointing the service at a client's hostname. That is taking
+#: control of a name in somebody else's namespace, which is a
+#: different act from assessing it and is not something a scanner
+#: should do unattended on the strength of a DNS record. So each
+#: provider carries a documented judgement and the steps an operator
+#: would follow to do it deliberately, which is `Provider.steps`.
+DIFFICULTIES = ("easy", "medium", "hard", "impossible")
+
+#: What a difficulty means for the finding's severity.
+#:
+#: The mapping the operator asked for. It is one named constant
+#: because the ratio of report noise to signal lives here: moving
+#: `hard` from medium to low would quieten a report by a third.
+DIFFICULTY_SEVERITY: dict[str, str] = {
+    "easy": "critical",
+    "medium": "high",
+    "hard": "medium",
+    "impossible": "low",
+}
+
+
 @dataclass(frozen=True)
 class Provider:
     """One service that hands out subdomains to whoever asks first."""
@@ -75,6 +104,16 @@ class Provider:
     #: claimed, so a plaintext body cannot convict a provider that
     #: routes on SNI.
     tls_only: bool = False
+    #: How hard the claim is on THIS provider, before evidence is
+    #: considered. `impossible` is not a synonym for `claimable=False`
+    #: -- it is what that flag means in this vocabulary, and the two
+    #: are kept consistent by `__post_init__` rather than by hand.
+    difficulty: str = "medium"
+    #: What an operator would actually do, in order. Shown whatever
+    #: the difficulty, including `impossible`, because "why can I not
+    #: take this" is the question an impossible row raises and a row
+    #: that only says "impossible" does not answer it.
+    steps: tuple[str, ...] = ()
     #: A string the body must contain before ANY fingerprint of this
     #: provider counts. Keeps a short marker -- `Bad request.` is four
     #: words that appear on a thousand error pages -- from matching a
@@ -88,8 +127,19 @@ class Provider:
 #: years ago, and a false positive on this check costs an operator a
 #: morning proving a live site belongs to the client.
 PROVIDERS: tuple[Provider, ...] = (
+    # Easiest of the lot: a bucket name is global, free and
+    # first-come, and the console will take it the moment it is free.
     Provider("AWS S3", (".s3.amazonaws.com",),
              ("NoSuchBucket", "The specified bucket does not exist"),
+             difficulty="easy",
+             steps=("Confirm the bucket is gone: `aws s3api head-bucket "
+                    "--bucket <name>` returns 404, not 403.",
+                    "Create a bucket with the EXACT name from the CNAME, "
+                    "in the region the hostname encodes.",
+                    "Enable static website hosting and upload an index.html.",
+                    "The client's hostname now serves your content over "
+                    "http. https needs their certificate, so TLS is the "
+                    "limit of the impact here."),
              patterns=(
                  # The region sits between the marker and the domain:
                  # `.s3-website-eu-west-1.amazonaws.com`.
@@ -97,50 +147,164 @@ PROVIDERS: tuple[Provider, ...] = (
                  re.compile(r"\.s3\.dualstack\."),
                  re.compile(r"\.s3-external-"),
              )),
+    # Free, instant, and GitHub will serve TLS for the custom domain
+    # once it is claimed -- which makes this worse than S3, not better.
     Provider("GitHub Pages", (".github.io",),
              ("There isn't a GitHub Pages site here",
-              "For root URLs (like http://example.com/) you must provide an index.html file")),
+              "For root URLs (like http://example.com/) you must provide an index.html file"),
+             difficulty="easy",
+             steps=("Create any repository and enable GitHub Pages on it.",
+                    "Add the client's hostname as the Pages custom domain, "
+                    "or commit it to a CNAME file at the repo root.",
+                    "GitHub matches on the CNAME target, so no DNS change "
+                    "of yours is needed -- theirs already points here.",
+                    "Let GitHub issue a Let's Encrypt certificate for the "
+                    "name. The result is a trusted-TLS site on the "
+                    "client's domain.")),
+    # App names are global and free to claim, but Heroku ended free
+    # dynos: serving anything needs a paid plan and a verified card.
     Provider("Heroku", (".herokuapp.com", ".herokudns.com", ".herokussl.com"),
-             ("No such app", "herokucdn.com/error-pages/no-such-app.html")),
+             ("No such app", "herokucdn.com/error-pages/no-such-app.html"),
+             difficulty="medium",
+             steps=("Create the app under the EXACT name in the CNAME: "
+                    "`heroku apps:create <name>`.",
+                    "Add a verified payment method -- free dynos are gone, "
+                    "so nothing serves without a paid plan.",
+                    "`heroku domains:add <client-hostname>`.",
+                    "Deploy anything. The client's record already points "
+                    "at the app you now own.")),
+    # Seven very different surfaces under one name, and they are not
+    # equally takeable: an App Service name is global and free to
+    # claim, while a Front Door or Traffic Manager profile needs the
+    # subscription and in some cases domain validation. Rated for the
+    # harder end on purpose -- overstating difficulty costs a check,
+    # understating it puts a critical in a report that cannot be
+    # demonstrated.
     Provider("Azure", (".azurewebsites.net", ".cloudapp.azure.com",
                        ".cloudapp.net", ".trafficmanager.net",
                        ".blob.core.windows.net", ".azureedge.net",
                        ".azurefd.net"),
-             ("404 Web Site not found", "Error 404 - Web app not found")),
+             ("404 Web Site not found", "Error 404 - Web app not found"),
+             difficulty="hard",
+             steps=("Identify WHICH Azure surface the CNAME lands on -- "
+                    "App Service, Storage, CDN, Front Door and Traffic "
+                    "Manager all end up under this provider and differ.",
+                    "For App Service or Storage: create a resource with the "
+                    "exact name from the CNAME in any subscription.",
+                    "For Front Door or Traffic Manager: the profile name "
+                    "must be free AND recent Azure requires a DNS TXT "
+                    "validation record, which the client controls -- that "
+                    "is usually what makes this fail.",
+                    "Add the client's hostname as a custom domain on the "
+                    "resource.")),
+    # The store name is claimable on a trial, but attaching a custom
+    # domain needs a paid plan -- and Shopify checks the DNS.
     Provider("Shopify", (".myshopify.com",),
              ("Sorry, this shop is currently unavailable",
-              "Only one step left!")),
+              "Only one step left!"),
+             difficulty="medium",
+             steps=("Start a Shopify trial and take the store handle from "
+                    "the CNAME target.",
+                    "A paid plan is required before a custom domain can be "
+                    "connected.",
+                    "Settings -> Domains -> Connect existing domain, and "
+                    "enter the client's hostname.")),
+    # A Fastly service will happily answer for any domain added to
+    # it, but getting an account that can is not a self-serve minute:
+    # billing details, and in practice a sales conversation.
     Provider("Fastly", (".fastly.net", ".fastlylb.net"),
-             ("Fastly error: unknown domain",)),
+             ("Fastly error: unknown domain",),
+             difficulty="hard",
+             steps=("Obtain a Fastly account with service-creation rights.",
+                    "Create a service and add the client's hostname as a "
+                    "domain on it.",
+                    "Point the service at an origin you control and "
+                    "activate the version.",
+                    "No DNS change is needed -- the client's CNAME already "
+                    "resolves into Fastly's network.")),
     Provider("Pantheon", (".pantheonsite.io",),
-             ("The gods are wise",)),
+             ("The gods are wise",),
+             difficulty="medium",
+             steps=("Create a Pantheon sandbox site.",
+                    "The platform domain is assigned per environment, so "
+                    "the site name has to match the CNAME target.",
+                    "Add the client's hostname under Domains/HTTPS, which "
+                    "requires a paid plan on most tiers.")),
     Provider("Zendesk", (".zendesk.com",),
-             ("Help Center Closed",)),
+             ("Help Center Closed",),
+             difficulty="medium",
+             steps=("Register a Zendesk trial on the subdomain named in "
+                    "the CNAME, if it is free.",
+                    "Enable Guide (the help centre) so something is served.",
+                    "Host mapping for a custom domain is a paid feature, "
+                    "and Zendesk verifies the CNAME.")),
     Provider("Tumblr", (".tumblr.com",),
-             ("Whatever you were looking for doesn't currently exist at this address",)),
+             ("Whatever you were looking for doesn't currently exist at this address",),
+             difficulty="easy",
+             steps=("Register a free Tumblr blog.",
+                    "Blog Settings -> Custom domain -> enter the client's "
+                    "hostname.",
+                    "Tumblr checks the CNAME points at Tumblr, which it "
+                    "already does, and accepts it.")),
     Provider("WordPress", (".wordpress.com",),
-             ("Do you want to register",)),
+             ("Do you want to register",),
+             difficulty="medium",
+             steps=("Register the free blog at the CNAME target's name.",
+                    "Mapping a custom domain onto it needs a paid plan.",
+                    "Add the client's hostname as a mapped domain.")),
     Provider("Ghost", (".ghost.io",),
              ("The thing you were looking for is no longer here",)),
     Provider("Netlify", (".netlify.app", ".netlify.com"),
-             ("Not Found - Request ID",)),
+             ("Not Found - Request ID",),
+             difficulty="easy",
+             steps=("Create a free Netlify site.",
+                    "Domain management -> add the client's hostname as a "
+                    "custom domain. Netlify accepts it when the CNAME "
+                    "already resolves to Netlify.",
+                    "Netlify provisions TLS for it automatically.")),
+    # `npm i -g surge && surge ./dir <hostname>` and it is done. No
+    # web console, no verification, no payment.
     Provider("Surge", (".surge.sh",),
-             ("project not found",)),
+             ("project not found",),
+             difficulty="easy",
+             steps=("`npm install -g surge`",
+                    "Put an index.html in a directory.",
+                    "`surge ./that-directory <client-hostname>` -- surge "
+                    "claims any domain whose CNAME already points at it.")),
     Provider("Bitbucket", (".bitbucket.io",),
-             ("Repository not found",)),
+             ("Repository not found",),
+             difficulty="easy",
+             steps=("Create a free Bitbucket account and a repository "
+                    "named exactly for the CNAME target.",
+                    "Publish static content to it.",
+                    "Bitbucket serves the repo at that name, which is "
+                    "where the client's record points.")),
     Provider("Webflow", (".webflow.io",),
              ("The page you are looking for doesn't exist or has been moved",)),
     Provider("Readme", (".readme.io", ".readmessl.com"),
              ("Project doesnt exist... yet!",)),
     Provider("Statuspage", (".statuspage.io",),
-             ("You are being <a href=\"https://www.statuspage.io\">redirected",)),
+             ("You are being <a href=\"https://www.statuspage.io\">redirected",),
+             difficulty="medium",
+             steps=("Create a Statuspage account and take the page "
+                    "subdomain from the CNAME target.",
+                    "A custom domain is a paid feature.",
+                    "Add the client's hostname; Statuspage verifies the "
+                    "CNAME already points at it.")),
     Provider("Unbounce", (".unbouncepages.com",),
              ("The requested URL was not found on this server",)),
     Provider("Helpjuice", (".helpjuice.com",), ("We could not find what you're looking for",)),
     Provider("Help Scout", (".helpscoutdocs.com",), ("No settings were found for this company",)),
     Provider("Cargo", (".cargocollective.com",), ("404 Not Found",)),
     Provider("Acquia", (".acquia-sites.com",),
-             ("The site you are looking for could not be found",)),
+             ("The site you are looking for could not be found",),
+             difficulty="hard",
+             steps=("Acquia Cloud is enterprise-onboarded; there is no "
+                    "self-serve path to a matching site name.",
+                    "A takeover here realistically needs an existing "
+                    "Acquia subscription.",
+                    "Treat the dangling record as hygiene unless you "
+                    "already hold such an account.")),
     Provider("Campaign Monitor", (".createsend.com",),
              ("Trying to access your account?",)),
     Provider("Desk", (".desk.com",), ("Sorry, We Couldn't Find That Page",)),
@@ -167,9 +331,23 @@ PROVIDERS: tuple[Provider, ...] = (
              patterns=(re.compile(r"\.elb\.[a-z0-9-]+\.amazonaws\.com$"),
                        re.compile(r"\.[a-z0-9-]+\.elb\.amazonaws\.com$"),
                        re.compile(r"\.elb\.amazonaws\.com$")),
-             claimable=False),
+             claimable=False, difficulty="impossible",
+             steps=("You cannot take this name. AWS assigns the random "
+                    "suffix in an ELB hostname, so the exact name cannot "
+                    "be re-registered by anyone.",
+                    "It is still a real defect: the record points at "
+                    "nothing and should be removed, and until it is, it "
+                    "misleads anyone reading the client's DNS.",
+                    "Report as DNS hygiene, not as an exploitable "
+                    "takeover. Writing it up as the latter is the error "
+                    "this rating exists to prevent.")),
     Provider("AWS Elastic Beanstalk",
-             (".elasticbeanstalk.com",), (), claimable=False),
+             (".elasticbeanstalk.com",), (), claimable=False,
+             difficulty="impossible",
+             steps=("Beanstalk CNAMEs are allocated per region and are "
+                    "not freely re-registerable by an outsider.",
+                    "Remove the dangling record; do not report it as an "
+                    "exploitable takeover.")),
     # CloudFront says "ERROR: The request could not be satisfied" for
     # at least four unrelated reasons, and that string was this
     # table's fingerprint until a live engagement showed what it
@@ -198,8 +376,116 @@ PROVIDERS: tuple[Provider, ...] = (
                    "CloudFront attempted to establish a connection with the "
                    "origin"),
              tls_only=True, guard="Generated by cloudfront",
-             claimable=False),
+             claimable=False, difficulty="impossible",
+             steps=("A CloudFront distribution domain is assigned by AWS. "
+                    "Nobody can create a distribution with an existing "
+                    "name, so the name itself cannot be taken.",
+                    "Adding the client's hostname as an alternate domain "
+                    "name on YOUR distribution requires a certificate "
+                    "covering it, which means control of the client's "
+                    "domain -- i.e. this is not a path in.",
+                    "Remove the record. Report as hygiene.")),
 )
+
+
+#: `claimable=False` and `difficulty="impossible"` say the same thing
+#: in two vocabularies, and a provider added later will set one and
+#: forget the other. Checked at import rather than trusted: a table
+#: that disagrees with itself would rate a name both unclaimable and
+#: easy, and one of those would reach a report.
+#: By name, for looking a decided row's provider back up. The
+#: Candidate carries the NAME rather than the object, because it is
+#: serialised into the database and a dataclass is not.
+_BY_NAME: dict[str, Provider] = {p.name: p for p in PROVIDERS}
+
+
+def _check_provider_table() -> None:
+    for p in PROVIDERS:
+        if p.difficulty not in DIFFICULTIES:
+            raise ValueError(
+                f"{p.name}: difficulty {p.difficulty!r} is not one of "
+                f"{DIFFICULTIES}")
+        if not p.claimable and p.difficulty != "impossible":
+            raise ValueError(
+                f"{p.name}: claimable=False but difficulty="
+                f"{p.difficulty!r} -- a name nobody can register is not "
+                f"takeable at any difficulty")
+        if p.claimable and p.difficulty == "impossible":
+            raise ValueError(
+                f"{p.name}: difficulty=impossible but claimable=True")
+
+
+_check_provider_table()
+
+
+def difficulty_for(c: Candidate) -> str:
+    """How hard it would actually be to take this name.
+
+    Two inputs, and as with `severity_for` the ORDER is the point.
+
+    The provider's claim process sets the baseline: an S3 bucket is a
+    free global name anyone can create, a CloudFront distribution
+    domain is assigned by AWS and cannot be created at all.
+
+    **Evidence caps it.** A `candidate` is a name whose CNAME points
+    at a takeable provider and which nothing has checked -- we do not
+    know it is unclaimed. Taking it would mean first establishing
+    that, and an unverified row must not outrank a proven one, which
+    is the same inversion `SEVERITY` was rewritten to remove. So a
+    candidate is never better than `hard`, however easy the provider.
+
+    `live` is the finished answer in the other direction: the name
+    resolves and the provider is serving it, so there is nothing to
+    take.
+    """
+    if not c.claimable:
+        return "impossible"
+    if c.verdict == "live":
+        return "impossible"
+    p = _BY_NAME.get(c.provider)
+    base = p.difficulty if p else "medium"
+    # Only an EVIDENCED verdict earns the provider's own difficulty.
+    # `candidate` is the absence of evidence; so is any verdict this
+    # module has not met, and treating the latter as evidence is how
+    # an unexamined row reaches the top of a report. Asserted in
+    # webtest, which is where this came from: keyed on `candidate`
+    # alone, a verdict of "something-new" on AWS S3 scored critical.
+    if c.verdict not in ("dangling", "fingerprint"):
+        # Not "set to hard" -- take the WORSE of the two, so a
+        # provider already rated impossible is not promoted by having
+        # been checked less.
+        return max(base, "hard", key=DIFFICULTIES.index)
+    return base
+
+
+def steps_for(c: Candidate) -> list[str]:
+    """What an operator would do, in order.
+
+    Shown whatever the difficulty. "Impossible" raises the question
+    "why not", and a row that only says impossible does not answer
+    it -- so those providers carry the reason and what to do instead.
+    """
+    p = _BY_NAME.get(c.provider)
+    steps = list(p.steps) if p and p.steps else []
+    if not steps:
+        steps = [
+            f"No claim procedure is recorded for {c.provider} in "
+            f"app/takeover.py. Treat the difficulty as unverified and "
+            f"check the provider's own documentation before reporting "
+            f"this as exploitable.",
+        ]
+    # Same rule as `difficulty_for`: anything that is not an evidenced
+    # verdict is unevidenced, including one this module has not met.
+    if c.verdict not in ("dangling", "fingerprint"):
+        # First, because it is the step that has to happen before any
+        # of the others mean anything.
+        steps = [
+            "FIRST establish the name is actually unclaimed. Nothing here "
+            "has shown that it is: neither the dangling check nor the "
+            "provider fingerprint could be run, so the CNAME pointing at "
+            "this provider is all that is known.",
+        ] + steps
+    return steps
 
 
 def provider_for(cname: str) -> Provider | None:
@@ -535,14 +821,27 @@ SEVERITY: dict[tuple[str, bool], str] = {
 
 
 def severity_for(c: Candidate) -> str:
-    """Severity of one takeover. Unknown shapes fall to `low`.
+    """Severity of one takeover, from how hard it is to actually take.
 
-    Falling to the floor rather than raising: a verdict this table
-    has not met is, by definition, one nothing has reasoned about,
-    and guessing high on it would put an unexamined row at the top of
-    a client's report.
+    **Severity now follows `difficulty_for`**, per
+    `DIFFICULTY_SEVERITY`: easy -> critical, medium -> high, hard ->
+    medium, impossible -> low. Asked for, and it is the better
+    question: "how bad is this" on a dangling record IS "can somebody
+    actually get it", and a free S3 bucket and an unregisterable ELB
+    name were both High under the old table.
+
+    The property the old `SEVERITY` table existed to protect is kept,
+    and it is kept in `difficulty_for` rather than here: evidence
+    caps difficulty, so a `candidate` can never be `easy` and
+    therefore never critical. Without that, pointing a CNAME at
+    GitHub Pages would be enough to produce a critical on a name
+    nothing had checked -- which is the inversion that table was
+    rewritten to remove, arriving by a different route.
+
+    `SEVERITY` is kept below for the migration note and for anything
+    still reading it; it is no longer what decides.
     """
-    return SEVERITY.get((c.verdict, bool(c.claimable)), "low")
+    return DIFFICULTY_SEVERITY.get(difficulty_for(c), "low")
 
 
 #: Which verdicts are worth raising at all.
