@@ -372,6 +372,9 @@ class Project(Base, TimestampMixin):
     agent_anthropic_token: Mapped[str | None] = mapped_column(Text)
     agent_openai_token: Mapped[str | None] = mapped_column(Text)
     agent_model: Mapped[str | None] = mapped_column(String(128))
+    # Per-project local LLM config. NULL inherits the site setting.
+    agent_local_base_url: Mapped[str | None] = mapped_column(Text)
+    agent_local_token: Mapped[str | None] = mapped_column(Text)
     # NULL inherits the site default rather than hard-coding one here, so
     # changing the site policy moves every project that never chose.
     slack_private: Mapped[bool | None] = mapped_column(Boolean, default=None)

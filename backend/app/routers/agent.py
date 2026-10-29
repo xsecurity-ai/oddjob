@@ -256,17 +256,21 @@ async def _resolve(session: AsyncSession,
 
     proj_token = {"anthropic": pr.agent_anthropic_token if pr else None,
                   "openai": pr.agent_openai_token if pr else None,
-                  # A local server is shared infrastructure; there is no
-                  # per-project key worth having for it.
-                  "local": None}[provider]
+                  "local": pr.agent_local_token if pr else None}[provider]
     site_token = str(cfg.get(f"agent.{provider}_token") or "")
     token = (proj_token or "").strip() or site_token.strip()
     source = "project" if (proj_token or "").strip() else "site"
     model = (((pr.agent_model if pr else "") or "").strip()
              or str(cfg.get(f"agent.{provider}_model") or "").strip()
              or DEFAULT_MODEL[provider])
-    base_url = (str(cfg.get("agent.local_base_url") or "").strip()
-                if provider == "local" else None)
+    if provider == "local":
+        base_url = None
+        if pr and pr.agent_local_base_url:
+            base_url = str(pr.agent_local_base_url).strip() or None
+        if not base_url:
+            base_url = str(cfg.get("agent.local_base_url") or "").strip() or None
+    else:
+        base_url = None
     return provider, token, model, source, base_url, cfg
 
 

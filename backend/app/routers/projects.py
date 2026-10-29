@@ -1129,6 +1129,8 @@ async def get_agent_override(project: str,
         "anthropic_token_set": bool(pr.agent_anthropic_token),
         "anthropic_token_kind": token_kind("anthropic", pr.agent_anthropic_token or ""),
         "openai_token_set": bool(pr.agent_openai_token),
+        "local_base_url": pr.agent_local_base_url,
+        "local_token_set": bool(pr.agent_local_token),
     }
 
 
@@ -1146,6 +1148,11 @@ async def set_agent_override(project: str, body: AgentOverride,
     for key in ("agent_provider", "agent_model"):
         if key in patch:
             setattr(pr, key, (patch[key] or None) or None)
+    # Handle local-specific fields separately — they're on the Project model.
+    for key in ("agent_local_base_url", "agent_local_token"):
+        if key in patch:
+            setattr(pr, key, (patch[key] or None) or None)
+            patch.pop(key)
     await session.commit()
     return await get_agent_override(project, pr, session)
 
