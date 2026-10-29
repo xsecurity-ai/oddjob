@@ -90,6 +90,13 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
           kind: a?.kind ?? '', host: a?.host ?? null,
           third_party: a?.third_party ?? false,
           bytes: a?.bytes ?? null, fetched: a?.fetched ?? false,
+          // Carried across, and this is the bug that made the By page
+          // table show a dash in Findings and Secrets on every row
+          // whatever the data said: the columns read them off the row
+          // and these rows were built by hand without them.
+          scanned: a?.scanned ?? false,
+          vulns: a?.vulns ?? 0, criticals: a?.criticals ?? 0,
+          highs: a?.highs ?? 0, secrets: a?.secrets ?? 0,
           url: a?.url ?? '',
         }
       })
@@ -171,7 +178,34 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
       renderCell: (p) => {
         const r = p.row as WebAsset
         if (!r.vulns) {
-          return <Box sx={{ color: alpha(neon.muted, 0.35) }}>—</Box>
+          // Three answers, not two. "Nothing has looked at this file"
+          // and "this file is clean" are different, and collapsing
+          // the first into the second is how a finding gets missed --
+          // the sweep covers a tenth of a large estate at any moment,
+          // so most dashes mean the first.
+          if (!r.fetched) {
+            return (
+              <Tooltip title="Nothing has retrieved this file, so nothing
+                              has read it. Run a crawl with asset fetching on.">
+                <Box sx={{ color: alpha(neon.muted, 0.3) }}>—</Box>
+              </Tooltip>
+            )
+          }
+          if (!r.scanned) {
+            return (
+              <Tooltip title="Fetched, but the scanners have not reached it
+                              yet. This is not a clean result.">
+                <Box sx={{ color: alpha(neon.yellow, 0.75), fontSize: 10.5 }}>
+                  unscanned
+                </Box>
+              </Tooltip>
+            )
+          }
+          return (
+            <Tooltip title="Read by the scanners, nothing found.">
+              <Box sx={{ color: alpha(neon.green, 0.75) }}>0</Box>
+            </Tooltip>
+          )
         }
         return (
           // Clickable: the count was a number you then had to go and
@@ -204,11 +238,21 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
           sx={{ color: neon.yellow, fontWeight: 700, cursor: 'pointer',
                 textShadow: glow(neon.yellow, 0.5),
                 '&:hover': { textDecoration: 'underline' } }}>{p.value}</Box>
+      ) : !(p.row as WebAsset).scanned ? (
+        // Same three answers as Findings. A blank Secrets column on a
+        // file nothing has read is not "no secrets".
+        <Tooltip title={(p.row as WebAsset).fetched
+          ? 'Fetched, but not scanned yet. This is not a clean result.'
+          : 'Never retrieved, so never read.'}>
+          <Box sx={{ color: alpha(neon.yellow, 0.6), fontSize: 10.5 }}>?</Box>
+        </Tooltip>
       ) : (
         // No underline and no pointer on a dash: there is nothing to
         // open, and a cell that looks clickable and is not is worse
         // than one that plainly is not.
-        <Box sx={{ color: alpha(neon.muted, 0.35) }}>—</Box>
+        <Tooltip title="Read by the scanners, no credential in it.">
+          <Box sx={{ color: alpha(neon.muted, 0.35) }}>—</Box>
+        </Tooltip>
       ),
     },
     {

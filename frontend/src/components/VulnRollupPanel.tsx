@@ -18,7 +18,7 @@
  * hand-rolled lists; that made them the only tables in the app that
  * looked different and did less.
  */
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Box, Chip, CircularProgress, Stack, Tooltip, alpha } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
 import type { ColumnDef } from '../lib/columns'
@@ -53,25 +53,64 @@ function Severity({ value }: { value: string }) {
 }
 
 /** The findings behind one expanded row. */
+/** Worst first, then everything settled pushed to the bottom.
+ *
+ *  Three keys, in the order somebody reading an expanded host
+ *  actually works:
+ *
+ *    severity   critical before info. Alphabetical would put
+ *               `critical` before `high` by luck and `info` before
+ *               `low` by accident, which is why this is a table and
+ *               not a string compare.
+ *    last scan  what the most recent scan said. `resolved` means the
+ *               scan looked and it was gone, so it goes last -- it
+ *               is the one row in the list nobody has to do anything
+ *               about. `unconfirmed` does NOT go last: nothing that
+ *               reports this finding has run since, so its absence
+ *               is unmeasured rather than fixed.
+ *    status     what somebody DID about it. Closed last, for the
+ *               same reason: it is finished.
+ *
+ *  Then newest sighting, then title, so the order is stable between
+ *  renders rather than whatever the server's `Vuln.id` happened to be.
+ */
+const SEV_RANK: Record<string, number> =
+  Object.fromEntries(SEVERITIES.map((s, i) => [s, i]))
+
+export function byWorstFirst(a: Vuln, b: Vuln): number {
+  const sev = (SEV_RANK[a.severity] ?? 99) - (SEV_RANK[b.severity] ?? 99)
+  if (sev) return sev
+  const gone = Number(a.lifecycle === 'resolved') - Number(b.lifecycle === 'resolved')
+  if (gone) return gone
+  const shut = Number(a.status === 'closed') - Number(b.status === 'closed')
+  if (shut) return shut
+  const seen = (b.last_seen_at ?? '').localeCompare(a.last_seen_at ?? '')
+  if (seen) return seen
+  return (a.title ?? '').localeCompare(b.title ?? '')
+}
+
 function Detail({ rows, loading, onFinding, show }: {
   rows: Vuln[]
   loading: boolean
   onFinding: (id: number) => void
   show: (v: Vuln) => React.ReactNode
 }) {
+  // Sorted here rather than at each call site: both rollups expand
+  // into this, and two copies of an ordering is two orderings.
+  const ordered = useMemo(() => [...rows].sort(byWorstFirst), [rows])
   if (loading) {
     return <Stack sx={{ alignItems: 'center', py: 1 }}>
       <CircularProgress size={15} sx={{ color: neon.cyan }} />
     </Stack>
   }
-  if (!rows.length) {
+  if (!ordered.length) {
     return <Box sx={{ fontSize: 11.5, color: neon.muted }}>
       Nothing came back for this row.
     </Box>
   }
   return (
     <Stack spacing={0.2}>
-      {rows.map((v) => (
+      {ordered.map((v) => (
         <Box key={v.id} onClick={() => onFinding(v.id)}
           sx={{ display: 'flex', alignItems: 'center', gap: 1,
                 px: 0.6, py: 0.4, fontSize: 11.5, borderRadius: 0.5,
