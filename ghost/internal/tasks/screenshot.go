@@ -340,6 +340,20 @@ func runScreenshot(ctx context.Context, args map[string]any, _ string) Result {
 		// every internal host, which is a picture of our own browser
 		// rather than of the client's estate.
 		chromedp.IgnoreCertErrors,
+		// chromedp waits 20 seconds by default for chromium to print
+		// its devtools websocket URL, and reports the timeout as
+		// "would not start" -- which is a claim about the browser
+		// when the truth is usually that the host is busy. A Ghost is
+		// routinely a small cloud instance already running a port
+		// sweep, and chromium's startup there is slow rather than
+		// broken.
+		//
+		// 90 seconds. The task has its own deadline above it, so this
+		// cannot hang a run; all it buys is the difference between a
+		// browser that was slow and a browser that is not there, and
+		// the two have very different fixes. CI hit this twice in one
+		// afternoon on a loaded runner, at 20.04s.
+		chromedp.WSURLReadTimeout(90*time.Second),
 	)
 	// No `UserDataDir`, deliberately: left unset, chromedp makes a
 	// fresh temporary profile per allocator and removes it when the
