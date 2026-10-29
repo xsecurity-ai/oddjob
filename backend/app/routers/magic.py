@@ -246,4 +246,20 @@ async def invite(username: str, _: User = Depends(require_site_admin),
         select(User).where(User.username == username.lower()))).scalar_one_or_none()
     if not u:
         raise HTTPException(404, f"no user {username!r}")
+    # An invite sets a FIRST password. Sent to an account already in
+    # use it is an unsolicited password-reset mail to a working user,
+    # and a link that sets a password is worth something to whoever
+    # reads that mailbox. The UI disables the button, which is a
+    # courtesy and not a control -- this is the control.
+    #
+    # 409 rather than 403: nothing is forbidden about the caller, the
+    # account is simply in a state this does not apply to. `Disable`
+    # and then a fresh invite is the deliberate path for an account
+    # that has genuinely lost its password.
+    if u.last_login_at is not None:
+        raise HTTPException(
+            409, f"{u.username!r} has signed in before "
+                 f"({u.last_login_at:%Y-%m-%d %H:%M} UTC), so an invite "
+                 f"would email a password-setting link to an account "
+                 f"already in use")
     return await deliver_invite(session, u, await load_all(session))

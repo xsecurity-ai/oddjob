@@ -1004,6 +1004,10 @@ export interface User {
   is_site_admin: boolean; is_active: boolean
   /** Which sign-in methods actually work for this account. */
   has_password: boolean; has_google: boolean
+  /** When this account last signed in. `null` means it never has,
+   *  which is what an invited account looks like until the link is
+   *  used -- and the only state in which an invite makes sense. */
+  last_login_at: string | null
   groups: Group[]; created_at: string
 }
 export interface Me { user: User; projects: Record<string, string> }
