@@ -48,6 +48,7 @@ from . import (
     assetfetch,
     assetlinks,
     assetscan,
+    heap,
     lifecycle,
     lockfiles,
     manifest,
@@ -1466,6 +1467,20 @@ class AssetWorker:
         while True:
             try:
                 await self._cycle()
+                # Hand the cycle's working set back to the OS.
+                #
+                # A cycle reads file bodies, builds an index over them
+                # and drops the lot. Freeing those objects returns the
+                # memory to glibc and glibc keeps it: measured in this
+                # image, 200k strings of 2 KB cost 420 MB resident,
+                # and after del + gc.collect() all 420 MB was still
+                # there. `malloc_trim` returned 403 MB of it.
+                #
+                # Here rather than on a timer because this is where
+                # the churn is, and after the cycle rather than before
+                # so the next one starts from a floor rather than a
+                # mark left by the last.
+                heap.trim()
                 await asyncio.sleep(CYCLE_SECS)
             except asyncio.CancelledError:
                 log.info("asset worker stopped")

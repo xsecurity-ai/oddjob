@@ -3370,6 +3370,54 @@ _st, _nar = call("/api/ghosts/callback/probe", "POST",
 check("an agent with no outbound address is refused, not guessed at",
       _st == 409, f"status={_st} {str(_nar)[:160]}")
 _srv.close()
+print("\n== giving freed memory back to the OS ==")
+# CPython frees to glibc and glibc mostly does not free to the kernel,
+# so a burst of allocation becomes a permanent high-water mark. This
+# is what the asset worker calls after every cycle.
+from app.heap import rss_mb, trim  # noqa: E402
+
+_base = rss_mb()
+check("rss is readable, or honestly reports that it is not",
+      isinstance(_base, float) and _base >= 0.0, _base)
+# The allocation SHAPE matters and is the reason this is asserted with
+# many medium strings rather than one big block: a single large
+# allocation goes to mmap and is returned on free without any help,
+# which is exactly the case that would make a broken trim look fine.
+_rows = [("x" * 2048) + str(i) for i in range(120000)]
+_held = rss_mb()
+del _rows
+import gc as _gc  # noqa: E402
+
+_gc.collect()
+_freed = rss_mb()
+_released = trim()
+_final = rss_mb()
+if _base == 0.0:
+    # No /proc: a developer's laptop. The call must still be safe.
+    check("trim is harmless where it cannot be measured",
+          _released == 0.0, _released)
+else:
+    check("holding 120k medium strings costs real memory",
+          _held - _base > 100, f"{_base:.0f} -> {_held:.0f} MB")
+    # WHICH of the two returns the memory is a property of the libc
+    # and its tuning, not of this code, and the two disagree: in the
+    # deployed Wolfi image `del` + gc gave back nothing and trim
+    # returned 403 MB, while on the CI runner glibc had already
+    # trimmed on free and there was 1 MB left to reclaim.
+    #
+    # So the assertion is the one that holds either way -- the memory
+    # is back by the time trim returns -- plus the invariants that
+    # are genuinely this module's: it never raises, never reports a
+    # negative, and never makes RSS worse. Asserting "freeing alone
+    # does not give it back" encoded one environment's allocator as
+    # a fact about the program, which is what CI caught.
+    check("one way or the other, the memory comes back",
+          _final - _base < 60, f"{_base:.0f} -> {_final:.0f} MB")
+    check("...and trim never reports a negative",
+          _released >= 0.0, _released)
+    check("...nor leaves rss higher than it found it",
+          _final <= _freed + 5, f"{_freed:.0f} -> {_final:.0f} MB")
+check("trim is safe to call twice", trim() >= 0.0)
 
 
 print("\n== which bundles the project already holds ==")
