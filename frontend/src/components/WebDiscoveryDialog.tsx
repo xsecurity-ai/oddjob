@@ -62,6 +62,11 @@ export function WebDiscoveryDialog({ project, onClose, onQueued }: {
   const [mode, setMode] = useState<Mode>('both')
   const [kitchenSink, setKitchenSink] = useState(false)
   const [fetchAssets, setFetchAssets] = useState(false)
+  // Off: a re-crawl pulls back only the bundles the project does not
+  // already hold. Off is the default because the saving is traffic at
+  // the client and their CDNs, and a re-download is only worth it when
+  // something has been deployed since the last run.
+  const [refetchAssets, setRefetchAssets] = useState(false)
   // Authenticated discovery. Empty leaves the agent's defaults alone,
   // so an unauthenticated run is the no-extra-input case.
   const [username, setUsername] = useState('')
@@ -82,6 +87,10 @@ export function WebDiscoveryDialog({ project, onClose, onQueued }: {
     const a: Record<string, unknown> = {}
     if (fetchAssets) {
       a.fetch_assets = true
+      // Only ever sent with the flag it qualifies. On its own it
+      // would read as "re-download" to an agent that was not asked to
+      // download anything.
+      if (refetchAssets) a.refetch_assets = true
       // First party only, always, from here. Widening it is an
       // `assets_scope` the agent accepts but this dialog does not
       // offer: fetching from four hundred CDNs is a scope decision
@@ -213,7 +222,14 @@ export function WebDiscoveryDialog({ project, onClose, onQueued }: {
             <>
               <FormControlLabel
                 control={<Checkbox size="small" checked={fetchAssets}
-                  onChange={(e) => setFetchAssets(e.target.checked)} />}
+                  onChange={(e) => {
+                    setFetchAssets(e.target.checked)
+                    // Cleared with its parent rather than left ticked
+                    // and greyed. A box that still shows a choice it
+                    // can no longer act on is a lie about what the
+                    // next run will do.
+                    if (!e.target.checked) setRefetchAssets(false)
+                  }} />}
                 label={<Box sx={{ fontSize: 13 }}>
                   Download the bundles the pages load
                 </Box>} />
@@ -225,7 +241,34 @@ export function WebDiscoveryDialog({ project, onClose, onQueued }: {
                 recorded but never fetched. The files are kept in the
                 database, and a bundle with a key in it puts that key in
                 the database too.
+                {' '}Only bundles this project does not already hold are
+                requested, unless the box below is ticked.
               </Caveat>
+              {/* Under the checkbox it qualifies, and dead until that
+                  one is on: "re-download" means nothing when nothing
+                  is being downloaded, and an enabled control that
+                  does nothing is worse than a greyed one that
+                  explains itself. */}
+              <FormControlLabel
+                disabled={!fetchAssets}
+                control={<Checkbox size="small" checked={refetchAssets}
+                  disabled={!fetchAssets}
+                  onChange={(e) => setRefetchAssets(e.target.checked)} />}
+                label={<Box sx={{ fontSize: 13 }}>
+                  Re-download bundles already stored
+                </Box>}
+                sx={{ ml: 2, mt: -0.5 }} />
+              {fetchAssets && (
+                <Caveat>
+                  Off, a second crawl asks only for what is new — the
+                  usual case, and it is the client's servers and their
+                  CDNs that are spared the repeat. On, every bundle is
+                  fetched again, which is what a deploy since the last
+                  run calls for: a fingerprinted bundle changes its URL
+                  and is picked up either way, but <code>app.js</code>
+                  {' '}does not.
+                </Caveat>
+              )}
             </>
           )}
 

@@ -3216,5 +3216,83 @@ check("a list holding something that is not a message drops only that",
 check("an empty thread is an empty conversation", thread_messages([]) == [])
 
 
+print("\n== which bundles the project already holds ==")
+# A crawl asks this between finding the bundles a page loads and
+# fetching them, so a second crawl does not re-request hundreds of
+# unchanged files from the client and from whatever CDN fronts them.
+_CRAWL = json.dumps({
+    "sites": ["https://198.51.100.9/"], "depth": 1,
+    "urls": ["https://198.51.100.9/"],
+    "assets": [
+        # Fetched: the bytes are here, so a later crawl need not ask.
+        {"url": "https://198.51.100.9/static/app.a1b2c3.js",
+         "page": "https://198.51.100.9/", "kind": "script",
+         "status": 200, "content_type": "application/javascript",
+         "sha256": "a" * 64, "bytes": 21, "body": "var a=1;var b=2;var c=3"},
+        # Seen but never pulled back. Known about is not the same as
+        # held, and an asset with no body is exactly what a later run
+        # SHOULD go and get.
+        {"url": "https://198.51.100.9/static/vendor.js",
+         "page": "https://198.51.100.9/", "kind": "script"},
+    ]})
+# Its own ghost. The enrollment at the top of this file has been
+# re-enrolled and killed by the tests in between, and reusing its key
+# here would fail for a reason that has nothing to do with assets.
+_st, _hg = call("/api/ghosts?project=AGENT", "POST",
+                {"name": "held-a"}, token=admin)
+HELDKEY = (_hg or {}).get("callback_key")
+
+_st, _ = call("/api/scans/import?project=AGENT", "POST",
+              {"content": _CRAWL, "format": "auto", "mode": "open"},
+              token=admin)
+check("a crawl carrying one fetched bundle and one reference imports",
+      _st == 200, f"status={_st}")
+
+_held = call("/api/ghosts/assets/held", "POST", {"urls": [
+    "https://198.51.100.9/static/app.a1b2c3.js",
+    "https://198.51.100.9/static/vendor.js",
+    "https://198.51.100.9/static/new.js",
+]}, key=HELDKEY)
+check("the question is answered over the callback key, with no user token",
+      _held[0] == 200, f"status={_held[0]} {str(_held[1])[:160]}")
+check("the bundle whose bytes are stored comes back as held",
+      (_held[1] or {}).get("held") ==
+      ["https://198.51.100.9/static/app.a1b2c3.js"],
+      str(_held[1])[:200])
+# The two halves that make this safe to act on. A row that exists
+# without a body means "seen, never fetched" -- calling it held would
+# mean a file that was only ever referenced is never actually read.
+check("...a reference with no body is not held, so it is still fetched",
+      "https://198.51.100.9/static/vendor.js"
+      not in ((_held[1] or {}).get("held") or []), str(_held[1])[:200])
+check("...and a url nothing has ever seen is not held either",
+      "https://198.51.100.9/static/new.js"
+      not in ((_held[1] or {}).get("held") or []), str(_held[1])[:200])
+
+# Another engagement's answer is a fact about that engagement. An
+# agent runs on somebody else's network; it reads its own project and
+# nothing wider.
+call("/api/projects", "POST", {"code": "HELDB", "name": "Other"}, token=admin)
+_st2, _en2 = call("/api/ghosts?project=HELDB", "POST",
+                  {"name": "held-b"}, token=admin)
+_k2 = (_en2 or {}).get("callback_key")
+_o = call("/api/ghosts/assets/held", "POST",
+          {"urls": ["https://198.51.100.9/static/app.a1b2c3.js"]}, key=_k2)
+check("an agent on another project is told nothing about this one's",
+      (_o[1] or {}).get("held") == [], str(_o[1])[:160])
+
+_n = call("/api/ghosts/assets/held", "POST",
+          {"urls": [f"https://198.51.100.9/{i}.js" for i in range(2001)]},
+          key=HELDKEY)
+check("a question bigger than the cap is refused rather than parsed",
+      _n[0] == 422, f"status={_n[0]} {str(_n[1])[:160]}")
+check("an empty question is an empty answer, not an error",
+      call("/api/ghosts/assets/held", "POST", {"urls": []}, key=HELDKEY)[1]
+      == {"held": []})
+check("and no key is no answer",
+      call("/api/ghosts/assets/held", "POST", {"urls": []})[0] in (401, 403),
+      call("/api/ghosts/assets/held", "POST", {"urls": []})[0])
+
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

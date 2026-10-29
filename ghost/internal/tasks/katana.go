@@ -239,11 +239,17 @@ func runKatana(ctx context.Context, args map[string]any, _ string) Result {
 	defer func() { _ = co.Close() }()
 
 	fetchAssetsWanted, _ := args["fetch_assets"].(bool)
+	// Off by default: a re-crawl pulls back only the bundles the
+	// project does not already hold. On, every one is fetched again,
+	// which is what a deploy since the last run calls for -- a
+	// fingerprinted bundle changes its URL, but `app.js` does not.
+	refetchAssets, _ := args["refetch_assets"].(bool)
 	// Reported in the result, not logged: "we recorded 412 assets and
 	// deliberately did not fetch them" is something the operator who
 	// asked for the crawl needs to read, and a log line on the agent
 	// host is not where they are looking.
 	assetsSkipped := 0
+	assetsHeld := 0
 
 	crawler, err := standard.New(co)
 	if err != nil {
@@ -303,6 +309,11 @@ func runKatana(ctx context.Context, args map[string]any, _ string) Result {
 		// would put "scan the client" and "touch four hundred
 		// third parties" behind the same click.
 		notOurs := 0
+		// Assets held back from the fetch, re-joined to the result
+		// afterwards. Two reasons an asset lands here and only one
+		// of them is "already held", which is why the counters are
+		// separate in the output.
+		var pulled []asset
 		if assetScope(args) != "all" {
 			keep := make([]asset, 0, len(assets))
 			for _, a := range assets {
@@ -310,15 +321,55 @@ func runKatana(ctx context.Context, args map[string]any, _ string) Result {
 					keep = append(keep, a)
 					continue
 				}
+				// Held back from the FETCH, not dropped. The
+				// comment above has always said the reference is
+				// kept either way, and until the re-join below it
+				// was not: ticking "download the bundles" made the
+				// run forget which CDNs the pages load from, which
+				// is the one question this table exists to answer
+				// and the one nobody would think to check.
 				notOurs++
+				pulled = append(pulled, a)
 			}
 			assets = keep
+		}
+		// What this project already has the bytes of. Asked once,
+		// between finding the bundles and fetching them -- the only
+		// point at which the list of URLs exists and no request has
+		// been made yet.
+		//
+		// The reference is still reported for a held asset, because
+		// "this page loads it" is a fact about THIS crawl and the
+		// page may be one nothing had reached before. Only the
+		// request is skipped. Oddjob's importer fills in bytes it
+		// does not have and never blanks bytes it does, so a
+		// body-less sighting of a stored asset is safe by
+		// construction.
+		if !refetchAssets {
+			held := alreadyHeld(ctx, assets)
+			if len(held) > 0 {
+				keep := make([]asset, 0, len(assets))
+				for _, a := range assets {
+					if held[a.URL] {
+						a.AlreadyHeld = true
+						assetsHeld++
+						pulled = append(pulled, a)
+						continue
+					}
+					keep = append(keep, a)
+				}
+				assets = keep
+			}
 		}
 		if len(assets) > 0 {
 			assets = fetchAssets(ctx, assets, args,
 				intOr(args, "max_asset_body", 5*1024*1024),
 				intOr(args, "asset_budget", 64*1024*1024))
 		}
+		// Put back after the fetch, so the result carries every asset
+		// the crawl saw -- held and fetched -- rather than only the
+		// ones this run happened to request.
+		assets = append(assets, pulled...)
 		assetsSkipped = notOurs
 	}
 
@@ -352,7 +403,12 @@ func runKatana(ctx context.Context, args map[string]any, _ string) Result {
 			// are on somebody else's host. A gap in the bundles,
 			// said out loud for the same reason the body gaps are.
 			"assets_not_fetched": assetsSkipped,
-			"assets_scope":       assetScope(args)}),
+			// Already in the database, so not asked for again. A
+			// different fact from `assets_not_fetched`, which is
+			// "somebody else's host and we did not touch it".
+			"assets_already_held": assetsHeld,
+			"assets_refetched":    refetchAssets,
+			"assets_scope":        assetScope(args)}),
 		Stderr: tail(strings.Join(failures, "\n"), 4000),
 		Summary: fmt.Sprintf(
 			"katana: %d url(s) across %d site(s)%s; %d exchange(s) kept"+
@@ -481,6 +537,10 @@ type asset struct {
 	ContentType string `json:"content_type,omitempty"`
 	Body        string `json:"body,omitempty"`
 	FetchError  string `json:"fetch_error,omitempty"`
+	// Recorded but deliberately NOT fetched because the project
+	// already holds the bytes. Distinct from an empty asset with no
+	// explanation, which reads as "nothing has tried".
+	AlreadyHeld bool `json:"already_held,omitempty"`
 	// Which product refused a PLAIN request for this file, if one
 	// did. Kept even when the browser-handshake retry then
 	// succeeded: "this host is behind Cloudflare and refuses a
@@ -599,6 +659,56 @@ func nameVersion(path, query string) (string, string) {
 		stem = stem[:64]
 	}
 	return stem, ver
+}
+
+// : Most asset URLs in one `held` question. The server caps this at
+// : the same number; chunking here is what keeps a big crawl under it.
+const heldChunk = 2000
+
+// AssetsHeld asks Oddjob which asset URLs this project already holds
+// the bytes of. Wired by the agent at startup, the way Parallelism is.
+//
+// **Nil means fetch everything, and that is the right default.** A
+// task run standalone, or in a test, has nobody to ask -- and "we do
+// not know" has to mean "fetch", because a missing bundle is a gap in
+// the evidence and a repeated one is only traffic. The same applies
+// to an error from the call: it is logged into the result and the
+// fetch goes ahead.
+var AssetsHeld func(ctx context.Context, urls []string) ([]string, error)
+
+// alreadyHeld returns the subset of these URLs Oddjob already has the
+// bytes of, asking in chunks. An empty set on any failure.
+func alreadyHeld(ctx context.Context, in []asset) map[string]bool {
+	if AssetsHeld == nil || len(in) == 0 {
+		return nil
+	}
+	urls := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, a := range in {
+		if !seen[a.URL] {
+			seen[a.URL] = true
+			urls = append(urls, a.URL)
+		}
+	}
+	out := map[string]bool{}
+	for start := 0; start < len(urls); start += heldChunk {
+		end := start + heldChunk
+		if end > len(urls) {
+			end = len(urls)
+		}
+		held, err := AssetsHeld(ctx, urls[start:end])
+		if err != nil {
+			// Partial answers are kept. Knowing about the first
+			// chunk is better than fetching all of it again, and
+			// the only cost of a missing answer is one more
+			// request to a host that has already served it.
+			return out
+		}
+		for _, u := range held {
+			out[u] = true
+		}
+	}
+	return out
 }
 
 // fetchAssets pulls back the files the pages referenced.

@@ -249,3 +249,117 @@ func TestSamePartyAsset(t *testing.T) {
 		})
 	}
 }
+
+// A second crawl of a site should not re-request every bundle it
+// already stored. The saving is traffic at the client's servers and
+// at whatever CDN fronts them: nothing here is a probe, but it is
+// still the engagement's egress asking a stranger for a file it
+// already has, on every run.
+func TestAlreadyHeldSkipsTheFetch(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			hits++
+			w.Header().Set("Content-Type", "application/javascript")
+			_, _ = fmt.Fprint(w, "var x = 1;")
+		}))
+	defer srv.Close()
+
+	old := AssetsHeld
+	defer func() { AssetsHeld = old }()
+
+	stored := srv.URL + "/stored.js"
+	fresh := srv.URL + "/fresh.js"
+	var asked [][]string
+	AssetsHeld = func(_ context.Context, urls []string) ([]string, error) {
+		asked = append(asked, urls)
+		return []string{stored}, nil
+	}
+
+	in := []asset{{URL: stored, Kind: "script"}, {URL: fresh, Kind: "script"}}
+	held := alreadyHeld(context.Background(), in)
+	if !held[stored] || held[fresh] {
+		t.Fatalf("held set is %v", held)
+	}
+	if len(asked) != 1 || len(asked[0]) != 2 {
+		t.Fatalf("asked %v, want one question carrying both urls", asked)
+	}
+
+	keep := []asset{}
+	for _, a := range in {
+		if !held[a.URL] {
+			keep = append(keep, a)
+		}
+	}
+	_ = fetchAssets(context.Background(), keep, map[string]any{},
+		1024*1024, 8*1024*1024)
+	if hits != 1 {
+		t.Errorf("%d requests, want 1 — the stored bundle was asked for again", hits)
+	}
+}
+
+// Not knowing has to mean fetching. A task run standalone has nobody
+// to ask, and a missing bundle is a gap in the evidence while a
+// repeated one is only traffic.
+func TestAlreadyHeldIsEmptyWithoutAServer(t *testing.T) {
+	old := AssetsHeld
+	defer func() { AssetsHeld = old }()
+
+	AssetsHeld = nil
+	if got := alreadyHeld(context.Background(),
+		[]asset{{URL: "https://a.example/x.js"}}); len(got) != 0 {
+		t.Errorf("no hook should hold nothing, got %v", got)
+	}
+
+	// Same for a server that answers with an error: the crawl goes
+	// ahead rather than stalling on a lookup that is an optimisation.
+	AssetsHeld = func(context.Context, []string) ([]string, error) {
+		return nil, fmt.Errorf("server unreachable")
+	}
+	if got := alreadyHeld(context.Background(),
+		[]asset{{URL: "https://a.example/x.js"}}); len(got) != 0 {
+		t.Errorf("a failed question should hold nothing, got %v", got)
+	}
+}
+
+// The question is chunked, because the server caps it. A crawl that
+// found 5,000 bundles must still get an answer rather than a 422.
+func TestAlreadyHeldChunksBigCrawls(t *testing.T) {
+	old := AssetsHeld
+	defer func() { AssetsHeld = old }()
+
+	var sizes []int
+	AssetsHeld = func(_ context.Context, urls []string) ([]string, error) {
+		sizes = append(sizes, len(urls))
+		return urls[:1], nil
+	}
+	in := make([]asset, 0, heldChunk+5)
+	for i := 0; i < heldChunk+5; i++ {
+		in = append(in, asset{URL: fmt.Sprintf("https://a.example/%d.js", i)})
+	}
+	got := alreadyHeld(context.Background(), in)
+	if len(sizes) != 2 || sizes[0] != heldChunk || sizes[1] != 5 {
+		t.Fatalf("chunk sizes %v, want [%d 5]", sizes, heldChunk)
+	}
+	if len(got) != 2 {
+		t.Errorf("both chunks' answers should be kept, got %v", got)
+	}
+}
+
+// One URL on four hundred pages is one question, not four hundred.
+func TestAlreadyHeldAsksOncePerURL(t *testing.T) {
+	old := AssetsHeld
+	defer func() { AssetsHeld = old }()
+
+	var asked []string
+	AssetsHeld = func(_ context.Context, urls []string) ([]string, error) {
+		asked = urls
+		return nil, nil
+	}
+	u := "https://a.example/jquery.js"
+	alreadyHeld(context.Background(),
+		[]asset{{URL: u, Page: "/a"}, {URL: u, Page: "/b"}, {URL: u, Page: "/c"}})
+	if len(asked) != 1 {
+		t.Errorf("asked %v, want the url once", asked)
+	}
+}

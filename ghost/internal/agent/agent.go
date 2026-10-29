@@ -101,7 +101,7 @@ func New(cfg *config.Config) *Agent {
 			"a crash between finishing a scan and reporting it",
 			cfg.SpoolDir(), err)
 	}
-	return &Agent{
+	a := &Agent{
 		started: time.Now(),
 		cfg:     cfg,
 		sp:      sp,
@@ -120,6 +120,13 @@ func New(cfg *config.Config) *Agent {
 		// inbound HTTP handler — would be worse.
 		wake: make(chan struct{}, 1),
 	}
+	// A crawl asks Oddjob which bundles it already has before
+	// fetching any, so a re-crawl does not re-request hundreds of
+	// unchanged files from the client and their CDNs. Wired here, the
+	// way Parallelism is: a task runner takes (ctx, args, workDir)
+	// and has nowhere to be handed a client.
+	tasks.AssetsHeld = a.cli.HeldAssets
+	return a
 }
 
 // VerifyServer checks an inbound call against the server this agent
