@@ -22,11 +22,14 @@ path that drifts.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import ipaddress
 import json
 import logging
 import re
 import secrets
+import socket
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -3709,6 +3712,101 @@ async def assets_held(body: HeldQuery, a: Agent = Depends(agent_from_key),
             WebAsset.url.in_(want),
             WebAsset.body.is_not(None)))).scalars().all()
     return {"held": list(rows)}
+
+
+class CallbackProbe(BaseModel):
+    """An agent asking whether the world can reach a port it just bound."""
+    port: int = Field(ge=1, le=65535)
+    proto: str = Field("tcp", pattern="^(tcp|udp)$")
+
+
+@router.post("/callback/probe", response_model=dict)
+async def callback_probe(body: CallbackProbe,
+                         a: Agent = Depends(agent_from_key),
+                         session: AsyncSession = Depends(get_session)):
+    """Dial the agent on a port it is holding, and say whether it answered.
+
+    An out-of-band test binds a port on the Ghost and points a payload
+    at it. Hearing nothing then means one of two things and they are
+    not the same: the target is not vulnerable, or a cloud security
+    group dropped the inbound connection and the test measured
+    nothing. This is what tells them apart, and it runs BEFORE the
+    payload goes anywhere.
+
+    **This is an SSRF primitive and is built not to be one.**
+
+    The agent does not choose the host. It names a port and nothing
+    else; the address dialled is the outbound address this agent
+    reported at registration, read from the database here. An agent
+    cannot point this server at a third party, because there is no
+    field in which to say one.
+
+    The agent does not choose the bytes either. The nonce is minted
+    here, sent on the wire, and returned so the agent can recognise
+    its own probe among real callbacks and drop it -- reporting our
+    own connection as a finding would be the tool finding itself.
+
+    Short timeout and one attempt: this answers "is the path open",
+    and an open path answers immediately. Retrying would only make a
+    blocked port take longer to report as blocked.
+    """
+    host = (a.outbound_ip or "").strip()
+    if not host:
+        raise HTTPException(
+            409, f"{a.name} has not reported an outbound address, so there "
+                 f"is nothing to dial. It is registered without one — see "
+                 f"--public-ip-url.")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        # Recorded by the agent, but this is the value we are about to
+        # connect to, so it is checked here rather than trusted to
+        # have been checked on the way in.
+        raise HTTPException(
+            409, f"{a.name}'s recorded outbound address {host!r} is not an "
+                 f"address, so it cannot be dialled.") from None
+
+    nonce = "oddjob-probe-" + secrets.token_hex(8)
+    sent, detail = await _dial(host, body.port, body.proto, nonce)
+    return {"host": host, "port": body.port, "proto": body.proto,
+            "nonce": nonce, "sent": sent, "detail": detail}
+
+
+async def _dial(host: str, port: int, proto: str, nonce: str) -> tuple[bool, str]:
+    """One connection, one payload, no retry. -> (did we get it out, why not).
+
+    `sent` is only half the answer and the agent knows it: a UDP
+    datagram leaves successfully whether or not anything receives it,
+    and even a TCP connect proves the path is open rather than that
+    the listener saw the bytes. What settles it is the agent finding
+    the nonce in its own hit list, which is why the nonce goes back.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        if proto == "udp":
+            def _udp() -> None:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+                    sk.settimeout(5)
+                    sk.sendto(nonce.encode(), (host, port))
+            await asyncio.wait_for(loop.run_in_executor(None, _udp), 8)
+            return True, "datagram sent"
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), 8)
+        try:
+            writer.write(nonce.encode())
+            await writer.drain()
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+        del reader
+        return True, "connected"
+    except TimeoutError:
+        return False, ("timed out — nothing on the path answered. On a cloud "
+                       "instance an inbound security-group rule is the usual "
+                       "cause.")
+    except OSError as e:
+        return False, f"could not connect: {e}"
 
 
 @router.post("/tasks/{task_id}/result", response_model=dict)

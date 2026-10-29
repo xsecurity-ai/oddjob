@@ -411,6 +411,35 @@ func (c *Client) Heartbeat(ctx context.Context, req HeartbeatReq) (*HeartbeatRes
 	return &out, nil
 }
 
+// ProbeCallback asks Oddjob to dial a port this agent is holding.
+//
+// The point is to tell "the target is not vulnerable" apart from "our
+// listener was never reachable" -- a cloud security group drops
+// inbound 443 by default, and a blocked port produces exactly the
+// silence a clean result does.
+//
+// We name only the port. The address dialled is the outbound address
+// this agent reported at registration, read from the server's own
+// database, so this cannot be pointed at a third party. The nonce
+// comes back so the listener can recognise the probe among real
+// callbacks and drop it.
+func (c *Client) ProbeCallback(ctx context.Context, port int, proto string) (
+	nonce string, sent bool, detail string, err error) {
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var out struct {
+		Nonce  string `json:"nonce"`
+		Sent   bool   `json:"sent"`
+		Detail string `json:"detail"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/api/ghosts/callback/probe",
+		map[string]any{"port": port, "proto": proto}, &out); err != nil {
+		return "", false, "", err
+	}
+	return out.Nonce, out.Sent, out.Detail, nil
+}
+
 // HeldAssets asks which of these asset URLs Oddjob already holds the
 // bytes of, so a re-crawl fetches only what is new.
 //

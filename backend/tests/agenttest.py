@@ -3271,6 +3271,107 @@ check("a list holding something that is not a message drops only that",
 check("an empty thread is an empty conversation", thread_messages([]) == [])
 
 
+print("\n== dialling a port an agent says it is holding ==")
+# An out-of-band test binds a port on the Ghost and points a payload
+# at it. Silence then means either "not vulnerable" or "a security
+# group dropped it", and this is what tells them apart.
+import socket as _sock  # noqa: E402
+import threading as _thr  # noqa: E402
+
+_st, _cg = call("/api/ghosts?project=AGENT", "POST",
+                {"name": "cb-ghost"}, token=admin)
+CBKEY = (_cg or {}).get("callback_key")
+call("/api/ghosts/register", "POST",
+     {"platform": "linux", "arch": "amd64", "privileged": True,
+      "outbound_ip": "127.0.0.1", "outbound_ip_source": "public-service"},
+     key=CBKEY)
+
+# A real socket, because what is being asserted is that the server
+# really connects and really writes the nonce. A mock would assert
+# the shape of the call and none of the behaviour.
+_srv = _sock.socket(); _srv.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
+_srv.bind(("127.0.0.1", 0)); _srv.listen(1)
+_cbport = _srv.getsockname()[1]
+_got = {}
+
+
+def _accept():
+    try:
+        c, peer = _srv.accept()
+        c.settimeout(5)
+        _got["bytes"] = c.recv(256)
+        _got["from"] = peer[0]
+        c.close()
+    except Exception as e:                       # noqa: BLE001
+        _got["error"] = str(e)
+
+
+_t = _thr.Thread(target=_accept, daemon=True); _t.start()
+_st, _pr = call("/api/ghosts/callback/probe", "POST",
+                {"port": _cbport, "proto": "tcp"}, key=CBKEY)
+_t.join(timeout=10)
+check("the probe is accepted over the agent key", _st == 200,
+      f"status={_st} {str(_pr)[:160]}")
+check("...and the server actually connected", (_pr or {}).get("sent") is True,
+      str(_pr)[:200])
+check("...to the agent's OWN recorded address, which it did not choose",
+      (_pr or {}).get("host") == "127.0.0.1", str(_pr)[:200])
+# The nonce is minted server-side. An agent that chose the bytes could
+# make this server send arbitrary content to an arbitrary port; it
+# cannot name the host either, which is what keeps this from being an
+# SSRF primitive with a login.
+_nonce = (_pr or {}).get("nonce") or ""
+check("the nonce is server-minted and looks like one",
+      _nonce.startswith("oddjob-probe-") and len(_nonce) > 20, _nonce)
+check("...and is what actually arrived on the wire",
+      _got.get("bytes", b"").decode(errors="replace") == _nonce,
+      f"{_got.get('bytes')!r} vs {_nonce!r}")
+
+# A port nothing is listening on is a fact, not an error: that is
+# precisely the answer the agent needs in order to report `unknown`
+# instead of claiming the target is clean.
+_free = _sock.socket(); _free.bind(("127.0.0.1", 0))
+_deadport = _free.getsockname()[1]; _free.close()
+_st, _dead = call("/api/ghosts/callback/probe", "POST",
+                  {"port": _deadport, "proto": "tcp"}, key=CBKEY)
+check("a closed port answers 200 with sent=false, not an error",
+      _st == 200 and (_dead or {}).get("sent") is False,
+      f"status={_st} {str(_dead)[:160]}")
+check("...and says why, so the agent can quote it",
+      bool((_dead or {}).get("detail")), str(_dead)[:160])
+
+# UDP leaves whether or not anything receives it. The endpoint says
+# so by reporting the send, and the AGENT settles it by looking for
+# the nonce in its own hits -- which is why the nonce goes back.
+_st, _udp = call("/api/ghosts/callback/probe", "POST",
+                 {"port": _cbport, "proto": "udp"}, key=CBKEY)
+check("udp is accepted too", _st == 200 and (_udp or {}).get("proto") == "udp",
+      f"status={_st} {str(_udp)[:140]}")
+
+check("a port outside 1-65535 is refused",
+      call("/api/ghosts/callback/probe", "POST",
+           {"port": 70000, "proto": "tcp"}, key=CBKEY)[0] == 422)
+check("...as is a protocol that is neither tcp nor udp",
+      call("/api/ghosts/callback/probe", "POST",
+           {"port": 80, "proto": "icmp"}, key=CBKEY)[0] == 422)
+check("and no agent key is no probe",
+      call("/api/ghosts/callback/probe", "POST",
+           {"port": 80, "proto": "tcp"})[0] in (401, 403))
+
+# An agent with no recorded outbound address has nothing to dial, and
+# is told that rather than having a guess made on its behalf.
+_st, _na = call("/api/ghosts?project=AGENT", "POST",
+                {"name": "cb-noaddr"}, token=admin)
+_nakey = (_na or {}).get("callback_key")
+call("/api/ghosts/register", "POST",
+     {"platform": "linux", "arch": "amd64", "privileged": False}, key=_nakey)
+_st, _nar = call("/api/ghosts/callback/probe", "POST",
+                 {"port": 80, "proto": "tcp"}, key=_nakey)
+check("an agent with no outbound address is refused, not guessed at",
+      _st == 409, f"status={_st} {str(_nar)[:160]}")
+_srv.close()
+
+
 print("\n== which bundles the project already holds ==")
 # A crawl asks this between finding the bundles a page loads and
 # fetching them, so a second crawl does not re-request hundreds of
