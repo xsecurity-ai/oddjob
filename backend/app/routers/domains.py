@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import clouds
 from .. import domains as gen
 from ..db import get_session
 from ..events import broker
@@ -89,11 +90,28 @@ async def roots(project: str = Query(...),
     counts = dict(gen.roots_in(hosts))
     origin = dict.fromkeys(counts, "targets")
 
+    # Never a provider's own zone, from either source.
+    #
+    # `enumerable_roots` has always dropped these for the auto_amass
+    # standing order; this list did not, so the dialog offered
+    # `amazonaws.com` -- usually at the TOP, because an estate inside a
+    # cloud has more provider-named hosts than chosen ones -- while the
+    # automation refused to walk it. Picking it enumerated AWS, not the
+    # client. Same predicate, so the two cannot drift again.
+    counts = {d: n for d, n in counts.items() if not clouds.is_cloud_domain(d)}
+    origin = {d: o for d, o in origin.items() if d in counts}
+
     # The same function the auto_amass standing order uses. They
     # disagreed before — this offered zones the automation could not
     # see, so an operator with the toggle on kept finding work here.
     scoped = await scope_roots(session, pr.id)
     for r in scoped:
+        # Not narrowed into `scoped` itself: that set is also the
+        # "does this project name any domains at all" test below, and
+        # a project scoped entirely to cloud zones does name some.
+        # Emptying it there would skip the gate filter instead.
+        if clouds.is_cloud_domain(r):
+            continue
         if r not in counts:
             counts[r] = 0
             origin[r] = "scope"
@@ -203,11 +221,20 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
     what to enumerate: not a list, but "everything this project knows
     about". It takes every hostname on record — targets, the alternate
     and certificate names hung off them, the hosts of web addresses —
-    throws away the ones that are addresses, and walks each remaining
-    name back to its registrable domain, so `a.b.c.example` asks about
-    `a.b.c.example`, `b.c.example` and `c.example`. Anything typed in the
-    box is walked too, so a selection and the estate compose rather than
-    one replacing the other.
+    throws away the ones that are addresses and the ones a cloud
+    provider named for itself, and walks each remaining name back to its
+    registrable domain, so `a.b.c.example` asks about `a.b.c.example`,
+    `b.c.example` and `c.example`. Anything typed in the box is walked
+    too, so a selection and the estate compose rather than one replacing
+    the other.
+
+    The cloud exclusion is Kitchen Sink only, and it is about where the
+    walk LANDS. `i-0a1.eu-west-1.compute.amazonaws.com` walks to
+    `amazonaws.com`: a zone belonging to AWS, enumerated at AWS, telling
+    you nothing about the client. A name chosen inside a cloud
+    (`api.acme.example` on an EC2 box) walks to the client and is kept.
+    A domain typed into the box is never excluded, because typing one is
+    an explicit instruction.
 
     Two things that walk must not do, and does not:
 
@@ -257,17 +284,34 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
     # selects, so it is cheaper than asking per domain.
     known = await known_hosts(session, pr.id)
 
-    wanted, addresses = _domains_to_enumerate(body, typed, known)
+    wanted, addresses, cloud = _domains_to_enumerate(body, typed, known)
     if not wanted:
         # Kitchen Sink with nothing to walk. Said plainly rather than
         # returning an empty success, because "it worked and did
         # nothing" and "there was nothing here" read identically on the
         # screen and have different fixes.
-        why = ("this project has no hostnames on record yet" if not addresses
-               else "the one host on record is an address, and an address "
-                    "has no zone" if addresses == 1
-               else f"all {addresses} hosts on record are addresses, and an "
-                    f"address has no zone")
+        #
+        # Which of the two it was decides what to do next -- addresses
+        # want a reverse lookup, provider-assigned names want nothing at
+        # all -- so they are named separately rather than totalled.
+        if addresses and cloud:
+            why = (f"{addresses} of the hosts on record are addresses and "
+                   f"{cloud} are names their cloud provider assigned, and "
+                   f"neither kind has a zone of yours to walk")
+        elif cloud:
+            why = ("the one host on record is a name its cloud provider "
+                   "assigned, and that walks back to the provider's domain, "
+                   "not to yours" if cloud == 1 else
+                   f"all {cloud} hosts on record are names their cloud "
+                   f"providers assigned, and those walk back to the "
+                   f"providers' domains, not to yours")
+        elif addresses:
+            why = ("the one host on record is an address, and an address "
+                   "has no zone" if addresses == 1 else
+                   f"all {addresses} hosts on record are addresses, and an "
+                   f"address has no zone")
+        else:
+            why = "this project has no hostnames on record yet"
         raise HTTPException(422, f"nothing to enumerate: {why}.")
 
     # What has already been handed to amass, for the skip. Loaded for
@@ -333,13 +377,13 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
     return {"queued": queued, "refused": refused, "skipped": skipped,
             "deferred": deferred, "agents_online": live, "mode": mode,
             "kitchen_sink": bool(body.kitchen_sink),
-            "considered": len(wanted)}
+            "considered": len(wanted), "cloud_skipped": cloud}
 
 
 def _domains_to_enumerate(body: EnumerateRequest, typed: list[str],
-                          known: list[str]) -> tuple[list[str], int]:
+                          known: list[str]) -> tuple[list[str], int, int]:
     """-> (the domains to put through the gate, how many addresses were
-    ignored).
+    ignored, how many provider-assigned cloud names were ignored).
 
     Deduplicated across hosts, and that matters more than it sounds: ten
     names under `f.com` walk to `f.com` ten times, and ten identical
@@ -353,16 +397,45 @@ def _domains_to_enumerate(body: EnumerateRequest, typed: list[str],
     if not body.kitchen_sink:
         # Unchanged behaviour: what was typed, as typed. No walking, so
         # a list of names does not quietly become a list of apexes.
-        return list(dict.fromkeys(typed)), 0
+        # Typed names are not filtered: somebody who writes a provider
+        # name into the box has asked for that zone on purpose.
+        return list(dict.fromkeys(typed)), 0, 0
+    cloud = 0
     for h in list(known) + typed:
         if gen.is_ip(h):
             # "ignore the ip address hosts". An address has no zone, and
             # `registrable()` on one used to return its last two octets.
             addresses += 1
             continue
-        for name in gen.walk_to_registrable(h):
+        # Where the walk LANDS is what decides this, not where it
+        # started. `i-0a1.eu-west-1.compute.amazonaws.com` walks to
+        # `amazonaws.com` -- a zone belonging to AWS, enumerated at
+        # AWS, with millions of names under it and none of them the
+        # client's. `api.acme.example` on the same EC2 box walks to
+        # `acme.example` and is kept, because somebody chose that name.
+        #
+        # So the filter is on the produced names. Every name in a
+        # provider-assigned walk is under the provider's zone, so a
+        # host of that shape contributes nothing and is counted as
+        # skipped; a host that contributes even one name is not.
+        #
+        # This is the predicate `enumerable_roots` already used for the
+        # auto_amass standing order. The two disagreeing is what put a
+        # provider's zone in front of the operator here while the
+        # automation quietly refused to walk it.
+        walk = gen.walk_to_registrable(h)
+        kept = False
+        for name in walk:
+            if clouds.is_cloud_domain(name):
+                continue
             out.setdefault(name, None)
-    return list(out), addresses
+            kept = True
+        # `walk` and not `kept` alone: a bare label or a malformed name
+        # walks to nothing either, and calling that a cloud name would
+        # put a wrong reason on the screen for a real data problem.
+        if walk and not kept:
+            cloud += 1
+    return list(out), addresses, cloud
 
 
 def _record_search(session: AsyncSession, pr: Project, user: User, domain: str,

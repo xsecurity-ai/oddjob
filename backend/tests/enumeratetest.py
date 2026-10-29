@@ -657,6 +657,106 @@ check("an estate of addresses is told so rather than silently succeeding",
 check("and the reason says addresses, not 'no domains'",
       "address" in str(r7).lower(), str(r7)[:200])
 
+print("-- names the cloud provider chose, not the client --")
+# An estate inside a cloud is mostly provider PTR names, and every one
+# of them walks back to the PROVIDER's zone. Enumerating
+# `amazonaws.com` enumerates AWS: millions of names, none the
+# client's, and acting on any of them means touching hosts nobody
+# authorised. The standing order has always refused those zones; this
+# is the same refusal on the path an operator drives by hand.
+call("/api/projects", "POST", {"code": "KS4", "name": "Cloud estate"},
+     token=admin)
+call("/api/projects/KS4/scope", "POST",
+     {"lines": ["*.acme.example", "acme.example",
+                # A real engagement is routinely authorised to work
+                # inside the client's cloud. That is what makes the
+                # case worth asserting: these names are in scope, the
+                # gate would pass them, and they must still not be
+                # walked.
+                "*.compute.amazonaws.com", "*.bc.googleusercontent.com",
+                "*.droplet.digitalocean.com", "*.oraclevcn.com"]},
+     token=admin)
+st, ks4a = call("/api/ghosts?project=KS4", "POST", {"name": "ks4-ghost"},
+                token=admin)
+call("/api/ghosts/register", "POST",
+     {"platform": "linux", "arch": "amd64", "privileged": True},
+     key=ks4a["callback_key"])
+for _h in ("ec2-203-0-113-7.eu-west-1.compute.amazonaws.com",
+           "7.113.0.203.bc.googleusercontent.com",
+           # DigitalOcean and Oracle name their boxes under zones that
+           # were NOT in the provider table until this change. They
+           # are the reason the table and `cloudnames.py` have to
+           # agree: without the entry these two walked straight
+           # through while the AWS and GCP ones were caught.
+           "box.droplet.digitalocean.com",
+           "vm.subnet.oraclevcn.com",
+           # A name somebody CHOSE, which happens to live in a cloud.
+           # This is the case the exclusion must not eat.
+           "api.acme.example"):
+    call("/api/targets?project=KS4", "POST", {"host": _h}, token=admin)
+
+st, r10 = call("/api/domains/enumerate?project=KS4", "POST",
+               {"domains": "", "kitchen_sink": True}, token=admin)
+check("a cloud estate with one chosen name still has work to do",
+      st == 200, f"status={st} {str(r10)[:200]}")
+q10 = sorted(x["domain"] for x in (r10 or {}).get("queued", []))
+check("only the name somebody chose is walked, and only to its own zone",
+      q10 == ["acme.example", "api.acme.example"], str(q10))
+
+_blob10 = json.dumps(r10)
+for _zone in ("amazonaws.com", "googleusercontent.com",
+              "digitalocean.com", "oraclevcn.com"):
+    # Absent entirely, not refused: a refusal is a list the operator
+    # reads, and filling it with provider zones every single run is the
+    # noise this removes.
+    check(f"{_zone} is nowhere in the answer, not even as a refusal",
+          _zone not in _blob10, _blob10[:300])
+check("and the hosts it skipped are counted so the number is explainable",
+      (r10 or {}).get("cloud_skipped") == 4, str(r10)[:300])
+
+print("-- a typed provider zone is still an instruction --")
+# Same rule as the already-scanned skip: the exclusion belongs to the
+# generated list. Somebody who types a provider zone into the box has
+# asked for it on purpose, and the tool overruling that would be the
+# tool deciding it knew better.
+st, r11 = call("/api/domains/enumerate?project=KS4", "POST",
+               {"domains": "compute.amazonaws.com"}, token=admin)
+check("typing one queues it",
+      [x["domain"] for x in (r11 or {}).get("queued", [])] ==
+      ["compute.amazonaws.com"], f"status={st} {str(r11)[:200]}")
+
+print("-- an estate that is nothing but provider names --")
+call("/api/projects", "POST", {"code": "KS5", "name": "All cloud"},
+     token=admin)
+call("/api/projects/KS5/scope", "POST",
+     {"lines": ["*.compute.amazonaws.com"]}, token=admin)
+st, ks5a = call("/api/ghosts?project=KS5", "POST", {"name": "ks5-ghost"},
+                token=admin)
+call("/api/ghosts/register", "POST",
+     {"platform": "linux", "arch": "amd64", "privileged": True},
+     key=ks5a["callback_key"])
+call("/api/targets?project=KS5", "POST",
+     {"host": "ec2-203-0-113-8.eu-west-1.compute.amazonaws.com"}, token=admin)
+st, r12 = call("/api/domains/enumerate?project=KS5", "POST",
+               {"domains": "", "kitchen_sink": True}, token=admin)
+check("it is told there is nothing to walk rather than succeeding emptily",
+      st == 422, f"status={st} {str(r12)[:200]}")
+# "No domains" would send the operator looking for targets they
+# already have. The fix for this estate is different: there is nothing
+# to fix, and the message has to say which it is.
+check("and the reason names the cloud provider, not a missing hostname",
+      "cloud provider" in str(r12).lower(), str(r12)[:300])
+
+print("-- and the suggestions list agrees with both --")
+_st13, _r13 = call("/api/domains/roots?project=KS4", token=admin)
+_n13 = {row["domain"] for row in (_r13 or [])}
+check("the dialog offers the client's zone", "acme.example" in _n13,
+      sorted(_n13))
+check("and offers no provider zone, which it used to put at the top "
+      "because a cloud estate has more provider names than chosen ones",
+      not {d for d in _n13 if "amazonaws" in d or "googleusercontent" in d
+           or "digitalocean" in d or "oraclevcn" in d}, sorted(_n13))
+
 print("-- more domains than one submission may queue --")
 # A typed list over the cap is an operator mistake they can fix by
 # splitting it. A WALKED list over the cap is just a big estate, and
