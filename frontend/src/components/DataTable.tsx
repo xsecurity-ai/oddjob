@@ -43,6 +43,7 @@ function csvCell(v: unknown): string {
 export function DataTable({
   rows, columns, loading, error, initialSort, hiddenColumns, note,
   kind, project, canWrite = false, extraActions, tableId, server, getRowId,
+  renderDetail, expanded, onExpand,
   onSelectionChange,
 }: {
   /** `any` because a row is whatever the view's query returned; this is
@@ -68,6 +69,19 @@ export function DataTable({
    *  the group's id IS one of those exchanges, so without this the table
    *  sees a duplicate key and the parent row disappears. */
   getRowId?: RowIdGetter
+  /** Master-detail. Supplying this adds a chevron gutter, and the
+   *  result is rendered UNDER the row across every column.
+   *
+   *  The grid did not do this for a long time and CLAUDE.md said so;
+   *  the two Vulns rollups are what made it worth having, because
+   *  "the same style table" and "expands" were both the requirement
+   *  and a hand-rolled list beside the real tables is neither. */
+  renderDetail?: (row: any) => ReactNode
+  /** The open row's id, and how to change it. Held by the caller so
+   *  the table stays stateless about it -- the caller is what knows
+   *  when a refetch has made the open row disappear. */
+  expanded?: string | null
+  onExpand?: (id: string | null) => void
   /** Supplied when the database does the paging, sorting and searching.
    *  `rows` is then ONE PAGE, not the whole table. Needed for Web,
    *  where one engagement holds 211,012 rows: loading them to filter in
@@ -389,6 +403,9 @@ export function DataTable({
           onRowSelectionChange={setSelection}
           widths={view.widths}
           onWidth={view.setWidth}
+          renderDetail={renderDetail}
+          expanded={expanded}
+          onExpand={onExpand}
           empty={filtering
             ? (
               <Stack spacing={1} sx={{

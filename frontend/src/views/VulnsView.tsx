@@ -15,12 +15,13 @@ import {
 import { useAuth } from '../lib/auth'
 import { useStoredChoice } from '../lib/useStoredChoice'
 import { SecretsPanel } from '../components/SecretsPanel'
+import { VulnsByTarget, VulnsByTitle } from '../components/VulnRollupPanel'
 import { LifecycleStrip } from '../components/LifecycleStrip'
 import { neon, glow, TAB_SX } from '../theme'
 
 /** Module-level so the stored-choice hook gets a stable reference,
  *  and so the validated set and the rendered tabs cannot drift. */
-const VULN_TABS = ['all', 'secrets'] as const
+const VULN_TABS = ['all', 'by-target', 'by-vuln', 'secrets'] as const
 
 
 export function VulnsView({ project }: { project: string | null }) {
@@ -191,6 +192,11 @@ export function VulnsView({ project }: { project: string | null }) {
       sx={{ minHeight: 34, px: 2, pt: 1,
             borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
       <Tab value="all" label="All" sx={TAB_SX} />
+      {/* The same findings asked two other ways, right after All
+          because they are readings of it rather than a different
+          dataset -- Secrets is the one that is a different question. */}
+      <Tab value="by-target" label="By Target" sx={TAB_SX} />
+      <Tab value="by-vuln" label="By Vuln" sx={TAB_SX} />
       <Tab value="secrets" label="Secrets" sx={TAB_SX} />
     </Tabs>
   )
@@ -202,6 +208,22 @@ export function VulnsView({ project }: { project: string | null }) {
   // puts every view in. Wrapping it in a plain `<Box flex={1}>` gave
   // it an auto height instead, the grid grew to its full content, and
   // the Secrets table could not be scrolled at all.
+  // Siblings of the strip in a fragment, for the reason spelled out
+  // below: these panels size themselves against the view's flex
+  // column and a wrapper would give them an auto height.
+  if (tab === 'by-target' || tab === 'by-vuln') {
+    return (
+      <>
+      {strip}
+      {tab === 'by-target'
+        ? <VulnsByTarget project={project} onFinding={setDetail} />
+        : <VulnsByTitle project={project} onFinding={setDetail} />}
+      <VulnModal id={detail} onClose={() => setDetail(null)}
+        onHost={(proj, h) => { setDetail(null); open(proj, h) }} />
+      </>
+    )
+  }
+
   if (tab === 'secrets') {
     return (
       <>

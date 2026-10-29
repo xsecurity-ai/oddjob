@@ -254,4 +254,88 @@ else:
           f"not served: {_missing}; server has {_served}" if _missing else
           f"{len(_used)} prefixes all served")
 
+print("\n== the findings rolled up two ways ==")
+# Both tabs on the Vulns page are a GROUP BY on the server: a project
+# with 23,000 findings cannot be grouped in the browser.
+#
+# Asserted against the FLAT list rather than against the fixture, and
+# deliberately. Earlier tests in this file add and delete findings, so
+# a hardcoded expectation here would be testing the order of this
+# file. Comparing the two views tests the thing that has to hold --
+# that they describe the same findings.
+st, _flat = call("/api/vulns?project=APITEST&limit=1000")
+_items = (_flat or {}).get("items", [])
+_want_host = {}
+for _v in _items:
+    _d = _want_host.setdefault(_v["host"], {"total": 0, "critical": 0, "high": 0,
+                                            "medium": 0, "low": 0, "info": 0})
+    _d["total"] += 1
+    if _v["severity"] in _d:
+        _d[_v["severity"]] += 1
+
+st, _btr = call("/api/vulns/by-target?project=APITEST")
+_bt = (_btr or {}).get("items", [])
+check("by-target returns a row per host carrying a finding",
+      st == 200 and len(_bt) == len(_want_host),
+      f"status={st} rollup={len(_bt) if st == 200 else _bt} flat={len(_want_host)}")
+_by = {r["host"]: r for r in _bt}
+check("...and every per-severity count matches the flat list",
+      all(all(_by[h][k] == v for k, v in d.items()) for h, d in _want_host.items()),
+      {h: (_by.get(h), d) for h, d in _want_host.items()})
+# A zero is an answer, not an absence: the column has to carry it.
+check("...with the severities a host has none of reported as 0",
+      all(isinstance(r["info"], int) for r in _bt), _bt[:1])
+check("busiest host first",
+      [r["total"] for r in _bt] == sorted((r["total"] for r in _bt), reverse=True),
+      [r["total"] for r in _bt])
+
+st, _bvr = call("/api/vulns/by-title?project=APITEST")
+_bv = (_bvr or {}).get("items", [])
+check("by-title returns a row per distinct finding",
+      st == 200 and len(_bv) == len({v["title"] for v in _items}),
+      f"status={st} {len(_bv) if st == 200 else _bv}")
+check("...and the per-title totals add up to the findings",
+      sum(r["total"] for r in _bv) == len(_items),
+      (sum(r["total"] for r in _bv), len(_items)))
+
+# The case the rollup exists for: one finding across several hosts,
+# reported at two severities because two scanners disagreed.
+_hosts = sorted(_want_host)
+st, _ = call("/api/vulns?project=APITEST", "POST",
+             {"host": _hosts[0], "title": "Shared finding", "severity": "high",
+              "external_id": "ROLL-1"})
+check("a shared finding is created on one host", st == 201, st)
+st, _ = call("/api/vulns?project=APITEST", "POST",
+             {"host": _hosts[1], "title": "Shared finding", "severity": "medium",
+              "external_id": "ROLL-2"})
+check("...and on a second, at a different severity", st == 201, st)
+st, _bv2r = call("/api/vulns/by-title?project=APITEST")
+_bv2 = (_bv2r or {}).get("items", [])
+_sh = [r for r in _bv2 if r["title"] == "Shared finding"]
+# Unique on (title, severity): two scanners disagreeing about the same
+# thing are TWO rows. Rolling them into one forces a choice between
+# reporting the worst -- which overstates the other -- and a cell that
+# cannot be sorted or counted.
+check("a title at two severities is two rows", len(_sh) == 2, _sh)
+check("...one per severity", sorted(r["severity"] for r in _sh)
+      == ["high", "medium"], _sh)
+check("...each counting only its own host",
+      all(r["hosts"] == 1 for r in _sh), _sh)
+check("the rollup says whether it was cut short",
+      _bv2r.get("truncated") is False, _bv2r.get("truncated"))
+
+# The expansion fetch. `title` is EXACT: `q` is a substring search and
+# would also match a different finding whose title contains this one.
+st, _exact = call("/api/vulns?project=APITEST&title=Shared%20finding")
+check("an exact title filter returns every host carrying it",
+      st == 200 and _exact["total"] == 2, f"status={st} {_exact.get('total')}")
+# What an expanded row actually fetches: one severity's hosts, not
+# both. The row says 1 host, so the detail must show 1.
+st, _one = call("/api/vulns?project=APITEST&title=Shared%20finding&severity=high")
+check("...and narrowing to one severity returns only that row's hosts",
+      st == 200 and _one["total"] == 1, f"status={st} {_one.get('total')}")
+check("...and nothing else",
+      {i["title"] for i in _exact["items"]} == {"Shared finding"},
+      {i["title"] for i in _exact["items"]})
+
 print(f"\n{'='*52}\n  {ok} passed, {fail} failed\n{'='*52}")

@@ -81,9 +81,19 @@ simply missing its tail, which is why it shipped twice. Wrap one in
 `display: 'flex', flexDirection: 'column'` and a parent with a
 definite height. `test/table.scroll.check.mjs` catches the shape.
 
-**The MIT DataGrid throws above 100 rows a page** and cannot do
-master-detail. Paging, sorting, filtering and row expansion are all done
-outside it; the grid gets `pageSize: -1` and one finished page of rows.
+**The MIT DataGrid throws above 100 rows a page.** Paging, sorting and
+filtering are all done outside it; the grid gets `pageSize: -1` and one
+finished page of rows. That is why `DataTable`/`TableGrid` are ours.
+
+**Master-detail IS supported now — pass `renderDetail`.** It was not,
+and this file said so. The Vulns rollups are what made it worth
+having: "the same style table" and "expands" were both the
+requirement, and a hand-rolled list beside the real tables is neither.
+
+The detail renders as a SIBLING of the row, never a cell inside it —
+a row is one CSS grid, so a cell cannot be wider than its own track.
+Only the open row's detail is mounted: several hundred rows each
+holding a hidden list is how a page stops scrolling.
 
 ## How the data is shaped
 
