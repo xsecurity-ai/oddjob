@@ -85,9 +85,18 @@ function needsName(t: Target): boolean {
  *  the client's resource names to a resolver to be told, correctly,
  *  that no such name exists. The backend applies the same rule — see
  *  `dns_subject` in `app/hosts.py` — so a sweep queued any other way
- *  drops them too. */
+ *  drops them too.
+ *
+ *  A provider-assigned name (`cloud_ephemeral`) is excluded for a
+ *  third reason: the provider derives it FROM the address, so looking
+ *  it up tells us what we would already know if the row had been
+ *  filed with its address, and on a cloud estate these outnumber the
+ *  real gaps several to one. The list exists to show what is still
+ *  missing; burying three of those under 5,000 PTR names is the same
+ *  as not having it. A name chosen inside a cloud is a real gap and
+ *  stays. */
 function needsAddress(t: Target): boolean {
-  return t.kind !== 'mobile' && t.kind !== 'cloud'
+  return t.kind !== 'mobile' && t.kind !== 'cloud' && !t.cloud_ephemeral
     && hasName(t) && !(t.ip_address ?? '').trim()
 }
 

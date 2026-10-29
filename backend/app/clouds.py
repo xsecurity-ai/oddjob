@@ -36,6 +36,13 @@ through them and a crawl will meet them.
 This list is deliberately not exhaustive. It covers what turns up,
 and `is_cloud_domain` matches suffixes, so a provider's subdomains
 are covered without listing each.
+
+Every zone an ephemeral PTR template in `cloudnames.py` lands in must
+be reachable from here, because that is what makes "never enumerate a
+provider's zone" cover the names the providers hand out themselves.
+`digitalocean.com` and `oraclevcn.com` are in the table for that
+reason -- `*.droplet.digitalocean.com` and `*.oraclevcn.com` walk to
+them, and without the entry those walks were offered for enumeration.
 """
 from __future__ import annotations
 
@@ -56,12 +63,14 @@ PROVIDERS: dict[str, tuple[str, tuple[str, ...]]] = {
         "cloudfunctions.net", "run.app", "firebaseapp.com", "web.app",
         "withgoogle.com")),
     "alibaba": ("Alibaba Cloud", ("aliyuncs.com", "alicdn.com")),
-    "oracle": ("Oracle Cloud", ("oraclecloud.com", "oraclecloudapps.com")),
+    "oracle": ("Oracle Cloud", (
+        "oraclecloud.com", "oraclecloudapps.com", "oraclevcn.com")),
     "ibm": ("IBM Cloud", ("cloud.ibm.com", "appdomain.cloud", "bluemix.net")),
     "tencent": ("Tencent Cloud", ("myqcloud.com", "tencentcloudapi.com")),
     "huawei": ("Huawei Cloud", ("myhuaweicloud.com", "hwclouds.com")),
     "digitalocean": ("DigitalOcean", (
-        "digitaloceanspaces.com", "ondigitalocean.app")),
+        "digitaloceanspaces.com", "ondigitalocean.app",
+        "digitalocean.com")),
     "cloudflare": ("Cloudflare", (
         "cloudflare.com", "workers.dev", "pages.dev", "r2.dev",
         "cfargotunnel.com", "cdn.cloudflare.net")),
