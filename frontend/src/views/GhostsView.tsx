@@ -307,6 +307,27 @@ function DeployWizard({ project, onClose }:
 }
 
 // ---------------------------------------------------------- the routing
+/** What each routing mode does, as a balloon rather than a sentence
+ *  beside the control.
+ *
+ *  Inline it was prose whose length changed with the selection, which
+ *  pushed Parallel onto a second row. It is also read once, on the way
+ *  to choosing -- so it belongs on the options, where the answer
+ *  arrives BEFORE the choice, not after it.
+ */
+const MODE_LABEL: Record<string, string> = {
+  mesh: 'Mesh', primary: 'Primary', geo: 'By region',
+}
+
+const MODE_HELP: Record<string, string> = {
+  mesh: 'Whichever agent asks first takes the next pooled task.',
+  primary: 'One agent does the work and the rest stand by. The primary is '
+    + 'derived — the enabled, online agent with the lowest priority — so if '
+    + 'it stops heartbeating the next takes over on the next poll.',
+  geo: 'Pooled tasks run on an agent serving their region, or wait. A task '
+    + 'with no region is refused rather than guessed at.',
+}
+
 function Routing({ project, routing }:
   { project: string; routing: GhostRouting | undefined }) {
   const qc = useQueryClient()
@@ -322,38 +343,63 @@ function Routing({ project, routing }:
   // a hook above it would change the order between renders.
   if (!routing) return null
   return (
-    // One row: the routing controls and the country gate beside them.
-    // `useFlexGap` with `flexWrap` so the gate drops under the
-    // controls on a narrow window instead of forcing the page
-    // sideways -- a wrap is the only honest answer when the two will
-    // not fit, and `spacing` alone does not survive wrapping.
-    <Stack direction="row" spacing={1.5} useFlexGap
-      sx={{ mb: 1.5, flexWrap: 'wrap' }}>
-      {/* The controls keep their own vertical centring. Grouped
-          rather than left loose in the row because the gate is a
-          taller block -- label above, help text below -- and centring
-          each control against THAT would scatter them. */}
-      <Stack direction="row" spacing={1.5} useFlexGap sx={{
-        alignItems: "center", flexWrap: 'wrap', flex: '1 1 440px',
-      }}>
-        <TextField select size="small" label="Routing" value={routing.mode}
-          disabled={!canWrite(project) || set.isPending}
-          onChange={(e) => set.mutate({ mode: e.target.value })} sx={{ width: 150 }}>
-          <MenuItem value="mesh">Mesh</MenuItem>
-          <MenuItem value="primary">Primary</MenuItem>
-          <MenuItem value="geo">By region</MenuItem>
-        </TextField>
-        <Box sx={{ color: neon.muted, fontSize: 12 }}>
-          {routing.mode === 'mesh' &&
-            'Whichever agent asks first takes the next pooled task.'}
-          {routing.mode === 'primary' && (routing.current_primary_name
-            ? <>Serving now: <Box component="span" sx={{ color: neon.green }}>
-                {routing.current_primary_name}</Box>. If it stops heartbeating
-                the next by priority takes over.</>
-            : 'No agent is online to be primary.')}
-          {routing.mode === 'geo' &&
-            'Pooled tasks run on an agent serving their region, or wait.'}
-        </Box>
+    // ONE row. Routing, Parallel and the country gate are three
+    // controls of the same shape, so they centre against each other
+    // and need no grouping -- the nested Stack this replaced existed
+    // only because the gate used to be a tall block with a caption
+    // above and help below, and it is now a control like the others.
+    //
+    // `useFlexGap` with `flexWrap` so the row wraps on a narrow window
+    // rather than forcing the page sideways; `spacing` alone does not
+    // survive a wrap.
+    <Stack direction="row" spacing={1.5} useFlexGap sx={{
+      mb: 1.5, alignItems: 'center', flexWrap: 'wrap',
+    }}>
+        {/* What the mode MEANS is a balloon, not a sentence beside the
+            control. Spelled out inline it was a line of prose that
+            changed length with the selection and pushed Parallel onto
+            another row; the operator reads it once, on the way to
+            choosing, and then never again. Each option carries its own
+            so the answer arrives BEFORE the choice is made, which is
+            the point at which it is wanted. */}
+        <Tooltip title={MODE_HELP[routing.mode] ?? ''} enterDelay={200}>
+          <TextField select size="small" label="Routing" value={routing.mode}
+            disabled={!canWrite(project) || set.isPending}
+            onChange={(e) => set.mutate({ mode: e.target.value })}
+            sx={{ width: 150 }}>
+            {(['mesh', 'primary', 'geo'] as const).map((m) => (
+              <MenuItem key={m} value={m}>
+                <Tooltip title={MODE_HELP[m]} placement="right"
+                  enterDelay={200}>
+                  <Box sx={{ width: '100%' }}>{MODE_LABEL[m]}</Box>
+                </Tooltip>
+              </MenuItem>
+            ))}
+          </TextField>
+        </Tooltip>
+        {/* Beside Routing, because the two are one decision: how work
+            is spread, and how much of it at once. */}
+        <Tooltip title="How many tasks one agent may run at once on this engagement. A ceiling, not a target: each agent also works out what its own host can stand — cores, memory, what masscan managed to emit — and the lower of the two is what runs.">
+          <TextField select size="small" label="Parallel" sx={{ width: 110 }}
+            value={routing.max_parallel}
+            disabled={!canWrite(project) || set.isPending}
+            onChange={(e) => set.mutate({ max_parallel: Number(e.target.value) })}>
+            {[1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 32].map((n) => (
+              <MenuItem key={n} value={n}>{n}</MenuItem>
+            ))}
+          </TextField>
+        </Tooltip>
+        {/* `primary` is the one mode whose state is not in the label:
+            WHICH agent is serving is an observation, it changes on its
+            own, and a tooltip nobody is hovering cannot report it. */}
+        {routing.mode === 'primary' && (
+          <Box sx={{ color: neon.muted, fontSize: 12 }}>
+            {routing.current_primary_name
+              ? <>Serving now: <Box component="span" sx={{ color: neon.green }}>
+                  {routing.current_primary_name}</Box></>
+              : 'No agent is online to be primary.'}
+          </Box>
+        )}
         {/* Always shown, including at zero. The queue depth is the
             number an operator checks to know whether a submission landed,
             and a chip that only appears when work is waiting cannot
@@ -400,16 +446,6 @@ function Routing({ project, routing }:
             } />
           </Tooltip>
         )}
-        <Tooltip title="How many tasks one agent may run at once on this engagement. A ceiling, not a target: each agent also works out what its own host can stand — cores, memory, what masscan managed to emit — and the lower of the two is what runs.">
-          <TextField select size="small" label="Parallel" sx={{ width: 110 }}
-            value={routing.max_parallel}
-            disabled={!canWrite(project) || set.isPending}
-            onChange={(e) => set.mutate({ max_parallel: Number(e.target.value) })}>
-            {[1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 32].map((n) => (
-              <MenuItem key={n} value={n}>{n}</MenuItem>
-            ))}
-          </TextField>
-        </Tooltip>
         {queueOpen && (
           <GhostQueueDialog project={project} onClose={() => setQueueOpen(false)} />
         )}
@@ -422,22 +458,25 @@ function Routing({ project, routing }:
             bgcolor: alpha(neon.red, 0.14),
             border: `1px solid ${alpha(neon.red, 0.5)}` }} />
         )}
-      </Stack>
-      {/* The engagement's gate, not a routing preference: it says where
-          this engagement is authorised to test at all, and it applies
-          in every routing mode. Each ghost has its own list too, and
-          both have to allow a target. */}
-      <Box sx={{ flex: '1 1 320px', maxWidth: 560, minWidth: 0 }}>
-        <CountryPicker
-          label="Countries this engagement may scan"
-          help={'Applies in every routing mode. While a list is set, a '
-                + 'target whose country is not known is refused — locate '
-                + 'it from Enumerate, or leave this empty.'}
-          available={routing.geoip_available}
-          disabled={!canWrite(project) || set.isPending}
-          value={routing.scan_countries}
-          onChange={(next) => set.mutate({ scan_countries: next })} />
-      </Box>
+
+        {/* The engagement's gate, not a routing preference: it says
+            where this engagement is authorised to test at all, and it
+            applies in every routing mode. Rendered `compact` so it
+            reads as one more control on this row rather than a block
+            underneath -- what it is, not where it sits, is what makes
+            it belong here. The explanation is on hover for the same
+            reason the routing modes' is. */}
+        <Box sx={{ flex: '1 1 300px', maxWidth: 420, minWidth: 180 }}>
+          <CountryPicker compact
+            label="Countries this engagement may scan"
+            help={'Applies in every routing mode. While a list is set, a '
+                  + 'target whose country is not known is refused — locate '
+                  + 'it from Enumerate, or leave this empty.'}
+            available={routing.geoip_available}
+            disabled={!canWrite(project) || set.isPending}
+            value={routing.scan_countries}
+            onChange={(next) => set.mutate({ scan_countries: next })} />
+        </Box>
     </Stack>
   );
 }
@@ -672,9 +711,9 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
   /** Which tab to open on. `ghost-debug` used to be its own route
    *  and still resolves, so a bookmark lands on Debug rather than
    *  on a page that no longer exists. */
-  tab?: 'fleet' | 'debug'
+  tab?: 'fleet' | 'tasks' | 'debug'
 }) {
-  const [tab, setTab] = useState<'fleet' | 'debug'>(initialTab)
+  const [tab, setTab] = useState<'fleet' | 'tasks' | 'debug'>(initialTab)
   const qc = useQueryClient()
   const { canWrite, roleOn } = useAuth()
   const [wizard, setWizard] = useState(false)
@@ -1247,21 +1286,34 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
     // tables off MUI's DataGrid, which did its own scrolling and did
     // not care what its parent was.
     <Box sx={{ p: 2, flex: 1, minHeight: 0, overflowY: 'auto' }}>
-      {/* One page, two tabs. Debug was a second sidebar entry behind
-          a dropdown, which cost a click to reach a view an operator
-          checks WHILE a scan is running -- and hid it entirely until
-          the group was open. It is a second view of the same fleet,
-          so it belongs beside it. */}
-      {admin && (
-        <Tabs value={tab} onChange={(_, v) => setTab(v)}
-          sx={{ minHeight: 34, mb: 1,
-                borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
-          <Tab value="fleet" label="Fleet" sx={TAB_SX} />
-          <Tab value="debug" label="Debug" sx={TAB_SX} />
-        </Tabs>
-      )}
+      {/* One page, three views of the same fleet: what I have, what it
+          is doing, and what it is saying. Debug was a second sidebar
+          entry behind a dropdown, which cost a click to reach a view
+          an operator checks WHILE a scan is running.
+          Tasks sat under the fleet table, which meant scrolling past
+          60vh of agents to reach the thing that actually moves.
+          Shown to everyone, unlike Debug: what the fleet is running is
+          not an admin question, and the strip is no longer admin-only
+          because hiding Fleet/Tasks from a reader hid the navigation
+          itself. */}
+      <Tabs value={tab} onChange={(_, v) => setTab(v)}
+        sx={{ minHeight: 34, mb: 1,
+              borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
+        <Tab value="fleet" label="Fleet" sx={TAB_SX} />
+        <Tab value="tasks" label="Tasks" sx={TAB_SX} />
+        {admin && <Tab value="debug" label="Debug" sx={TAB_SX} />}
+      </Tabs>
       {admin && tab === 'debug' && <GhostDebugView project={project} />}
-      {tab === 'debug' && admin ? null : (
+      {tab === 'tasks' && (
+        // The routing row comes too, because the queue depth and the
+        // rate live on it -- reading a task list without them is the
+        // position without the direction.
+        <>
+          <Routing project={project} routing={routing} />
+          <GhostTasksTable project={project} />
+        </>
+      )}
+      {tab !== 'fleet' ? null : (
       <>
       <Routing project={project} routing={routing} />
       <Box sx={{ height: '60vh', minHeight: 320,
@@ -1298,18 +1350,6 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
           </Stack>
         }
       />
-      </Box>
-
-      {/* Under the fleet, because the question it answers comes second:
-          what have I got, then what is it doing. */}
-      <Box sx={{ mt: 3 }}>
-        <Typography sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 12,
-                          letterSpacing: '0.14em', textTransform: 'uppercase',
-                          color: neon.cyan, textShadow: glow(neon.cyan, 0.4),
-                          mb: 1 }}>
-          Tasks
-        </Typography>
-        <GhostTasksTable project={project} />
       </Box>
 
       </>
