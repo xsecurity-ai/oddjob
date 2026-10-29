@@ -55,6 +55,11 @@ log = logging.getLogger("oddjob.assetscan")
 #: the absent-scanner path.
 OPENGREP = os.environ.get("ODDJOB_OPENGREP", "/usr/local/bin/opengrep")
 
+#: trufflehog. Overridable for the same reason opengrep is: a
+#: developer without it installed can point at their own, and the
+#: suite can prove the absent-scanner path.
+TRUFFLEHOG = os.environ.get("ODDJOB_TRUFFLEHOG", "/usr/local/bin/trufflehog")
+
 #: opengrep's pre-extracted interpreter, unpacked at image build.
 #:
 #: `opengrep_manylinux` is a self-extracting wrapper, not a static
@@ -652,7 +657,73 @@ def available() -> dict[str, bool]:
     return {
         "opengrep": bool(shutil.which(OPENGREP) or os.path.exists(OPENGREP)),
         "detect-secrets": ds,
+        "trufflehog": bool(shutil.which(TRUFFLEHOG)
+                           or os.path.exists(TRUFFLEHOG)),
     }
+
+
+def parse_trufflehog(raw: str) -> list[Finding]:
+    """trufflehog `--json` output -> findings.
+
+    One JSON object per LINE, not one document -- trufflehog streams,
+    so a partial read is still parseable up to the last newline and a
+    `json.loads` of the whole thing fails on the first result.
+
+    **`Verified` is the field worth having.** detect-secrets can say
+    a string looks like an AWS key; trufflehog can say it IS one,
+    because it asked AWS. That is the difference between a finding and
+    a morning spent on an example key from a README, so a verified
+    result is `critical` and an unverified one is `medium` -- never
+    the same severity, whatever the detector.
+    """
+    out: list[Finding] = []
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            # One malformed line is not a reason to drop the rest of a
+            # stream that may hold a live credential.
+            continue
+        det = str(d.get("DetectorName") or "unknown")
+        verified = bool(d.get("Verified"))
+        meta = ((d.get("SourceMetadata") or {}).get("Data") or {})
+        fs = (meta.get("Filesystem") or {})
+        path = str(fs.get("file") or "")
+        line_no = fs.get("line")
+        try:
+            line_no = int(line_no) if line_no is not None else None
+        except (TypeError, ValueError):
+            line_no = None
+        secret = d.get("Raw") or d.get("RawV2") or None
+        out.append(Finding(
+            scanner="trufflehog",
+            rule=det[:128],
+            title=(f"{det} credential"
+                   + (" (verified live)" if verified else " (unverified)")),
+            # Verified means the provider accepted it. Nothing else
+            # this codebase reports gets to be critical on its own.
+            severity="critical" if verified else "medium",
+            path=path,
+            line=line_no,
+            detail=(f"trufflehog detector {det!r}. "
+                    + ("The provider ACCEPTED this credential: it is live, "
+                       "and rotating it is the first action."
+                       if verified else
+                       "Not verified against the provider -- either it is "
+                       "not live, or trufflehog has no verifier for this "
+                       "detector. Treat as unconfirmed until checked.")),
+            fingerprint=fingerprint("trufflehog", det,
+                                    hashlib.sha256(
+                                        (secret or path).encode()
+                                    ).hexdigest()),
+            secret=secret))
+    # Mapping a finding back to the file that produced it is the
+    # caller's job, exactly as it is for opengrep: it holds the
+    # temporary-name index and this does not.
+    return out[:MAX_PER_FILE * 4]
 
 
 def redact(secret: str) -> str:

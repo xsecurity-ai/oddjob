@@ -207,6 +207,43 @@ RUN set -eux; \
     find /dl/rules -name '*.yml' -path '*test*' -delete; \
     chown -R 10001:10001 /dl/home /dl/rules
 
+# trufflehog, for the credentials detect-secrets cannot see.
+#
+# The two are not a choice between. detect-secrets finds a string
+# that LOOKS like a credential -- entropy, or a vendor regex -- and
+# says so. trufflehog carries detectors that know what each vendor's
+# key is FOR, and can tell a live one from an example in a README.
+# On a client's bundles that distinction is the difference between a
+# finding and a morning wasted.
+#
+# Pinned by VERSION and by SHA256, which is stronger than the
+# opengrep download above -- that one is trusted by TLS alone and the
+# comment there says so plainly. These digests come from the
+# release's own checksums.txt. A future bump that changes the archive
+# without changing them fails the build, which is the point.
+ARG TRUFFLEHOG_VERSION=3.99.7
+ARG TRUFFLEHOG_SHA256_AMD64=bdbea0508e439b144f49de14e775908de5f902f3d14ea7ae8354bae72b0b72ef
+ARG TRUFFLEHOG_SHA256_ARM64=3060f7c9f18c70afdc432984cacabdd1e9103729b5d5fee7fb6755a90d1c59d4
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64)  th_arch=amd64; want="${TRUFFLEHOG_SHA256_AMD64}" ;; \
+      aarch64) th_arch=arm64; want="${TRUFFLEHOG_SHA256_ARM64}" ;; \
+      *) echo "unsupported arch $arch" >&2; exit 1 ;; \
+    esac; \
+    tgz="trufflehog_${TRUFFLEHOG_VERSION}_linux_${th_arch}.tar.gz"; \
+    curl -fsSL -o "$tgz" \
+      "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/${tgz}"; \
+    : "Written to a file rather than piped: a pipeline under plain"; \
+    : "sh has no pipefail, so a failing sha256sum would be masked by"; \
+    : "the exit status of echo -- the check would always pass."; \
+    printf '%s  %s\n' "${want}" "${tgz}" > trufflehog.sha256; \
+    sha256sum -c trufflehog.sha256; \
+    rm -f trufflehog.sha256; \
+    tar xzf "$tgz" trufflehog; \
+    rm -f "$tgz"; \
+    ./trufflehog --version
+
 
 # ------------------------------------------------------------ runtime
 # Distroless. No shell, no package manager, no apt database, no libc
@@ -291,6 +328,10 @@ COPY --from=scanners --chown=0:0 --chmod=0755 /dl/opengrep /usr/local/bin/opengr
 COPY --from=scanners --chown=10001:10001 /dl/home /opt/opengrep
 # The ruleset, so a scan never calls semgrep.dev.
 COPY --from=scanners --chown=10001:10001 /dl/rules /opt/opengrep-rules
+# The secret scanner. Root-owned and not writable by the app's uid,
+# for the same reason opengrep is: nothing the application can reach
+# should be able to replace a binary that reads a client's source.
+COPY --from=scanners --chown=0:0 --chmod=0755 /dl/trufflehog /usr/local/bin/trufflehog
 
 USER 10001
 WORKDIR /app/backend

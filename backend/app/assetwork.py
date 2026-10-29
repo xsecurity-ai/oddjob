@@ -685,6 +685,35 @@ async def scan_batch(items: list[tuple[int, str, str]]
                 if fid is not None:
                     out[fid].append(_reseat(f, real[fid]))
 
+        # trufflehog over the whole directory, one invocation like
+        # opengrep. `filesystem` walks it; `--no-update` keeps a
+        # scanner that reads a client's source from reaching out to
+        # check its own version mid-sweep.
+        #
+        # It is additive to detect-secrets, not a replacement. That
+        # one finds strings that LOOK like credentials; this one
+        # carries detectors that know what each vendor's key is for
+        # and can confirm a live one with the provider. Running both
+        # and deduplicating on fingerprint costs one subprocess and
+        # catches what either alone would miss.
+        if have.get("trufflehog"):
+            rc, so, se = await assetscan._run(
+                [assetscan.TRUFFLEHOG, "filesystem", d,
+                 "--json", "--no-update"], b"")
+            # trufflehog exits non-zero when it FINDS things with
+            # some flag combinations, so the output is what decides,
+            # not the status. Only a run that produced nothing AND
+            # failed is a failure.
+            if rc not in (0, 183) and not so.strip():
+                ok = False
+                log.warning("assetwork: trufflehog rc=%s (%s): %s",
+                            rc, "TIMED OUT" if rc == -1 else "failed",
+                            se[-200:])
+            for f in assetscan.parse_trufflehog(so):
+                fid = owner(f.path)
+                if fid is not None:
+                    out[fid].append(_reseat(f, real[fid]))
+
         # detect-secrets runs IN PROCESS, per file: it is a Python
         # library, not a subprocess, so there is no startup cost to
         # amortise and batching would only lose the per-file path.
