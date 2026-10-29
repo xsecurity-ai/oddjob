@@ -481,6 +481,7 @@ project" may mean "not yours".
 | **Targets** | `list_targets` `get_target` `add_target` `set_target_flags` `find_by_technology` `target_timeline` `add_target_note` |
 | **Ports & services** | `list_ports` `list_services` `port_summary` `scan_coverage` `explore` |
 | **Findings & web** | `list_vulns` `add_finding` `list_web_addresses` `list_web_urls` `get_web_packet` `list_credentials` |
+| **Proof & record** | `list_pocs` `create_poc` `list_reports` `report_kinds` `list_actions` |
 | **Static assets** | `search_web_assets` `list_web_assets` `get_web_asset` |
 | **Importing** | `import_formats` `import_report` `import_nmap` `bulk_import` |
 | **Ghost — fleet** | `list_ghosts` `enroll_ghost` `kill_ghost` `ghost_routing` `ghost_task_kinds` |

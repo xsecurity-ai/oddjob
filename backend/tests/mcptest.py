@@ -577,5 +577,60 @@ check("a host with no ports is a scanning gap, not an absence of exposure",
       "gap in what has been scanned" in
       run(M.exploit_leads("MCPT", "dark.acme.example"))["note"], empty)
 
+print("\n--- which of the API's surfaces the server can reach ---")
+# "Make sure the MCP is working on all API endpoints" has a wrong
+# answer, and it is "all of them". Some prefixes hold site
+# configuration, user administration and secret VALUES, and this
+# server feeds a model whose context is shipped to a third party.
+# Covering those would undo the decision `get_finding_secret` and
+# `list_credentials` already took on purpose.
+#
+# So the boundary is a decision, and like every other decision here
+# it has to be written down rather than left to whoever reads the
+# route table next.
+NEVER_EXPOSED = {
+    "/settings": "site configuration, including the Slack bot token and "
+                 "SMTP credentials",
+    "/users": "account administration",
+    "/groups": "group membership, which is authorisation",
+    "/secrets": "the secret VALUES themselves -- see get_finding_secret",
+    "/agent": "the in-product assistant; an MCP client calling it would "
+              "be a model driving a model",
+    "/events": "a server-sent event stream, which has no MCP shape",
+}
+
+from app.main import app as _app  # noqa: E402
+
+_spec = _app.openapi()
+_served = set()
+for _path in _spec.get("paths", {}):
+    if _path.startswith("/api/"):
+        _parts = _path.split("/")
+        if len(_parts) > 2:
+            _served.add("/" + _parts[2])
+
+# ROOT is the repo root; the server lives under backend/.
+_src = _pathlib.Path(M.__file__).read_text()
+_called = set(re.findall(r"/api/[a-z0-9\-_{}/]+", _src))
+_reach = {"/" + p.split("/")[2] for p in _called if len(p.split("/")) > 2}
+
+_gap = sorted(_served - _reach - set(NEVER_EXPOSED))
+check("every API surface is either reachable from MCP or deliberately not",
+      not _gap,
+      "unreachable and unexplained: " + ", ".join(_gap) if _gap
+      else f"{len(_served & _reach)} reachable, "
+           f"{len(NEVER_EXPOSED)} withheld on purpose")
+
+# The other direction: a prefix on the withheld list that the server
+# has quietly started calling. That is the one that matters, because
+# it is how a secret reaches a third party's logs.
+_leaked = sorted(set(NEVER_EXPOSED) & _reach)
+check("...and nothing withheld has crept back in",
+      not _leaked,
+      "NOW REACHABLE: " + ", ".join(f"{p} ({NEVER_EXPOSED[p]})"
+                                    for p in _leaked) if _leaked
+      else "none of the withheld prefixes are called")
+
+
 print(f"\n{ok} passed, {fail} failed")
 raise SystemExit(1 if fail else 0)

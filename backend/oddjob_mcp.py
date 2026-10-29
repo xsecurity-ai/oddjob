@@ -197,6 +197,105 @@ AGENT_ONLY: dict[str, str] = {
 }
 
 
+# ===================================================================== pocs
+@tool(agent_equivalent="list_pocs")
+async def list_pocs(project: str | None = None, host: str | None = None,
+                    status: str | None = None, limit: int = 200) -> Any:
+    """Proof-of-concept records: what was actually demonstrated.
+
+    A finding says a thing is wrong; a PoC says somebody showed it.
+    `status` is confirmed or unconfirmed, and the difference is the
+    whole point -- an unconfirmed PoC is a script that has not yet
+    proved anything.
+    """
+    return _rows(await _req("GET", "/api/pocs",
+                            params={"project": project, "host": host,
+                                    "status": status, "limit": limit}),
+                 ("host", "title", "status", "exit_code", "path", "notes"),
+                 limit)
+
+
+@tool(writes=True, agent_equivalent=None)
+async def create_poc(project: str, host: str, title: str,
+                     status: str = "unconfirmed", path: str | None = None,
+                     exit_code: int | None = None,
+                     notes: str | None = None) -> Any:
+    """Record a proof of concept against a host.
+
+    Defaults to `unconfirmed`, deliberately: claiming something was
+    demonstrated is the operator's call, and a tool that defaults to
+    `confirmed` would put that claim in a client's report without
+    anyone making it.
+    """
+    return await _req("POST", "/api/pocs", params={"project": project},
+                      json={"host": host, "title": title, "status": status,
+                            "path": path, "exit_code": exit_code,
+                            "notes": notes})
+
+
+# ================================================================== reports
+@tool(agent_equivalent="list_reports")
+async def list_reports(project: str | None = None, limit: int = 100) -> Any:
+    """Reports generated for an engagement.
+
+    The rendered document is NOT returned -- it runs to megabytes and
+    is a download, not something to put in a model's context. This
+    lists what exists so a caller can say what has been produced and
+    when.
+    """
+    return _rows(await _req("GET", "/api/reports",
+                            params={"project": project}),
+                 ("id", "project_code", "kind", "title", "status",
+                  "size_bytes", "created_at"), limit)
+
+
+@tool(agent_equivalent=None)
+async def report_kinds() -> Any:
+    """Which report kinds this deployment can produce."""
+    return await _req("GET", "/api/reports/kinds")
+
+
+# ================================================================== activity
+@tool(agent_equivalent="list_actions")
+async def list_actions(project: str | None = None, limit: int = 100) -> Any:
+    """What has been DONE on an engagement, newest first.
+
+    The audit trail as the UI shows it: who ran what, against which
+    host, and when. Distinct from the findings -- this is the record
+    of the work, not of its results, and it is how you answer "has
+    anybody looked at this yet".
+    """
+    return _rows(await _req("GET", "/api/actions",
+                            params={"project": project, "limit": limit}),
+                 ("at", "actor", "action", "project_code", "host", "detail"),
+                 limit)
+
+
+#: MCP tools the in-product agent deliberately does NOT have.
+#:
+#: The mirror of `AGENT_ONLY`, and it carries the same obligation: an
+#: asymmetry is fine, an UNRECORDED one is the drift this file exists
+#: to stop. "Same product, two front doors, different answers
+#: depending which one you came in by" is what the suite is guarding.
+MCP_ONLY: dict[str, str] = {
+    "create_poc":
+        "A PoC record is a claim that somebody DEMONSTRATED a thing -- "
+        "not that a scanner reported it. An MCP caller is the "
+        "operator's own client, usually the thing that just ran the "
+        "exploit, so it is in a position to make that claim. The "
+        "in-product assistant is not: it reads the database and has "
+        "run nothing, and a tool letting it write 'this was "
+        "reproduced' would put a claim in a client's report that "
+        "nobody made. It can already read them with `list_pocs`.",
+    "report_kinds":
+        "A capability lookup -- which report kinds this deployment can "
+        "produce -- and only useful to something that is about to "
+        "generate one. The agent does not generate reports; it reads "
+        "the ones that exist, with `list_reports`. Adding it there "
+        "would be a tool whose answer the caller can never act on.",
+}
+
+
 # ==================================================================== transport
 async def _req(method: str, path: str, *, params: dict | None = None,
                json: Any | None = None) -> Any:
