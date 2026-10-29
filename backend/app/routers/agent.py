@@ -76,10 +76,27 @@ WITHHELD = ("[credential withheld from the shared transcript. Read it on "
 SYSTEM = """You are an assistant embedded in Oddjob, a penetration-testing
 engagement database. You are working on engagement {code}{client}.
 
+Today is {today}. Use that date for anything time-relative -- how old
+a finding is, whether a certificate has expired, what "last week"
+means. Do NOT answer from your own sense of the date: you were asked
+"what is the current date" and said 2026-01-22, which was nine months
+out, because nothing here had told you.
+
 Answer from the data. Call the tools rather than guessing: you have no
 knowledge of this engagement beyond what they return.
 
 Rules that matter here:
+
+- SEARCH IS CASE-INSENSITIVE. Every `search=` and `q=` argument is a
+  SQL `ILIKE`, so "move", "MOVE" and "Move" are the same query and
+  running all three spends three of your steps to learn nothing. It
+  has happened: a question about MOVEit burned ten calls on case
+  variants and substring guesses and reached no answer at all.
+  If a search comes back empty, the next move is a DIFFERENT tool or
+  a SHORTER term -- not the same term in another case. Searching
+  `list_findings` and `list_web_addresses` for the same string are
+  two genuinely different questions; searching for "MOVE" after
+  "move" is one question asked twice.
 
 - A missing value is not a negative finding. "alive" being null means the
   host has not been probed, which is NOT the same as it being down. A
@@ -319,6 +336,17 @@ def thread_messages(raw: Iterable[str]) -> list[dict]:
         elif isinstance(item, dict):
             out.append(item)
     return out
+
+
+def _today() -> str:
+    """The date, for the system prompt.
+
+    UTC and ISO, because the alternative is a model reading a local
+    format and guessing which half is the month. Computed per request
+    rather than at import: this process runs for weeks, and a date
+    captured at startup is wrong for every day after the first.
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%d (%A), in UTC")
 
 
 #: The value that means "not one engagement, all of them". A sentinel
@@ -690,7 +718,7 @@ async def chat(body: ChatRequest, project: str = Query(...),
         n = "every project" if scope is None else f"{len(scope)} project(s)"
         system = SYSTEM.format(
             code=f"ALL ENGAGEMENTS ({n} you can read)",
-            client="", reach="",
+            client="", reach="", today=_today(),
             writes="You are answering across several engagements at once. "
                    "Always say which project a host or finding belongs to — "
                    "an answer that mixes clients without labelling them is "
@@ -699,6 +727,7 @@ async def chat(body: ChatRequest, project: str = Query(...),
     else:
         system = SYSTEM.format(
             code=pr.code, client=f" for {pr.client}" if pr.client else "",
+            today=_today(),
             reach=(GHOST_ON if any(t.name == "task_ghost" for t in tools) else ""),
             writes=WRITES_ON if allow else WRITES_OFF)
     # The thread is the engagement's, so the history comes from it
