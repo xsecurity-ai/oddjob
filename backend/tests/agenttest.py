@@ -3142,6 +3142,33 @@ check("the audit trail has the proxy actions",
       sorted(a for a in _actions if "proxy" in str(a)))
 
 
+print("\n== the agent is told things it cannot know ==")
+# Asked "what is the current date" it answered 2026-01-22 -- nine
+# months out -- because nothing in the prompt said otherwise and a
+# model answers from its weights when it has nothing else.
+# `_dt` is already imported further up this file.
+from app.routers.agent import SYSTEM, _today  # noqa: E402
+
+_t = _today()
+check("the prompt carries today's date",
+      _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d") in _t, _t)
+check("...as ISO, not a local format that reads two ways",
+      _t[:4].isdigit() and _t[4] == "-", _t)
+_filled = SYSTEM.format(code="X", client="", reach="", writes="", today=_t)
+check("...and it reaches the rendered prompt", _t in _filled)
+
+# The other half of that transcript: ten tool calls, three of them
+# the same ILIKE search in different cases, and no answer.
+check("the prompt says searches are case-insensitive",
+      "CASE-INSENSITIVE" in _filled)
+check("...and says what to do instead of re-casing a term",
+      "DIFFERENT tool" in _filled or "SHORTER term" in _filled)
+# Computed per request: this process runs for weeks and a date
+# captured at import is wrong for every day after the first.
+check("the date is computed per call, not frozen at import",
+      _today() == _today())
+
+
 print("\n== a stored thread goes back to the provider as messages ==")
 # A user turn is stored as ONE message object; an assistant turn as
 # the provider-shaped TAIL of the round, which is a LIST. Reading both

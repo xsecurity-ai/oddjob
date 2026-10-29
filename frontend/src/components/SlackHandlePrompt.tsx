@@ -58,6 +58,55 @@ function inviteLines(raw: string | null | undefined): InviteLine[] {
 
 const chan = (c: string) => `#${c.replace(/^#/, '')}`
 
+/**
+ * What a Slack error code actually means, and what to do about it.
+ *
+ * These are NOT one problem. The old copy told everyone the same
+ * thing — "the usual cause is not being a member of that Slack
+ * workspace yet" — which is right for `user_not_found` and wrong for
+ * the one people actually hit: `channel_not_found` means the CHANNEL
+ * is not there, and on a project that has never set one the name was
+ * DERIVED from the project code, so it was never going to be.
+ *
+ * Said plainly because the wrong advice costs a round trip to
+ * somebody who administers a workspace, to fix a thing that is not
+ * broken there.
+ */
+const WHY: Record<string, string> = {
+  channel_not_found:
+    'That channel does not exist in the workspace, or the bot cannot '
+    + 'see it because it is private and has not been invited. This is '
+    + 'NOT about your membership. If the project has no channel set, '
+    + 'the name was derived from the project code — create it, or set '
+    + 'an explicit channel in Project → Slack.',
+  user_not_found:
+    'Slack has no member with that handle. THIS is the membership '
+    + 'case: somebody who administers the workspace has to add you '
+    + 'before you can be added to a channel in it.',
+  not_in_channel:
+    'The bot is not in that channel, so it cannot invite anyone to '
+    + 'it. Invite the bot to the channel first.',
+  already_in_channel: 'You were already in it. Nothing to do.',
+  is_archived:
+    'That channel is archived. Un-archive it, or point the project at '
+    + 'a different one.',
+  cant_invite_self: 'The bot cannot invite itself.',
+  invalid_auth:
+    'The bot token is not valid. Site Config → Slack, or the '
+    + "project's own token if it overrides.",
+  missing_scope:
+    'The token is valid but lacks the scope to invite. It needs '
+    + '`channels:manage` (or `groups:write` for a private channel).',
+}
+
+/** The explanation for one failed line, or null when the code is not
+ *  one we have met. Null matters: inventing a cause for an unknown
+ *  code is exactly what the old copy did. */
+function why(outcome: string): string | null {
+  const code = outcome.trim().split(/[\s:,]/)[0]
+  return WHY[code] ?? null
+}
+
 export function SlackHandlePrompt({ project }: { project: string | null }) {
   const qc = useQueryClient()
   const { refresh } = useAuth()
@@ -395,11 +444,26 @@ function InviteReport({ me }: { me: SlackMe }) {
       </Box>
 
       {failed.length > 0 && (
-        <Alert severity="warning" variant="outlined" sx={{ fontSize: 11.5, lineHeight: 1.6 }}>
+        <Alert severity="warning" variant="outlined"
+          sx={{ fontSize: 11.5, lineHeight: 1.6 }}>
           Your handle is saved regardless — the invite is a separate step and
-          failing it does not lose your answer. The usual cause is not being a
-          member of that Slack workspace yet, which someone with access to it
-          has to fix; adding you to a channel cannot.
+          failing it does not lose your answer.
+          {/* One explanation per DISTINCT code. The previous copy gave
+              every failure the same cause, which sent people to a
+              workspace administrator to fix a channel that simply did
+              not exist. */}
+          {[...new Set(failed.map((l) => why(l.outcome)).filter(Boolean))]
+            .map((w) => (
+              <Box key={w as string} sx={{ mt: 0.8 }}>{w}</Box>
+            ))}
+          {/* A code we have not met gets no invented cause -- just the
+              code, which is the thing to search for. */}
+          {failed.some((l) => !why(l.outcome)) && (
+            <Box sx={{ mt: 0.8 }}>
+              The code above is Slack's own. We have no note on what it
+              means here, so it is shown verbatim rather than guessed at.
+            </Box>
+          )}
         </Alert>
       )}
     </Stack>
