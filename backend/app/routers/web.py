@@ -1145,6 +1145,13 @@ async def assets(project: str = Query(...),
             "sha256": a.sha256, "bytes": a.bytes,
             "content_type": a.content_type, "status_code": a.status_code,
             "fetched": a.sha256 is not None,
+            # Whether the scanners have READ this file, which is a
+            # different question from whether its bytes are here.
+            # Without it a zero in the Findings column means both
+            # "clean" and "nothing has looked", and on an estate where
+            # the sweep has covered a tenth of the files it almost
+            # always means the second.
+            "scanned": a.scanned_at is not None,
             "first_page": a.first_page,
             "loaded_by": by_asset.get(a.id, []),
             "vulns": by_id.get(a.id, (0, 0, 0))[0],

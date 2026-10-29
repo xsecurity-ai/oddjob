@@ -19,6 +19,7 @@ import {
   type ColumnDef, type FilterModel,
 } from '../src/lib/columns'
 import { filterRows, sortRows } from '../src/lib/tableOps'
+import { byWorstFirst, collapse } from '../src/components/VulnRollupPanel'
 import { maybeSorted, sortedStrings, isRanked } from '../src/lib/sortOptions'
 import { THEMES } from '../src/palettes'
 import { readChoice } from '../src/lib/useStoredChoice'
@@ -833,6 +834,96 @@ console.log('\n== a remembered tab choice ==')
         readChoice('', TABS, 'all') === 'all'
         && readChoice('__proto__', TABS, 'all') === 'all')
 }
+
+
+
+// --------------------------------------------- rollup detail ordering
+//
+// Expanding a rollup row answers "what is this row made of". Two
+// things were wrong with the answer: it came back in `Vuln.id` order,
+// and it listed the same host twice under one vulnerability while the
+// `hosts` column beside it counted DISTINCT hosts — so the table
+// disagreed with itself on screen.
+const v = (o: Partial<Record<string, unknown>>) => ({
+  id: 1, target_id: 1, host: 'a.acme.example', project_code: 'ACME',
+  title: 't', severity: 'info', status: 'open', triage: 'needs_investigating',
+  port: null, protocol: null, description: null, remediation: null,
+  external_id: null, created_at: '', updated_at: '', scanner: null,
+  first_seen_at: null, last_seen_at: null, lifecycle: 'present',
+  lifecycle_why: null, last_looked_at: null, ...o,
+}) as never
+
+console.log('\n== a rollup expansion is worst first, settled last ==')
+{
+  const rows = [
+    v({ id: 1, severity: 'low' }),
+    v({ id: 2, severity: 'critical', lifecycle: 'resolved' }),
+    v({ id: 3, severity: 'critical' }),
+    v({ id: 4, severity: 'critical', status: 'closed' }),
+    v({ id: 5, severity: 'high' }),
+  ]
+  const got = [...rows].sort(byWorstFirst).map((r) => (r as { id: number }).id)
+  // critical open, critical closed, critical resolved, high, low.
+  // Resolved after closed: the scan looked and it was gone, which is
+  // the one row nobody has to do anything about.
+  check('severity first, then resolved last, then closed last',
+        got.join(',') === '3,4,2,5,1', got.join(','))
+}
+{
+  // `unconfirmed` must NOT sink with `resolved`: nothing that reports
+  // it has run since, so its absence is unmeasured rather than fixed.
+  const rows = [
+    v({ id: 1, severity: 'high', lifecycle: 'resolved' }),
+    v({ id: 2, severity: 'high', lifecycle: 'unconfirmed' }),
+  ]
+  const got = [...rows].sort(byWorstFirst).map((r) => (r as { id: number }).id)
+  check('unconfirmed is not treated as resolved', got.join(',') === '2,1',
+        got.join(','))
+}
+
+console.log('\n== a rollup expansion shows each thing once ==')
+{
+  const byHost = (x: { host: string; port: number | null }) =>
+    `${x.host}\u0000${x.port ?? ''}`
+  const rows = [
+    v({ id: 10, host: 'h1.acme.example' }),
+    v({ id: 11, host: 'h1.acme.example' }),   // the same thing, twice
+    v({ id: 12, host: 'h2.acme.example' }),
+  ]
+  const got = collapse(rows, byHost as never)
+  check('two rows for one host collapse to one', got.length === 2,
+        String(got.length))
+  check('...and say how many rows said it',
+        got.find((g) => g.host === 'h1.acme.example')?.dupes === 2,
+        JSON.stringify(got.map((g) => [g.host, g.dupes])))
+  check('...while a host seen once is not marked',
+        got.find((g) => g.host === 'h2.acme.example')?.dupes === 1)
+}
+{
+  // The same title on two ports is two exposures, not one row seen
+  // twice. Merging those would hide a genuine second one.
+  const byHost = (x: { host: string; port: number | null }) =>
+    `${x.host}\u0000${x.port ?? ''}`
+  const got = collapse([
+    v({ id: 20, host: 'h.acme.example', port: 443 }),
+    v({ id: 21, host: 'h.acme.example', port: 8443 }),
+  ], byHost as never)
+  check('the same host on two ports stays two rows', got.length === 2,
+        String(got.length))
+}
+{
+  // Collapsing must never lower what the row reports.
+  const byHost = (x: { host: string }) => x.host
+  const got = collapse([
+    v({ id: 30, host: 'h.acme.example', severity: 'low', status: 'closed' }),
+    v({ id: 31, host: 'h.acme.example', severity: 'critical' }),
+  ], byHost as never)
+  check('the survivor is the worst of the group',
+        got[0].severity === 'critical' && got[0].status === 'open',
+        `${got[0].severity}/${got[0].status}`)
+  check('...and it links to that one', got[0].id === 31, String(got[0].id))
+}
+
 
 console.log(`\n${'='.repeat(56)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(56)}`)
 process.exit(fail ? 1 : 0)

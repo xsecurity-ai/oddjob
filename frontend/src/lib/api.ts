@@ -26,6 +26,12 @@ export interface WebAsset {
    *  bytes, not findings on the host that serves it. A CDN bundle's
    *  host is somebody else's infrastructure; the bundle is ours to
    *  answer for. */
+  /** Whether the scanners have read this file. A different question
+   *  from `fetched`: the bytes can be here with nothing having looked
+   *  at them yet, and on a large estate that is the usual state for
+   *  most of the rows. Without it a zero in Findings means both
+   *  "clean" and "not looked at". */
+  scanned: boolean
   vulns: number
   criticals: number
   highs: number
