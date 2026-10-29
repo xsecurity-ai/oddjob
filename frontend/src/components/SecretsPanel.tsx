@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Box, Stack, Tooltip, alpha } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
 import type { ColumnDef } from '../lib/columns'
@@ -155,7 +155,10 @@ export function SecretsPanel({ project, onFinding }: {
     put(next)
   }
 
-  const grouped = group(data ?? [])
+  // Memoised on the response, not rebuilt per render: `stat` below
+  // keys off it, and a dependency whose identity changes every time
+  // is a memo that never hits and reads as though it does.
+  const grouped = useMemo(() => group(data ?? []), [data])
   // One finished list, in the order it is read: host, then its
   // files when the host is open, then their secrets when the file
   // is. Sorted worst-first within each level so the thing worth
@@ -183,10 +186,42 @@ export function SecretsPanel({ project, onFinding }: {
     }
   }
 
+  // What a row sorts BY, which is never the row's own value.
+  //
+  // This grid is a flattened tree -- host, then its files, then their
+  // secrets -- and a flat sorter over it would put a secret above the
+  // host it belongs to. So every row in a host's block reports the
+  // HOST's value, which makes sorting mean "order the hosts by this"
+  // and leaves the block intact: rows inside it compare equal, and
+  // `Array.prototype.sort` has been stable since ES2019, so they keep
+  // the order this function built them in. Descending reverses the
+  // hosts and still does not reverse their contents.
+  //
+  // It also fixes the reason sorting did nothing at all: the columns
+  // name `severity`, `detector`, `count` and `label`, and not one of
+  // those is a field on these rows -- a secret's live under `row.`
+  // and the group rows have `worst` and `secrets`. Every comparison
+  // was reading undefined.
+  const hostOf = (r: Row) => (r.kind === 'secret' ? r.row.host ?? '' : r.host)
+  const stat = useMemo(() => {
+    const m = new Map<string, { worst: number; secrets: number }>()
+    for (const [host, files] of grouped) {
+      const all = [...files.values()].flat()
+      m.set(host, { worst: SEV_RANK[worstOf(all)] ?? 9, secrets: all.length })
+    }
+    return m
+  }, [grouped])
+  const by = (pick: (s: { worst: number; secrets: number }) => number) =>
+    (_raw: unknown, row: Row) => {
+      const h = stat.get(hostOf(row))
+      return h ? pick(h) : Number.MAX_SAFE_INTEGER
+    }
+
   const columns: ColumnDef<Row>[] = [
     {
       field: 'label', headerName: 'Host · file · secret', flex: 4,
       minWidth: 360,
+      valueGetter: (_v, row) => hostOf(row as Row),
       // One column for all three levels. Indentation is what makes
       // a flat grid read as a tree, and splitting the levels across
       // columns would leave two of them blank on every row.
@@ -246,6 +281,7 @@ export function SecretsPanel({ project, onFinding }: {
     },
     {
       field: 'count', headerName: 'Secrets', width: 96,
+      valueGetter: by((h) => h.secrets),
       renderCell: (p) => {
         const r = p.row as Row
         if (r.kind === 'secret') return null
@@ -264,6 +300,12 @@ export function SecretsPanel({ project, onFinding }: {
     },
     {
       field: 'detector', headerName: 'Detector', width: 180,
+      // Not sortable, and this is the honest answer rather than a
+      // missing feature: a host block holds several detectors, so
+      // "order the hosts by detector" has no value to order by. A
+      // header that offered it would be offering a no-op, which is
+      // what the whole table was doing before.
+      sortable: false,
       renderCell: (p) => {
         const r = p.row as Row
         if (r.kind !== 'secret') return null
@@ -276,34 +318,33 @@ export function SecretsPanel({ project, onFinding }: {
     },
     {
       field: 'severity', headerName: 'Sev', width: 86,
+      // The rank, not the word: sorted as a string, severity reads
+      // critical, high, info, low, medium — "info" third, which is
+      // actively misleading on a findings table.
+      valueGetter: by((h) => h.worst),
       renderCell: (p) => {
         const r = p.row as Row
         // A group carries the worst of what is inside it, so a
         // collapsed host still says whether it is worth opening.
         const sev = r.kind === 'secret' ? r.row.severity : r.worst
+        // On a secret row this is also the way to the finding behind
+        // it. There used to be a `Finding` column for that and it was
+        // a wide repeat of the title beside a label that already says
+        // host, file and secret -- but it carried the only link, so
+        // the link moves here rather than going with it.
+        const open = r.kind === 'secret'
+          ? () => onFinding(r.row.vuln_id) : undefined
         return (
-          <Box sx={{ color: SEV_COLOUR[sev] ?? neon.muted, fontSize: 10.5,
-                     letterSpacing: '0.08em', textTransform: 'uppercase',
-                     opacity: r.kind === 'secret' ? 1 : 0.75 }}>
+          <Box onClick={open ? (e) => { e.stopPropagation(); open() } : undefined}
+            title={open ? 'Show the full finding' : undefined}
+            sx={{ color: SEV_COLOUR[sev] ?? neon.muted, fontSize: 10.5,
+                  letterSpacing: '0.08em', textTransform: 'uppercase',
+                  opacity: r.kind === 'secret' ? 1 : 0.75,
+                  cursor: open ? 'pointer' : 'default',
+                  '&:hover': open
+                    ? { textShadow: glow(SEV_COLOUR[sev] ?? neon.muted, 0.7) }
+                    : undefined }}>
             {sev}
-          </Box>
-        )
-      },
-    },
-    {
-      field: 'finding', headerName: 'Finding', flex: 2, minWidth: 200,
-      renderCell: (p) => {
-        const r = p.row as Row
-        if (r.kind !== 'secret') return null
-        return (
-          <Box onClick={(e) => { e.stopPropagation(); onFinding(r.row.vuln_id) }}
-            title="Show the full finding"
-            sx={{ overflow: 'hidden', textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap', cursor: 'pointer', color: neon.text,
-                  fontSize: 11.5,
-                  '&:hover': { color: neon.cyan,
-                               textShadow: glow(neon.cyan, 0.5) } }}>
-            {r.row.title}
           </Box>
         )
       },
