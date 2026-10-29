@@ -281,29 +281,24 @@ export function SecretsPanel({ project, onFinding }: {
         // A group carries the worst of what is inside it, so a
         // collapsed host still says whether it is worth opening.
         const sev = r.kind === 'secret' ? r.row.severity : r.worst
+        // On a secret row this is also the way to the finding behind
+        // it. There used to be a `Finding` column for that and it was
+        // a wide repeat of the title beside a label that already says
+        // host, file and secret -- but it carried the only link, so
+        // the link moves here rather than going with it.
+        const open = r.kind === 'secret'
+          ? () => onFinding(r.row.vuln_id) : undefined
         return (
-          <Box sx={{ color: SEV_COLOUR[sev] ?? neon.muted, fontSize: 10.5,
-                     letterSpacing: '0.08em', textTransform: 'uppercase',
-                     opacity: r.kind === 'secret' ? 1 : 0.75 }}>
+          <Box onClick={open ? (e) => { e.stopPropagation(); open() } : undefined}
+            title={open ? 'Show the full finding' : undefined}
+            sx={{ color: SEV_COLOUR[sev] ?? neon.muted, fontSize: 10.5,
+                  letterSpacing: '0.08em', textTransform: 'uppercase',
+                  opacity: r.kind === 'secret' ? 1 : 0.75,
+                  cursor: open ? 'pointer' : 'default',
+                  '&:hover': open
+                    ? { textShadow: glow(SEV_COLOUR[sev] ?? neon.muted, 0.7) }
+                    : undefined }}>
             {sev}
-          </Box>
-        )
-      },
-    },
-    {
-      field: 'finding', headerName: 'Finding', flex: 2, minWidth: 200,
-      renderCell: (p) => {
-        const r = p.row as Row
-        if (r.kind !== 'secret') return null
-        return (
-          <Box onClick={(e) => { e.stopPropagation(); onFinding(r.row.vuln_id) }}
-            title="Show the full finding"
-            sx={{ overflow: 'hidden', textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap', cursor: 'pointer', color: neon.text,
-                  fontSize: 11.5,
-                  '&:hover': { color: neon.cyan,
-                               textShadow: glow(neon.cyan, 0.5) } }}>
-            {r.row.title}
           </Box>
         )
       },
