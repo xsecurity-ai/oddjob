@@ -234,15 +234,6 @@ export function TargetsView({ project }: { project: string | null }) {
   const unaddressedSelected = useMemo(
     () => selectedRows.filter(needsAddress), [selectedRows])
 
-  const patch = useMutation({
-    mutationFn: (v: { project: string; host: string; body: Partial<Target> }) =>
-      api.patchTarget(v.project, v.host, v.body),
-    // No optimistic update: the server publishes an SSE change and the grid
-    // refetches. That is the same path an external API or MCP client takes,
-    // so the UI exercises live-refresh rather than faking it locally.
-    onSettled: () => void qc.invalidateQueries({ queryKey: ['targets'] }),
-  })
-
   // Closing the modal and saying so outside it. A dialog that stays
   // open on success has to be dismissed before the operator can get
   // back to the table, which is the next thing they want; the
@@ -332,7 +323,6 @@ export function TargetsView({ project }: { project: string | null }) {
                         ? chipWidth(`+${(t.geo_countries?.length ?? 1) - 1}`) + 6 : 0)),
         textWidth('unknown'))),
       alive: fit('Alive', Math.max(chipWidth('DOWN'), textWidth('N/A'))),
-      hacked: fit('Hacked', chipWidth('PWNED') + 18),   // + the lamp and its gap
       // An icon button, or the italic N/A a mobile row shows instead.
       actions: fit('Action', Math.max(34, textWidth('N/A'))),
     }
@@ -509,60 +499,6 @@ export function TargetsView({ project }: { project: string | null }) {
               bgcolor: alpha(c, 0.16), color: c,
               border: `1px solid ${alpha(c, 0.65)}`, textShadow: glow(c, 0.5),
             }} />
-          </Tooltip>
-        )
-      },
-    },
-    {
-      // Click to toggle: a lamp that lights red when the host is owned and
-      // sits dark when it is not. This is the flag an operator flips most
-      // often during an engagement, and making them open a dialog for it
-      // was the wrong trade. It is also the ONLY way to set it now — the
-      // row action that duplicated it has gone.
-      field: 'hacked', headerName: 'Hacked', width: widths.hacked, type: 'boolean',
-      renderCell: (p) => {
-        const on = !!p.value
-        const allowed = canWrite(p.row.project_code)
-        return (
-          <Tooltip title={allowed
-            ? (on ? 'Pwned — click to clear' : 'Click to mark pwned')
-            : 'Read-only on this project'}>
-            <Box
-              component="span"
-              onClick={(e) => {
-                e.stopPropagation()      // the row click opens the host modal
-                if (allowed && !patch.isPending) {
-                  patch.mutate({ project: p.row.project_code, host: p.row.host,
-                                 body: { hacked: !on } })
-                }
-              }}
-              sx={{
-                display: 'inline-flex', alignItems: 'center', gap: 0.7,
-                cursor: allowed ? 'pointer' : 'default',
-                opacity: patch.isPending ? 0.5 : 1,
-                userSelect: 'none',
-                '&:hover .lamp': allowed
-                  ? { boxShadow: `0 0 10px ${alpha(on ? neon.red : neon.muted, 0.9)}` }
-                  : undefined,
-              }}>
-              <Box className="lamp" sx={{
-                width: 11, height: 11, borderRadius: '50%',
-                flex: '0 0 auto',
-                background: on ? neon.red : 'transparent',
-                border: `1px solid ${alpha(on ? neon.red : neon.muted, on ? 1 : 0.55)}`,
-                boxShadow: on ? `0 0 9px ${alpha(neon.red, 0.85)}` : 'none',
-                transition: 'all .14s',
-              }} />
-              {/* Nothing when it is off. An unlit lamp already says so,
-                  and a column of the word "off" is noise in a grid whose
-                  job is to make the few pwned hosts findable. */}
-              {on && (
-                <Box component="span" sx={{
-                  fontSize: 11, letterSpacing: '0.08em',
-                  color: neon.red, textShadow: glow(neon.red, 0.5),
-                }}>PWNED</Box>
-              )}
-            </Box>
           </Tooltip>
         )
       },
