@@ -1279,5 +1279,63 @@ check("...and owes exactly the origins that have one",
           **_estate))] == [1])
 
 
+print("\n== auto_poc: the floor is a floor ==")
+# The value is the LOWEST severity worth proving, so one setting
+# carries both "is this on" and "how far down" -- and the two cannot
+# drift apart the way a boolean plus a threshold would.
+from app.automation import poc_severities  # noqa: E402
+
+check("off covers nothing", poc_severities("off") == ())
+check("critical covers only critical",
+      poc_severities("critical") == ("critical",))
+check("medium covers medium, high and critical",
+      poc_severities("medium") == ("critical", "high", "medium"),
+      str(poc_severities("medium")))
+check("info covers the lot",
+      poc_severities("info")
+      == ("critical", "high", "medium", "low", "info"))
+check("case and space are forgiven",
+      poc_severities("  MEDIUM ") == ("critical", "high", "medium"))
+# A floor nobody can parse must do NOTHING. The alternative is a typo
+# in a settings field quietly widening what gets a payload written
+# for it and fired, which is the opposite of what an explicit floor
+# is for.
+for bad in ("typo", "", "all", "none", "sev1"):
+    check(f"an unparseable floor ({bad!r}) covers nothing, never everything",
+          poc_severities(bad) == (), str(poc_severities(bad)))
+
+print("\n== auto_poc is not in the kitchen sink ==")
+from app.automation import KITCHEN_SINK, Snapshot, effective  # noqa: E402
+
+check("the sink does not switch proving on",
+      "auto_poc" not in KITCHEN_SINK, sorted(KITCHEN_SINK))
+# Asserted through `effective`, which is what `plan` and the gap
+# report both read -- so this holds for the resolution that is
+# actually applied, not just for the dict.
+_sunk = effective(Snapshot(kitchen_sink=True))
+check("...and resolving the sink leaves it off",
+      _sunk.auto_poc == "off", _sunk.auto_poc)
+check("...while the sink really does turn the others up",
+      _sunk.auto_nmap == "full" and _sunk.auto_nuclei == "both+confirm",
+      f"{_sunk.auto_nmap} {_sunk.auto_nuclei}")
+
+print("\n== and it reports its own backlog ==")
+from app.automation import Gap, gaps  # noqa: E402
+
+_off = gaps(Snapshot(auto_poc="off", poc_backlog=12))
+check("a policy that is off has no gap, whatever is outstanding",
+      not [g for g in _off if g.policy == "auto_poc"], str(_off))
+_on = [g for g in gaps(Snapshot(auto_poc="high", poc_backlog=7))
+       if g.policy == "auto_poc"]
+check("a policy that is on reports what it still owes",
+      len(_on) == 1 and _on[0].outstanding == 7, str(_on))
+check("...and names the floor, because the number means nothing without it",
+      _on and "high" in _on[0].what, _on[0].what if _on else None)
+check("nothing outstanding is not a gap",
+      not [g for g in gaps(Snapshot(auto_poc="high", poc_backlog=0))
+           if g.policy == "auto_poc"])
+_ = Gap
+
+
 print(f"\n{ok} passed, {fail} failed")
 raise SystemExit(1 if fail else 0)

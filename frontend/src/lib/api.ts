@@ -61,6 +61,9 @@ export interface Project {
    *  not, so neither covers the other. */
   auto_web: string
   auto_nuclei: string
+  /** "off", or the lowest severity worth proving — the value is a
+   *  floor, so "medium" covers medium, high and critical. */
+  auto_poc: string
   /** Ask each web origin what OTHER names it answers to. */
   auto_vhost: boolean
   /** Probe every URL the project knows. */
@@ -2140,6 +2143,7 @@ export const api = {
     auto_amass?: boolean; auto_resolve_ips?: boolean
     auto_reverse_dns?: boolean; auto_nmap?: string; auto_web?: string;
     auto_nuclei?: string
+    auto_poc?: string
     auto_vhost?: boolean; auto_httpx?: boolean; kitchen_sink?: boolean
     url_wordlist?: string | null; user_agent?: string | null
     /** The rules of engagement. ISO-8601 UTC for the dates.

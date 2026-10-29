@@ -1,16 +1,30 @@
 """Standing orders: the follow-up work a project does without being asked.
 
-Four policies, set per engagement, each of which answers one obvious
-"and now do the next thing" that an operator otherwise has to remember:
+Policies set per engagement, each of which answers one obvious "and
+now do the next thing" that an operator otherwise has to remember:
 
     auto_amass        hand every in-scope zone to amass, once
     auto_resolve_ips  resolve any hostname with no address recorded
     auto_reverse_dns  find names for every address the estate answers on
     auto_nmap         scan hosts that have never been scanned
                       ("off" | "top100" | "full")
+    auto_web          crawl and/or content-discover every web URL
+    auto_nuclei       template scanning, and CVE confirmation
+    auto_vhost        ask each origin what other names it answers to
+    auto_httpx        probe every URL and record what answered
+    auto_poc          prove every finding at or above a severity floor
+                      ("off" | "critical" | "high" | "medium" | "low"
+                      | "info")
 
-All four are off by default and each one puts packets on a client's
-estate, so three things are true of everything in this file.
+All of them are off by default and each one puts packets on a
+client's estate, so three things are true of everything in this file.
+
+`auto_poc` is the one that does something the others do not: the rest
+send a scanner's own traffic, and that one asks a model to WRITE a
+check for a specific finding and then fires it. What goes at the
+client is therefore something nobody reviewed first, which is why its
+floor is explicit rather than a boolean and why it is not in
+`KITCHEN_SINK`.
 
 **Every candidate goes through the scope gate on its own.** Not the
 project, not the batch -- each name, every cycle. An automation that
@@ -61,7 +75,7 @@ import json
 import logging
 from dataclasses import dataclass, field, replace
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import domains as gen
@@ -77,9 +91,11 @@ from .models import (
     Agent,
     AgentTask,
     DomainSearch,
+    Poc,
     Project,
     Target,
     TargetAddress,
+    Vuln,
 )
 from .roots import enumerable_roots
 from .scopegate import as_host, index_for
@@ -246,6 +262,12 @@ class Snapshot:
     auto_nuclei: str = "off"
     auto_vhost: bool = False
     auto_httpx: bool = False
+    #: "off" or the lowest severity to prove. See models.POC_CHOICES.
+    auto_poc: str = "off"
+    #: Findings at or above that floor with no proof recorded. Counted
+    #: in `snapshot` rather than derived here, because "has a PoC" is
+    #: a join and a Snapshot is meant to be the answer, not the query.
+    poc_backlog: int = 0
     #: Everything on, at its most thorough. Resolved by `effective`
     #: rather than copied into the fields above, so switching it off
     #: returns the project to whatever was set before.
@@ -312,6 +334,11 @@ class Snapshot:
 #: explicit site decision; a convenience switch that routed around a
 #: vendor-approval gate would be the gate not existing. See
 #: app/ctlogs.py, which argues it at length.
+#: `auto_poc` is deliberately NOT here, for the same reason the
+#: Certificate Transparency lookups are not: a convenience switch
+#: must not quietly start doing the one thing somebody would want to
+#: decide on purpose. Every other entry turns a scanner up; this one
+#: would begin writing payloads for findings and firing them.
 KITCHEN_SINK: dict[str, object] = {
     "auto_amass": True,
     "auto_resolve_ips": True,
@@ -393,6 +420,10 @@ def gaps(s: Snapshot) -> list[Gap]:
         if n:
             out.append(Gap(policy, what, n))
 
+    if s.auto_poc != "off":
+        add("auto_poc",
+            f"finding(s) at {s.auto_poc} or worse with no proof",
+            s.poc_backlog)
     if s.auto_amass:
         zones = {z for z in s.scope_zones if z} - s.searched
         add("auto_amass", "in-scope zone(s) never handed to amass",
@@ -637,6 +668,54 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
     return out
 
 
+#: Worst first. The `auto_poc` value is a FLOOR, so "medium" means
+#: this list up to and including medium -- which is the whole reason
+#: the setting is a severity and not a boolean.
+POC_SEVERITIES = ("critical", "high", "medium", "low", "info")
+
+
+def poc_severities(floor: str) -> tuple[str, ...]:
+    """The severities a floor covers. Empty for "off" or nonsense.
+
+    Empty rather than "everything" on an unrecognised value. A floor
+    nobody can parse must do nothing: the alternative is a typo in a
+    settings field quietly widening what gets a payload written for
+    it, which is the opposite of what an explicit floor is for.
+    """
+    floor = (floor or "off").strip().lower()
+    if floor not in POC_SEVERITIES:
+        return ()
+    return POC_SEVERITIES[:POC_SEVERITIES.index(floor) + 1]
+
+
+async def poc_backlog(session: AsyncSession, project_id: int,
+                      floor: str) -> int:
+    """How many findings at or above `floor` still have no proof.
+
+    The backlog, not the new arrivals: a standing order is evaluated
+    against whatever is outstanding, which is what makes switching
+    one on do something rather than appearing to be broken. See the
+    module docstring.
+
+    Counted with a NOT EXISTS rather than an outer join so one
+    finding with three PoCs against it is one row and not three --
+    the number is "findings owed a proof", and a join would make a
+    well-covered finding inflate the figure it is supposed to reduce.
+    """
+    wanted = poc_severities(floor)
+    if not wanted:
+        return 0
+    has_poc = (select(Poc.id)
+               .where(Poc.vuln_id == Vuln.id)
+               .exists())
+    return int((await session.execute(
+        select(func.count(Vuln.id))
+        .join(Target, Target.id == Vuln.target_id)
+        .where(Target.project_id == project_id,
+               Vuln.severity.in_(wanted),
+               ~has_poc))).scalar_one())
+
+
 async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
     """Read one project's state into a `Snapshot`."""
     rows = (await session.execute(
@@ -723,6 +802,10 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
         auto_nuclei=str(getattr(pr, "auto_nuclei", None) or "off"),
         auto_vhost=bool(getattr(pr, "auto_vhost", False)),
         auto_httpx=bool(getattr(pr, "auto_httpx", False)),
+        auto_poc=str(getattr(pr, "auto_poc", None) or "off"),
+        poc_backlog=await poc_backlog(session, pr.id,
+                                      str(getattr(pr, "auto_poc", None)
+                                          or "off")),
         kitchen_sink=bool(getattr(pr, "kitchen_sink", False)),
         targets=targets, not_dns_named=not_dns_named, addresses=addresses,
         searched=searched, tasked=tasked,
