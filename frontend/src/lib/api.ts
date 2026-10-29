@@ -611,6 +611,12 @@ export interface AgentSessionBrief {
   closed: boolean
   at: string | null
   turn_count: number
+  /** Which thread this was on the project, counting from 1 in the
+   *  order they were opened — the label for one nobody has named and
+   *  nobody has asked anything in. Counts closed threads, so the
+   *  number does not get handed to a different conversation the
+   *  moment its holder closes. */
+  ordinal: number
 }
 
 export interface AgentReply {
@@ -1497,6 +1503,12 @@ export const api = {
   /** One of this engagement's agent threads, as everyone on it sees
    *  it. Null when the project has not been asked anything yet —
    *  which is different from an empty thread somebody started. */
+  /** Name a thread, for everyone on the engagement. An empty title
+   *  clears it back to its number. */
+  renameAgentSession: (project: string, thread: number, title: string) =>
+    req<AgentSessionBrief>(
+      `/api/agent/session/${thread}/rename` + qs({ project }),
+      { method: 'POST', body: JSON.stringify({ title }) }),
   agentSession: (project: string, thread?: number) =>
     req<AgentSession | null>('/api/agent/session' + qs({ project, thread })),
   /** Open a fresh thread. `closeCurrent` true replaces the
