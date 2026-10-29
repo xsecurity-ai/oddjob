@@ -192,6 +192,14 @@ jobs:
       # sharing a database means the second suite dies on its first line.
       - name: Run the suites against Postgres
         working-directory: backend
+        # This job drives the suites DIRECTLY rather than through
+        # runtests.py, so anything runtests.py puts in the environment
+        # has to be repeated here. webtest replays over a real socket
+        # to its own API on 127.0.0.1, and a loopback target is
+        # refused in a deployment -- see hosts.address_refusal.
+        # Loopback only; nothing else is relaxed.
+        env:
+          ODDJOB_ALLOW_LOOPBACK_TARGETS: "1"
         run: |
           set -euo pipefail
           port=8099
