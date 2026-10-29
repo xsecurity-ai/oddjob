@@ -322,6 +322,32 @@ export interface SecretRow {
 }
 
 /** A finding in full, with every host it was found on. */
+export interface VulnsByTargetRow {
+  host: string
+  project_code: string
+  total: number
+  critical: number; high: number; medium: number; low: number; info: number
+}
+
+/** A rollup, and whether it is all of it. A bare list cannot say
+ *  "there was more", and on FALCON the by-title rollup is 5,013 rows
+ *  — a limit that cut it silently would look complete. */
+export interface Rollup<T> { items: T[]; truncated: boolean }
+
+/** One finding AT one severity.
+ *
+ *  Unique on (title, severity), not title alone: the same title does
+ *  arrive at two severities because scanners disagree, and rolling
+ *  those together forces a choice between reporting the worst — which
+ *  overstates the other — and listing both in a cell that cannot be
+ *  sorted or counted. Two rows states it plainly. */
+export interface VulnsByTitleRow {
+  title: string
+  severity: string
+  hosts: number
+  total: number
+}
+
 export interface VulnDetail extends Vuln {
   has_secret?: boolean
   occurrences: VulnOccurrence[]
@@ -1206,6 +1232,22 @@ export const api = {
   vulns: (project?: string) => req<Page<Vuln>>('/api/vulns' + qs({ project, limit: 100000 })),
   /** One finding, with its full text and every host it appears on. */
   vuln: (id: number) => req<VulnDetail>(`/api/vulns/${id}`),
+  /** The same findings rolled up two ways. Aggregated on the SERVER:
+   *  a project with 23,000 findings cannot be grouped in the browser,
+   *  and the rows a tab shows are a few hundred either way. The
+   *  findings behind a row are fetched only when it is expanded. */
+  vulnsByTarget: (project: string, q?: string) =>
+    req<Rollup<VulnsByTargetRow>>('/api/vulns/by-target' + qs({ project, q })),
+  vulnsByTitle: (project: string, q?: string) =>
+    req<Rollup<VulnsByTitleRow>>('/api/vulns/by-title' + qs({ project, q })),
+  /** The findings behind one rollup row, fetched when it is expanded.
+   *  `title` is an EXACT match, not the substring `q` does: a title
+   *  that merely contains this one is a different finding. */
+  vulnsForHost: (project: string, host: string) =>
+    req<Page<Vuln>>('/api/vulns' + qs({ project, host, limit: 500 })),
+  vulnsForTitle: (project: string, title: string, severity?: string) =>
+    req<Page<Vuln>>('/api/vulns'
+      + qs({ project, title, severity, limit: 500 })),
   /** New since the last scan, still present, resolved — and unknown.
    *
    *  Derived on the server per request from the sweep table, so a

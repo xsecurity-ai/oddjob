@@ -15,9 +15,13 @@
  * track, so the row stops shrinking at the sum of the minimums and the
  * container scrolls sideways instead of crushing the text.
  */
-import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react'
+import {
+  Fragment, useCallback, useMemo, useRef, useState, type ReactNode,
+} from 'react'
 import { Box, Checkbox, Tooltip, Typography, alpha } from '@mui/material'
 import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward'
+import ChevronRightIcon from '@mui/icons-material/ChevronRight'
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward'
 import {
   flexRender, getCoreRowModel, useReactTable,
@@ -57,11 +61,13 @@ const JUSTIFY = { left: 'flex-start', center: 'center', right: 'flex-end' } as c
 
 /** The checkbox gutter, when there is one. */
 const TICK = 42
+/** The chevron gutter, when the table expands. */
+const CHEV = 30
 
 export function TableGrid({
   rows, columns, columnVisibility, sort, onSort, density, getRowId,
   selectable, rowSelection, onRowSelectionChange, empty,
-  widths = {}, onWidth,
+  widths = {}, onWidth, renderDetail, expanded, onExpand,
 }: {
   /** One page of rows. `any` for the same reason MUI's own row type was
    *  `any`: a row is whatever the view's query returned. */
@@ -84,6 +90,19 @@ export function TableGrid({
    *  release, not during the drag -- the drag is tracked locally so a
    *  pointermove does not write to storage sixty times a second. */
   onWidth?: (field: string, px: number | null) => void
+  /** Master-detail. Supplying this adds a chevron gutter and renders
+   *  the result UNDER the row, spanning every column.
+   *
+   *  The detail is a sibling of the row rather than a cell inside it,
+   *  because a row is one CSS grid and a cell cannot be wider than
+   *  its track. It is rendered only while open: a table of several
+   *  hundred rows each holding a mounted-but-hidden list is how a
+   *  page stops scrolling. */
+  renderDetail?: (row: any) => ReactNode
+  /** Which row id is open. One at a time -- a table with twenty
+   *  things unfolded is a worse way to read the same data. */
+  expanded?: string | null
+  onExpand?: (id: string | null) => void
 }) {
   const byField = useMemo(
     () => new Map(columns.map((c) => [c.field, c])), [columns])
@@ -189,14 +208,17 @@ export function TableGrid({
     onWidth?.(d.field, w)
   }, [onWidth])
 
+  const expands = !!renderDetail
   const layout = useMemo(() => {
     const parts = shownColumns.map((c) => track(c, widthOf(c.field)))
     return {
-      template: (selectable ? `${TICK}px ` : '')
+      template: (expands ? `${CHEV}px ` : '')
+        + (selectable ? `${TICK}px ` : '')
         + (parts.map((p) => p.css).join(' ') || '1fr'),
-      min: (selectable ? TICK : 0) + parts.reduce((n, p) => n + p.min, 0),
+      min: (expands ? CHEV : 0) + (selectable ? TICK : 0)
+        + parts.reduce((n, p) => n + p.min, 0),
     }
-  }, [shownColumns, selectable, widthOf])
+  }, [shownColumns, selectable, expands, widthOf])
 
   const sortIndex = useMemo(() => {
     const m = new Map<string, { dir: 'asc' | 'desc'; place: number }>()
@@ -231,6 +253,23 @@ export function TableGrid({
       px: 1.25, py, fontSize: 12.5,
     },
     '& .tick': { display: 'flex', alignItems: 'center', justifyContent: 'center' },
+    // The chevron gutter. `cursor: pointer` only on the body ones --
+    // the header carries an empty cell purely to keep the columns
+    // aligned, and a pointer over it promises something it has not.
+    '& .chev': {
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      minWidth: 0, overflow: 'hidden',
+    },
+    '& .tbody .chev': { cursor: 'pointer' },
+    '& .tbody .chev:hover': { backgroundColor: alpha(neon.cyan, 0.12) },
+    // The detail, under its row and across the whole width. NOT a
+    // grid child: it sits between two `[role=row]` grids, so none of
+    // the column rules apply to it.
+    '& .detail': {
+      borderBottom: `1px solid ${alpha(neon.purple, 0.25)}`,
+      backgroundColor: alpha(neon.bgDeep, 0.45),
+      px: 1.25, py: 0.75,
+    },
 
     '& .thead': {
       position: 'sticky', top: 0, zIndex: 3,
@@ -274,6 +313,7 @@ export function TableGrid({
                               flexDirection: 'column' }}>
         {table.getHeaderGroups().map((group) => (
           <div key={group.id} role="row" className="thead">
+            {expands && <div className="chev" />}
             {selectable && (
               <div className="tick">
                 <Checkbox size="small" checked={allTicked} indeterminate={someTicked}
@@ -349,8 +389,27 @@ export function TableGrid({
         <div className="tbody">
           {bodyRows.map((row) => {
             const ticked = row.getIsSelected()
+            const open = expands && expanded === row.id
             return (
-              <div key={row.id} role="row" className={ticked ? 'ticked' : undefined}>
+              // A fragment, not a wrapper: the rows are direct
+              // children of `.tbody` and every row rule is keyed on
+              // that, so putting a div around each pair would detach
+              // all of them at once.
+              <Fragment key={row.id}>
+              <div role="row" className={ticked ? 'ticked' : undefined}>
+                {expands && (
+                  <div className="chev"
+                    onClick={(e) => {
+                      // The row itself may open a modal. Expanding is
+                      // a different intent and must not do both.
+                      e.stopPropagation()
+                      onExpand?.(open ? null : row.id)
+                    }}>
+                    {open
+                      ? <ExpandMoreIcon sx={{ fontSize: 16, color: neon.cyan }} />
+                      : <ChevronRightIcon sx={{ fontSize: 16, color: neon.muted }} />}
+                  </div>
+                )}
                 {selectable && (
                   <div className="tick">
                     <Checkbox size="small" checked={ticked}
@@ -371,6 +430,13 @@ export function TableGrid({
                   )
                 })}
               </div>
+              {open && (
+                // Spans every column. A row is one CSS grid, so a
+                // cell cannot be wider than its own track -- the
+                // detail has to be its own element to cross them.
+                <div className="detail">{renderDetail?.(row.original)}</div>
+              )}
+              </Fragment>
             )
           })}
         </div>

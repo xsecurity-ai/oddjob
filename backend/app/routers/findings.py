@@ -10,7 +10,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import assetfetch, assetwork, audit, lifecycle, manifest, slack
@@ -111,6 +111,10 @@ async def list_vulns(
     project: str | None = Query(None),
     q: str | None = Query(None),
     host: str | None = Query(None),
+    title: str | None = Query(
+        None, description="Exact title match. Distinct from `q`, which is a "
+                          "substring search and would also return findings "
+                          "whose title merely contains this one."),
     severity: str | None = Query(None),
     state: str | None = Query(
         None, pattern="^(new|present|resolved|unconfirmed)$",
@@ -136,6 +140,8 @@ async def list_vulns(
         stmt = stmt.where(Target.project_id == pr.id)
     if host:
         stmt = stmt.where(Target.host == normalise_host(host))
+    if title:
+        stmt = stmt.where(Vuln.title == title)
     if severity:
         stmt = stmt.where(Vuln.severity == severity.lower())
     stmt = apply_search(stmt, q, [Target.host, Project.code, Vuln.title, Vuln.severity,
@@ -182,6 +188,154 @@ class LifecycleOut(BaseModel):
     #: rather than counted, because the action is to go and scan
     #: them.
     unconfirmed_hosts: list[str]
+
+
+#: The severities, worst first. Named once so the two rollups below
+#: and the UI agree on both the set and the order -- a summary that
+#: omitted a severity because nothing was in it would read as a tool
+#: that cannot count it.
+ROLLUP_SEVERITIES = ("critical", "high", "medium", "low", "info")
+
+
+def _sev_counts() -> list:
+    """One COUNT per severity, as columns.
+
+    Counted in SQL rather than by loading the findings and tallying
+    them in Python: FALCON alone has 23,000, and the answer here is
+    eight numbers a row.
+    """
+    # `count(CASE WHEN ... THEN 1 END)` rather than `sum(CASE ... ELSE 0)`:
+    # count ignores the NULL the CASE falls through to, so there is no
+    # empty-group NULL to coalesce away, and it reads the same on
+    # SQLite and Postgres.
+    return [
+        func.count(case((Vuln.severity == sev, 1))).label(sev)
+        for sev in ROLLUP_SEVERITIES
+    ]
+
+
+class Rollup(BaseModel):
+    """A rollup, and whether it is all of it.
+
+    A bare list cannot say "there was more". On FALCON the by-title
+    rollup is 5,013 rows against a limit that was 5,000, so the first
+    version of this would have cut thirteen of them off and looked
+    complete -- which is the one thing a summary must not do.
+
+    `truncated` is worked out by asking for one row more than the
+    limit and seeing whether it arrives, so it costs nothing.
+    """
+    items: list
+    truncated: bool = False
+
+
+class VulnsByTargetRow(BaseModel):
+    host: str
+    project_code: str
+    total: int
+    critical: int = 0
+    high: int = 0
+    medium: int = 0
+    low: int = 0
+    info: int = 0
+
+
+class VulnsByTitleRow(BaseModel):
+    """One finding AT one severity.
+
+    Grouped on (title, severity) rather than title alone. The same
+    title does arrive at two severities -- different scanners
+    disagree about how bad the same thing is -- and rolling those
+    together forces a choice between reporting the worst (which
+    overstates the other) and listing both in one row (which cannot
+    be sorted or counted). Two rows states it plainly and each one
+    carries a number that means something.
+    """
+    title: str
+    severity: str
+    hosts: int
+    total: int
+
+
+@router.get("/vulns/by-target", response_model=Rollup)
+async def vulns_by_target(
+    project: str | None = Query(None),
+    q: str | None = Query(None),
+    limit: int = Query(20000, ge=1, le=100000),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Findings per host, counted by severity.
+
+    The rollup the Vulns page needs to answer "which host is worst",
+    which a flat list of 23,000 rows cannot. Aggregated in SQL; the
+    findings themselves are fetched per host when a row is expanded,
+    so opening one costs one query and opening none costs nothing.
+    """
+    stmt = (select(Target.host, Project.code,
+                   func.count(Vuln.id).label("total"), *_sev_counts())
+            .join(Target, Target.id == Vuln.target_id)
+            .join(Project, Project.id == Target.project_id))
+    vis = await visible_project_ids(session, user)
+    if vis is not None:
+        stmt = stmt.where(Target.project_id.in_(vis))
+    if project:
+        pr = await resolve_project(session, project)
+        if vis is not None and pr.id not in vis:
+            raise HTTPException(404, f"no project {project!r}")
+        stmt = stmt.where(Target.project_id == pr.id)
+    stmt = apply_search(stmt, q, [Target.host, Vuln.title, Vuln.severity])
+    stmt = (stmt.group_by(Target.host, Project.code)
+            .order_by(func.count(Vuln.id).desc(), Target.host)
+            .limit(limit + 1))
+    rows = (await session.execute(stmt)).all()
+    return Rollup(
+        items=[VulnsByTargetRow(
+            host=r.host, project_code=r.code, total=r.total,
+            **{sev: getattr(r, sev) for sev in ROLLUP_SEVERITIES})
+            for r in rows[:limit]],
+        truncated=len(rows) > limit)
+
+
+@router.get("/vulns/by-title", response_model=Rollup)
+async def vulns_by_title(
+    project: str | None = Query(None),
+    q: str | None = Query(None),
+    limit: int = Query(20000, ge=1, le=100000),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """The same findings the other way up: one row per finding AT a
+    severity, with how many hosts carry it.
+
+    "This one thing is wrong on 400 hosts" and "this host has 400
+    things wrong" are different questions and neither answers the
+    other.
+    """
+    stmt = (select(Vuln.title, Vuln.severity,
+                   func.count(func.distinct(Target.host)).label("hosts"),
+                   func.count(Vuln.id).label("total"))
+            .join(Target, Target.id == Vuln.target_id)
+            .join(Project, Project.id == Target.project_id))
+    vis = await visible_project_ids(session, user)
+    if vis is not None:
+        stmt = stmt.where(Target.project_id.in_(vis))
+    if project:
+        pr = await resolve_project(session, project)
+        if vis is not None and pr.id not in vis:
+            raise HTTPException(404, f"no project {project!r}")
+        stmt = stmt.where(Target.project_id == pr.id)
+    stmt = apply_search(stmt, q, [Vuln.title, Target.host, Vuln.severity])
+    stmt = (stmt.group_by(Vuln.title, Vuln.severity)
+            .order_by(func.count(func.distinct(Target.host)).desc(),
+                      Vuln.title)
+            .limit(limit + 1))
+    rows = (await session.execute(stmt)).all()
+    return Rollup(
+        items=[VulnsByTitleRow(title=r.title, severity=r.severity,
+                               hosts=r.hosts, total=r.total)
+               for r in rows[:limit]],
+        truncated=len(rows) > limit)
 
 
 @router.get("/vulns/lifecycle", response_model=LifecycleOut)

@@ -1,0 +1,236 @@
+/**
+ * The findings, rolled up two ways.
+ *
+ * "This host has 400 things wrong" and "this one thing is wrong on
+ * 400 hosts" are different questions and neither answers the other.
+ * The flat All tab answers a third — "what is wrong with this
+ * estate" — and on a project with 23,000 findings it answers none of
+ * them well.
+ *
+ * **Aggregated on the server.** Both tabs are a GROUP BY; the
+ * findings behind a row are fetched only when it is expanded.
+ * Grouping in the browser would mean shipping every finding first,
+ * which is the thing this exists to avoid.
+ *
+ * **Real `DataTable`s.** They sort, filter, resize and export like
+ * every other table here, and they expand — see `renderDetail`.
+ * Expansion used to be impossible in the grid and the panels were
+ * hand-rolled lists; that made them the only tables in the app that
+ * looked different and did less.
+ */
+import { useState } from 'react'
+import { Box, Chip, CircularProgress, Stack, Tooltip, alpha } from '@mui/material'
+import { useQuery } from '@tanstack/react-query'
+import type { ColumnDef } from '../lib/columns'
+import { api, type Vuln, type VulnsByTargetRow, type VulnsByTitleRow } from '../lib/api'
+import { SEVERITY_COLOUR as SEV } from '../lib/severity'
+import { DataTable } from './DataTable'
+import { neon, glow } from '../theme'
+
+/** Worst first, and the order the server rolls up in. */
+const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const
+
+/** A count cell. Zero is shown as a dash and not left blank: "no
+ *  criticals" is an answer, and an empty cell reads as "not counted". */
+function Count({ n, colour }: { n: number; colour?: string }) {
+  if (!n) return <Box sx={{ color: alpha(neon.muted, 0.4) }}>—</Box>
+  return (
+    <Box sx={{ color: colour ?? neon.text, fontWeight: 700,
+               textShadow: colour === neon.red ? glow(neon.red, 0.4) : 'none' }}>
+      {n.toLocaleString()}
+    </Box>
+  )
+}
+
+function Severity({ value }: { value: string }) {
+  return (
+    <Box sx={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em',
+               textTransform: 'uppercase', color: SEV[value] ?? neon.muted,
+               textShadow: value === 'critical' ? glow(neon.red, 0.45) : 'none' }}>
+      {value}
+    </Box>
+  )
+}
+
+/** The findings behind one expanded row. */
+function Detail({ rows, loading, onFinding, show }: {
+  rows: Vuln[]
+  loading: boolean
+  onFinding: (id: number) => void
+  show: (v: Vuln) => React.ReactNode
+}) {
+  if (loading) {
+    return <Stack sx={{ alignItems: 'center', py: 1 }}>
+      <CircularProgress size={15} sx={{ color: neon.cyan }} />
+    </Stack>
+  }
+  if (!rows.length) {
+    return <Box sx={{ fontSize: 11.5, color: neon.muted }}>
+      Nothing came back for this row.
+    </Box>
+  }
+  return (
+    <Stack spacing={0.2}>
+      {rows.map((v) => (
+        <Box key={v.id} onClick={() => onFinding(v.id)}
+          sx={{ display: 'flex', alignItems: 'center', gap: 1,
+                px: 0.6, py: 0.4, fontSize: 11.5, borderRadius: 0.5,
+                cursor: 'pointer',
+                '&:hover': { backgroundColor: alpha(neon.cyan, 0.1) } }}>
+          {show(v)}
+          {!!v.port && (
+            <Chip size="small" label={`:${v.port}`} variant="outlined"
+              sx={{ height: 16, fontSize: 10, color: neon.muted,
+                    borderColor: alpha(neon.muted, 0.35) }} />
+          )}
+        </Box>
+      ))}
+    </Stack>
+  )
+}
+
+// ---------------------------------------------------------- by target
+export function VulnsByTarget({ project, onFinding }: {
+  project: string | null
+  onFinding: (id: number) => void
+}) {
+  const [open, setOpen] = useState<string | null>(null)
+  const q = useQuery({
+    queryKey: ['vulns-by-target', project],
+    queryFn: () => api.vulnsByTarget(project as string),
+    enabled: !!project,
+  })
+  const detail = useQuery({
+    queryKey: ['vulns-of-host', project, open],
+    queryFn: () => api.vulnsForHost(project as string, open as string),
+    enabled: !!open && !!project,
+  })
+
+  const columns: ColumnDef<VulnsByTargetRow>[] = [
+    { field: 'host', headerName: 'Host', flex: 2, minWidth: 220,
+      renderCell: (p) => (
+        <Box sx={{ fontFamily: `'Share Tech Mono', monospace`,
+                   color: neon.cyan }}>{p.value}</Box>
+      ) },
+    { field: 'total', headerName: 'Vulns', width: 92, type: 'number',
+      renderCell: (p) => <Count n={p.value as number} /> },
+    ...SEVERITIES.map((s): ColumnDef<VulnsByTargetRow> => ({
+      field: s,
+      headerName: s === 'critical' ? 'Crit' : s[0].toUpperCase() + s.slice(1),
+      width: s === 'critical' ? 80 : 76,
+      type: 'number',
+      renderCell: (p) => <Count n={p.value as number} colour={SEV[s]} />,
+    })),
+  ]
+
+  return (
+    <DataTable
+      rows={q.data?.items ?? []}
+      columns={columns as ColumnDef[]}
+      loading={q.isLoading}
+      error={q.error as Error | null}
+      tableId="vulns-by-target"
+      // The host IS the identity here; the rollup has one row each.
+      getRowId={(r) => (r as VulnsByTargetRow).host}
+      initialSort={{ field: 'total', sort: 'desc' }}
+      expanded={open}
+      onExpand={setOpen}
+      renderDetail={() => (
+        <Detail rows={detail.data?.items ?? []} loading={detail.isLoading}
+          onFinding={onFinding}
+          show={(v) => (
+            <>
+              <Box sx={{ width: 62, flex: '0 0 auto' }}>
+                <Severity value={v.severity} />
+              </Box>
+              <Box sx={{ flex: 1, minWidth: 0, color: neon.text,
+                         overflow: 'hidden', textOverflow: 'ellipsis',
+                         whiteSpace: 'nowrap' }}>{v.title}</Box>
+            </>
+          )} />
+      )}
+      note={'One row per host, worst first. Expand a host to see what '
+            + 'was found on it; the findings are fetched only when you do.'
+            + (q.data?.truncated
+               ? ' THIS LIST IS CUT SHORT — there are more hosts than the '
+                 + 'rollup returns, so the totals below are not the whole '
+                 + 'project.' : '')}
+    />
+  )
+}
+
+// ------------------------------------------------------------ by vuln
+export function VulnsByTitle({ project, onFinding }: {
+  project: string | null
+  onFinding: (id: number) => void
+}) {
+  const [open, setOpen] = useState<string | null>(null)
+  const q = useQuery({
+    queryKey: ['vulns-by-title', project],
+    queryFn: () => api.vulnsByTitle(project as string),
+    enabled: !!project,
+  })
+  // The row id carries BOTH halves of the key, because the rollup is
+  // unique on (title, severity) and the same title at two severities
+  // is two rows with two different host lists.
+  const [title, severity] = (open ?? '\u0000').split('\u0000')
+  const detail = useQuery({
+    queryKey: ['vulns-of-title', project, title, severity],
+    queryFn: () => api.vulnsForTitle(project as string, title, severity),
+    enabled: !!open && !!project,
+  })
+
+  const columns: ColumnDef<VulnsByTitleRow>[] = [
+    { field: 'severity', headerName: 'Severity', width: 104,
+      renderCell: (p) => <Severity value={String(p.value)} /> },
+    { field: 'title', headerName: 'Finding', flex: 3, minWidth: 260 },
+    { field: 'hosts', headerName: 'Hosts', width: 96, type: 'number',
+      renderCell: (p) => (
+        <Tooltip title="Distinct hosts carrying this finding at this severity">
+          <Box sx={{ color: neon.cyan, fontWeight: 700, cursor: 'help' }}>
+            {(p.value as number).toLocaleString()}
+          </Box>
+        </Tooltip>
+      ) },
+    { field: 'total', headerName: 'Findings', width: 100, type: 'number',
+      renderCell: (p) => <Count n={p.value as number} /> },
+  ]
+
+  return (
+    <DataTable
+      rows={q.data?.items ?? []}
+      columns={columns as ColumnDef[]}
+      loading={q.isLoading}
+      error={q.error as Error | null}
+      tableId="vulns-by-title"
+      getRowId={(r) => {
+        const v = r as VulnsByTitleRow
+        // NUL as the separator: a finding title can contain anything
+        // a scanner put in it, including the punctuation an obvious
+        // separator would use.
+        return `${v.title}\u0000${v.severity}`
+      }}
+      initialSort={{ field: 'hosts', sort: 'desc' }}
+      expanded={open}
+      onExpand={setOpen}
+      renderDetail={() => (
+        <Detail rows={detail.data?.items ?? []} loading={detail.isLoading}
+          onFinding={onFinding}
+          show={(v) => (
+            <Box sx={{ flex: 1, minWidth: 0,
+                       fontFamily: `'Share Tech Mono', monospace`,
+                       color: neon.cyan, overflow: 'hidden',
+                       textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {v.host}
+            </Box>
+          )} />
+      )}
+      note={'One row per finding AT a severity — two scanners that '
+            + 'disagree about the same thing are two rows, each with its '
+            + 'own host count. Expand one to see which hosts carry it.'
+            + (q.data?.truncated
+               ? ' THIS LIST IS CUT SHORT — there are more findings than '
+                 + 'the rollup returns.' : '')}
+    />
+  )
+}
