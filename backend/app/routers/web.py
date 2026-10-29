@@ -1397,6 +1397,14 @@ async def assets_scan(limit: int = 200,
 # Registered AFTER `/assets/search`, because Starlette matches in
 # registration order and `{asset_id}` would otherwise swallow it --
 # `/assets/search` would try to parse "search" as an int and 422.
+#: Worst first. A `case` rather than ordering on the string, which
+#: would put "critical" after "high" alphabetically and quietly
+#: invert the one thing this ordering exists to get right.
+_SEV_ORDER = case(
+    {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4},
+    value=Vuln.severity, else_=5)
+
+
 @router.get("/assets/{asset_id}", response_model=dict)
 async def asset_detail(asset_id: int,
                        user: User = Depends(get_current_user),
@@ -1440,6 +1448,28 @@ async def asset_detail(asset_id: int,
         "fetched": a.sha256 is not None,
         "body": body[:MAX_BODY_VIEW],
         "truncated": len(body) > MAX_BODY_VIEW,
+        # What the scanners found IN this asset, so the Findings and
+        # Secrets counts in the table are something you can open
+        # rather than a number you have to go and look for in Vulns.
+        #
+        # `line` comes from FindingSecret where there is one -- it is
+        # the only place the position is kept as a column rather than
+        # buried in the description -- and is what lets the viewer
+        # scroll to the finding instead of handing back the whole
+        # bundle and wishing you luck.
+        "findings": [
+            {"id": v.id, "title": v.title, "severity": v.severity,
+             "scanner": v.scanner, "external_id": v.external_id,
+             "status": v.status, "triage": v.triage,
+             "line": line, "path": path}
+            for v, line, path in (await session.execute(
+                select(Vuln, FindingSecret.line, FindingSecret.path)
+                .outerjoin(FindingSecret, FindingSecret.vuln_id == Vuln.id)
+                .where(Vuln.asset_id == a.id)
+                # Worst first: the list is read top-down and the
+                # question is always what to look at.
+                .order_by(_SEV_ORDER, Vuln.id))).all()
+        ],
     }
 
 

@@ -1113,8 +1113,19 @@ export const api = {
    *  database holds; it is fetched when something actually asks to
    *  read it, which is one asset at a time. */
   webAsset: (id: number) =>
-    req<WebAsset & { body: string; truncated: boolean }>(
-      `/api/web/assets/${id}`),
+    req<WebAsset & {
+      body: string; truncated: boolean
+      /** What the scanners found IN this asset. `line` comes from the
+       *  stored finding position where there is one, which is what
+       *  lets the viewer scroll to it rather than hand back the whole
+       *  bundle. */
+      findings: Array<{
+        id: number; title: string; severity: string
+        scanner: string | null; external_id: string | null
+        status: string; triage: string
+        line: number | null; path: string | null
+      }>
+    }>(`/api/web/assets/${id}`),
 
   /** Grep the bundles whose bytes were actually pulled back.
    *

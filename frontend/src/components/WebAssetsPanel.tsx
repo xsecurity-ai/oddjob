@@ -174,7 +174,13 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
           return <Box sx={{ color: alpha(neon.muted, 0.35) }}>—</Box>
         }
         return (
-          <Stack direction="row" spacing={0.6} sx={{ alignItems: 'center' }}>
+          // Clickable: the count was a number you then had to go and
+          // find in Vulns. The modal lists them, and a finding with a
+          // line scrolls the file to it.
+          <Stack direction="row" spacing={0.6}
+            onClick={() => setOpen(r.id)}
+            sx={{ alignItems: 'center', cursor: 'pointer',
+                  '&:hover': { textDecoration: 'underline' } }}>
             <Box sx={{ color: neon.text }}>{r.vulns}</Box>
             {/* Severity beside the total rather than instead of it.
                 "14 findings" and "14 findings, 3 of them critical"
@@ -194,9 +200,14 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
     {
       field: 'secrets', headerName: 'Secrets', width: 96, type: 'number',
       renderCell: (p) => (p.value ?? 0) > 0 ? (
-        <Box sx={{ color: neon.yellow, fontWeight: 700,
-                   textShadow: glow(neon.yellow, 0.5) }}>{p.value}</Box>
+        <Box onClick={() => setOpen((p.row as WebAsset).id)}
+          sx={{ color: neon.yellow, fontWeight: 700, cursor: 'pointer',
+                textShadow: glow(neon.yellow, 0.5),
+                '&:hover': { textDecoration: 'underline' } }}>{p.value}</Box>
       ) : (
+        // No underline and no pointer on a dash: there is nothing to
+        // open, and a cell that looks clickable and is not is worse
+        // than one that plainly is not.
         <Box sx={{ color: alpha(neon.muted, 0.35) }}>—</Box>
       ),
     },
