@@ -15,6 +15,45 @@ import { neon, glow } from '../theme'
  *  is the absence of all three; colouring it like a finding is
  *  exactly how a tester spends a morning proving a live Shopify
  *  store belongs to the client. */
+/** How hard the claim is, and what that means for the finding.
+ *
+ *  Severity is DERIVED from this on the server -- easy maps to
+ *  critical, impossible to low -- so the two are never shown
+ *  disagreeing. The colour follows the severity rather than the
+ *  difficulty word, because an operator scanning the column is
+ *  looking for what to do first, not for an adjective.
+ */
+const DIFFICULTY: Record<string, {
+  label: string; colour: string; sev: string; why: string
+}> = {
+  easy: {
+    label: 'EASY', colour: neon.red, sev: 'critical',
+    why: 'Anyone can claim this name: free, instant, and the claimant '
+       + 'chooses it. Evidenced, so this is a takeover you can demonstrate.',
+  },
+  medium: {
+    // palettes.ts documents orange as the high-severity colour,
+    // which is exactly what medium maps to.
+    label: 'MEDIUM', colour: neon.orange, sev: 'high',
+    why: 'Claimable, but it needs an account and usually a paid plan or '
+       + 'an email verification first.',
+  },
+  hard: {
+    label: 'HARD', colour: neon.yellow, sev: 'medium',
+    why: 'A real barrier: enterprise onboarding, domain validation the '
+       + 'client controls, or a race you have to win. Also what an '
+       + 'UNCHECKED row is capped at, however easy its provider -- '
+       + 'establishing the name is free is itself the first step.',
+  },
+  impossible: {
+    label: 'IMPOSSIBLE', colour: neon.muted, sev: 'low',
+    why: 'The name cannot be re-registered by anyone -- the provider '
+       + 'assigned it. The dangling record is still worth removing, but '
+       + 'it is DNS hygiene and not an exploitable takeover. Reporting '
+       + 'it as the latter overstates the finding.',
+  },
+}
+
 const VERDICT: Record<string, { label: string; colour: string; why: string }> = {
   dangling: {
     label: 'Dangling', colour: neon.pink,
@@ -140,6 +179,47 @@ export function TakeoversPanel({ project }: { project: string | null }) {
             <Box sx={{ color: v.colour, fontSize: 10.5, letterSpacing: '0.08em',
                        textTransform: 'uppercase', cursor: 'help' }}>
               {v.label}
+            </Box>
+          </Tooltip>
+        )
+      },
+    },
+    {
+      // Beside the verdict on purpose: "is it dangling" and "could you
+      // actually take it" are the two halves of the same judgement,
+      // and a reader who sees one without the other draws the wrong
+      // conclusion in both directions.
+      field: 'difficulty', headerName: 'Difficulty', width: 128,
+      renderCell: (p) => {
+        const row = p.row as Takeover
+        const d = DIFFICULTY[String(p.value)] ?? DIFFICULTY.hard
+        return (
+          <Tooltip
+            enterDelay={300}
+            title={
+              <Box>
+                <Box sx={{ fontWeight: 700, mb: 0.5 }}>
+                  {d.label} — reported as {row.severity || d.sev}
+                </Box>
+                <Box sx={{ mb: 0.75 }}>{d.why}</Box>
+                {/* The steps, in the tooltip as well as the drawer:
+                    the question "what would it take" is asked while
+                    reading the row, not after opening it. */}
+                {row.steps?.length > 0 && (
+                  <Box component="ol" sx={{ pl: 2, m: 0 }}>
+                    {row.steps.map((st, i) => (
+                      <Box component="li" key={i} sx={{ mb: 0.25 }}>{st}</Box>
+                    ))}
+                  </Box>
+                )}
+              </Box>
+            }>
+            <Box sx={{ color: d.colour, fontSize: 10.5,
+                       letterSpacing: '0.08em', cursor: 'help',
+                       fontWeight: d.label === 'EASY' ? 700 : 400,
+                       textShadow: d.label === 'EASY'
+                         ? glow(neon.red, 0.5) : 'none' }}>
+              {d.label}
             </Box>
           </Tooltip>
         )

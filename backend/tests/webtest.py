@@ -1348,24 +1348,127 @@ check("...and one anybody can is not",
 # finding ranked Low while an UNEVIDENCED Heroku name would have
 # ranked High. A report where a proven misconfiguration sits below a
 # guess teaches its reader to distrust the severities.
+print("\n== how hard it would actually be to take the name ==")
+# The operator's mapping: easy/medium/hard/impossible -> critical/
+# high/medium/low. Asserted against the constant rather than
+# re-spelled, so the two cannot drift.
+check("the difficulty scale maps onto severities as specified",
+      _tk.DIFFICULTY_SEVERITY == {"easy": "critical", "medium": "high",
+                                  "hard": "medium", "impossible": "low"},
+      _tk.DIFFICULTY_SEVERITY)
+
+
+def _diff(provider, verdict, claimable=True):
+    return _tk.difficulty_for(_tk.Candidate(
+        "h", "cn", ["cn"], provider, claimable, verdict,
+        None if verdict == "candidate" else "evidence"))
+
+
+# A free, instant, claimant-chooses-the-name provider, with evidence.
+check("an evidenced S3 bucket is easy", _diff("AWS S3", "dangling") == "easy")
+check("...and GitHub Pages too, which also serves TLS for it",
+      _diff("GitHub Pages", "fingerprint") == "easy")
+# Needs an account and usually a card.
+check("Heroku is medium: the app name is free, serving it is not",
+      _diff("Heroku", "dangling") == "medium")
+# Validation the CLIENT controls is what makes Azure hard.
+check("Azure is hard: Front Door and Traffic Manager want a TXT record "
+      "only the client can publish",
+      _diff("Azure", "dangling") == "hard")
+# An AWS-assigned name cannot be re-registered by anyone.
+check("an ELB name is impossible, not merely hard",
+      _diff("AWS ELB", "dangling", claimable=False) == "impossible")
+check("...and a served name is impossible for the opposite reason",
+      _diff("AWS S3", "live") == "impossible")
+
+# The cap, which is the part that keeps this honest.
+check("an unchecked row is never easier than hard",
+      _diff("AWS S3", "candidate") == "hard", _diff("AWS S3", "candidate"))
+check("...and the cap cannot PROMOTE an impossible one",
+      _diff("AWS ELB", "candidate", claimable=False) == "impossible")
+
+# The steps are the deliverable, not the adjective.
+_st_easy = _tk.steps_for(_tk.Candidate(
+    "h", "cn", ["cn"], "AWS S3", True, "dangling", "evidence"))
+check("an easy row carries the steps to do it", len(_st_easy) >= 3,
+      len(_st_easy))
+_st_imp = _tk.steps_for(_tk.Candidate(
+    "h", "cn", ["cn"], "AWS ELB", False, "dangling", "evidence"))
+# "Impossible" raises the question "why not", and a row that only says
+# impossible does not answer it.
+check("an impossible row says WHY, not just that it cannot be done",
+      _st_imp and "cannot" in _st_imp[0].lower(), _st_imp[:1])
+check("...and says what to do instead",
+      any("hygiene" in x.lower() for x in _st_imp), _st_imp)
+_st_cand = _tk.steps_for(_tk.Candidate(
+    "h", "cn", ["cn"], "AWS S3", True, "candidate", None))
+check("an unchecked row is told to establish that first, before anything",
+      _st_cand and _st_cand[0].startswith("FIRST"), _st_cand[:1])
+
+# The table has two vocabularies for the same fact and a provider
+# added later will set one and forget the other.
+check("every provider carries a difficulty from the scale",
+      all(p.difficulty in _tk.DIFFICULTIES for p in _tk.PROVIDERS))
+check("...and claimable=False always means impossible",
+      all(p.difficulty == "impossible"
+          for p in _tk.PROVIDERS if not p.claimable))
+check("...and impossible always means claimable=False",
+      all(not p.claimable
+          for p in _tk.PROVIDERS if p.difficulty == "impossible"))
+
+
 print("\n== a guess never outranks evidence ==")
 _rank = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
-_evidenced = [_sev(v, c) for v in ("dangling", "fingerprint")
-              for c in (False, True)]
-_guesses = [_sev("candidate", c) for c in (False, True)]
-check("the worst unevidenced row does not outrank the best evidenced one",
-      max(_rank[x] for x in _guesses) <= min(_rank[x] for x in _evidenced),
-      (_guesses, _evidenced))
-check("an unevidenced claimable row no longer borrows High",
-      _sev("candidate", True) == "low", _sev("candidate", True))
-check("evidence on a claimable provider is still the top of the table",
-      _sev("dangling", True) == "high")
+
+
+def _sev_p(provider, verdict, claimable=True):
+    """Severity for a REAL provider, which now decides the baseline."""
+    return _tk.severity_for(_tk.Candidate(
+        "h", "cn", ["cn"], provider, claimable, verdict,
+        None if verdict == "candidate" else "evidence"))
+
+
+# The invariant, restated for a model where the PROVIDER sets the
+# baseline. Comparing every guess against every evidenced row is no
+# longer the right comparison: an evidenced row on an unclaimable
+# provider is legitimately Low, so the old form would require a guess
+# to rank below that -- i.e. below the floor. The guarantee that
+# matters is per provider: for the SAME provider, not having checked
+# must never score higher than having checked.
+for _p in ("AWS S3", "GitHub Pages", "Heroku", "Azure", "Acquia"):
+    _ev = min(_rank[_sev_p(_p, v)] for v in ("dangling", "fingerprint"))
+    _gu = _rank[_sev_p(_p, "candidate")]
+    check(f"on {_p}, an unchecked row does not outrank a checked one",
+          _gu <= _ev, (_gu, _ev))
+# And the specific case the old table was rewritten for: a free,
+# instant provider must not produce a critical on the strength of a
+# CNAME alone.
+check("an unevidenced row on the easiest provider is not critical",
+      _sev_p("GitHub Pages", "candidate") != "critical",
+      _sev_p("GitHub Pages", "candidate"))
+check("...while the same row WITH evidence is",
+      _sev_p("GitHub Pages", "dangling") == "critical",
+      _sev_p("GitHub Pages", "dangling"))
+# "P" is not in the provider table, so it falls to the `medium`
+# default -- which is the honest answer for a provider whose claim
+# process nobody has written down, and lands on High.
+check("evidence on a provider with no recorded difficulty is High",
+      _sev("dangling", True) == "high", _sev("dangling", True))
 check("claimable=False is Low throughout, as specified",
       all(_sev(v, False) == "low"
           for v in ("dangling", "fingerprint", "candidate")))
-check("a verdict the table has never met falls to the floor, not the top",
+# A verdict nothing has reasoned about is not treated as evidence:
+# it is not `dangling` or `fingerprint`, so it cannot reach the
+# provider's own difficulty, and on an unrecorded provider that is
+# High at the very most. Asserted as "never critical" rather than a
+# fixed value, because the floor moved and the property did not: an
+# unexamined row must not reach the top of a client's report.
+check("a verdict the table has never met cannot reach critical",
       _tk.severity_for(_tk.Candidate("h", "c", ["c"], "P", True,
-                                     "something-new", None)) == "low")
+                                     "something-new", None)) != "critical")
+check("...nor on the easiest provider either",
+      _tk.severity_for(_tk.Candidate("h", "c", ["c"], "AWS S3", True,
+                                     "something-new", None)) != "critical")
 _c = _tk.Candidate("x.corp.com", "y.elb.eu-west-1.amazonaws.com",
                    ["y.elb.eu-west-1.amazonaws.com"], "AWS ELB",
                    False, "candidate", None)
@@ -1442,13 +1545,16 @@ tv = [v for v in (vs or {}).get("items", [])
       if (v.get("external_id") or "").startswith("takeover:")]
 check("a finding was raised for the takeover", len(tv) >= 1, len(tv))
 # dead.corp.com points at Heroku, which IS first-come -- but nothing
-# here showed the name to be unclaimed, so the verdict is `candidate`
-# and the severity is Low. Claimable says how bad IF TRUE; the
-# verdict says whether we know it is true, and it caps the answer.
-# This assertion read High until the severity table grew its second
-# input, which is the inversion it was written to catch.
-check("...at Low: first-come, but nothing showed it was unclaimed",
-      all(v["severity"] == "low" for v in tv), [v["severity"] for v in tv])
+# here showed the name to be unclaimed, so the verdict is `candidate`.
+# Severity now follows DIFFICULTY, and an unchecked row is capped at
+# `hard` however easy the provider, which is Medium.
+#
+# This assertion has now read High, then Low, and now Medium. The
+# number is not the point and never was: the property under it is
+# that an unchecked row scores BELOW the same row once checked, and
+# that is asserted directly above.
+check("...at Medium: first-come, but nothing showed it was unclaimed",
+      all(v["severity"] == "medium" for v in tv), [v["severity"] for v in tv])
 check("...keyed on external_id so it can be found again",
       all(v["external_id"].startswith("takeover:") for v in tv), tv[:1])
 
@@ -1495,8 +1601,11 @@ s3 = [v for v in (vs4 or {}).get("items", [])
       if (v.get("external_id") or "") == "takeover:gone.corp.com"]
 check("an evidenced takeover on a first-come provider is raised",
       len(s3) == 1, len(s3))
-check("...at High — the one shape that reaches the top of the table",
-      s3 and s3[0]["severity"] == "high", s3 and s3[0]["severity"])
+# An S3 bucket name is free, global and first-come, and this one is
+# EVIDENCED -- the provider served NoSuchBucket. Easy to take and
+# known to be takeable is the top of the scale.
+check("...at Critical: evidenced, on a provider anyone can claim from",
+      s3 and s3[0]["severity"] == "critical", s3 and s3[0]["severity"])
 
 check("...and the note with it",
       again.get("dead.corp.com", {}).get("note") == "client owns it",

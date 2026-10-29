@@ -483,6 +483,17 @@ export interface Takeover {
   note: string | null
   target_id: number | null
   seen_at: string | null
+  /** How hard it would ACTUALLY be to take the name. Derived from the
+   *  provider's claim process, capped by how much evidence there is:
+   *  an unchecked row is never better than `hard`, however easy the
+   *  provider. */
+  difficulty: 'easy' | 'medium' | 'hard' | 'impossible'
+  /** What that difficulty means as a finding severity. */
+  severity: string
+  /** What an operator would do, in order. Present whatever the
+   *  difficulty — an `impossible` row carries the reason and what to
+   *  do instead. */
+  steps: string[]
 }
 
 /** A SOCKS5 credential for one ghost. Never carries the password:
