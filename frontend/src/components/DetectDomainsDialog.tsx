@@ -315,7 +315,11 @@ export function DetectDomainsDialog({ project, onClose, seed = [], onQueued }: {
                 a zone the operator just asked for by name would be the
                 tool overruling them. */}
             {kitchenSink && (
-              <FormControlLabel sx={{ ml: 2 }}
+              // Not indented. It reads as a sub-setting of Kitchen Sink
+              // when it is stepped in, and it is not one: the two are
+              // separate questions -- WHICH hosts to walk back, and
+              // whether to ask about ones already asked about.
+              <FormControlLabel
                 control={<Checkbox size="small" checked={rescan}
                   onChange={(e) => setRescan(e.target.checked)} />}
                 label={

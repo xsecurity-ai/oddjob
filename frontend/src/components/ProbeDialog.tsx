@@ -110,11 +110,20 @@ export function ProbeDialog({ project, tool, onClose, onQueued }: {
       <Stack spacing={1.6}>
         <Caveat>{BLURB[tool].hint}</Caveat>
 
+        {/* Called what it does. "Kitchen Sink" was the same switch
+            under a name that sounded like a scope setting, so the
+            dialog appeared to offer a choice about WHICH subjects --
+            and the only thing the flag changes is whether ones
+            already done are included.
+            `probe_owed` computes the subject list identically either
+            way; off, it subtracts what has been run. So the default
+            IS incremental, and this is the opt-in to repeat it. */}
         <FormControlLabel
           control={<Checkbox size="small" checked={kitchenSink}
             onChange={(e) => setKitchenSink(e.target.checked)} />}
           label={<Box sx={{ fontSize: 13 }}>
-            Kitchen Sink — every subject, including ones already done
+            Rescan targets — run {tool} again on subjects it has already
+            been pointed at
           </Box>} />
         {/* The cost of the tick, stated. The count alone reads the
             same with it on and off, which is how a project came to
@@ -140,7 +149,7 @@ export function ProbeDialog({ project, tool, onClose, onQueued }: {
           <Alert severity="info" variant="outlined" sx={{ fontSize: 12 }}>
             {d?.considered
               ? `Every ${d.takes} on this project has already been through `
-                + `${tool}. Tick Kitchen Sink to run it again.`
+                + `${tool}. Tick Rescan targets to run it again.`
               : `Nothing to point ${tool} at yet. `
                 + (tool === 'nuclei'
                    ? 'It needs URLs — port-scan or crawl something first.'
