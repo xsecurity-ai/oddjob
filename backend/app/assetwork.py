@@ -699,16 +699,32 @@ async def scan_batch(items: list[tuple[int, str, str]]
         if have.get("trufflehog"):
             rc, so, se = await assetscan._run(
                 [assetscan.TRUFFLEHOG, "filesystem", d,
-                 "--json", "--no-update"], b"")
+                 "--json", "--no-update"], b"",
+                # trufflehog is a Go binary and reserves a virtual
+                # arena far larger than it will ever make resident, so
+                # RLIMIT_AS kills it during package init -- `panic:
+                # cannot allocate memory`, before it reads a byte. The
+                # directory it is handed is already capped by
+                # SCAN_BUDGET_BYTES and the container limit is still
+                # the backstop. See assetscan._bound_memory.
+                bound_memory=False)
             # trufflehog exits non-zero when it FINDS things with
             # some flag combinations, so the output is what decides,
             # not the status. Only a run that produced nothing AND
             # failed is a failure.
             if rc not in (0, 183) and not so.strip():
                 ok = False
+                # The HEAD of the output, not the tail. A Go panic
+                # says what went wrong on its first line and then
+                # prints a stack; logging the last 200 characters
+                # showed the innermost frame of a goroutine and hid
+                # `panic: cannot allocate memory` entirely, which cost
+                # a real diagnosis. Both ends, since a timeout says
+                # nothing at either.
                 log.warning("assetwork: trufflehog rc=%s (%s): %s",
                             rc, "TIMED OUT" if rc == -1 else "failed",
-                            se[-200:])
+                            (se[:300] + (" ... " + se[-120:]
+                                         if len(se) > 420 else "")))
             for f in assetscan.parse_trufflehog(so):
                 fid = owner(f.path)
                 if fid is not None:

@@ -147,6 +147,26 @@ JOBS = 4
 def _bound_memory() -> None:
     """Cap the child's address space. Runs in the forked child.
 
+    **Not every scanner can live under this, and the reason is the
+    word ADDRESS SPACE.** A Go runtime reserves an enormous virtual
+    arena the moment it starts -- far more than it will ever make
+    resident -- so a cap on virtual size kills it during package
+    init, before it has read a byte:
+
+        WITHOUT rlimit         rc=0  trufflehog 3.99.7
+        WITH RLIMIT_AS=3.5G    rc=2  panic: cannot allocate memory
+
+    That is measured, in the deployed image. trufflehog therefore
+    runs with `bound_memory=False`, and that is not a loophole: it
+    reads a directory already capped by `assetwork.SCAN_BUDGET_BYTES`
+    at 24 MB, its resident size on that is small, and the container
+    limit remains the backstop it always was.
+
+    opengrep is the one this was written for and it is unaffected:
+    OCaml does not reserve that way, and its virtual footprint was
+    measured at 2.7 G against 1.8 G resident -- close enough together
+    that a ceiling on one bounds the other.
+
     Best effort, and silent when it cannot be done. macOS does not let
     a process set RLIMIT_AS, and an exception raised in `preexec_fn`
     does not merely skip the limit -- it makes the spawn itself fail,
@@ -805,13 +825,18 @@ def parse_opengrep(raw: str, path: str) -> list[Finding]:
 
 
 async def _run(argv: list[str], stdin: bytes,
-               env: dict[str, str] | None = None) -> tuple[int, str, str]:
+               env: dict[str, str] | None = None,
+               bound_memory: bool = True) -> tuple[int, str, str]:
     """Exec a scanner. Argument list, never a shell string.
 
     The runtime image has no shell at all, so a shell string would
     not merely be unsafe, it would not run -- and the inputs here
     include filenames taken from a source map, which is
     attacker-influenced text.
+
+    `bound_memory=False` for a scanner that cannot live under
+    RLIMIT_AS. See `_bound_memory` for which, and why that is not a
+    loophole.
     """
     proc = await asyncio.create_subprocess_exec(
         *argv, stdin=asyncio.subprocess.PIPE,
@@ -819,7 +844,7 @@ async def _run(argv: list[str], stdin: bytes,
         env={**os.environ, **(env or {})},
         # Applied in the child between fork and exec, so the ceiling
         # is on the scanner and not on this process.
-        preexec_fn=_bound_memory)
+        preexec_fn=_bound_memory if bound_memory else None)
     try:
         so, se = await asyncio.wait_for(proc.communicate(stdin),
                                         timeout=TIMEOUT)
