@@ -36,6 +36,7 @@ result is replaced with a note before anything is written. See
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -272,6 +273,52 @@ async def _resolve(session: AsyncSession,
     else:
         base_url = None
     return provider, token, model, source, base_url, cfg
+
+
+def thread_messages(raw: Iterable[str]) -> list[dict]:
+    """A stored thread, back in the shape a provider accepts.
+
+    The two turn kinds are stored in two shapes, on purpose. A user
+    turn is ONE message object. An assistant turn is the
+    provider-shaped TAIL of that round -- the assistant message, every
+    tool result, and anything it said after them -- so it is a LIST,
+    and has to be spread back into the conversation rather than pushed
+    in as a single element.
+
+    Reading both with `append` put a list where a message belongs.
+    Nothing on this side objected: the list travelled all the way to
+    the provider, which answered the NEXT turn of any thread that had
+    called a tool with
+
+        HTTP 400: Invalid request format:
+        'list' object has no attribute 'get'
+
+    -- the server walking the messages and asking a list for its
+    "role". The report came from a local model, but nothing about it
+    is local: the same thread breaks on any provider, and only looks
+    like a local-server fault because that is where it was first
+    pointed.
+
+    Flattening on the way OUT rather than fixing the write and
+    migrating: threads already stored this way are repaired by being
+    read, and the stored shape is not wrong -- a round genuinely is
+    several messages.
+
+    Anything that is neither object nor list of objects is dropped. A
+    turn that cannot be parsed is a turn the model cannot be shown,
+    and sending a malformed one is how this got here.
+    """
+    out: list[dict] = []
+    for blob in raw:
+        try:
+            item = json.loads(blob)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(item, list):
+            out.extend(m for m in item if isinstance(m, dict))
+        elif isinstance(item, dict):
+            out.append(item)
+    return out
 
 
 #: The value that means "not one engagement, all of them". A sentinel
@@ -668,12 +715,7 @@ async def chat(body: ChatRequest, project: str = Query(...),
             raise HTTPException(
                 409, f"thread {sess.id} is closed. Start a new one.")
         await session.refresh(sess, ["turns"])
-        stored = []
-        for t in sess.turns:
-            try:
-                stored.append(json.loads(t.content))
-            except (ValueError, TypeError):
-                continue
+        stored = thread_messages(t.content for t in sess.turns)
         # A client that posts history is not trusted over the thread:
         # two people in the same conversation would otherwise each
         # rewrite it with their own copy.
