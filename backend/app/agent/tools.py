@@ -41,6 +41,7 @@ from .. import assetsearch
 from ..hosts import InvalidHost, dns_subject, validate_host
 from ..models import (
     ROLE_ORDER,
+    Action,
     Agent,
     AgentTask,
     Credential,
@@ -51,6 +52,7 @@ from ..models import (
     PortScanCoverage,
     Project,
     ProjectScope,
+    Report,
     Service,
     Target,
     TargetAddress,
@@ -539,6 +541,57 @@ def build(session: AsyncSession, project: Project | None, user: User,
                        "external_id": v.external_id,
                        "description": (v.description or "")[:1500]}
                       for v, h in rows], MAX_ROWS, total)
+
+    async def list_pocs(host: str = "", status: str = "",
+                        limit: int = 50) -> dict:
+        stmt = (select(Poc, Target.host)
+                .join(Target, Target.id == Poc.target_id)
+                .where(scoped(Target.project_id)))
+        if host:
+            stmt = stmt.where(Target.host == host.strip().lower())
+        if status:
+            stmt = stmt.where(Poc.status == status.strip().lower())
+        total = int((await session.execute(
+            select(func.count()).select_from(stmt.subquery()))).scalar_one())
+        n = max(1, min(int(limit), MAX_ROWS))
+        rows = (await session.execute(stmt.limit(n))).all()
+        return _rows([{"host": h, "title": p.title, "status": p.status,
+                       # 0 reproduced | 1 not reproduced | 2 could not
+                       # test. Three answers, and the third is not the
+                       # second: "could not test" is a gap, not a pass.
+                       "exit_code": p.exit_code, "path": p.path,
+                       "notes": (p.notes or "")[:1000]}
+                      for p, h in rows], MAX_ROWS, total)
+
+    async def list_reports(limit: int = 50) -> dict:
+        stmt = (select(Report).where(scoped(Report.project_id))
+                .order_by(Report.id.desc()))
+        total = int((await session.execute(
+            select(func.count()).select_from(stmt.subquery()))).scalar_one())
+        n = max(1, min(int(limit), MAX_ROWS))
+        rows = (await session.execute(stmt.limit(n))).scalars().all()
+        # Deliberately NOT the rendered document. It runs to megabytes
+        # of HTML and belongs in a download, not in a model's context.
+        return _rows([{"id": r.id, "kind": r.kind, "title": r.title,
+                       "status": r.status, "size_bytes": r.size_bytes,
+                       "created_at": str(r.created_at)}
+                      for r in rows], MAX_ROWS, total)
+
+    async def list_actions(kind: str = "", limit: int = 50) -> dict:
+        stmt = (select(Action, Target.host)
+                .join(Service, Service.id == Action.service_id)
+                .join(Target, Target.id == Service.target_id)
+                .where(scoped(Target.project_id))
+                .order_by(Action.id.desc()))
+        if kind:
+            stmt = stmt.where(Action.kind == kind.strip().lower())
+        total = int((await session.execute(
+            select(func.count()).select_from(stmt.subquery()))).scalar_one())
+        n = max(1, min(int(limit), MAX_ROWS))
+        rows = (await session.execute(stmt.limit(n))).all()
+        return _rows([{"host": h, "kind": a.kind, "status": a.status,
+                       "at": str(a.created_at)}
+                      for a, h in rows], MAX_ROWS, total)
 
     async def list_services(port: int = 0, service: str = "",
                             only_unknown: bool = False, limit: int = 50) -> dict:
@@ -1225,6 +1278,24 @@ def build(session: AsyncSession, project: Project | None, user: User,
                                 "enum": ["critical", "high", "medium", "low", "info"]},
                    "search": {"type": "string"}, "host": {"type": "string"},
                    "limit": {"type": "integer"}}), list_findings),
+        Tool("list_pocs", "Proof-of-concept records: what was actually "
+             "DEMONSTRATED, as opposed to what a scanner reported. "
+             "`exit_code` is 0 reproduced, 1 not reproduced, 2 could not "
+             "test -- and the third is not the second.",
+             _obj({"host": {"type": "string"},
+                   "status": {"type": "string",
+                              "enum": ["confirmed", "unconfirmed"]},
+                   "limit": {"type": "integer"}}), list_pocs),
+        Tool("list_reports", "Reports generated for this engagement. Lists "
+             "what exists and when; the rendered document is a download, "
+             "not something to read into an answer.",
+             _obj({"limit": {"type": "integer"}}), list_reports),
+        Tool("list_actions", "Active probes requested against this "
+             "engagement's services, newest first. The record of the WORK "
+             "rather than of its results -- this is how you answer "
+             "'has anybody looked at this yet'.",
+             _obj({"kind": {"type": "string"},
+                   "limit": {"type": "integer"}}), list_actions),
         Tool("list_services", "Search services and open ports. `only_unknown` "
              "finds open ports whose service could not be identified.",
              _obj({"port": {"type": "integer"}, "service": {"type": "string"},
