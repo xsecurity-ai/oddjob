@@ -28,6 +28,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from './lib/api'
 import { useAuth } from './lib/auth'
 import { useLive, type LiveState } from './lib/useLive'
+import { useAnyUnseen } from './lib/c2unseen'
 import { useStoredFlag } from './lib/useStoredFlag'
 import { lastProject, parse, push, rememberProject, replace, type Route,
          type View } from './lib/route'
@@ -50,7 +51,7 @@ import { StandingOrdersButton } from './components/StandingOrders'
 import { useHostModal } from './components/HostModal'
 import { AgentPanel, AgentView } from './components/AgentPanel'
 import { UsersView } from './views/UsersView'
-import { neon, glow } from './theme'
+import { neon, glow, blink } from './theme'
 import { sorted } from './lib/sortOptions'
 
 const ALL = '__all__'
@@ -58,7 +59,9 @@ const ALL = '__all__'
 /** A sidebar entry. `key` is a `View`, not a string, so a nav item
  *  pointing at a page that does not exist is a compile error rather
  *  than a click that silently lands on Targets. */
-interface NavLeaf { key: View; label: string; icon: React.ReactNode }
+interface NavLeaf { key: View; label: string; icon: React.ReactNode
+                    /** Unread activity under this item -- see `blink`. */
+                    alert?: boolean }
 interface NavNode extends NavLeaf { children?: NavLeaf[] }
 const RAIL = 186
 const RAIL_COLLAPSED = 58
@@ -176,6 +179,11 @@ export default function App() {
     queryKey: ['projects'], queryFn: api.projects, enabled: authed,
   })
   const scope = project === ALL ? null : project
+  // Above the early returns with every other hook -- see the note
+  // by `webCheck`. Scoped like every other view: a session on an
+  // engagement you are not looking at must not blink a tab that
+  // then shows you nothing.
+  const c2Unread = useAnyUnseen(scope)
   const { data: stats } = useQuery({
     queryKey: ['stats', scope], queryFn: () => api.stats(scope ?? undefined), enabled: authed,
   })
@@ -252,7 +260,8 @@ export default function App() {
         '&:hover': { background: alpha(neon.pink, 0.08) },
       }}>
       <ListItemIcon sx={{ minWidth: isCollapsed ? 0 : 34,
-                          color: on ? neon.cyan : neon.muted }}>
+                          color: on ? neon.cyan : neon.muted,
+                          ...(n.alert ? blink(neon.green) : {}) }}>
         {n.icon}
       </ListItemIcon>
       {!isCollapsed && (
@@ -260,7 +269,8 @@ export default function App() {
           sx: { fontFamily: `'Orbitron', sans-serif`,
                 fontSize: depth ? 10.5 : 11,
                 letterSpacing: '0.12em', textTransform: 'uppercase',
-                color: on ? neon.cyan : neon.muted } } }} />
+                color: on ? neon.cyan : neon.muted,
+                ...(n.alert ? blink(neon.green) : {}) } } }} />
       )}
     </ListItemButton>)
 
@@ -307,7 +317,12 @@ export default function App() {
     { key: 'ghosts', label: 'Ghosts', icon: <MemoryIcon fontSize="small" /> },
     // Below Ghosts, because that is what catches the callbacks: a
     // session only exists because a Ghost was holding a port.
-    { key: 'c2', label: 'C2', icon: <TerminalIcon fontSize="small" /> },
+    // Blinks while a shell has said something nobody has read. Only
+    // while you are somewhere else: on the page itself the session
+    // blinks instead, which says *which* one, and a nav item blinking
+    // at a page you are already looking at says nothing.
+    { key: 'c2', label: 'C2', icon: <TerminalIcon fontSize="small" />,
+      alert: c2Unread && view !== 'c2' },
     // No sidebar entry for Project Config: it is reached from the edit
     // button on its own row in Projects, which is where you already are
     // when you want it. The route still resolves, so existing links and

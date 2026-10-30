@@ -34,6 +34,29 @@ export const glow = (c: string, strength = 1) =>
     ? `0 0 ${2 * strength}px ${alpha(c, 0.9)}, 0 0 ${10 * strength}px ${alpha(c, 0.45)}`
     : 'none'
 
+/** "There is something here you have not read yet."
+ *
+ *  A pulse rather than a hard on/off: a square blink at this size
+ *  reads as a rendering fault, and an operator's first instinct is to
+ *  reload rather than to look.
+ *
+ *  Reduced motion gets the colour and the halo with no animation. The
+ *  point is that the item stands out from the ones around it, and
+ *  that survives holding it still -- dropping the signal entirely
+ *  would mean an operator who asked for less motion is simply not
+ *  told their shell called back.
+ */
+export const blink = (c: string) => ({
+  color: c,
+  textShadow: glow(c, 1.2),
+  animation: 'oddjob-blink 1.15s ease-in-out infinite',
+  '@keyframes oddjob-blink': {
+    '0%, 100%': { opacity: 1 },
+    '50%': { opacity: 0.35 },
+  },
+  '@media (prefers-reduced-motion: reduce)': { animation: 'none' },
+})
+
 /** Every tab strip in the app, so they cannot drift apart.
  *
  *  Lived in WebView while it was the only view with tabs; moved
