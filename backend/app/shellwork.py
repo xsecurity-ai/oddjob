@@ -16,11 +16,12 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import proxytunnel
+from . import proxytunnel, shellprobe
 from .db import SessionLocal
 from .events import broker
 from .models import Agent, Project, ShellExchange, ShellSession, Target
 from .shellhub import FLUSH_IDLE, MAX_PENDING, hub, now
+from .shellprobe import PROBE
 from .timeline import record
 
 log = logging.getLogger("oddjob.shellwork")
@@ -110,8 +111,25 @@ async def _arrived(session: AsyncSession, agent: Agent,
                      actor=f"ghost:{agent.name}", source="c2")
     await session.commit()
 
-    hub.attach(agent.id, frame.stream, s.id)
+    live = hub.attach(agent.id, frame.stream, s.id)
     log.info("shell session %d: %s on %s via %s", s.id, peer, where, agent.name)
+
+    # One harmless command, to find out whether anything on the far
+    # end is a shell at all. A reverse shell says nothing until it
+    # is typed at, so silence is the only thing that distinguishes
+    # it from a port scanner -- and the answer names the box, which
+    # is worth having on its own.
+    #
+    # `command` is set so the reply pairs with it in the transcript,
+    # and the actor is Oddjob rather than a person: this is traffic
+    # WE generated and the record should not suggest otherwise.
+    live.command = PROBE.decode().strip()
+    if await hub.write(s.id, PROBE):
+        session.add(ShellExchange(session_id=s.id, seq=1,
+                                  command=live.command, output=None,
+                                  actor_id=None))
+        await session.commit()
+    _arm_probe(live, s.id)
     code = await _code(session, agent.project_id)
     await broker.publish("c2", action="arrived", project=code,
                          session=s.id, peer=peer,
@@ -135,6 +153,15 @@ async def _data(session: AsyncSession, agent: Agent,
         # guessed at: writing it to whichever session was last would
         # put one host's output in another host's transcript.
         return
+
+    # The FIRST bytes decide what this peer is. Only the first: a
+    # `cat` of a certificate later in a real session would
+    # otherwise re-classify it as a scanner halfway through.
+    if not live.judged:
+        live.judged = True
+        state, why = shellprobe.classify(frame.payload)
+        if state != shellprobe.PENDING:
+            await _judge(live.session_id, state, why)
 
     text = frame.payload.decode("utf-8", "replace")
     live.buf.append(text)
@@ -311,3 +338,45 @@ async def adopt_orphans(session: AsyncSession) -> int:
     log.info("marked %d shell session(s) lost: this process holds no "
              "tunnels at startup", len(rows))
     return len(rows)
+
+
+async def _judge(session_id: int, state: str, why: str) -> None:
+    """Record what the far end turned out to be. Its own session.
+
+    Never overwrites a decision already made: the first answer is
+    the one taken, for the reason in `_data`.
+    """
+    try:
+        async with SessionLocal() as s:
+            row = await s.get(ShellSession, session_id)
+            if row is None or row.probe != shellprobe.PENDING:
+                return
+            row.probe = state
+            row.probe_note = why[:200] or None
+            await s.commit()
+            log.info("session %d looks like a %s: %s", session_id, state, why)
+            await broker.publish("c2", action="probe",
+                                 project=await _code(s, row.project_id),
+                                 session=session_id, probe=state)
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("judging session %d: %s", session_id, e)
+
+
+def _arm_probe(live, session_id: int) -> None:
+    """Call it silent if nothing comes back in time."""
+    live.probe_timer = asyncio.create_task(_probe_deadline(session_id))
+
+
+async def _probe_deadline(session_id: int) -> None:
+    try:
+        await asyncio.sleep(shellprobe.WINDOW)
+    except asyncio.CancelledError:
+        return
+    # `silent`, not `scanner`. Nothing answered, which is not the
+    # same as something answering wrongly -- a real shell can be
+    # slow, speak its own protocol, or never have received the
+    # probe at all. The list shows these; it only hides the ones
+    # positively identified as something else.
+    await _judge(session_id, shellprobe.SILENT,
+                 "nothing came back within "
+                 f"{int(shellprobe.WINDOW)}s of being asked")

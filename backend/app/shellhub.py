@@ -68,10 +68,11 @@ Send = Callable[[bytes], Awaitable[None]]
 
 def _cancel(live: Live) -> None:
     """Stop a stream's pending flush, if it has one."""
-    t = getattr(live, "timer", None)
-    live.timer = None
-    if t is not None and hasattr(t, "cancel"):
-        t.cancel()
+    for name in ("timer", "probe_timer"):
+        t = getattr(live, name, None)
+        setattr(live, name, None)
+        if t is not None and hasattr(t, "cancel"):
+            t.cancel()
 
 
 @dataclass
@@ -89,6 +90,10 @@ class Live:
     #: firing against a detached stream would open a session to
     #: write nothing.
     timer: object | None = None
+    #: The "did anything answer" deadline, and whether the first
+    #: bytes back have already been classified. See shellprobe.
+    probe_timer: object | None = None
+    judged: bool = False
 
 
 @dataclass
