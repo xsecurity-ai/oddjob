@@ -292,6 +292,12 @@ TASK_KINDS: dict[str, str | None] = {
     #: is not a scan FILE: there is no nmap XML or nuclei JSONL to
     #: hand an importer, only one exchange, which `routers/web.py`
     #: files as a web_addresses row of its own. See `apply_replay`.
+    #: A proof of concept: one nuclei template at one host,
+    #: answering "does this still reproduce". `None` because
+    #: there is no scan file -- the verdict is filed onto the
+    #: `Poc` row by `pocwork.apply_result` in `submit_result`,
+    #: which is the same shape `replay` uses.
+    "poc": None,
     "replay": None,
     "install": None,
     "shell": None,
@@ -3907,6 +3913,36 @@ async def submit_result(task_id: int, body: ResultIn,
     # `apply_replay` writes the row for it. A `failed` here means the
     # ghost could not carry out the instruction at all — bad arguments,
     # a runner that is not there — and there is no exchange to record.
+    # A proof reporting back. Like the replay below it, the result is
+    # evidence about the client's estate and this handler is the only
+    # thing that was ever going to file it -- `import_as` is None for
+    # this kind because there is no scan file to parse.
+    #
+    # `done` only, and that is not a formality here: the runner
+    # reports `done` with exit 2 when it could not reach the host,
+    # because "we could not test" is a result and must not be
+    # mistaken for "it did not reproduce". A `failed` means the ghost
+    # could not carry out the instruction at all.
+    if (t.status == "done" and t.kind == "poc"
+            and (t.output or "").strip()):
+        from ..pocwork import apply_result as apply_poc
+        try:
+            args = json.loads(t.args or "{}")
+            if pid := args.get("poc_id"):
+                poc = await apply_poc(session, int(pid), t.output)
+                if poc is not None:
+                    await session.commit()
+                    await broker.publish("pocs", action="result",
+                                         project=await _project_code(
+                                             session, t.project_id))
+        except Exception as e:                   # noqa: BLE001
+            # Never fatal to the result import. The task ran, the
+            # output is stored, and a proof whose row could not be
+            # updated is recoverable; losing the whole result is not.
+            t.import_result = json.dumps(
+                {"error": f"poc: {type(e).__name__}: {e}"[:500]})
+            await session.commit()
+
     if t.status == "done" and t.kind == "replay" and (t.output or "").strip():
         from .web import apply_replay
         try:

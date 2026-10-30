@@ -1102,6 +1102,28 @@ class Poc(Base, TimestampMixin):
     exit_code: Mapped[int | None] = mapped_column(Integer)
     notes: Mapped[str | None] = mapped_column(Text)
 
+    #: The proof itself: a nuclei template, as YAML.
+    #:
+    #: A template and not a script because the agent image has no
+    #: interpreter -- no python, perl, ruby or node -- so a script
+    #: is a proof that cannot run on a Ghost. It is also declarative,
+    #: which matters when the thing writing it is a model: YAML with
+    #: matchers cannot open a socket of its own choosing, and a shell
+    #: script on the engagement's own infrastructure can.
+    template: Mapped[str | None] = mapped_column(Text)
+    #: Where it was last pointed. One target, because "it reproduces"
+    #: spread across twelve hosts is a sentence about none of them.
+    target_url: Mapped[str | None] = mapped_column(Text)
+    #: When it last RAN, which is not when the row was written. A
+    #: proof built and never run is the "not validated" case, and
+    #: `exit_code` alone cannot tell that from a run that is pending.
+    validated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    #: What the run said, in the agent's own words, for the cases the
+    #: exit code cannot carry -- which host did not answer, which
+    #: matcher fired, why the template was refused.
+    verdict: Mapped[str | None] = mapped_column(Text)
+
     target: Mapped[Target] = relationship(back_populates="pocs")
 
 
