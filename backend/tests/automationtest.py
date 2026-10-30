@@ -21,6 +21,7 @@ happen, rather than driving a server and inferring it.
 
 # Run from anywhere: the suites import `app`, which lives one level up.
 import pathlib as _pathlib
+import re
 import sys as _sys
 
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
@@ -1335,6 +1336,107 @@ check("nothing outstanding is not a gap",
       not [g for g in gaps(Snapshot(auto_poc="high", poc_backlog=0))
            if g.policy == "auto_poc"])
 _ = Gap
+
+
+# ===================================================================
+# Running a task is what stops it being queued again
+# ===================================================================
+#
+# Every policy here is "once ever per subject". The check is
+# `(kind, subject) not in s.tasked`, and `s.tasked` is filled from
+# ONE list of kinds -- so a kind missing from that list has no entry,
+# its check can never be true, and the policy re-queues the same
+# subject on every cycle for ever.
+#
+# That shipped. `vhost`, `httpx`, `nuclei` and `nuclei_tech` were all
+# absent, and on one engagement each URL had been re-scanned between
+# 13 and 68 times over two weeks -- repeatedly sending the same scans
+# at a client. It did not look like a runaway: `outstanding_subjects`
+# stops a second copy stacking while the first is in flight, so
+# instead of exploding the queue idled at a few hundred tasks and
+# simply never finished. The kinds that WERE listed sat at 1.0-2.1
+# runs per subject.
+print("\n== a policy does not re-queue what it has already tasked ==")
+from app.automation import TASKED_KINDS  # noqa: E402
+
+_URLS = {"https://web.acme.example/", "https://shop.acme.example/"}
+
+
+def _everything_on(tasked=frozenset()):
+    """A snapshot with every URL-driven policy switched on."""
+    return Snapshot(
+        targets=ESTATE, web_urls=set(_URLS),
+        auto_web="both", auto_vhost=True, auto_httpx=True,
+        auto_nuclei="both", tasked=set(tasked))
+
+
+def _as_tasked(cands):
+    """What `tasked_subjects` would record for these candidates.
+
+    The same rule it uses: every entry of `args["targets"]`,
+    lowercased. Written out here rather than imported so the two
+    sides cannot silently agree on a shared mistake.
+    """
+    out = set()
+    for c in cands:
+        for sub in (c.args.get("targets") or []):
+            out.add((c.kind, str(sub).lower()))
+    return out
+
+
+_first = _everything_on()
+_round1 = plan(_first)
+check("with nothing tasked, every policy has work to do",
+      len(_round1) > 0, str(len(_round1)))
+
+# NOTE: this exercises `plan` honouring `tasked`, which was never
+# the broken half. The bug was in what the CALLER loaded into it, and
+# the guard below is what catches that.
+_round2 = plan(_everything_on(_as_tasked(_round1)))
+_repeat = [f"{c.kind}:{c.subject}" for c in _round2]
+check("once those have been tasked, the next cycle queues NOTHING",
+      not _repeat, "would re-queue: " + ", ".join(sorted(_repeat)[:8]))
+
+# Named individually, so a regression says which kind came back
+# rather than only that something did.
+for _kind in ("vhost", "httpx", "nuclei", "nuclei_tech", "katana",
+              "gobuster"):
+    _one = [c for c in _round1 if c.kind == _kind]
+    if not _one:
+        continue
+    _again = [c for c in plan(_everything_on(_as_tasked(_one)))
+              if c.kind == _kind]
+    check(f"a tasked {_kind} subject is not offered again",
+          not _again, str([c.subject for c in _again][:3]))
+
+# THE guard, and the only one of these that would have caught the
+# bug: every kind `plan` can emit must be a kind `tasked_subjects` is
+# told to load. If it is not, that kind has no entry in `tasked`, its
+# "already done" check can never be true, and it re-queues for ever.
+#
+# Tied to what `plan` ACTUALLY emits rather than to a list written
+# here, because a hand-written list is the thing that was wrong in
+# the first place.
+_emitted = {c.kind for c in _round1}
+check("every kind the policies emit is one we load `tasked` for",
+      _emitted <= set(TASKED_KINDS),
+      "emitted but never loaded: "
+      + ", ".join(sorted(_emitted - set(TASKED_KINDS))))
+
+# And the same question asked of the source, which catches a kind
+# that is checked against `tasked` on a path this snapshot does not
+# reach. `[^\n]*?` and not `[^)]*`: the first version of this used
+# `[^)]*`, which cannot span `u.lower()` -- so it matched almost
+# nothing and passed against the very bug it was written for.
+_src = (_pathlib.Path(__file__).resolve().parents[1]
+        / "app" / "automation.py").read_text()
+_asked = set(re.findall(r'\(\s*"([a-z_]+)"\s*,[^\n]*?\bin s\.tasked', _src))
+check("the source agrees -- every literal kind checked is loaded",
+      _asked and _asked <= set(TASKED_KINDS),
+      f"found {sorted(_asked)}; missing "
+      + ", ".join(sorted(_asked - set(TASKED_KINDS))))
+check("...and the regex found the checks at all, rather than nothing",
+      len(_asked) >= 4, str(sorted(_asked)))
 
 
 print(f"\n{ok} passed, {fail} failed")

@@ -230,6 +230,20 @@ NUCLEI_KINDS: dict[str, tuple[str, ...]] = {
 assert set(NUCLEI_CHOICES) == {"off", *NUCLEI_KINDS}
 assert set(NUCLEI_PROFILES) == {k for ks in NUCLEI_KINDS.values() for k in ks}
 
+
+#: Every kind `plan()` asks "has this already been tasked" about.
+#:
+#: Derived from the policy tables rather than typed out, because the
+#: cost of the two disagreeing is silent and open-ended: the check
+#: simply never matches and the policy re-queues for ever. The
+#: standing orders are "once ever per subject" for every policy, so
+#: this is every kind any of them can emit.
+TASKED_KINDS: tuple[str, ...] = tuple(sorted({
+    "amass", "nslookup", "reverse_ip", "nmap", "vhost", "httpx",
+    *{k for ks in WEB_KINDS.values() for k in ks},
+    *{k for ks in NUCLEI_KINDS.values() for k in ks},
+}))
+
 #: `NMAP_CHOICES` lives in models.py, where schemas.py can validate
 #: against it without importing this module. They have to agree, and
 #: the test asserts that they do rather than trusting two lists.
@@ -756,9 +770,25 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
     # domains waiting every single time they opened the dialog.
     scope_zones = await enumerable_roots(session, pr.id)
 
-    tasked = await tasked_subjects(
-        session, pr.id,
-        ("amass", "nslookup", "reverse_ip", "nmap", "katana", "gobuster"))
+    # DERIVED, not hand-listed. A kind missing from this tuple has no
+    # entry in `tasked`, so its "have we already done this" check can
+    # never be true and the policy re-queues the same subject on every
+    # cycle for ever.
+    #
+    # That is not hypothetical: `vhost`, `httpx`, `nuclei` and
+    # `nuclei_tech` were all absent, and on one engagement each URL
+    # had been re-scanned between 13 and 68 times over two weeks. It
+    # did not look like a runaway because `outstanding_subjects`
+    # stops a second copy stacking while the first is in flight -- so
+    # instead of exploding it idled at a few hundred tasks and simply
+    # never finished, re-sending the same scans at the client. The
+    # kinds that WERE listed sat at 1.0-2.1 runs per subject, which
+    # is what this is supposed to do.
+    #
+    # `TASKED_KINDS` is built from the same tables `plan()` reads, so
+    # adding a policy kind cannot miss this again -- see the guard in
+    # `automationtest.py`, which checks the two agree.
+    tasked = await tasked_subjects(session, pr.id, TASKED_KINDS)
 
     # Everywhere web discovery could be pointed. A crawl and a
     # content-discovery run both need a URL to start from -- "scan
