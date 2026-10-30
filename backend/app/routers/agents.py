@@ -55,6 +55,7 @@ from .. import (
     audit,
     countrygate,
     geoip,
+    heap,
     lookuphistory,
     proxyauth,
     proxyhub,
@@ -3808,6 +3809,10 @@ async def _dial(host: str, port: int, proto: str, nonce: str) -> tuple[bool, str
     except OSError as e:
         return False, f"could not connect: {e}"
 
+#: An output big enough that parsing it moved real memory. Below
+#: this, trimming costs more than it returns.
+TRIM_OUTPUT_BYTES = 4 * 1024 * 1024
+
 
 @router.post("/tasks/{task_id}/result", response_model=dict)
 async def submit_result(task_id: int, body: ResultIn,
@@ -4001,6 +4006,19 @@ async def submit_result(task_id: int, body: ResultIn,
     await broker.publish("agents", action="result", project=code)
     for ch in ("targets", "services", "vulns", "web"):
         await broker.publish(ch, action="agent", project=code)
+
+    # A big result is the other place this process churns hundreds of
+    # megabytes at once: the body arrives as one string, is parsed
+    # into a document several times its size, and the whole lot is
+    # dropped a moment later. glibc keeps every byte of it -- see
+    # app/heap.py, which measures that in this image -- so the next
+    # import meets a ceiling made of memory nobody is using.
+    #
+    # Only for the large ones. Trimming after a 4 KB nslookup result
+    # would be a free-list walk on the hot path to reclaim nothing,
+    # which is the trade this is trying to avoid, not make.
+    if len(body.output or "") >= TRIM_OUTPUT_BYTES:
+        heap.trim()
     return {"ok": True, "imported": imported}
 
 
