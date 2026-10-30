@@ -39,12 +39,22 @@ const Header = 5
 
 // Frame types. OPEN travels server->agent; OPENED and FAILED come
 // back; DATA and CLOSE go either way.
+//
+// ARRIVED is the one that goes only agent->server, and it is what
+// makes a shell tunnel different from a proxy one. A proxy stream
+// starts because the server asked for a destination; a shell stream
+// starts because something connected to a port the agent is
+// listening on, which the server could not have asked for and does
+// not learn any other way. Payload is the peer address as the agent
+// saw it -- provenance, and the only thing distinguishing two
+// callbacks on one port.
 const (
-	OPEN   = 0x01
-	OPENED = 0x02
-	FAILED = 0x03
-	DATA   = 0x04
-	CLOSE  = 0x05
+	OPEN    = 0x01
+	OPENED  = 0x02
+	FAILED  = 0x03
+	DATA    = 0x04
+	CLOSE   = 0x05
+	ARRIVED = 0x06
 )
 
 // MaxPayload caps one frame's payload. Not a protocol limit -- it
@@ -67,7 +77,7 @@ type Frame struct {
 
 func known(kind byte) bool {
 	switch kind {
-	case OPEN, OPENED, FAILED, DATA, CLOSE:
+	case OPEN, OPENED, FAILED, DATA, CLOSE, ARRIVED:
 		return true
 	}
 	return false
