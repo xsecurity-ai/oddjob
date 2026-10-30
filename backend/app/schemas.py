@@ -745,6 +745,22 @@ class VulnOut(_VulnFields):
     #: this host. None means never.
     last_looked_at: datetime | None = None
 
+    # ---- the proof, if there is one. See app/pocwork.py -------------
+    #: Not Available | Available, Confirmed | Available, Not Confirmed.
+    #:
+    #: "Available" means a script exists; "Confirmed" means it ran
+    #: here and worked. The middle state is the one that needed
+    #: saying: a proof that wants a credential nobody has, or a
+    #: person to click a link, is real work that cannot be run from
+    #: here, and it is neither of the other two.
+    poc_state: str = "Not Available"
+    #: The sentence behind "Not Confirmed" -- never run, the host did
+    #: not answer, it ran and matched nothing. Three different places
+    #: to go, so the word alone is not enough.
+    poc_detail: str | None = None
+    #: The proof's row, for opening it. None when there is none.
+    poc_id: int | None = None
+
 
 # ------------------------------------------------------------------ pocs
 class _PocFields(BaseModel):
