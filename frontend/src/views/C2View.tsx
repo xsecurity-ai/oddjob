@@ -227,6 +227,43 @@ function ListenersTab({ project }: { project: string }) {
           <Box>{p.row.agent_name ?? '—'}</Box>
         </Stack>
       ) },
+    // What a payload is pointed at. Both, because which one an
+    // operator needs depends on the target: an address always
+    // works, a name survives the address changing and is what a
+    // filtering proxy is likelier to allow.
+    { field: 'agent_name_public', headerName: 'Calls back to', flex: 1,
+      minWidth: 180,
+      valueGetter: (_v, row) => row.agent_name_public ?? row.agent_ip ?? '',
+      renderCell: (p) => {
+        const name = p.row.agent_name_public
+        const ip = p.row.agent_ip
+        if (!name && !ip) {
+          return (
+            <Tooltip title="This ghost has not reported its public
+                            address yet. It does so when it registers.">
+              <Box sx={{ color: neon.muted }}>—</Box>
+            </Tooltip>
+          )
+        }
+        return (
+          <Tooltip title={name
+            ? `${name} — resolved from ${ip} by a public resolver, not `
+              + `the ghost's own, so it is what the client sees.`
+            : (p.row.agent_name_note
+               ?? 'No public name for this address.')}>
+            <Box sx={{ fontFamily: `'Share Tech Mono', monospace`,
+                       fontSize: 11.5, overflow: 'hidden',
+                       textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {name || ip}
+              {name && ip && (
+                <Box component="span" sx={{ color: neon.muted, ml: 0.8 }}>
+                  {ip}
+                </Box>
+              )}
+            </Box>
+          </Tooltip>
+        )
+      } },
     { field: 'protocol', headerName: 'Proto', width: 80,
       type: 'singleSelect', valueOptions: ['tcp', 'udp'] },
     { field: 'port', headerName: 'Port', width: 90, type: 'number' },
@@ -329,6 +366,11 @@ function SetupListenerDialog({ project, onClose }: {
   const [udp, setUdp] = useState<number[]>([])
   const [note, setNote] = useState('')
   const [said, setSaid] = useState<string[]>([])
+  // The ghost the ports would be opened on, for the capability
+  // warning below.
+  const picked = useMemo(
+    () => usable.find((g: GhostAgent) => g.id === agent) ?? null,
+    [usable, agent])
 
   useEffect(() => {
     if (agent === '' && usable.length) setAgent(usable[0].id)
@@ -394,6 +436,20 @@ function SetupListenerDialog({ project, onClose }: {
             ))}
           </TextField>
 
+          {picked?.can_bind_privileged === false && (
+            // Said BEFORE the port is picked. This failed at bind
+            // time with `permission denied`, which names no
+            // capability and sent an afternoon in the wrong place.
+            <Alert severity="warning" sx={{ fontSize: 12 }}>
+              This ghost reports that it cannot bind ports below 1024,
+              so 443 and 80 will fail. It was started without
+              CAP_NET_BIND_SERVICE — recreate it with
+              <Box component="code" sx={{ mx: 0.5 }}>
+                --cap-add=NET_BIND_SERVICE
+              </Box>
+              and the shipped compose file does this already.
+            </Alert>
+          )}
           <PortPicker label="TCP ports" value={tcp} onChange={setTcp}
             help="A client's egress is usually filtered to browser ports,
                   so a callback on 47000 is refused by their firewall and

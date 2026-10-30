@@ -225,6 +225,10 @@ func (a *Agent) Register(ctx context.Context) error {
 			missing[k] = v
 		}
 		a.mu.Unlock()
+		// After `addr`, because the name is a lookup OF that
+		// address and there is nothing to ask without one.
+		name := recon.PublicName(ctx, addr.IP)
+		canBind, bindKnown, bindWhy := tools.PrivilegedBindCapable()
 		resp, err := a.cli.Register(ctx, client.RegisterReq{
 			Platform:     runtime.GOOS,
 			Arch:         runtime.GOARCH,
@@ -239,13 +243,27 @@ func (a *Agent) Register(ctx context.Context) error {
 			// the machine's. HostPlatform is the field that answers
 			// "which of these is the Windows box", and the two are
 			// sent side by side rather than one overwriting the other.
-			OutboundIP:         addr.IP,
-			OutboundIPSource:   addr.Source,
-			OutboundIPNote:     addr.Note,
-			Interfaces:         recon.InterfaceIPs(),
-			HostPlatform:       hp.Host,
-			HostPlatformSource: hp.HostWhy,
-			Container:          hp.Container,
+			OutboundIP:       addr.IP,
+			OutboundIPSource: addr.Source,
+			OutboundIPNote:   addr.Note,
+			// What that address is CALLED, asked of a public
+			// resolver rather than the host's. The host's answer is
+			// about its own network -- an internal name, or an AWS
+			// `ip-10-0-1-7` -- and the question is what the client
+			// sees when our traffic reaches them.
+			PublicName:     name.Name,
+			PublicNameNote: name.Note,
+			// Whether this host can hold a port below 1024. Reported
+			// so Oddjob can say so while a listener port is being
+			// CHOSEN, rather than letting the operator find out from
+			// `bind: permission denied` long afterwards.
+			CanBindPrivileged:      canBind,
+			CanBindPrivilegedKnown: bindKnown,
+			BindNote:               bindWhy,
+			Interfaces:             recon.InterfaceIPs(),
+			HostPlatform:           hp.Host,
+			HostPlatformSource:     hp.HostWhy,
+			Container:              hp.Container,
 		})
 		if err != nil {
 			return err

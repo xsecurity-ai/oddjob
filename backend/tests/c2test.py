@@ -313,6 +313,55 @@ check("...and the one with no target says so rather than guessing",
       sum(1 for x in sess if x["host"] is None) == 1,
       str([x["host"] for x in sess]))
 
+print("\n== the row says where a payload should call back to ==")
+# The two things an operator needs to write a payload, and which one
+# they need depends on the target: an address always works, a name
+# survives the address changing and is what a proxy will allow.
+
+
+async def say(ip, name, note, can_bind):
+    async with SessionLocal() as s:
+        a = await s.get(Agent, GID)
+        a.outbound_ip = ip
+        a.public_name = name
+        a.public_name_note = note
+        a.can_bind_privileged = can_bind
+        await s.commit()
+
+
+asyncio.run(say("203.0.113.40", "ghost-01.acme.example", None, True))
+row = call("/api/c2/listeners?project=C2T", token=admin)[1][0]
+check("the listener carries the ghost's public address",
+      row["agent_ip"] == "203.0.113.40", row["agent_ip"])
+check("...and what that address is called",
+      row["agent_name_public"] == "ghost-01.acme.example",
+      row["agent_name_public"])
+
+# "No PTR" and "we could not ask" are different facts. A blank cell
+# for both hides the one that means OUR lookup failed rather than
+# that the address has no name.
+asyncio.run(say("203.0.113.40", None,
+                "could not reach 8.8.8.8:53: i/o timeout", True))
+row = call("/api/c2/listeners?project=C2T", token=admin)[1][0]
+check("a failed lookup carries its reason rather than reading as unnamed",
+      row["agent_name_public"] is None
+      and "8.8.8.8" in (row["agent_name_note"] or ""),
+      str(row["agent_name_note"]))
+
+# NULL is "the ghost has not said", which is not "it cannot".
+# Warning about a ghost that is fine is how an operator learns to
+# ignore the warning.
+asyncio.run(say("203.0.113.40", None, None, None))
+row = call("/api/c2/listeners?project=C2T", token=admin)[1][0]
+check("a ghost that has not reported its capability is NULL, not false",
+      row["agent_can_bind_privileged"] is None,
+      str(row["agent_can_bind_privileged"]))
+asyncio.run(say("203.0.113.40", None, None, False))
+row = call("/api/c2/listeners?project=C2T", token=admin)[1][0]
+check("...and one that says it cannot bind 443 says so plainly",
+      row["agent_can_bind_privileged"] is False,
+      str(row["agent_can_bind_privileged"]))
+
 print("\n== a listener is the engagement's, not the world's ==")
 call("/api/projects", "POST", {"code": "OTHER", "name": "other"}, token=admin)
 st, rows = call("/api/c2/listeners?project=OTHER", token=admin)
