@@ -303,6 +303,16 @@ SPEC = [
      "label": "Maximum tool calls per message", "type": "number", "default": 12,
      "help": "A hard stop on the agent's tool loop. Without one a confused "
              "model can spend an afternoon and a lot of money going in circles."},
+    {"key": "agent.context_tokens", "group": "Agent",
+     "label": "Context window (tokens, 0 for no limit)", "type": "number",
+     "default": 0,
+     "help": "The thread is re-sent whole on every message, tool results "
+             "and all, so a long conversation eventually exceeds what the "
+             "model will accept and the agent stops answering for everyone "
+             "on the project. Set this a little under your model's window "
+             "and Oddjob sheds the oldest tool output to fit, saying so in "
+             "the thread. 131072 is common for a local model; leave it at "
+             "0 for a hosted one with room to spare."},
     {"key": "agent.auto_remediation", "group": "Agent",
      "label": "Write remediation for findings that have none", "type": "bool",
      "default": True,

@@ -36,6 +36,7 @@ result is replaced with a note before anything is written. See
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterable
 from datetime import UTC, datetime
 
@@ -45,6 +46,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..agent import AgentError, build, run, token_kind
+from ..agent.budget import fit as budget_fit
 from ..agent.providers import anthropic_chat, openai_chat
 from ..db import get_session
 from ..models import AgentSession, AgentTurn, Project, User
@@ -55,6 +57,8 @@ from ..security import (
     visible_project_ids,
 )
 from .settings import load_all
+
+log = logging.getLogger("oddjob.agent")
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -829,6 +833,23 @@ async def chat(body: ChatRequest, project: str = Query(...),
         messages = [m.model_dump() for m in body.history]
     messages.append({"role": "user", "content": body.message})
     max_steps = max(1, min(int(cfg.get("agent.max_steps") or 12), 50))
+
+    # Make it fit before sending it. The thread is the engagement's
+    # and is re-sent whole on every message, tool results included --
+    # 200 rows a call, a dozen questions in -- so without this the
+    # conversation eventually exceeds the model's window and the
+    # agent stops answering for EVERYONE on the project at once:
+    #
+    #   ContextWindowExceededError: request (134784 tokens) exceeds
+    #   the available context size (131072 tokens)
+    #
+    # Old tool results go first because they are the one thing that
+    # can be regenerated; see app/agent/budget.py.
+    budget = int(cfg.get("agent.context_tokens") or 0)
+    messages, shed = budget_fit(messages, budget, system)
+    if shed:
+        log.info("agent: dropped %d old tool result(s) to fit %d tokens",
+                 shed, budget)
 
     try:
         if provider == "anthropic":

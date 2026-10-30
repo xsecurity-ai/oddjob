@@ -968,6 +968,7 @@ async def model_chat(session, project, system: str, tools):
     function signature and not on a provider. A test substitutes its own
     and the guarantee is exercised with no key and no network.
     """
+    from .agent.budget import fit as budget_fit
     from .agent.providers import anthropic_chat, openai_chat
     from .agent.tools import run as run_tool
     from .routers.agent import _resolve
@@ -980,8 +981,15 @@ async def model_chat(session, project, system: str, tools):
         return None, ("No model is configured for this engagement, so I "
                       "cannot answer. Set one in Site Config → Agent.")
     steps = max(1, min(int(cfg.get("agent.max_steps") or 12), 50))
+    budget = int(cfg.get("agent.context_tokens") or 0)
 
     async def chat(messages):
+        # The same ceiling the HTTP path applies, from the same
+        # setting: a Slack thread grows exactly like a browser one,
+        # and an agent that goes quiet in Slack is harder to notice
+        # rather than easier. Inside `chat`, which is where the
+        # messages exist.
+        messages, _shed = budget_fit(messages, budget, system)
         if provider == "anthropic":
             r = await anthropic_chat(token, model, system, messages, tools,
                                      run_tool, steps)
