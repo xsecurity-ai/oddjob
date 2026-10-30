@@ -17,10 +17,20 @@ type announcement struct {
 	Peer     string `json:"peer"`
 	Protocol string `json:"protocol"`
 	Port     int    `json:"port"`
+	//: Whether the Ghost terminated TLS for this connection. One
+	//: listener takes both, decided per connection from the first
+	//: bytes, so this is a property of the SESSION and not of the
+	//: port it arrived on.
+	TLS bool `json:"tls,omitempty"`
 }
 
 func announce(peer, protocol string, port int) []byte {
-	b, err := json.Marshal(announcement{Peer: peer, Protocol: protocol, Port: port})
+	return announceTLS(peer, protocol, port, false)
+}
+
+func announceTLS(peer, protocol string, port int, encrypted bool) []byte {
+	b, err := json.Marshal(announcement{Peer: peer, Protocol: protocol,
+		Port: port, TLS: encrypted})
 	if err != nil {
 		// Cannot happen for three plain fields, and if it somehow
 		// did, the peer address alone is still a session the server

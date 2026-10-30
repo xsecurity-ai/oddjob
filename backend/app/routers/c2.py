@@ -59,6 +59,11 @@ class SessionOut(BaseModel):
     peer_geo: dict | None
     #: pending | shell | scanner | silent. Whether anything on the
     #: far end behaves like a shell -- see `app/shellprobe.py`.
+    #: Whether the Ghost terminated TLS for this callback. One
+    #: listener takes both, so this is per session rather than per
+    #: port -- and it says whether the shell crossed the client's
+    #: network in cleartext.
+    encrypted: bool
     probe: str
     probe_note: str | None
     listen_port: int | None
@@ -121,6 +126,7 @@ def _out(s: ShellSession, host: str | None, agent: str | None,
     return SessionOut(
         id=s.id, project_code=code, host=host, target_id=s.target_id,
         agent_name=agent, peer=s.peer, peer_geo=_peer_geo(s.peer),
+        encrypted=bool(s.encrypted),
         probe=s.probe, probe_note=s.probe_note,
         listen_port=s.listen_port,
         state=s.state, label=s.label, connected=hub.holds(s.id),

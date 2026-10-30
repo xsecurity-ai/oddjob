@@ -414,6 +414,11 @@ export interface C2Session {
    *  `silent` is NOT `scanner`: nothing answered, which is not the
    *  same as something answering wrongly. A real shell can be slow
    *  or speak its own protocol, so these stay visible. */
+  /** Whether the ghost terminated TLS for this callback. One
+   *  listener takes both — a plain `nc` and a `socat openssl:` land
+   *  on the same port — so this is per session, and it says whether
+   *  the shell crossed the client's network in cleartext. */
+  encrypted: boolean
   probe: string
   probe_note: string | null
   listen_port: number | null

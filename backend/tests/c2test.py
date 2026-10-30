@@ -224,16 +224,26 @@ def announcement(peer, protocol=None, port=None):
                        "port": port}).encode()
 
 
-peer_, proto_, port_ = shellwork._announcement(
+peer_, proto_, port_, enc_ = shellwork._announcement(
     announcement("198.51.100.7:51000", "tcp", 443))
 check("an announcement says which listener caught it",
       (peer_, proto_, port_) == ("198.51.100.7:51000", "tcp", 443),
       f"{peer_} {proto_} {port_}")
-peer_, proto_, port_ = shellwork._announcement(
+check("...and a plain callback is not reported as encrypted",
+      enc_ is False, str(enc_))
+peer_, proto_, port_, enc_ = shellwork._announcement(
     announcement("198.51.100.7:51000"))
 check("...and a bare address from an older ghost still parses",
       (peer_, proto_, port_) == ("198.51.100.7:51000", None, None),
       f"{peer_} {proto_} {port_}")
+check("...as cleartext, which is a fact about that ghost and not a "
+      "default standing in for one", enc_ is False)
+
+# One listener takes both, so the Ghost says which this was.
+_tls = json.dumps({"peer": "198.51.100.7:51002", "protocol": "tcp",
+                   "port": 443, "tls": True}).encode()
+peer_, proto_, port_, enc_ = shellwork._announcement(_tls)
+check("a TLS callback is recorded as encrypted", enc_ is True, str(enc_))
 
 
 async def callback(peer, port=443):
