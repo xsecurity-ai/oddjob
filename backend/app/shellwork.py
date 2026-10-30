@@ -8,6 +8,7 @@ test without a websocket.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime
 
@@ -18,6 +19,7 @@ from . import proxytunnel
 from .events import broker
 from .models import Agent, Project, ShellExchange, ShellSession, Target
 from .shellhub import FLUSH_AFTER, MAX_PENDING, hub, now
+from .timeline import record
 
 log = logging.getLogger("oddjob.shellwork")
 
@@ -45,10 +47,32 @@ async def on_frame(session: AsyncSession, agent: Agent,
         await _closed(session, agent, frame)
 
 
+def _announcement(payload: bytes) -> tuple[str, str | None, int | None]:
+    """`(peer, protocol, port)` out of an ARRIVED frame.
+
+    JSON from an agent that knows which of its listeners caught the
+    callback, a bare address from one that does not. Both are
+    accepted: a Ghost holding one port predates holding several, and
+    an upgrade that silently stopped recording sessions would be a
+    worse failure than not knowing the port.
+    """
+    raw = payload.decode("utf-8", "replace")
+    if raw.startswith("{"):
+        try:
+            doc = json.loads(raw)
+            port = doc.get("port")
+            return (str(doc.get("peer") or "")[:64],
+                    str(doc.get("protocol") or "") or None,
+                    int(port) if isinstance(port, int) else None)
+        except (ValueError, TypeError):
+            pass
+    return raw[:64], None, None
+
+
 async def _arrived(session: AsyncSession, agent: Agent,
                    frame: proxytunnel.Frame) -> None:
     """A callback landed on the Ghost's listener."""
-    peer = frame.payload.decode("utf-8", "replace")[:64]
+    peer, proto, port = _announcement(frame.payload)
     host = peer.rsplit(":", 1)[0].strip("[]")
 
     # File it against the target it came from, where the project has
@@ -62,17 +86,41 @@ async def _arrived(session: AsyncSession, agent: Agent,
     s = ShellSession(
         project_id=agent.project_id,
         target_id=target.id if target else None,
-        agent_id=agent.id, peer=peer, state="open",
+        agent_id=agent.id, peer=peer, listen_port=port, state="open",
         last_seen_at=datetime.now(UTC))
     session.add(s)
+    await session.flush()
+
+    where = f"{proto or 'tcp'}/{port}" if port else "the ghost's listener"
+    if target is not None:
+        # A shell IS the compromise. Nothing else an engagement
+        # produces is better evidence that a host is owned, so this
+        # sets the same flag an imported Cobalt Strike beacon sets --
+        # and like that one it is never cleared here: losing a shell
+        # is not evidence the access is gone.
+        newly = not target.hacked
+        target.hacked = True
+        await record(session, target.id,
+                     "status" if newly else "note",
+                     f"compromised — shell caught on {where}" if newly
+                     else f"another shell caught on {where}",
+                     detail=f"session {s.id} from {peer}, via {agent.name}",
+                     actor=f"ghost:{agent.name}", source="c2")
     await session.commit()
 
     hub.attach(agent.id, frame.stream, s.id)
-    log.info("shell session %d: %s via %s", s.id, peer, agent.name)
-    await broker.publish("c2", action="arrived",
-                         project=await _code(session, agent.project_id),
+    log.info("shell session %d: %s on %s via %s", s.id, peer, where, agent.name)
+    code = await _code(session, agent.project_id)
+    await broker.publish("c2", action="arrived", project=code,
                          session=s.id, peer=peer,
                          host=target.host if target else None)
+    if target is not None:
+        # The pill lives on the target, so the Targets grid and the
+        # host modal have to be told too. Publishing `c2` alone left
+        # a host that had just been owned still reading as clean
+        # until something else happened to refresh it.
+        await broker.publish("targets", action="update", project=code,
+                             host=target.host)
 
 
 async def _data(session: AsyncSession, agent: Agent,

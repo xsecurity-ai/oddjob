@@ -19,10 +19,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import audit
+from .. import audit, listeners
 from ..db import get_session
 from ..events import broker
-from ..models import Agent, Project, ShellExchange, ShellSession, Target, User
+from ..models import Agent, Project, ShellExchange, ShellListener, ShellSession, Target, User
 from ..security import get_current_user, require_project
 from ..shellhub import hub
 
@@ -243,3 +243,179 @@ async def relabel(sid: int, body: LabelIn, project: str = Query(...),
     s.label = (body.label or "").strip()[:200] or None
     await session.commit()
     return {"ok": True, "label": s.label}
+
+
+# ------------------------------------------------------------ listeners
+#
+# A listener is the thing that makes a callback possible at all, and
+# until now it was implicit: a port came up because a task asked for
+# one and went away when the task finished. That is the wrong
+# lifetime for a shell. A payload already sent calls back on its own
+# schedule -- minutes later, or at 2am when cron fires -- and the port
+# has to be there when it does.
+
+
+class ListenerOut(BaseModel):
+    id: int
+    agent_id: int
+    agent_name: str | None
+    #: Whether Oddjob is holding that Ghost's shell tunnel right now.
+    #: A listener on a Ghost nothing can reach is not catching
+    #: anything, and the row has to say so rather than showing the
+    #: last state it reported before it went away.
+    agent_online: bool
+    protocol: str
+    port: int
+    enabled: bool
+    state: str
+    state_detail: str | None
+    state_at: str | None
+    note: str | None
+    #: How many shells have landed on it. The number that says whether
+    #: a listener is doing its job.
+    sessions: int
+
+
+class ListenerIn(BaseModel):
+    agent_id: int
+    protocol: str = Field(default="tcp", pattern="^(tcp|udp)$")
+    #: Several at once, because an operator setting up a catch opens
+    #: the handful of ports a client's egress filter is likely to
+    #: allow rather than one and then another.
+    ports: list[int] = Field(min_length=1, max_length=32)
+    note: str | None = Field(default=None, max_length=300)
+
+
+class ListenerPatch(BaseModel):
+    enabled: bool | None = None
+    note: str | None = Field(default=None, max_length=300)
+
+
+def _listener_out(r: ShellListener, agent_name: str | None,
+                  sessions: int) -> ListenerOut:
+    return ListenerOut(
+        id=r.id, agent_id=r.agent_id, agent_name=agent_name,
+        agent_online=hub.has_tunnel(r.agent_id),
+        protocol=r.protocol, port=r.port, enabled=bool(r.enabled),
+        state=r.state, state_detail=r.state_detail,
+        state_at=r.state_at.isoformat() if r.state_at else None,
+        note=r.note, sessions=sessions)
+
+
+@router.get("/listeners", response_model=list[ListenerOut])
+async def list_listeners(project: str = Query(...),
+                         pr: Project = Depends(require_project("readonly")),
+                         _: User = Depends(get_current_user),
+                         session: AsyncSession = Depends(get_session)):
+    """Which Ghost is holding which port on this engagement.
+
+    Counting sessions by `(agent, port)` rather than by a foreign key
+    to the listener row: a session is evidence and outlives the
+    configuration that caught it, so deleting a listener must not
+    take its shells with it or renumber what they landed on.
+    """
+    rows = (await session.execute(
+        select(ShellListener, Agent.name)
+        .outerjoin(Agent, Agent.id == ShellListener.agent_id)
+        .where(ShellListener.project_id == pr.id)
+        .order_by(Agent.name, ShellListener.protocol,
+                  ShellListener.port))).all()
+    counts = {(a, p): n for a, p, n in (await session.execute(
+        select(ShellSession.agent_id, ShellSession.listen_port,
+               func.count(ShellSession.id))
+        .where(ShellSession.project_id == pr.id)
+        .group_by(ShellSession.agent_id, ShellSession.listen_port))).all()}
+    return [_listener_out(r, name, counts.get((r.agent_id, r.port), 0))
+            for r, name in rows]
+
+
+@router.post("/listeners", response_model=dict)
+async def add_listeners(body: ListenerIn, project: str = Query(...),
+                        pr: Project = Depends(require_project("user")),
+                        user: User = Depends(get_current_user),
+                        session: AsyncSession = Depends(get_session)):
+    """Tell a Ghost to hold these ports.
+
+    `user`, not `readonly`: this binds a port on infrastructure the
+    engagement owns and invites a connection to it.
+
+    Nothing is pushed. The Ghost picks it up on its next heartbeat,
+    which is seconds, and the row says `pending` until it reports --
+    saying "listening" the moment the row is written would be a claim
+    about a bind that has not happened.
+    """
+    a = await session.get(Agent, body.agent_id)
+    if a is None or a.project_id != pr.id:
+        raise HTTPException(404, f"no ghost {body.agent_id} in {pr.code}")
+    if a.status == "disabled":
+        # A retired Ghost will never beat again, so the row would sit
+        # at `pending` for ever looking like a slow agent.
+        raise HTTPException(409, f"{a.name} is retired and will not take a listener")
+
+    made, refused = await listeners.add(session, a, body.protocol, body.ports,
+                                        note=body.note, actor=user)
+    if made:
+        await session.commit()
+        await audit.record(
+            session, "ui", "c2.listener.add", user=user, commit=True,
+            project_code=pr.code,
+            detail=f"{a.name}: {body.protocol} "
+                   + ", ".join(str(r.port) for r in made))
+        await broker.publish("c2", action="listeners", project=pr.code,
+                             agent=a.id)
+    return {"ok": True, "added": [r.port for r in made], "refused": refused,
+            "note": f"{a.name} picks this up on its next heartbeat."}
+
+
+@router.patch("/listeners/{lid}", response_model=dict)
+async def patch_listener(lid: int, body: ListenerPatch,
+                         project: str = Query(...),
+                         pr: Project = Depends(require_project("user")),
+                         user: User = Depends(get_current_user),
+                         session: AsyncSession = Depends(get_session)):
+    """Turn one off, or back on, or retitle it."""
+    r = await session.get(ShellListener, lid)
+    if r is None or r.project_id != pr.id:
+        raise HTTPException(404, f"no listener {lid} in {pr.code}")
+    if body.enabled is not None and bool(body.enabled) != bool(r.enabled):
+        r.enabled = bool(body.enabled)
+        # Back to pending either way: what the Ghost last said was
+        # about a port it is no longer being asked to hold, and
+        # showing "bound" against a disabled listener is a lie the
+        # operator would have no way to catch.
+        r.state, r.state_detail, r.state_at = "pending", None, None
+    if body.note is not None:
+        r.note = body.note or None
+    await session.commit()
+    await audit.record(
+        session, "ui", "c2.listener.patch", user=user, commit=True,
+        project_code=pr.code,
+        detail=f"{r.protocol}/{r.port} on ghost {r.agent_id}: "
+               + ("enabled" if r.enabled else "disabled"))
+    await broker.publish("c2", action="listeners", project=pr.code,
+                         agent=r.agent_id)
+    return {"ok": True, "enabled": bool(r.enabled)}
+
+
+@router.delete("/listeners/{lid}", status_code=204)
+async def delete_listener(lid: int, project: str = Query(...),
+                          pr: Project = Depends(require_project("user")),
+                          user: User = Depends(get_current_user),
+                          session: AsyncSession = Depends(get_session)):
+    """Stop holding the port.
+
+    The sessions it caught stay. They are evidence about a host and
+    have nothing to do with the configuration that happened to catch
+    them -- see the note on counting in `list_listeners`.
+    """
+    r = await session.get(ShellListener, lid)
+    if r is None or r.project_id != pr.id:
+        raise HTTPException(404, f"no listener {lid} in {pr.code}")
+    agent_id, what = r.agent_id, f"{r.protocol}/{r.port}"
+    await session.delete(r)
+    await session.commit()
+    await audit.record(
+        session, "ui", "c2.listener.delete", user=user, commit=True,
+        project_code=pr.code, detail=f"{what} on ghost {agent_id}")
+    await broker.publish("c2", action="listeners", project=pr.code,
+                         agent=agent_id)

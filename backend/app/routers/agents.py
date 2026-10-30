@@ -56,6 +56,7 @@ from .. import (
     countrygate,
     geoip,
     heap,
+    listeners,
     lookuphistory,
     proxyauth,
     proxyhub,
@@ -494,6 +495,16 @@ class AgentPatch(BaseModel):
     #: ghost's next heartbeat rather than immediately, which is
     #: seconds, not minutes.
     debug: bool | None = None
+    #: Ports this ghost should hold open for callbacks.
+    #:
+    #: DECLARATIVE: the list is the configuration, so saving `[80]`
+    #: after `[80, 443]` stops 443. `None` is "no opinion" and leaves
+    #: that protocol alone -- which is what an older client sending
+    #: neither field means, and the difference matters: reading a
+    #: missing field as `[]` would have every existing client close
+    #: every listener on the next name change.
+    listen_tcp: list[int] | None = None
+    listen_udp: list[int] | None = None
 
 
 class RoutingIn(BaseModel):
@@ -1829,6 +1840,15 @@ async def set_agent(agent_id: int, body: AgentPatch | None = None,
                         if r.strip()})) or None
         if body.notes is not None:
             a.notes = body.notes
+        if body.listen_tcp is not None or body.listen_udp is not None:
+            # `admin` on the project, like everything else in this
+            # handler. Opening a port on the engagement's own
+            # infrastructure and inviting a connection to it is not a
+            # readonly act.
+            refused = await listeners.set_for_agent(
+                session, a, tcp=body.listen_tcp, udp=body.listen_udp)
+            if refused:
+                raise HTTPException(422, "; ".join(refused[:5]))
         if body.debug is not None:
             # Turning it off drops what was already collected. The
             # store is a diagnostic buffer, not a record: it names the
@@ -3038,6 +3058,15 @@ class HeartbeatIn(BaseModel):
     """
     #: False while at capacity. The queue is held until true.
     ready: bool | None = None
+    #: What became of the listeners this agent was told to hold:
+    #: `[{"id": 3, "bound": true, "error": ""}]`.
+    #:
+    #: Absent from an older agent, and absent is NOT "they all
+    #: failed". A row nobody has reported on stays `pending`, which
+    #: is the honest answer -- writing `failed` for silence would put
+    #: a red cross against a port that is very likely fine. See
+    #: `app/listeners.report`.
+    listeners: list[dict] | None = None
     #: What it is working on, 0/None when idle. Kept for agents that
     #: run one task at a time; `running_tasks` is the general form.
     running_task: int | None = None
@@ -3163,6 +3192,14 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
         return {"ok": True, "task": None, "shutdown": True,
                 "reason": "this agent was killed from Oddjob"}
     a.status = "online"
+
+    # What this agent should be holding, and what it says it managed.
+    # Both happen before any of the early returns below: a Ghost at
+    # capacity still holds its ports, and an agent reporting a failed
+    # bind has to be heard even on a beat that hands out no work.
+    if body is not None and body.listeners is not None:
+        await listeners.report(session, a.id, body.listeners)
+    want = await listeners.desired(session, a.id)
 
     # Before working out what this agent can take: put back anything
     # the fleet's dead are still holding, so it can be among what this
@@ -3359,14 +3396,14 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
             await session.commit()
             return {"ok": True, "task": None, "holding": live,
                     "slots_free": 0, "max_parallel": allowed,
-                    "debug": bool(a.debug)}
+                    "listeners": want, "debug": bool(a.debug)}
         free = max(0, min(free, allowed - len(live)))
 
     if free <= 0:
         await session.commit()
         return {"ok": True, "task": None, "holding": sorted(doing),
                 "slots_free": 0, "max_parallel": allowed,
-                "debug": bool(a.debug)}
+                "listeners": want, "debug": bool(a.debug)}
 
     # Up to `free`, not one. Work addressed to this agent by name
     # comes first: the operator chose it, and a routing policy should
@@ -3514,7 +3551,7 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
     # nothing at all by a server that had moved on without it.
     return {"ok": True, "task": out[0] if out else None, "tasks": out,
             "slots_free": free, "max_parallel": allowed,
-            "debug": bool(a.debug)}
+            "listeners": want, "debug": bool(a.debug)}
 
 
 #: How many lines one agent keeps. Oldest are dropped past this.

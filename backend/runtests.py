@@ -70,6 +70,7 @@ SUITES = [
     ("tests/geoiptest.py",     TMP / "ms-geoip.db"),
     ("tests/countrytest.py",   TMP / "ms-country.db"),
     ("tests/assettest.py",     TMP / "ms-asset.db"),
+    ("tests/c2test.py",        TMP / "ms-c2.db"),
 ]
 
 
