@@ -2865,6 +2865,33 @@ class Agent(Base, TimestampMixin):
     #: What qualifies it: which lookup failed, what the address is not.
     #: Prose from the agent, for a tooltip rather than a column.
     outbound_ip_note: Mapped[str | None] = mapped_column(Text)
+    #: What `outbound_ip` is CALLED, from a PUBLIC resolver.
+    #:
+    #: 8.8.8.8 and not the agent's own resolver, which is the whole
+    #: point: a Ghost in a VPC or behind split-horizon DNS gets an
+    #: internal answer -- `ip-10-0-1-7`, or a corporate name -- and
+    #: the question this answers is what the CLIENT sees when our
+    #: traffic reaches them. Resolved on the agent for the same
+    #: reason: this server's resolver is somewhere else entirely.
+    public_name: Mapped[str | None] = mapped_column(String(253))
+    #: Why there is no name: no PTR, not a public address, or the
+    #: resolver could not be reached. The third is not the first, and
+    #: a UI that shows a blank cell for all three is hiding the one
+    #: that means our lookup failed rather than that no name exists.
+    public_name_note: Mapped[str | None] = mapped_column(String(300))
+
+    #: Whether this host can bind a port below 1024, as the AGENT
+    #: reports it, and whether it was able to find out.
+    #:
+    #: Two columns because "no" and "we could not tell" are different
+    #: answers. A Ghost deployed with `--cap-drop=ALL` and only
+    #: NET_RAW/NET_ADMIN is uid 0, scans perfectly, and cannot hold
+    #: 443 -- which is the port a callback listener most wants. That
+    #: failed at bind time with `permission denied` and nothing
+    #: before it said why; this is so the port picker can.
+    can_bind_privileged: Mapped[bool | None] = mapped_column(Boolean)
+    bind_note: Mapped[str | None] = mapped_column(String(300))
+
     #: JSON list of every usable address on the host. A jump box
     #: usually has one facing us and another facing the target.
     interfaces: Mapped[str | None] = mapped_column(Text)

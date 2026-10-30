@@ -335,6 +335,21 @@ class AgentOut(BaseModel):
     #: a real egress address are the same shape.
     outbound_ip_source: str | None = None
     outbound_ip_note: str | None = None
+    #: What `outbound_ip` is CALLED, from a PUBLIC resolver -- the
+    #: agent asks 8.8.8.8, not its own, because its own answers about
+    #: its own network and this server's answers about a third one.
+    public_name: str | None = None
+    #: Why there is none: no PTR, not a public address, or the
+    #: resolver was unreachable. The last is not the first.
+    public_name_note: str | None = None
+    #: Whether this host can hold a port below 1024, and whether the
+    #: agent could find out. Both, because "no" and "could not tell"
+    #: are different and only one of them is worth warning about.
+    #: False when the ghost says it cannot bind below 1024. NULL
+    #: means it has not told us, which is not the same -- warning on
+    #: NULL would warn about ghosts that are fine.
+    can_bind_privileged: bool | None = None
+    bind_note: str | None = None
     interfaces: list[str] = []
     #: The OS of the machine underneath, where it differs from
     #: `platform`. Null when undetermined — never defaulted to the
@@ -461,6 +476,19 @@ class RegisterIn(BaseModel):
     #: does not recognise is still more use than silence.
     outbound_ip_source: str | None = Field(None, max_length=32)
     outbound_ip_note: str | None = None
+    #: What `outbound_ip` is CALLED, from a PUBLIC resolver -- the
+    #: agent asks 8.8.8.8, not its own, because its own answers about
+    #: its own network and this server's answers about a third one.
+    public_name: str | None = Field(None, max_length=253)
+    #: Why there is none: no PTR, not a public address, or the
+    #: resolver was unreachable. The last is not the first.
+    public_name_note: str | None = Field(None, max_length=300)
+    #: Whether this host can hold a port below 1024, and whether the
+    #: agent could find out. Both, because "no" and "could not tell"
+    #: are different and only one is worth warning about.
+    can_bind_privileged: bool | None = None
+    can_bind_privileged_known: bool | None = None
+    bind_note: str | None = Field(None, max_length=300)
     interfaces: list[str] = []
     #: The OS underneath, where it differs from `platform`. Omitted by
     #: an older Ghost and by a newer one that could not tell.
@@ -655,6 +683,8 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         interfaces=_jlist(a.interfaces),
         outbound_ip_source=a.outbound_ip_source,
         outbound_ip_note=a.outbound_ip_note,
+        public_name=a.public_name, public_name_note=a.public_name_note,
+        can_bind_privileged=a.can_bind_privileged, bind_note=a.bind_note,
         host_platform=a.host_platform,
         host_platform_source=a.host_platform_source,
         container=a.container,
@@ -3014,6 +3044,16 @@ async def register(body: RegisterIn, request: Request,
     a.outbound_ip = body.outbound_ip
     a.outbound_ip_source = body.outbound_ip_source or None
     a.outbound_ip_note = body.outbound_ip_note or None
+    a.public_name = (body.public_name or None)
+    a.public_name_note = (body.public_name_note or None)
+    # NULL when the agent could not tell, not False. False is a claim
+    # that this host cannot bind 443, and the port picker warns on
+    # it -- warning about a Ghost that is actually fine is how an
+    # operator learns to ignore the warning.
+    a.can_bind_privileged = (
+        bool(body.can_bind_privileged)
+        if body.can_bind_privileged_known else None)
+    a.bind_note = (body.bind_note or None)
     a.interfaces = json.dumps(body.interfaces or [])
     # Blank is stored as NULL, not "". An older Ghost sends nothing and
     # a newer one that could not tell sends nothing, and both mean "no

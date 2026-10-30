@@ -264,6 +264,19 @@ class ListenerOut(BaseModel):
     #: anything, and the row has to say so rather than showing the
     #: last state it reported before it went away.
     agent_online: bool
+    #: Where a payload is told to call back TO. The Ghost's public
+    #: address, and what it is called from a public resolver --
+    #: together, because an operator writing a payload needs one of
+    #: them and which one depends on the target.
+    agent_ip: str | None
+    agent_name_public: str | None
+    #: Why there is no name, when there is none. "no PTR record" and
+    #: "the resolver could not be reached" are different facts and
+    #: only the first is about the address.
+    agent_name_note: str | None
+    #: False when the Ghost says it cannot bind below 1024. NULL
+    #: means it has not told us, which is not the same.
+    agent_can_bind_privileged: bool | None
     protocol: str
     port: int
     enabled: bool
@@ -291,11 +304,17 @@ class ListenerPatch(BaseModel):
     note: str | None = Field(default=None, max_length=300)
 
 
-def _listener_out(r: ShellListener, agent_name: str | None,
+def _listener_out(r: ShellListener, agent: Agent | None,
                   sessions: int) -> ListenerOut:
     return ListenerOut(
-        id=r.id, agent_id=r.agent_id, agent_name=agent_name,
+        id=r.id, agent_id=r.agent_id,
+        agent_name=agent.name if agent else None,
         agent_online=hub.has_tunnel(r.agent_id),
+        agent_ip=agent.outbound_ip if agent else None,
+        agent_name_public=agent.public_name if agent else None,
+        agent_name_note=agent.public_name_note if agent else None,
+        agent_can_bind_privileged=(
+            agent.can_bind_privileged if agent else None),
         protocol=r.protocol, port=r.port, enabled=bool(r.enabled),
         state=r.state, state_detail=r.state_detail,
         state_at=r.state_at.isoformat() if r.state_at else None,
@@ -315,7 +334,7 @@ async def list_listeners(project: str = Query(...),
     take its shells with it or renumber what they landed on.
     """
     rows = (await session.execute(
-        select(ShellListener, Agent.name)
+        select(ShellListener, Agent)
         .outerjoin(Agent, Agent.id == ShellListener.agent_id)
         .where(ShellListener.project_id == pr.id)
         .order_by(Agent.name, ShellListener.protocol,
@@ -325,8 +344,8 @@ async def list_listeners(project: str = Query(...),
                func.count(ShellSession.id))
         .where(ShellSession.project_id == pr.id)
         .group_by(ShellSession.agent_id, ShellSession.listen_port))).all()}
-    return [_listener_out(r, name, counts.get((r.agent_id, r.port), 0))
-            for r, name in rows]
+    return [_listener_out(r, agent, counts.get((r.agent_id, r.port), 0))
+            for r, agent in rows]
 
 
 @router.post("/listeners", response_model=dict)

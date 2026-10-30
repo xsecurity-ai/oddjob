@@ -110,6 +110,22 @@ type RegisterReq struct {
 	//: not. Prose, for a tooltip rather than a column.
 	OutboundIPNote string   `json:"outbound_ip_note,omitempty"`
 	Interfaces     []string `json:"interfaces,omitempty"`
+	//: What `OutboundIP` is CALLED, asked of a public resolver
+	//: (8.8.8.8) rather than the host's own. A Ghost in a VPC or
+	//: behind split-horizon DNS gets an internal answer from its
+	//: resolver, and the question is what the CLIENT sees.
+	PublicName string `json:"public_name,omitempty"`
+	//: Why there is no name, when there is none: no PTR, not a
+	//: public address, or the resolver could not be reached. Three
+	//: different facts, and the last is not the second.
+	PublicNameNote string `json:"public_name_note,omitempty"`
+	//: Whether this host can bind a port below 1024, and whether we
+	//: were able to find out. A Ghost deployed without
+	//: CAP_NET_BIND_SERVICE is uid 0, scans perfectly, and cannot
+	//: hold 443 -- which is the port a callback most wants.
+	CanBindPrivileged      bool   `json:"can_bind_privileged,omitempty"`
+	CanBindPrivilegedKnown bool   `json:"can_bind_privileged_known,omitempty"`
+	BindNote               string `json:"bind_note,omitempty"`
 	//: The OS of the machine underneath, where that differs from
 	//: Platform: a Linux container on WSL2 on Windows Server reports
 	//: platform=linux, host_platform=windows. Empty when it could not

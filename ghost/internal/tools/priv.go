@@ -25,6 +25,48 @@ func Privileged() bool {
 	}
 }
 
+// PrivilegedBindCapable answers "can this Ghost hold port 443".
+//
+// Three states, because there are three answers and the middle one is
+// the one that matters: on Linux the kernel is asked directly; off
+// Linux we do not know and must not guess; and a non-root process
+// without the capability simply cannot.
+//
+// This exists because a listener on 443 fails with `permission
+// denied` at BIND time, which is long after the operator chose the
+// port -- and the message says nothing about capabilities. A Ghost
+// deployed with `--cap-drop=ALL --cap-add=NET_RAW --cap-add=NET_ADMIN`
+// is uid 0, scans perfectly, and cannot bind 443. That is a real
+// deployment, it happened, and nothing before the failure said so.
+//
+// -> (capable, known, why)
+func PrivilegedBindCapable() (bool, bool, string) {
+	if runtime.GOOS == "windows" {
+		// Windows has no equivalent floor: an elevated process binds
+		// what it likes, and an unelevated one is refused by a
+		// different mechanism than this.
+		if Privileged() {
+			return true, true, "elevated"
+		}
+		return false, true, "not elevated, so a privileged port is refused"
+	}
+	if has, known := linuxEffectiveBindService(); known {
+		if has {
+			return true, true, "holds cap_net_bind_service"
+		}
+		return false, true, "CAP_NET_BIND_SERVICE is not in this " +
+			"process's capability set, so ports below 1024 cannot be " +
+			"bound — in a container, add --cap-add=NET_BIND_SERVICE"
+	}
+	// No procfs, or not Linux. Root USUALLY can, but "usually" is not
+	// something to report as a fact: unknown leaves Oddjob saying it
+	// does not know rather than promising a bind that may fail.
+	if Privileged() {
+		return true, false, "running as root; capabilities could not be read"
+	}
+	return false, false, "not root, and capabilities could not be read"
+}
+
 // RawSocketCapable is the softer question: root is one way, but on
 // Linux a capability on the binary is another, and a box set up that
 // way can SYN scan without the Ghost being root at all.

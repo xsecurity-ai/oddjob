@@ -331,6 +331,20 @@ export interface C2Listener {
    *  now. A listener on a Ghost nothing can reach is catching
    *  nothing we can see. */
   agent_online: boolean
+  /** Where a payload is told to call back TO: the ghost's public
+   *  address, and what it is called from a public resolver. Which
+   *  one you want depends on the target — an address always works,
+   *  a name survives the address changing. */
+  agent_ip: string | null
+  agent_name_public: string | null
+  /** Why there is no name. "no PTR record" and "the resolver could
+   *  not be reached" are different facts and only the first is
+   *  about the address. */
+  agent_name_note: string | null
+  /** False when the ghost says it cannot bind below 1024. `null`
+   *  means it has not told us, which is not the same — warning on
+   *  null would warn about ghosts that are fine. */
+  agent_can_bind_privileged: boolean | null
   protocol: string
   port: number
   enabled: boolean
@@ -786,6 +800,14 @@ export interface GhostDebugOut {
 }
 
 export interface GhostAgent {
+  /** False when the ghost says it cannot bind below 1024, so 443 and
+   *  80 will fail. `null` means it has not told us — warning on null
+   *  would warn about ghosts that are fine. */
+  can_bind_privileged?: boolean | null
+  bind_note?: string | null
+  /** What its public address is called, from a public resolver. */
+  public_name?: string | null
+  public_name_note?: string | null
   id: number
   project_code: string
   name: string

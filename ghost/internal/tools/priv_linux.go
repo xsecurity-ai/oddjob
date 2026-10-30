@@ -12,6 +12,12 @@ import (
 // : SYN scanning, OS fingerprinting and masscan.
 const capNetRaw = 13
 
+// : CAP_NET_BIND_SERVICE is capability 10. Binding below
+// : `net.ipv4.ip_unprivileged_port_start` (1024 by default) needs it,
+// : and 443 is the port a callback listener most wants -- client
+// : egress is usually filtered to browser ports.
+const capNetBindService = 10
+
 // linuxEffectiveNetRaw reports whether this process can actually open a
 // raw socket, as opposed to merely being uid 0.
 //
@@ -26,6 +32,24 @@ const capNetRaw = 13
 // Read from the kernel rather than inferred: /proc/self/status is the
 // authority on what this process actually holds.
 func linuxEffectiveNetRaw() (bool, bool) {
+	return linuxEffectiveCap(capNetRaw)
+}
+
+// linuxEffectiveBindService reports whether this process can bind a
+// privileged port.
+//
+// Separate from being root for exactly the reason above, and it cost
+// an afternoon to find out: a Ghost deployed with `--cap-drop=ALL
+// --cap-add=NET_RAW --cap-add=NET_ADMIN` is uid 0, scans perfectly,
+// and cannot bind 443 -- so a listener configured on it fails with
+// `permission denied` and nothing before that moment says why.
+// Reported so Oddjob can say so while the port is being chosen.
+func linuxEffectiveBindService() (bool, bool) {
+	return linuxEffectiveCap(capNetBindService)
+}
+
+// linuxEffectiveCap reads one bit of CapEff. -> (held, known).
+func linuxEffectiveCap(bit uint) (bool, bool) {
 	raw, err := os.ReadFile("/proc/self/status")
 	if err != nil {
 		// No procfs to ask. Unknown, not false — saying "no" here
@@ -41,7 +65,7 @@ func linuxEffectiveNetRaw() (bool, bool) {
 		if err != nil {
 			return false, false
 		}
-		return v&(1<<capNetRaw) != 0, true
+		return v&(1<<bit) != 0, true
 	}
 	return false, false
 }
