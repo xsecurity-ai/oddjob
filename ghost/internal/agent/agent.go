@@ -22,6 +22,8 @@ import (
 	"github.com/xsecurity-ai/oddjob/ghost/internal/identity"
 	"github.com/xsecurity-ai/oddjob/ghost/internal/recon"
 	"github.com/xsecurity-ai/oddjob/ghost/internal/retire"
+	"github.com/xsecurity-ai/oddjob/ghost/internal/shell"
+	"github.com/xsecurity-ai/oddjob/ghost/internal/socksrelay"
 	"github.com/xsecurity-ai/oddjob/ghost/internal/spool"
 	"github.com/xsecurity-ai/oddjob/ghost/internal/tasks"
 	"github.com/xsecurity-ai/oddjob/ghost/internal/tools"
@@ -48,6 +50,11 @@ type Agent struct {
 	cli            *client.Client
 	sp             *spool.Spool
 	id             *identity.Identity
+	// shells holds the ports Oddjob has asked this Ghost to keep
+	// open for callbacks, and the one tunnel home they share. Nil
+	// until the first beat that asks for one: a Ghost nobody has
+	// given a listener should hold no socket and dial nothing.
+	shells *shell.Manager
 	// When this process came up. The dead-man switch falls back to it
 	// when there has never been a successful contact to measure from,
 	// so a Ghost that enrolled and immediately lost the server still
@@ -632,6 +639,11 @@ func (a *Agent) beat(ctx context.Context) (*client.HeartbeatResp, error) {
 		// got what it needs" -- today, a browser. Sorted, so a
 		// heartbeat that says the same thing looks the same.
 		CannotRun: cannotRun(),
+		// What became of the ports it was told to hold. Sent on the
+		// beat AFTER the one that asked, which is seconds -- the
+		// row says `pending` until then, and that is the honest
+		// state rather than an optimistic "listening".
+		Listeners: a.listenerReport(),
 	})
 }
 
@@ -670,6 +682,57 @@ func (a *Agent) onHeartbeat(ctx context.Context, resp *client.HeartbeatResp) {
 	a.reclaimLogger()
 	a.adoptServerParallel(resp.MaxParallel)
 	a.adoptDebug(ctx, resp.Debug)
+	a.adoptListeners(ctx, resp.Listeners)
+}
+
+// adoptListeners makes the ports this Ghost holds match what Oddjob
+// asked for.
+//
+// Reconciled against the WHOLE desired set on every beat rather than
+// driven by commands. An agent that was offline for an hour missed
+// every command sent in it, so its ports would be whatever the last
+// message it happened to receive said -- which is the state nobody
+// can reason about. A full list makes a reconnecting agent correct
+// within one beat whatever it missed.
+//
+// Ports already held are left alone. Rebinding on every beat would
+// drop every shell on them every few seconds, which is the one thing
+// this feature exists to prevent.
+func (a *Agent) adoptListeners(ctx context.Context, want []shell.Spec) {
+	a.mu.Lock()
+	m := a.shells
+	a.mu.Unlock()
+	if m == nil {
+		if len(want) == 0 {
+			// Nothing asked for and nothing held: do not dial, do
+			// not allocate. A Ghost with no listeners should look
+			// in netstat exactly like one that has never heard of
+			// them.
+			return
+		}
+		m = shell.NewManager(func(dctx context.Context) (shell.Transport, error) {
+			return socksrelay.DialPath(dctx, a.cfg.Server,
+				socksrelay.ShellPath, a.id)
+		})
+		a.mu.Lock()
+		a.shells = m
+		a.mu.Unlock()
+	}
+	m.Reconcile(ctx, want)
+}
+
+// listenerReport is what to tell Oddjob about its listeners, or nil
+// when this Ghost holds none. Nil and not an empty slice: the field
+// is omitempty, and an omission means "no report" rather than "all
+// of them failed".
+func (a *Agent) listenerReport() []shell.Status {
+	a.mu.Lock()
+	m := a.shells
+	a.mu.Unlock()
+	if m == nil {
+		return nil
+	}
+	return m.Report()
 }
 
 // reclaimLogger puts our writer back when a library has taken the

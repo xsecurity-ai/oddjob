@@ -4098,7 +4098,8 @@ async def submit_result(task_id: int, body: ResultIn,
 
 
 # ------------------------------------------------------ proxy tunnel
-async def _tunnel_agent(ws: WebSocket, session: AsyncSession) -> Agent | None:
+async def _tunnel_agent(ws: WebSocket, session: AsyncSession,
+                        path: str) -> Agent | None:
     """Authenticate a tunnel upgrade. -> the agent, or None to refuse.
 
     The SAME Ed25519 scheme as every other request from a Ghost,
@@ -4127,9 +4128,12 @@ async def _tunnel_agent(ws: WebSocket, session: AsyncSession) -> Agent | None:
     if a is None or not a.public_key:
         return None
     # Empty body: a handshake has none, and the agent signs the same
-    # shape. `TUNNEL_PATH` is a constant on both sides because the
-    # signature covers it.
-    if not agentcrypto.verify(a.public_key, sig, "GET", TUNNEL_PATH, b"",
+    # shape. The PATH is signed too, and it is the path actually
+    # being dialled -- a signature over the proxy tunnel accepted on
+    # the shell tunnel would be a signature that proves nothing about
+    # which socket the agent meant to open. The constants are spelled
+    # out on both sides because of that.
+    if not agentcrypto.verify(a.public_key, sig, "GET", path, b"",
                               ts, nonce):
         return None
     return a
@@ -4138,6 +4142,13 @@ async def _tunnel_agent(ws: WebSocket, session: AsyncSession) -> Agent | None:
 #: Must match `socksrelay.TunnelPath` in the agent. The signature
 #: covers the path, so a disagreement is a 401 on every tunnel.
 TUNNEL_PATH = "/api/ghosts/proxy/tunnel"
+
+
+#: Must match `socksrelay.ShellPath` in the agent, for the same
+#: reason `TUNNEL_PATH` must match `socksrelay.TunnelPath`: the
+#: signature covers the path, so a disagreement is a 401 on every
+#: shell tunnel.
+SHELL_PATH = "/api/ghosts/shell/tunnel"
 
 
 @router.websocket("/shell/tunnel")
@@ -4157,7 +4168,7 @@ async def shell_tunnel(ws: WebSocket,
     listener because an operator asked it to, so the decision is
     already made upstream of here.
     """
-    agent = await _tunnel_agent(ws, session)
+    agent = await _tunnel_agent(ws, session, SHELL_PATH)
     if agent is None:
         await ws.accept()
         await ws.close(code=1008, reason="tunnel authentication failed")
@@ -4208,7 +4219,7 @@ async def proxy_tunnel(ws: WebSocket,
     decision made in Oddjob rather than something an agent can
     arrange for itself.
     """
-    agent = await _tunnel_agent(ws, session)
+    agent = await _tunnel_agent(ws, session, TUNNEL_PATH)
     if agent is None:
         # 1008 is "policy violation", the nearest thing a WebSocket
         # close has to 401. The handshake is accepted first because

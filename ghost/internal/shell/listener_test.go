@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"strconv"
 	"strings"
@@ -75,16 +76,28 @@ func start(t *testing.T) (*Listener, *pipe, context.CancelFunc) {
 	t.Helper()
 	p := newPipe()
 	ctx, cancel := context.WithCancel(context.Background())
+	m := NewMux(p)
+	go func() { _ = m.Run(ctx) }()
 	// Port 0: the OS picks a free one. A fixed port in a test is a
 	// test that fails when two of them run at once.
-	l, err := Open(ctx, p, 0)
+	l, err := Open(ctx, m, 0)
 	if err != nil {
 		cancel()
 		t.Fatalf("open: %v", err)
 	}
 	go func() { _ = l.Run(ctx) }()
-	t.Cleanup(func() { _ = l.Close(); cancel() })
+	t.Cleanup(func() { _ = l.Close(); m.Close(); cancel() })
 	return l, p, cancel
+}
+
+// peerOf reads the announcement an ARRIVED frame carries.
+func peerOf(t *testing.T, f socksrelay.Frame) announcement {
+	t.Helper()
+	var a announcement
+	if err := json.Unmarshal(f.Payload, &a); err != nil {
+		t.Fatalf("arrival is not an announcement: %q", f.Payload)
+	}
+	return a
 }
 
 func dial(t *testing.T, l *Listener) net.Conn {
@@ -107,15 +120,22 @@ func TestCatchesACallback(t *testing.T) {
 	arrived := p.of(socksrelay.ARRIVED)[0]
 	// Provenance: the peer address is the only thing distinguishing
 	// two callbacks on one port.
-	if !strings.HasPrefix(string(arrived.Payload), "127.0.0.1:") {
-		t.Errorf("arrival should carry the peer, got %q", arrived.Payload)
+	// Provenance: the peer address AND which of this ghost's ports
+	// caught it. Six listeners make "where did this come from" a
+	// real question.
+	got := peerOf(t, arrived)
+	if !strings.HasPrefix(got.Peer, "127.0.0.1:") {
+		t.Errorf("arrival should carry the peer, got %q", got.Peer)
+	}
+	if got.Protocol != "tcp" || got.Port != l.Port {
+		t.Errorf("arrival should say which listener caught it, got %+v", got)
 	}
 
 	_, _ = c.Write([]byte("uid=0(root)\n"))
 	waitFor(t, "the output", func() bool { return len(p.of(socksrelay.DATA)) > 0 })
-	got := string(p.of(socksrelay.DATA)[0].Payload)
-	if got != "uid=0(root)\n" {
-		t.Errorf("output came back as %q", got)
+	out := string(p.of(socksrelay.DATA)[0].Payload)
+	if out != "uid=0(root)\n" {
+		t.Errorf("output came back as %q", out)
 	}
 	if arrived.Stream != p.of(socksrelay.DATA)[0].Stream {
 		t.Errorf("output arrived on a different stream than the callback")
@@ -255,7 +275,7 @@ func TestOpenReportsABusyPort(t *testing.T) {
 	}
 	port := addr.Port
 
-	if _, err := Open(context.Background(), newPipe(), port); err == nil {
+	if _, err := Open(context.Background(), NewMux(newPipe()), port); err == nil {
 		t.Errorf("binding a port in use should fail, and say so here")
 	} else if !strings.Contains(err.Error(), strconv.Itoa(port)) {
 		t.Errorf("the error should name the port: %v", err)

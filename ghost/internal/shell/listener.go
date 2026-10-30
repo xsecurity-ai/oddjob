@@ -37,8 +37,6 @@ import (
 	"io"
 	"net"
 	"strconv"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/xsecurity-ai/oddjob/ghost/internal/socksrelay"
@@ -61,23 +59,29 @@ type Transport interface {
 	Send(ctx context.Context, b []byte) error
 }
 
-// Listener holds one port and relays every callback that lands on it.
+// conn adapts a stream socket to the mux's sink.
+type conn struct{ c net.Conn }
+
+func (s conn) write(b []byte) error { _, err := s.c.Write(b); return err }
+func (s conn) close() error         { return s.c.Close() }
+
+// Listener holds one TCP port and relays every callback that lands
+// on it. The tunnel, the stream ids and the read loop belong to the
+// Mux -- see the note there for why a listener must not own them.
 type Listener struct {
 	Port int
 
-	t      Transport
-	ln     net.Listener
-	mu     sync.Mutex
-	conns  map[uint32]net.Conn
-	nextID atomic.Uint32
-	sendMu sync.Mutex
+	m  *Mux
+	ln net.Listener
 }
 
 // Open binds the port. Separate from Run so a caller learns that the
 // port is unavailable immediately rather than from a goroutine --
 // "could not bind 4444" is an answer the operator needs while they
-// are still looking at the screen.
-func Open(ctx context.Context, t Transport, port int) (*Listener, error) {
+// are still looking at the screen, and is the difference between a
+// listener row that says `failed: address already in use` and one
+// that sits at `pending` for ever.
+func Open(ctx context.Context, m *Mux, port int) (*Listener, error) {
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+strconv.Itoa(port))
 	if err != nil {
@@ -88,14 +92,12 @@ func Open(ctx context.Context, t Transport, port int) (*Listener, error) {
 		_ = ln.Close()
 		return nil, fmt.Errorf("shell: %s is not a tcp address", ln.Addr())
 	}
-	return &Listener{Port: addr.Port, t: t, ln: ln,
-		conns: map[uint32]net.Conn{}}, nil
+	return &Listener{Port: addr.Port, m: m, ln: ln}, nil
 }
 
 // Run accepts callbacks until the context ends or the listener is
 // closed. Each one becomes a stream; the loop continues either way.
 func (l *Listener) Run(ctx context.Context) error {
-	go l.pump(ctx)
 	for {
 		c, err := l.ln.Accept()
 		if err != nil {
@@ -112,28 +114,25 @@ func (l *Listener) Run(ctx context.Context) error {
 			// engagement's only way back in.
 			continue
 		}
-		id := l.nextID.Add(1)
-		l.mu.Lock()
-		l.conns[id] = c
-		l.mu.Unlock()
+		id := l.m.add(conn{c: c})
 		// Announced BEFORE any bytes move, so the server has a
 		// session to attach them to. A DATA frame for a stream the
 		// server has never heard of has nowhere to go.
-		_ = l.send(ctx, socksrelay.ARRIVED, id,
-			[]byte(c.RemoteAddr().String()))
+		_ = l.m.send(ctx, socksrelay.ARRIVED, id,
+			announce(c.RemoteAddr().String(), "tcp", l.Port))
 		go l.read(ctx, id, c)
 	}
 }
 
 // read copies one callback's output home until it ends.
 func (l *Listener) read(ctx context.Context, id uint32, c net.Conn) {
-	defer l.drop(ctx, id)
+	defer l.m.drop(ctx, id)
 	buf := make([]byte, ReadChunk)
 	for {
 		_ = c.SetReadDeadline(time.Now().Add(IdleTimeout))
 		n, err := c.Read(buf)
 		if n > 0 {
-			if sendErr := l.send(ctx, socksrelay.DATA, id,
+			if sendErr := l.m.send(ctx, socksrelay.DATA, id,
 				buf[:n]); sendErr != nil {
 				return
 			}
@@ -144,82 +143,17 @@ func (l *Listener) read(ctx context.Context, id uint32, c net.Conn) {
 	}
 }
 
-// pump carries what the server sends down to the right socket.
-func (l *Listener) pump(ctx context.Context) {
-	for {
-		raw, err := l.t.Recv(ctx)
-		if err != nil {
-			return
-		}
-		f, err := socksrelay.Decode(raw)
-		if err != nil {
-			// Framing is lost, not one frame: carrying on would feed
-			// one session's bytes to another. The tunnel is dropped
-			// and redialled, which is what the proxy relay does for
-			// the same reason.
-			return
-		}
-		l.mu.Lock()
-		c := l.conns[f.Stream]
-		l.mu.Unlock()
-		if c == nil {
-			continue
-		}
-		switch f.Kind {
-		case socksrelay.DATA:
-			if _, err := c.Write(f.Payload); err != nil {
-				l.drop(ctx, f.Stream)
-			}
-		case socksrelay.CLOSE:
-			l.drop(ctx, f.Stream)
-		}
-	}
-}
-
-func (l *Listener) drop(ctx context.Context, id uint32) {
-	l.mu.Lock()
-	c := l.conns[id]
-	delete(l.conns, id)
-	l.mu.Unlock()
-	if c == nil {
-		return
-	}
-	_ = c.Close()
-	_ = l.send(ctx, socksrelay.CLOSE, id, nil)
-}
-
-// send serialises writes. A websocket is one connection and two
-// goroutines writing to it interleave into something neither end can
-// decode -- the failure this mutex exists for is silent corruption
-// rather than an error.
-func (l *Listener) send(ctx context.Context, kind byte, id uint32,
-	payload []byte) error {
-	b, err := socksrelay.Encode(kind, id, payload)
-	if err != nil {
-		return err
-	}
-	l.sendMu.Lock()
-	defer l.sendMu.Unlock()
-	return l.t.Send(ctx, b)
-}
-
-// Close stops listening and ends every live session.
+// Close stops listening. The callbacks it caught belong to the Mux
+// and are ended with it: a port being taken out of the configuration
+// should not kill a shell somebody is typing at.
 func (l *Listener) Close() error {
-	err := l.ln.Close()
-	l.mu.Lock()
-	for _, c := range l.conns {
-		_ = c.Close()
-	}
-	l.conns = map[uint32]net.Conn{}
-	l.mu.Unlock()
-	return err
+	return l.ln.Close()
 }
 
-// Live is how many callbacks are currently connected.
-func (l *Listener) Live() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.conns)
-}
+// Live is how many callbacks are currently connected, across every
+// listener on this tunnel. A count per port would mean the mux
+// keeping a second table keyed by listener, for a number only the
+// tests and the log line use.
+func (l *Listener) Live() int { return l.m.live() }
 
 var _ io.Closer = (*Listener)(nil)
