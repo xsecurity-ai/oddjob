@@ -115,5 +115,39 @@ check("a row that does not exist is None, not an error",
       asyncio.run(apply_result(FakeSession(Poc(id=1, target_id=1, title="t")),
                                999, payload(0))) is None)
 
+print("\n== the worker picks the worst finding with no proof ==")
+from app.agent.pocworker import PRIORITY, _url_for  # noqa: E402
+
+# Worst first, so a worker switched off after twenty findings proved
+# the twenty that mattered.
+from app.models import SEVERITIES  # noqa: E402
+
+check("severity order is worst first",
+      SEVERITIES[0] == "critical" and SEVERITIES[-1] == "info",
+      str(SEVERITIES))
+# Above every sweep in the queue: a proof is a question somebody is
+# waiting on, everything else is a sweep.
+check("a proof outranks a sweep", PRIORITY > 0, PRIORITY)
+
+
+class _V:
+    def __init__(self, port):
+        self.port = port
+
+
+print("\n== where a proof is pointed ==")
+# The scheme is a guess from the port and is the one thing here that
+# can be wrong undetectably. A wrong guess reports "could not test"
+# rather than a wrong verdict, because the runner proves
+# reachability before it runs anything.
+for port, want in [(443, "https://h.acme.example"),
+                   (80, "http://h.acme.example"),
+                   (8443, "https://h.acme.example:8443"),
+                   (8080, "http://h.acme.example:8080"),
+                   (None, "http://h.acme.example")]:
+    got = _url_for(_V(port), "h.acme.example")
+    check(f"port {port} -> {want}", got == want, got)
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

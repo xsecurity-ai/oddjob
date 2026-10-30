@@ -8,9 +8,7 @@
  * them and this shows the group.
  */
 import {
-  Box, Button, Chip, CircularProgress, Dialog, DialogContent, DialogTitle,
-  Divider, Link, MenuItem, Stack, Table, TableBody, TableCell, TableHead,
-  TableRow, TextField, Tooltip, Typography, alpha,
+  Alert, Box, Button, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, Divider, Link, MenuItem, Stack, Table, TableBody, TableCell, TableHead, TableRow, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import IconButton from '@mui/material/IconButton'
@@ -149,6 +147,25 @@ export function VulnModal({ id, onClose, onHost }: {
     enabled: id != null,
   })
 
+  //: Writing a proof: a model composes a nuclei template for this
+  //: finding and a Ghost runs it. Refused with a 409 naming the
+  //: missing half when either is absent -- a proof that silently
+  //: never validates reads exactly like one that failed.
+  const [pocSaid, setPocSaid] = useState<
+    { ok: boolean; text: string } | null>(null)
+  const poc = useMutation({
+    mutationFn: () => api.buildPoc(data!.project_code, id as number),
+    onSuccess: (r) => {
+      setPocSaid({ ok: true, text:
+        `Proof queued against ${r.target_url}. It will read “PoC created, `
+        + `not validated” until a Ghost runs it.` })
+      void qc.invalidateQueries({ queryKey: ['vuln', id] })
+      void qc.invalidateQueries({ queryKey: ['pocs'] })
+    },
+    onError: (e) => setPocSaid({ ok: false,
+      text: (e as Error).message || 'the proof could not be written' }),
+  })
+
   const sev = (s: string) => SEVERITY_COLOUR[s] ?? neon.muted
 
   return (
@@ -248,6 +265,39 @@ export function VulnModal({ id, onClose, onHost }: {
               <Typography sx={{ fontSize: 11, color: neon.muted, mt: 0.5 }}>
                 What a person concluded. Separate from Status, which is
                 what has been done about it.
+              </Typography>
+            </Box>
+
+            {/* Proving it. Beside Triage because they answer adjacent
+                questions -- "what do I think" and "can we show it" --
+                and the second is evidence for the first. */}
+            <Box>
+              <Typography sx={{ fontFamily: `'Orbitron', sans-serif`,
+                                fontSize: 10.5, letterSpacing: '0.16em',
+                                color: neon.cyan, mb: 0.75 }}>
+                PROOF
+              </Typography>
+              <Button size="small" variant="outlined"
+                disabled={poc.isPending}
+                onClick={() => { setPocSaid(null); poc.mutate() }}
+                sx={{ textTransform: 'none', fontSize: 12.5,
+                      color: neon.yellow,
+                      borderColor: alpha(neon.yellow, 0.5) }}>
+                {poc.isPending ? 'Writing…' : 'Create a PoC'}
+              </Button>
+              {pocSaid && (
+                <Alert severity={pocSaid.ok ? 'success' : 'warning'}
+                  variant="outlined" sx={{ fontSize: 11.5, mt: 1 }}
+                  onClose={() => setPocSaid(null)}>
+                  {pocSaid.text}
+                </Alert>
+              )}
+              <Typography sx={{ fontSize: 11, color: neon.muted, mt: 0.5 }}>
+                A model writes a nuclei template for this finding and a
+                Ghost runs it against the host. Re-runnable, so the same
+                check later answers whether it has been fixed. Needs a
+                model configured and a Ghost online; it will say which is
+                missing rather than queueing something that never runs.
               </Typography>
             </Box>
 

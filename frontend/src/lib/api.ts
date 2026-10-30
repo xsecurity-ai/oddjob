@@ -1258,6 +1258,15 @@ export const api = {
   /** The findings behind one rollup row, fetched when it is expanded.
    *  `title` is an EXACT match, not the substring `q` does: a title
    *  that merely contains this one is a different finding. */
+  /** Write a proof for one finding and queue it for validation.
+   *
+   *  Needs BOTH halves of the agent: a model to write the template
+   *  and a Ghost to run it. A 409 says which is missing — a proof
+   *  that silently never validates reads the same as one that
+   *  failed. */
+  buildPoc: (project: string, vulnId: number) =>
+    req<{ id: number; target_url: string; status: string }>(
+      `/api/vulns/${vulnId}/poc` + qs({ project }), { method: 'POST' }),
   vulnsForHost: (project: string, host: string) =>
     req<Page<Vuln>>('/api/vulns' + qs({ project, host, limit: 500 })),
   vulnsForTitle: (project: string, title: string, severity?: string) =>
