@@ -39,6 +39,16 @@ dependencies = [
     # with the operator's own licence key and are not vendored, because
     # GeoLite2 may not be redistributed and this repository is public.
     "maxminddb>=2.6",
+    # Parsing the nuclei templates the agent writes before they are
+    # stored or sent. `safe_load` only -- the document comes from a
+    # model, and `yaml.load` on that would be arbitrary object
+    # construction from untrusted input.
+    #
+    # Declared rather than relied on transitively: it was already
+    # importable through another dependency, and the day that one
+    # drops it the PoC builder stops parsing templates and starts
+    # refusing every one of them.
+    "pyyaml>=6.0",
 ]
 
 # Tracing is opt-in and so are its dependencies: an install that never sets
