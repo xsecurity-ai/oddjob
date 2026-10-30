@@ -18,7 +18,8 @@ import {
 } from '@mui/material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type C2Exchange, type C2Session } from '../lib/api'
-import { neon, glow } from '../theme'
+import { neon, glow, blink } from '../theme'
+import { key, readingSession, useUnseenSessions } from '../lib/c2unseen'
 
 /** How often an open session re-reads its tail. A shell is
  *  interactive and SSE carries the nudge, but a poll is what makes it
@@ -60,6 +61,16 @@ export function C2View({ project }: { project: string | null }) {
   }, [rows])
   useEffect(() => { setOpen(null) }, [project])
 
+  // Having a session on screen is reading it, so it stops
+  // blinking; leaving the page means whatever it says next is
+  // unread again and the nav item picks it up. Above the early
+  // return below, like every other hook here.
+  useEffect(() => {
+    if (!project) return
+    readingSession(project, open)
+    return () => readingSession(project, null)
+  }, [project, open])
+
   if (!project) {
     return (
       <Box sx={{ p: 2 }}>
@@ -99,7 +110,7 @@ export function C2View({ project }: { project: string | null }) {
 
       <Stack direction="row" sx={{ flex: 1, minHeight: 0 }}>
         <SessionList rows={rows} loading={sessions.isLoading}
-          error={sessions.error as Error | null}
+          error={sessions.error as Error | null} project={project}
           activeOnly={activeOnly} open={open} onOpen={setOpen} />
         {chosen
           ? <Terminal key={chosen.id} project={project} session={chosen}
@@ -122,14 +133,20 @@ export function C2View({ project }: { project: string | null }) {
   )
 }
 
-function SessionList({ rows, loading, error, activeOnly, open, onOpen }: {
+function SessionList({ rows, loading, error, project, activeOnly, open,
+                      onOpen }: {
   rows: C2Session[]
   loading: boolean
   error: Error | null
+  project: string
   activeOnly: boolean
   open: number | null
   onOpen: (id: number) => void
 }) {
+  // One subscription for the list rather than one per row: the set is
+  // the same object for every row and a hook inside `rows.map` would
+  // not be a hook at a stable position anyway.
+  const unseen = useUnseenSessions()
   return (
     <Stack sx={{ width: 320, flexShrink: 0, minHeight: 0, overflowY: 'auto',
                  borderRight: `1px solid ${alpha(neon.cyan, 0.22)}` }}>
@@ -151,7 +168,9 @@ function SessionList({ rows, loading, error, activeOnly, open, onOpen }: {
             : 'Nothing has called back on this engagement yet.'}
         </Typography>
       )}
-      {rows.map((s) => (
+      {rows.map((s) => {
+        const unread = unseen.has(key(project, s.id))
+        return (
         <Box key={s.id} onClick={() => onOpen(s.id)}
           sx={{ px: 1.5, py: 1, cursor: 'pointer',
                 borderBottom: `1px solid ${alpha(neon.purple, 0.14)}`,
@@ -166,7 +185,8 @@ function SessionList({ rows, loading, error, activeOnly, open, onOpen }: {
                          ? glow(neon.green, 0.8) : undefined }} />
             <Box sx={{ fontFamily: `'Share Tech Mono', monospace`,
                        fontSize: 12, color: neon.text, overflow: 'hidden',
-                       textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                       textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                       ...(unread ? blink(neon.green) : {}) }}>
               {title(s)}
             </Box>
           </Stack>
@@ -185,12 +205,19 @@ function SessionList({ rows, loading, error, activeOnly, open, onOpen }: {
                 <Box sx={{ fontSize: 9.5, color: neon.yellow }}>no route</Box>
               </Tooltip>
             )}
+            {unread && (
+              <Tooltip title="New output you have not read. Open it to
+                              clear.">
+                <Box sx={{ fontSize: 9.5, ...blink(neon.green) }}>new</Box>
+              </Tooltip>
+            )}
             <Box sx={{ fontSize: 10, color: alpha(neon.muted, 0.8) }}>
               {s.exchanges}
             </Box>
           </Stack>
         </Box>
-      ))}
+        )
+      })}
     </Stack>
   )
 }

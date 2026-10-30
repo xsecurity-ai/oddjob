@@ -33,6 +33,8 @@ import { countryCell, extraAddresses, splitVersion } from '../src/lib/cellFacts'
 import { parseDomains } from '../src/lib/domainInput'
 import scopeCases from './scope-cases.json'
 import domainCases from './domain-cases.json'
+import { anyUnseen, key, readingSession, reset as resetUnseen,
+         sessionSpoke, snapshot } from '../src/lib/c2unseen'
 
 let pass = 0, fail = 0
 const check = (label: string, cond: boolean, extra = '') => {
@@ -924,6 +926,51 @@ console.log('\n== a rollup expansion shows each thing once ==')
   check('...and it links to that one', got[0].id === 31, String(got[0].id))
 }
 
+// ---------------------------------------------------------------
+// Which shell sessions are unread
+// ---------------------------------------------------------------
+// Being wrong here is silent in both directions: a blink that never
+// starts means a shell called back and nobody looked, and one that
+// never stops means the operator stops believing it.
+{
+  resetUnseen()
+  sessionSpoke('FALCON', 7)
+  check('a session that spoke is unread', snapshot().has(key('FALCON', 7)))
+  check('...and the engagement shows it', anyUnseen('FALCON'))
+  check('...but only that engagement', !anyUnseen('ACME'))
+
+  readingSession('FALCON', 7)
+  check('opening it clears it', !snapshot().has(key('FALCON', 7)))
+  check('...and the engagement goes quiet', !anyUnseen('FALCON'))
+
+  sessionSpoke('FALCON', 7)
+  check('output on the session being read does not blink at you',
+        !anyUnseen('FALCON'))
+
+  sessionSpoke('FALCON', 8)
+  check('a different session still does', snapshot().has(key('FALCON', 8)))
+
+  readingSession('FALCON', null)
+  sessionSpoke('FALCON', 7)
+  check('leaving the page makes the one you were reading unread again',
+        snapshot().has(key('FALCON', 7)))
+
+  // Ids are only unique within an installation's database, and an
+  // operator can read several engagements at once.
+  resetUnseen()
+  sessionSpoke('FALCON', 1)
+  check('two engagements do not share an id space',
+        anyUnseen('FALCON') && !anyUnseen('ACME'))
+  check('no project selected is never unread', !anyUnseen(null))
+
+  // A set handed to useSyncExternalStore has to be the same object
+  // until something actually changes, or React re-renders forever.
+  const before = snapshot()
+  sessionSpoke('FALCON', 1)
+  check('a repeat of what we already know changes nothing',
+        snapshot() === before)
+  resetUnseen()
+}
 
 console.log(`\n${'='.repeat(56)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(56)}`)
 process.exit(fail ? 1 : 0)

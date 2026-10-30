@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { sessionSpoke } from './c2unseen'
 
 export type LiveState = 'connecting' | 'live' | 'offline'
 
@@ -46,8 +47,28 @@ export function useLive(enabled: boolean): LiveState {
       }, COALESCE_MS)
     }
 
+    // A shell speaking is the one change that has to be noticed
+    // rather than merely refetched: the row it belongs to may be on a
+    // page the operator is not looking at. Everything else about the
+    // event is still handled by refetching -- this only remembers
+    // that the session is unread.
+    const note = (e: MessageEvent<string>) => {
+      try {
+        const m = JSON.parse(e.data) as {
+          kind?: string; action?: string; project?: string; session?: number
+        }
+        if (m.kind !== 'c2' || !m.project || typeof m.session !== 'number') return
+        if (m.action === 'arrived' || m.action === 'output') {
+          sessionSpoke(m.project, m.session)
+        }
+      } catch {
+        // A payload we cannot read is not worth breaking the stream
+        // for; the refetch below still happens.
+      }
+    }
+
     es.addEventListener('hello', () => setState('live'))
-    es.addEventListener('change', refresh)
+    es.addEventListener('change', (e) => { note(e); refresh() })
     es.onopen = () => setState('live')
     es.onerror = () => {
       // EventSource reconnects on its own; just reflect the gap in the UI.
