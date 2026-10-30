@@ -597,6 +597,12 @@ NEVER_EXPOSED = {
     "/agent": "the in-product assistant; an MCP client calling it would "
               "be a model driving a model",
     "/events": "a server-sent event stream, which has no MCP shape",
+    "/c2": "live shells on client hosts. Three of the five routes write -- "
+           "send, close, relabel -- and typing into a shell on an "
+           "engagement host is an operator's decision, not a model's. The "
+           "two read routes would be safe on their own, but the transcript "
+           "is where an operator's typed credentials end up, and splitting "
+           "the prefix to expose them is not worth doing by halves",
 }
 
 from app.main import app as _app  # noqa: E402

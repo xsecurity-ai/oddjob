@@ -23,6 +23,7 @@ import LogoutIcon from '@mui/icons-material/Logout'
 import MenuIcon from '@mui/icons-material/Menu'
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft'
 import ChevronRightIcon from '@mui/icons-material/ChevronRight'
+import TerminalIcon from '@mui/icons-material/Terminal'
 import { useQuery } from '@tanstack/react-query'
 import { api } from './lib/api'
 import { useAuth } from './lib/auth'
@@ -30,6 +31,7 @@ import { useLive, type LiveState } from './lib/useLive'
 import { useStoredFlag } from './lib/useStoredFlag'
 import { lastProject, parse, push, rememberProject, replace, type Route,
          type View } from './lib/route'
+import { C2View } from './views/C2View'
 import { GateView } from './views/GateView'
 import { ProjectsView } from './views/ProjectsView'
 import { TargetsView } from './views/TargetsView'
@@ -303,6 +305,9 @@ export default function App() {
     // now. The `ghost-debug` route still resolves and opens that
     // tab, so existing links keep working.
     { key: 'ghosts', label: 'Ghosts', icon: <MemoryIcon fontSize="small" /> },
+    // Below Ghosts, because that is what catches the callbacks: a
+    // session only exists because a Ghost was holding a port.
+    { key: 'c2', label: 'C2', icon: <TerminalIcon fontSize="small" /> },
     // No sidebar entry for Project Config: it is reached from the edit
     // button on its own row in Projects, which is where you already are
     // when you want it. The route still resolves, so existing links and
@@ -357,6 +362,7 @@ export default function App() {
     // shows, read on a screen of their own, and a nav entry for it
     // would read as a second agent.
     agent: <AgentView project={project === ALL ? null : project} />,
+    c2: <C2View project={project === ALL ? null : project} />,
     settings: <ProjectConfigView project={project === ALL ? null : project} />,
     config: <SiteConfigView />,
     health: <HealthView />,
