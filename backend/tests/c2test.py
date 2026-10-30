@@ -659,12 +659,28 @@ sid = asyncio.run(callback("203.0.113.50:41000"))
 sess = call("/api/c2/sessions?project=C2T&state=live", token=admin)[1]
 moving = next(x for x in sess if x["peer"] == "203.0.113.50:41000")
 
+# A host the project does not have is REFUSED, not created. A typo
+# would otherwise make a second target one character from the real
+# one, send the session to it, and split the evidence for one
+# machine across two rows.
+st, r = call(f"/api/c2/sessions/{moving['id']}/target?project=C2T", "POST",
+             {"host": "typo-dc01.acme.example"}, token=admin)
+check("a host the engagement does not know is refused", st == 404, f"{st} {r}")
+check("...and says where to add it instead",
+      "Targets page" in str(r), str(r))
+
+# In scope first: the inventory refuses a host the engagement is
+# not authorised against, which is the gate doing its job.
+call("/api/projects/C2T/scope", "POST",
+     {"lines": ["dc01.acme.example"]}, token=admin)
+_st, _mk = call("/api/targets?project=C2T", "POST",
+                {"host": "dc01.acme.example"}, token=admin)
+check("the host exists before the session is moved to it",
+      _st in (200, 201), f"{_st} {_mk}")
 st, r = call(f"/api/c2/sessions/{moving['id']}/target?project=C2T", "POST",
              {"host": "dc01.acme.example"}, token=admin)
-check("a session can be moved to a named host",
+check("a session can be moved to a host the engagement has",
       st == 200 and r.get("host") == "dc01.acme.example", f"{st} {r}")
-check("...creating the target when the project has not got one",
-      r.get("created") is True, str(r.get("created")))
 
 sess = call("/api/c2/sessions?project=C2T&state=live", token=admin)[1]
 moved = next(x for x in sess if x["id"] == moving["id"])
@@ -683,12 +699,10 @@ check("...with a timeline entry saying why",
           for e in (tl or {}).get("items", [])),
       str([e.get("summary") for e in (tl or {}).get("items", [])][:3]))
 
-# Moving to a host that already exists reuses it rather than
-# failing on the unique key.
+# Moving twice is idempotent rather than an error on the unique key.
 st, r = call(f"/api/c2/sessions/{moving['id']}/target?project=C2T", "POST",
              {"host": "dc01.acme.example"}, token=admin)
-check("moving to an existing host reuses it",
-      st == 200 and r.get("created") is False, f"{st} {r}")
+check("moving to where it already is is not an error", st == 200, f"{st} {r}")
 
 # `hosts` decides what can be a target, here as everywhere.
 for bad, why in (("0.0.0.0", "an impossible address"),

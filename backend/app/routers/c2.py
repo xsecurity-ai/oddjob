@@ -338,10 +338,17 @@ async def retarget(sid: int, body: RetargetIn, project: str = Query(...),
     one who knows which -- usually because the shell just told
     them -- so this re-points the session at the real host.
 
-    The target is created if the project has no such host, because
-    refusing would mean the operator cannot record what they just
-    learned without leaving the page. Refused names are still
-    refused: `hosts` decides that, not this.
+    **Only a host the project already has.** Creating one from here
+    was wrong in a way that is quiet: a typo makes a second target
+    one character different from the real one, the session goes to
+    it, and the engagement now has two rows for one machine with the
+    evidence split between them. The inventory is where a host is
+    added, deliberately and once.
+
+    A callback still CREATES a target for the address it came from,
+    on arrival -- so there is always something to move away from.
+    That one is a fact we observed; this one would be a guess an
+    operator typed.
 
     **The compromise follows the session.** Moving a shell to a
     host means that host is the one with a shell on it, so the
@@ -362,11 +369,12 @@ async def retarget(sid: int, body: RetargetIn, project: str = Query(...),
     t = (await session.execute(
         select(Target).where(Target.project_id == pr.id,
                              Target.host == host))).scalar_one_or_none()
-    made = t is None
     if t is None:
-        t = Target(project_id=pr.id, host=host, kind="host")
-        session.add(t)
-        await session.flush()
+        raise HTTPException(
+            404, f"{pr.code} has no target {host!r}. A session can only be "
+                 f"moved to a host the engagement already knows -- add it "
+                 f"on the Targets page first, so one machine does not end "
+                 f"up as two rows a character apart.")
 
     was = s.target_id
     s.target_id = t.id
@@ -388,7 +396,7 @@ async def retarget(sid: int, body: RetargetIn, project: str = Query(...),
                          session=sid)
     await broker.publish("targets", action="update", project=pr.code,
                          host=host)
-    return {"ok": True, "host": host, "target_id": t.id, "created": made}
+    return {"ok": True, "host": host, "target_id": t.id}
 
 
 class LabelIn(BaseModel):
