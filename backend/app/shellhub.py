@@ -135,6 +135,18 @@ class Hub:
     def holds(self, session_id: int) -> bool:
         return self.live(session_id) is not None
 
+    def has_tunnel(self, agent_id: int) -> bool:
+        """Whether THIS process is holding that Ghost's shell tunnel.
+
+        Distinct from the agent being online: a Ghost beats over HTTP
+        and tunnels over a websocket, and it is perfectly possible to
+        be heartbeating while the tunnel is down. A listener on a
+        Ghost whose tunnel is gone may well be bound and catching
+        nothing we can see, so the Listeners tab shows this rather
+        than letting the last reported state stand in for it.
+        """
+        return agent_id in self._tunnels
+
     async def write(self, session_id: int, data: bytes) -> bool:
         """Send bytes down to a shell. -> whether there was a route.
 

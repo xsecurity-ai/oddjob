@@ -2306,6 +2306,81 @@ class ShellExchange(Base, TimestampMixin):
     session: Mapped[ShellSession] = relationship(back_populates="exchanges")
 
 
+class ShellListener(Base, TimestampMixin):
+    """A port a Ghost has been told to hold open for callbacks.
+
+    Configuration, not evidence: it says what an operator asked for,
+    and `state` says what the Ghost managed to do about it. Those are
+    two different facts and the table keeps them apart -- "we asked
+    for 443" and "443 is bound" are not the same claim, and a UI that
+    shows the first while meaning the second sends somebody to debug
+    a payload when the real answer is that nginx already had the
+    port.
+
+    One row per protocol and port, so a Ghost holding 443/tcp and
+    53/udp is two rows. The alternative -- a list on the agent -- made
+    "which Ghost is listening on 443" a scan of every agent's JSON,
+    and that question is the whole point of the Listeners tab.
+
+    CASCADE from the agent, unlike `ShellSession.agent_id`, which is
+    SET NULL. A session is a record of what was done and outlives the
+    Ghost that held it; a listener is an instruction to a Ghost that
+    no longer exists, which is not a record of anything.
+    """
+    __tablename__ = "shell_listeners"
+    __table_args__ = (
+        # One instruction per port. Asking twice is the same ask, and
+        # two rows would have the Ghost bind, fail on the second, and
+        # report a failure that is really a duplicate.
+        UniqueConstraint("agent_id", "protocol", "port",
+                         name="uq_shell_listener_agent_port"),
+        Index("ix_shell_listeners_project_enabled", "project_id", "enabled"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Denormalised from the agent, for the same reason
+    #: `ShellSession.project_id` is: the Listeners tab reads by
+    #: project, and that is an index this table can have.
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    #: Indexed because the heartbeat reads by it on every beat of
+    #: every agent, and because deleting a Ghost deletes through it.
+    agent_id: Mapped[int] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+
+    #: tcp | udp. Both, because a payload that can only reach you over
+    #: UDP is a payload you otherwise cannot catch at all.
+    protocol: Mapped[str] = mapped_column(
+        String(3), default="tcp", server_default="tcp")
+    port: Mapped[int] = mapped_column(Integer)
+
+    #: Off keeps the row and stops the Ghost holding the port. An
+    #: operator who wants 443 back for an hour should not have to
+    #: retype the listener afterwards.
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true")
+
+    #: pending | bound | failed -- what the GHOST last said.
+    #:
+    #: `pending` means the Ghost has not reported, which is a third
+    #: answer and not a quiet "failed": an agent that is offline, or
+    #: too old to know about listeners, has told us nothing and the
+    #: UI has to say so rather than invent a red cross.
+    state: Mapped[str] = mapped_column(
+        String(16), default="pending", server_default="pending")
+    #: Why, when it failed. "address already in use" is the entire
+    #: answer most of the time and it should be on the screen.
+    state_detail: Mapped[str | None] = mapped_column(String(300))
+    state_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    #: Free text from whoever set it up: which payload this is for.
+    note: Mapped[str | None] = mapped_column(String(300))
+    created_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
+
+    agent: Mapped[Agent] = relationship()
+
+
 class Implant(Base, TimestampMixin):
     """A C2 callback: an agent running on a host we control.
 
