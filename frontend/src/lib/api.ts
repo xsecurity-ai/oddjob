@@ -398,6 +398,16 @@ export interface C2Session {
   target_id: number | null
   agent_name: string | null
   peer: string | null
+  /** Whose address that is — country, city, ASN, organisation.
+   *  null when geolocation is off or the address is private.
+   *
+   *  "Is this our payload or somebody scanning the internet" is the
+   *  first question a callback raises, and a bare address does not
+   *  answer it. */
+  peer_geo: {
+    country: string | null; country_name: string | null
+    city: string | null; asn: number | null; org: string | null
+  } | null
   listen_port: number | null
   /** open | closed | lost. `lost` means the tunnel went, not the
    *  shell: the far end may be perfectly alive and what vanished is
