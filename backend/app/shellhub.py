@@ -44,12 +44,34 @@ log = logging.getLogger("oddjob.shellhub")
 #: this it is recorded on its own -- see the module docstring.
 FLUSH_AFTER = 2.0
 
+#: How long to wait for more bytes before writing what we have.
+#:
+#: A DEBOUNCE, armed by a timer. It used to be `FLUSH_AFTER` tested
+#: against the arrival of the NEXT frame, which meant the last chunk
+#: of every command's output was never written at all -- nothing
+#: else arrived to trigger the test, so `ls` produced a few hundred
+#: bytes that sat in memory for ever and an operator saw an empty
+#: terminal.
+#:
+#: Short, because this is interactive. Long enough to coalesce the
+#: chunks of one `ls` into one row, short enough that output appears
+#: while the operator is still looking at the screen.
+FLUSH_IDLE = 0.3
+
 #: Most output held for one exchange before it is written out. A
 #: `find /` produces megabytes and holding it all to pair it with one
 #: command would be holding megabytes.
 MAX_PENDING = 256 * 1024
 
 Send = Callable[[bytes], Awaitable[None]]
+
+
+def _cancel(live: Live) -> None:
+    """Stop a stream's pending flush, if it has one."""
+    t = getattr(live, "timer", None)
+    live.timer = None
+    if t is not None and hasattr(t, "cancel"):
+        t.cancel()
 
 
 @dataclass
@@ -62,6 +84,11 @@ class Live:
     command: str | None = None
     buf: list[str] = field(default_factory=list)
     last_at: float = 0.0
+    #: The debounce in flight, if any. Cancelled and re-armed on
+    #: every chunk, and cancelled when the stream goes -- a timer
+    #: firing against a detached stream would open a session to
+    #: write nothing.
+    timer: object | None = None
 
 
 @dataclass
@@ -106,6 +133,7 @@ class Hub:
             return []
         for sid in list(t.streams):
             self._by_session.pop(t.streams[sid].session_id, None)
+            _cancel(t.streams[sid])
         return [live.session_id for live in t.streams.values()]
 
     def attach(self, agent_id: int, stream: int, session_id: int) -> Live:
@@ -122,6 +150,10 @@ class Hub:
         live = t.streams.pop(stream, None)
         if live is None:
             return None
+        # A debounce still in flight would wake up, open a session
+        # and write into a stream nobody is holding. Callers flush
+        # before detaching, so there is nothing left for it to do.
+        _cancel(live)
         self._by_session.pop(live.session_id, None)
         return live.session_id
 
@@ -162,6 +194,36 @@ class Hub:
         if t is None:
             return False
         await t.send(proxytunnel.encode(proxytunnel.DATA, stream, data))
+        return True
+
+    async def terminate(self, session_id: int) -> bool:
+        """Close the shell on the far end. -> whether the signal went.
+
+        A CLOSE frame, not a row update: the Ghost closes the socket
+        when it gets one, and closing the socket is what kills
+        `nc -e /bin/sh` on the host. Marking the row closed without
+        this left the shell running on the client's machine while
+        Oddjob said the session had ended -- which is the wrong half
+        of the engagement record to get wrong, because the thing
+        still running is OURS.
+
+        False when there is no route. The caller records what it
+        could and says the far end was not reached, rather than
+        claiming a kill nobody delivered.
+        """
+        found = self._by_session.get(session_id)
+        if found is None:
+            return False
+        agent_id, stream = found
+        t = self._tunnels.get(agent_id)
+        if t is None:
+            return False
+        await t.send(proxytunnel.encode(proxytunnel.CLOSE, stream, b""))
+        # Detached here rather than waiting for the Ghost's own CLOSE
+        # to come back: the operator asked for this one to end, and a
+        # session that lingers in the map until a reply arrives is a
+        # session they can still type at.
+        self.detach(agent_id, stream)
         return True
 
     def tunnel(self, agent_id: int) -> Tunnel | None:

@@ -8,6 +8,7 @@ test without a websocket.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -16,9 +17,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import proxytunnel
+from .db import SessionLocal
 from .events import broker
 from .models import Agent, Project, ShellExchange, ShellSession, Target
-from .shellhub import FLUSH_AFTER, MAX_PENDING, hub, now
+from .shellhub import FLUSH_IDLE, MAX_PENDING, hub, now
 from .timeline import record
 
 log = logging.getLogger("oddjob.shellwork")
@@ -136,16 +138,63 @@ async def _data(session: AsyncSession, agent: Agent,
 
     text = frame.payload.decode("utf-8", "replace")
     live.buf.append(text)
-    pending = "".join(live.buf)
-
-    # Written out when it has been quiet, or when holding more would
-    # mean holding a lot. A `find /` is megabytes and pairing it with
-    # one command is not worth buffering megabytes to do.
-    quiet = live.last_at and (now() - live.last_at) > FLUSH_AFTER
     live.last_at = now()
-    if len(pending) < MAX_PENDING and not quiet:
+
+    # Straight out when holding more would mean holding a lot. A
+    # `find /` is megabytes and pairing it with one command is not
+    # worth buffering megabytes to do.
+    if sum(len(x) for x in live.buf) >= MAX_PENDING:
+        _disarm(live)
+        await flush(session, live.session_id, live)
         return
-    await flush(session, live.session_id, live)
+
+    # Otherwise wait a moment for the rest of it, and write it out
+    # when the shell stops talking.
+    #
+    # On a TIMER. This used to compare the arrival time of the NEXT
+    # frame against the last one -- so the final chunk of every
+    # command's output was never written, because nothing else
+    # arrived to make the comparison. `ls` produced a few hundred
+    # bytes that sat in this buffer for ever and the operator saw an
+    # empty terminal. It only looked like it worked at all because a
+    # 256 KB dump crosses MAX_PENDING on its own.
+    _arm(live)
+
+
+def _disarm(live) -> None:
+    t = live.timer
+    live.timer = None
+    if t is not None:
+        t.cancel()
+
+
+def _arm(live) -> None:
+    """(Re)start the debounce for this stream."""
+    _disarm(live)
+    live.timer = asyncio.create_task(_after_quiet(live))
+
+
+async def _after_quiet(live) -> None:
+    """Write the buffer once the shell has stopped talking.
+
+    Its OWN session. The websocket handler's session belongs to a
+    coroutine that is concurrently reading frames, and two tasks on
+    one AsyncSession is a corruption bug that shows up as something
+    else entirely.
+    """
+    try:
+        await asyncio.sleep(FLUSH_IDLE)
+    except asyncio.CancelledError:
+        return
+    live.timer = None
+    try:
+        async with SessionLocal() as s:
+            await flush(s, live.session_id, live)
+    except Exception as e:                                   # noqa: BLE001
+        # Never raises into the task runner: a shell that loses one
+        # flush is better than a background exception nobody sees,
+        # and the next chunk re-arms the timer anyway.
+        log.warning("flushing session %d: %s", live.session_id, e)
 
 
 async def flush(session: AsyncSession, session_id: int, live) -> None:
@@ -190,6 +239,9 @@ async def _closed(session: AsyncSession, agent: Agent,
     t = hub.tunnel(agent.id)
     live = t.streams.get(frame.stream) if t else None
     if live is not None:
+        # Disarmed first: the flush below writes everything, and a
+        # timer firing afterwards would be a second write of nothing.
+        _disarm(live)
         await flush(session, live.session_id, live)
     sid = hub.detach(agent.id, frame.stream)
     if sid is None:
@@ -209,8 +261,15 @@ async def mark_lost(session: AsyncSession, session_ids: list[int]) -> None:
 
     `lost` and not `closed`, because they are different facts and
     only one of them is about the host: the shell may be perfectly
-    alive and what vanished is our route to it. A Ghost that
-    reconnects brings its live streams back.
+    alive and what vanished is our route to it.
+
+    It does NOT come back. This said "a Ghost that reconnects brings
+    its live streams back", and the agent does the opposite -- a
+    dropped tunnel makes it release its listeners and close every
+    socket on them, because a listener bound to a dead mux catches
+    callbacks that go nowhere (see `shell.Manager`). So `lost` means
+    gone, and the UI must not promise a recovery that the agent is
+    not written to perform.
     """
     for sid in session_ids:
         s = await session.get(ShellSession, sid)
@@ -220,3 +279,35 @@ async def mark_lost(session: AsyncSession, session_ids: list[int]) -> None:
             await broker.publish("c2", action="lost",
                                  project=await _code(session, s.project_id),
                                  session=sid)
+
+
+async def adopt_orphans(session: AsyncSession) -> int:
+    """Mark sessions this process cannot be holding. -> how many.
+
+    Called at startup. A row saying `open` is a claim that a socket
+    is live on a Ghost and that THIS process has a tunnel to it --
+    and at boot it holds no tunnels at all, so every such row is a
+    claim nothing backs.
+
+    Nothing reconciled them before: the websocket handler marks its
+    own sessions lost when it disconnects, but a server that is
+    killed or redeployed never runs that handler. The rows survived
+    the restart, the in-memory hub did not, and the UI showed
+    "open, but this server is not holding its tunnel right now -- it
+    should come back on its own" for ever. It does not come back:
+    the Ghost closed those sockets when the tunnel dropped.
+
+    `lost`, not `closed`, for the same reason as `mark_lost`: we
+    know our route is gone, not that the shell died. Operators
+    terminate a session when they want to assert the second.
+    """
+    rows = (await session.execute(
+        select(ShellSession).where(ShellSession.state == "open"))).scalars().all()
+    if not rows:
+        return 0
+    for s in rows:
+        s.state = "lost"
+    await session.commit()
+    log.info("marked %d shell session(s) lost: this process holds no "
+             "tunnels at startup", len(rows))
+    return len(rows)

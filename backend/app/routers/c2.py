@@ -217,16 +217,39 @@ async def close(sid: int, project: str = Query(...),
                 pr: Project = Depends(require_project("user")),
                 user: User = Depends(get_current_user),
                 session: AsyncSession = Depends(get_session)):
-    """End a session. The transcript stays."""
+    """Terminate a session. The transcript stays.
+
+    **This kills the shell, it does not merely file the row.** A
+    CLOSE frame goes down the tunnel and the Ghost closes the
+    socket, which is what ends `nc -e /bin/sh` on the host. Marking
+    the row closed on its own left our own shell running on a
+    client's machine while Oddjob said the session had ended, and
+    that is the worse direction for the record to be wrong in: the
+    thing still running belongs to us.
+
+    `terminated` says whether the signal was delivered. False means
+    the row is closed here and the far end was not reached -- which
+    is a real outcome on an engagement and has to be reported as
+    itself rather than folded into success.
+    """
     s = await _session(session, sid, pr)
-    if s.state == "open":
+    terminated = await hub.terminate(sid)
+    if s.state in ("open", "lost"):
         s.state = "closed"
         s.closed_at = datetime.now(UTC)
         await session.commit()
-    await audit.record(session, "ui", "c2.close", user=user, commit=True,
-                       project_code=pr.code, detail=f"closed session {sid}")
+    await audit.record(
+        session, "ui", "c2.close", user=user, commit=True,
+        project_code=pr.code,
+        detail=f"terminated session {sid}"
+               + ("" if terminated else " (no route; row closed only)"))
     await broker.publish("c2", action="closed", project=pr.code, session=sid)
-    return {"ok": True, "state": s.state}
+    return {"ok": True, "state": s.state, "terminated": terminated,
+            "note": "The shell was closed on the host."
+                    if terminated else
+                    "Recorded as closed here. There was no route to the "
+                    "ghost, so if that shell is still alive it will stay "
+                    "alive until something on the host ends it."}
 
 
 class LabelIn(BaseModel):

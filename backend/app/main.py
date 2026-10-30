@@ -58,6 +58,17 @@ async def lifespan(app: FastAPI):
     from .importers.jobs import reap_stale as reap_imports
     if (n := await reap_imports()):
         print(f"marked {n} interrupted import(s) as failed")
+    # And the same for a shell session. `open` claims this process
+    # holds a tunnel to a live socket, and at startup it holds none
+    # -- so every open row is a claim nothing backs. Left alone they
+    # read "open, but not connected right now; it should come back"
+    # for ever, and it never does: the Ghost closes those sockets
+    # when the tunnel drops.
+    from .db import SessionLocal as _S
+    from .shellwork import adopt_orphans
+    async with _S() as s0:
+        if (n := await adopt_orphans(s0)):
+            print(f"marked {n} shell session(s) lost after a restart")
     # Security headers depend on site.base_url, which lives in the
     # database, so they cannot be computed until it is open.
     from .db import SessionLocal

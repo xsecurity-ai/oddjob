@@ -14,7 +14,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions,
-  DialogContent, DialogTitle, IconButton, MenuItem, Stack, Switch, Tab,
+  DialogContent, DialogTitle, IconButton, Menu, MenuItem, Stack, Switch, Tab,
   Tabs, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
@@ -499,6 +499,28 @@ function SessionList({ rows, loading, error, project, activeOnly, open,
   // the same object for every row and a hook inside `rows.map` would
   // not be a hook at a stable position anyway.
   const unseen = useUnseenSessions()
+  const qc = useQueryClient()
+  const { canWrite } = useAuth()
+  // Where the right-click landed, and on which session. Anchored to
+  // the pointer rather than the row so the menu opens where the
+  // operator clicked.
+  const [menu, setMenu] = useState<
+    { x: number; y: number; row: C2Session } | null>(null)
+  const [said, setSaid] = useState<string | null>(null)
+
+  const kill = useMutation({
+    mutationFn: (row: C2Session) => api.c2Close(project, row.id),
+    onSuccess: (r) => {
+      setMenu(null)
+      // Said out loud when the shell could NOT be reached. A quiet
+      // success there would have the operator believe they closed
+      // something that is still running on a client's machine.
+      setSaid(r.terminated ? null : r.note)
+      void qc.invalidateQueries({ queryKey: ['c2-sessions', project] })
+    },
+    onError: (e) => { setMenu(null); setSaid((e as Error).message) },
+  })
+
   return (
     <Stack sx={{ width: 320, flexShrink: 0, minHeight: 0, overflowY: 'auto',
                  borderRight: `1px solid ${alpha(neon.cyan, 0.22)}` }}>
@@ -524,6 +546,11 @@ function SessionList({ rows, loading, error, project, activeOnly, open,
         const unread = unseen.has(key(project, s.id))
         return (
         <Box key={s.id} onClick={() => onOpen(s.id)}
+          onContextMenu={(e) => {
+            if (!canWrite(project)) return
+            e.preventDefault()
+            setMenu({ x: e.clientX, y: e.clientY, row: s })
+          }}
           sx={{ px: 1.5, py: 1, cursor: 'pointer',
                 borderBottom: `1px solid ${alpha(neon.purple, 0.14)}`,
                 backgroundColor: s.id === open
@@ -570,6 +597,28 @@ function SessionList({ rows, loading, error, project, activeOnly, open,
         </Box>
         )
       })}
+
+      <Menu open={menu !== null} onClose={() => setMenu(null)}
+        anchorReference="anchorPosition"
+        anchorPosition={menu ? { top: menu.y, left: menu.x } : undefined}>
+        <MenuItem disabled={kill.isPending}
+          onClick={() => menu && kill.mutate(menu.row)}
+          sx={{ fontSize: 12.5, color: neon.red }}>
+          <DeleteIcon sx={{ fontSize: 16, mr: 1 }} />
+          {kill.isPending ? 'Terminating…' : 'Terminate'}
+        </MenuItem>
+        <MenuItem onClick={() => { if (menu) onOpen(menu.row.id); setMenu(null) }}
+          sx={{ fontSize: 12.5 }}>
+          Open
+        </MenuItem>
+      </Menu>
+
+      {said && (
+        <Alert severity="warning" variant="outlined"
+          sx={{ m: 1, fontSize: 11 }} onClose={() => setSaid(null)}>
+          {said}
+        </Alert>
+      )}
     </Stack>
   )
 }
