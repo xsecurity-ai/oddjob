@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/xsecurity-ai/oddjob/ghost/internal/identity"
+	"github.com/xsecurity-ai/oddjob/ghost/internal/shell"
 )
 
 type Client struct {
@@ -178,6 +179,16 @@ type HeartbeatResp struct {
 	//: or absent from an older server means "no opinion", which is
 	//: not the same as "run nothing" and must not be read as it.
 	MaxParallel int `json:"max_parallel"`
+	//: Ports this agent should be holding open for callbacks. The
+	//: WHOLE desired set, every beat, because reconciliation against
+	//: a full list is the only thing that works for an agent that
+	//: was offline for an hour: a command stream needs every message
+	//: ever sent to have arrived, and for that agent they did not.
+	//:
+	//: Absent from an older server means "hold nothing", which is
+	//: correct -- a server that does not know about listeners has no
+	//: listeners to ask for.
+	Listeners []shell.Spec `json:"listeners"`
 }
 
 // DebugLine is one line of the agent's own log, on the agent's clock.
@@ -399,6 +410,15 @@ type HeartbeatReq struct {
 	// taking one and handing it back would livelock -- the task
 	// returns to the pool and the same host takes it again.
 	CannotRun []string `json:"unaffordable,omitempty"`
+	// Listeners is what became of the ports this agent was told to
+	// hold: `[{"id":3,"bound":true}]`.
+	//
+	// Omitted when there is nothing to say, and the server reads an
+	// omission as "no report" rather than as failure -- a listener
+	// nobody has reported on stays `pending`, which is the honest
+	// state and not a red cross against a port that is very likely
+	// fine.
+	Listeners []shell.Status `json:"listeners,omitempty"`
 }
 
 func (c *Client) Heartbeat(ctx context.Context, req HeartbeatReq) (*HeartbeatResp, error) {

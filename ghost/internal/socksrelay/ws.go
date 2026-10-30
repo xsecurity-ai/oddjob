@@ -77,6 +77,14 @@ type Signer interface {
 // covers it, so the two sides must agree on the exact string.
 const TunnelPath = "/api/ghosts/proxy/tunnel"
 
+// ShellPath is where the server accepts a shell tunnel.
+//
+// Its own socket rather than a second kind of stream on the proxy
+// tunnel: the two have different lifetimes and different failure
+// modes, and a SOCKS tunnel dropping should not take a live shell
+// with it. They share the CODEC and nothing else.
+const ShellPath = "/api/ghosts/shell/tunnel"
+
 // Dial opens the tunnel.
 //
 // The agent dials OUT. There is no listener on this side and there
@@ -86,7 +94,17 @@ const TunnelPath = "/api/ghosts/proxy/tunnel"
 // proxy on its own say-so. Switching this on is a decision made in
 // Oddjob AND carried by the agent's own flag.
 func Dial(ctx context.Context, base string, s Signer) (*WS, error) {
-	u := strings.TrimRight(base, "/") + TunnelPath
+	return DialPath(ctx, base, TunnelPath, s)
+}
+
+// DialPath is Dial against a named endpoint.
+//
+// The path is signed as well as dialled, and the two are the SAME
+// string: a signature over one path and a connection to another
+// would be a signature that proves nothing about where the agent
+// meant to connect.
+func DialPath(ctx context.Context, base, path string, s Signer) (*WS, error) {
+	u := strings.TrimRight(base, "/") + path
 	// ws:// for http://, wss:// for https://. The scheme is taken
 	// from the server URL this agent already enrolled against rather
 	// than configured again, so a tunnel cannot be quietly downgraded
@@ -104,7 +122,7 @@ func Dial(ctx context.Context, base string, s Signer) (*WS, error) {
 	// other request from this agent uses, so the server verifies it
 	// with the code it already has.
 	h := http.Header{}
-	for k, v := range s.Sign(http.MethodGet, TunnelPath, nil) {
+	for k, v := range s.Sign(http.MethodGet, path, nil) {
 		h.Set(k, v)
 	}
 
