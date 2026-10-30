@@ -537,6 +537,9 @@ function SessionList({ rows, loading, error, project, activeOnly, open,
   const [menu, setMenu] = useState<
     { x: number; y: number; row: C2Session } | null>(null)
   const [said, setSaid] = useState<string | null>(null)
+  // Which dialog the context menu opened, and for which session.
+  const [ask, setAsk] = useState<
+    { kind: 'name' | 'target'; row: C2Session } | null>(null)
 
   const kill = useMutation({
     mutationFn: (row: C2Session) => api.c2Close(project, row.id),
@@ -651,7 +654,26 @@ function SessionList({ rows, loading, error, project, activeOnly, open,
           sx={{ fontSize: 12.5 }}>
           Open
         </MenuItem>
+        <MenuItem
+          onClick={() => { if (menu) setAsk({ kind: 'name', row: menu.row }); setMenu(null) }}
+          sx={{ fontSize: 12.5 }}>
+          Rename…
+        </MenuItem>
+        {/* A callback arrives from an ADDRESS, and the address is
+            as often a NAT egress as the box that was popped. This
+            is how an operator records which, usually because the
+            shell has just told them. */}
+        <MenuItem
+          onClick={() => { if (menu) setAsk({ kind: 'target', row: menu.row }); setMenu(null) }}
+          sx={{ fontSize: 12.5 }}>
+          Merge with target…
+        </MenuItem>
       </Menu>
+
+      {ask && (
+        <AskDialog project={project} kind={ask.kind} row={ask.row}
+          onDone={(msg) => { setAsk(null); if (msg) setSaid(msg) }} />
+      )}
 
       {said && (
         <Alert severity="warning" variant="outlined"
@@ -678,6 +700,7 @@ function Terminal({ project, session, onChanged }: {
   const [input, setInput] = useState('')
   const [said, setSaid] = useState<string | null>(null)
   const endRef = useRef<HTMLDivElement | null>(null)
+  const inputRef = useRef<HTMLInputElement | null>(null)
 
   const tail = useQuery({
     queryKey: ['c2-transcript', project, session.id],
@@ -696,6 +719,10 @@ function Terminal({ project, session, onChanged }: {
     mutationFn: (data: string) => api.c2Send(project, session.id, data),
     onSuccess: (r) => {
       setInput('')
+      // Belt and braces: the field is no longer disabled, so focus
+      // should never have left -- but a re-render that replaces the
+      // node would still lose it, and the cost of asking is nil.
+      inputRef.current?.focus()
       setSaid(r.sent ? null : 'Accepted and recorded, but it could not be '
                             + 'sent — the tunnel is not up. The command is '
                             + 'in the transcript as attempted.')
@@ -759,7 +786,16 @@ function Terminal({ project, session, onChanged }: {
       <Box sx={{ px: 2, py: 1.2,
                  borderTop: `1px solid ${alpha(neon.cyan, 0.22)}` }}>
         <TextField fullWidth size="small" value={input} autoComplete="off"
-          disabled={!live || send.isPending}
+          inputRef={inputRef} autoFocus
+          // NOT disabled while a command is in flight. Disabling an
+          // input makes the browser blur it, and re-enabling does
+          // not give focus back -- so every Enter meant clicking
+          // into the box again before the next command. A shell is
+          // typed at in bursts; that made it unusable.
+          //
+          // Sending two in quick succession is fine and is what a
+          // shell does anyway.
+          disabled={!live}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
             // Enter sends. No Shift+Enter newline: a shell takes one
@@ -804,5 +840,86 @@ function Line({ e }: { e: C2Exchange }) {
                    wordBreak: 'break-all' }}>{e.output}</Box>
       )}
     </Box>
+  )
+}
+
+
+/** Rename a session, or file it against a different host.
+ *
+ *  One dialog for both because they are the same gesture -- "this
+ *  session is actually X" -- and two near-identical modals is how
+ *  the two come to validate differently.
+ */
+function AskDialog({ project, kind, row, onDone }: {
+  project: string
+  kind: 'name' | 'target'
+  row: C2Session
+  onDone: (message?: string) => void
+}) {
+  const qc = useQueryClient()
+  const [value, setValue] = useState(
+    kind === 'name' ? (row.label ?? '') : (row.host ?? ''))
+  const [err, setErr] = useState<string | null>(null)
+
+  const save = useMutation<{ created?: boolean }>({
+    // Both calls return different shapes; only `created` is read
+    // here, so the union is narrowed at the boundary rather than
+    // threaded through the mutation's type.
+    mutationFn: async () => kind === 'name'
+      ? (await api.c2Label(project, row.id, value.trim()), {})
+      : await api.c2Retarget(project, row.id, value.trim()),
+    onSuccess: (r) => {
+      void qc.invalidateQueries({ queryKey: ['c2-sessions', project] })
+      // Targets move too when a session does, so the grids that
+      // show them have to hear about it.
+      void qc.invalidateQueries({ queryKey: ['targets'] })
+      const made = r.created
+      onDone(made ? `Created ${value.trim()} and moved the session to it.`
+                  : undefined)
+    },
+    onError: (e) => setErr((e as Error).message),
+  })
+
+  return (
+    <Dialog open onClose={() => onDone()} maxWidth="xs" fullWidth>
+      <DialogTitle sx={{ color: neon.cyan, fontSize: 15 }}>
+        {kind === 'name' ? 'Rename this session' : 'Merge with target'}
+      </DialogTitle>
+      <DialogContent>
+        <Typography sx={{ fontSize: 12, color: neon.muted, mb: 1.6,
+                          lineHeight: 1.6 }}>
+          {kind === 'name'
+            ? 'What to call it here. The address it came from is kept '
+              + 'either way.'
+            : `This shell came from ${row.peer ?? 'an unknown address'}, `
+              + 'which may be a NAT egress rather than the host itself. '
+              + 'Name the real host and the session — and the compromise '
+              + '— move to it. The target is created if there is not one.'}
+        </Typography>
+        <TextField fullWidth size="small" autoFocus value={value}
+          label={kind === 'name' ? 'Name' : 'Host'}
+          placeholder={kind === 'name' ? 'jump box' : 'dc01.acme.example'}
+          onChange={(e) => { setValue(e.target.value); setErr(null) }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && value.trim()) {
+              e.preventDefault()
+              save.mutate()
+            }
+          }} />
+        {err && (
+          <Alert severity="error" sx={{ mt: 1.5, fontSize: 11.5 }}>{err}</Alert>
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => onDone()} sx={{ color: neon.muted }}>
+          Cancel
+        </Button>
+        <Button
+          disabled={save.isPending || (kind === 'target' && !value.trim())}
+          onClick={() => save.mutate()} sx={{ color: neon.green }}>
+          {save.isPending ? 'Saving…' : 'Save'}
+        </Button>
+      </DialogActions>
+    </Dialog>
   )
 }

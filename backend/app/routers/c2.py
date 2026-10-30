@@ -19,12 +19,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import audit, listeners
+from .. import audit, hosts, listeners
 from ..db import get_session
 from ..events import broker
 from ..models import Agent, Project, ShellExchange, ShellListener, ShellSession, Target, User
 from ..security import get_current_user, require_project
 from ..shellhub import hub
+from ..timeline import record
 
 log = logging.getLogger("oddjob.c2")
 
@@ -309,6 +310,77 @@ async def close(sid: int, project: str = Query(...),
                     "Recorded as closed here. There was no route to the "
                     "ghost, so if that shell is still alive it will stay "
                     "alive until something on the host ends it."}
+
+
+class RetargetIn(BaseModel):
+    #: The host to file this session against. Created if the
+    #: project has no target for it.
+    host: str = Field(min_length=1, max_length=255)
+
+
+@router.post("/sessions/{sid}/target", response_model=dict)
+async def retarget(sid: int, body: RetargetIn, project: str = Query(...),
+                   pr: Project = Depends(require_project("user")),
+                   user: User = Depends(get_current_user),
+                   session: AsyncSession = Depends(get_session)):
+    """File this session against a different host.
+
+    A callback arrives from an ADDRESS, and the address is as often
+    a NAT egress as the box that was popped. The operator is the
+    one who knows which -- usually because the shell just told
+    them -- so this re-points the session at the real host.
+
+    The target is created if the project has no such host, because
+    refusing would mean the operator cannot record what they just
+    learned without leaving the page. Refused names are still
+    refused: `hosts` decides that, not this.
+
+    **The compromise follows the session.** Moving a shell to a
+    host means that host is the one with a shell on it, so the
+    pwned flag and a timeline entry go with it. The flag is not
+    removed from the old target: it was true when it was set, and
+    nothing here has learned otherwise.
+    """
+    s = await _session(session, sid, pr)
+    # `validate_host` is the one place that decides what can be a
+    # target -- addresses and names both, with the refusals that
+    # keep `0.0.0.0` and `localhost` out. Branching on the shape
+    # here would be a second opinion that drifts from it.
+    try:
+        host = hosts.validate_host(body.host)
+    except hosts.InvalidHost as e:
+        raise HTTPException(422, str(e)) from e
+
+    t = (await session.execute(
+        select(Target).where(Target.project_id == pr.id,
+                             Target.host == host))).scalar_one_or_none()
+    made = t is None
+    if t is None:
+        t = Target(project_id=pr.id, host=host, kind="host")
+        session.add(t)
+        await session.flush()
+
+    was = s.target_id
+    s.target_id = t.id
+    # A shell on a host is the compromise, wherever the session was
+    # filed before. Set here as well as on arrival because this is
+    # the point at which we learn WHICH host it was.
+    newly = not t.hacked
+    t.hacked = True
+    await record(session, t.id, "status" if newly else "note",
+                 f"compromised — shell session {sid} moved here"
+                 if newly else f"shell session {sid} moved here",
+                 detail=f"from {s.peer}", actor=user, source="c2")
+    await session.commit()
+    await audit.record(
+        session, "ui", "c2.retarget", user=user, commit=True,
+        project_code=pr.code,
+        detail=f"session {sid}: target {was} -> {t.id} ({host})")
+    await broker.publish("c2", action="retargeted", project=pr.code,
+                         session=sid)
+    await broker.publish("targets", action="update", project=pr.code,
+                         host=host)
+    return {"ok": True, "host": host, "target_id": t.id, "created": made}
 
 
 class LabelIn(BaseModel):

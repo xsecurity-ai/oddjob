@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import proxytunnel, shellprobe
+from . import hosts, proxytunnel, shellprobe
 from .db import SessionLocal
 from .events import broker
 from .models import Agent, Project, ShellExchange, ShellSession, Target
@@ -85,6 +85,8 @@ async def _arrived(session: AsyncSession, agent: Agent,
     target = (await session.execute(
         select(Target).where(Target.project_id == agent.project_id,
                              Target.host == host))).scalar_one_or_none()
+    if target is None:
+        target = await _target_for_peer(session, agent.project_id, host)
 
     s = ShellSession(
         project_id=agent.project_id,
@@ -380,3 +382,55 @@ async def _probe_deadline(session_id: int) -> None:
     await _judge(session_id, shellprobe.SILENT,
                  "nothing came back within "
                  f"{int(shellprobe.WINDOW)}s of being asked")
+
+
+async def _target_for_peer(session: AsyncSession, project_id: int,
+                           host: str) -> Target | None:
+    """Make a target for an address that called back. -> it, or None.
+
+    **A callback is the strongest evidence an engagement produces
+    that a host exists and is reachable**, which is a better claim
+    than most rows in the inventory have. So the address gets a
+    target rather than a session filed against nothing.
+
+    The caution this replaces was that the source of a callback is
+    as often a NAT egress as the box that was popped, and a target
+    invented from one is a host nobody can find. That is still true
+    and it is why the row says where it came from -- and why
+    "merge with target" exists, so an operator who knows the real
+    name can re-point the session at it.
+
+    Refused addresses are still refused: `0.0.0.0`, loopback,
+    link-local and the rest cannot be targets however they arrive,
+    and a callback from one is a Ghost talking to itself.
+    """
+    if (why := hosts.address_refusal(host)) is not None:
+        log.info("callback from %s gets no target: %s", host, why)
+        return None
+    # `alive` is a fact we just observed: it connected to us. The
+    # address itself IS the host here, so there is no separate
+    # address column to fill -- see `target_addresses`, which is
+    # populated by resolution rather than by a callback.
+    t = Target(project_id=project_id, host=host, kind="host", alive=True,
+               notes="Created from a C2 callback: this address connected "
+                     "to a listener, which is evidence it exists and is "
+                     "reachable. It may be a NAT egress rather than the "
+                     "host itself -- re-point the session if you know "
+                     "the real name.")
+    session.add(t)
+    try:
+        await session.flush()
+    except Exception as e:                                   # noqa: BLE001
+        # A race with anything else creating the same host. Take
+        # theirs: the unique key is (project_id, host) and either
+        # row is the same fact.
+        await session.rollback()
+        log.info("target for %s already exists (%s)", host, e)
+        return (await session.execute(
+            select(Target).where(Target.project_id == project_id,
+                                 Target.host == host))).scalar_one_or_none()
+    await record(session, t.id, "status",
+                 f"created from a C2 callback from {host}",
+                 actor="oddjob", source="c2")
+    log.info("created target %s from a callback", host)
+    return t

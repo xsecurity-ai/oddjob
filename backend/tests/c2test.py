@@ -293,26 +293,46 @@ check("...but is still recorded",
       any("another shell" in (e.get("summary") or "") for e in entries),
       str([e.get("summary") for e in entries][:5]))
 
-# A callback from an address nothing in the inventory knows. The
-# session is kept -- throwing away a live shell because the inventory
-# was behind is the worse failure -- and no target is invented for it,
-# because the source of a callback is as often a NAT egress as the
-# host that was popped.
+# A callback from an address nothing in the inventory knows.
+#
+# It GETS a target. A callback is the strongest evidence an
+# engagement produces that a host exists and is reachable, which is
+# a better claim than most rows in the inventory have.
+#
+# The caution this replaced -- that the source of a callback is as
+# often a NAT egress as the box that was popped -- is still true,
+# which is why the row records where it came from and why a
+# session can be re-pointed at the real host.
 before = call("/api/targets?project=C2T&limit=200", token=admin)[1]
 t = asyncio.run(callback("203.0.113.99:40000"))
 after = call("/api/targets?project=C2T&limit=200", token=admin)[1]
-check("a callback from an unknown address invents no target",
-      len(after.get("items", [])) == len(before.get("items", [])),
+check("a callback from an unknown address creates a target for it",
+      len(after.get("items", [])) == len(before.get("items", [])) + 1,
       f"{len(before.get('items', []))} -> {len(after.get('items', []))}")
+made = next((x for x in after.get("items", [])
+             if x["host"] == "203.0.113.99"), None)
+check("...marked alive, because it just connected to us",
+      made and made.get("alive") is True, str(made))
+check("...and saying where it came from, because it may be a NAT egress",
+      made and "callback" in (made.get("notes") or "").lower(),
+      str(made.get("notes") if made else None))
+
 st, sess = call("/api/c2/sessions?project=C2T&active=true", token=admin)
-check("...and the shell is kept anyway", st == 200 and len(sess) == 3,
-      f"{st} {len(sess) if isinstance(sess, list) else sess}")
+check("...and the shell is filed against it", st == 200 and any(
+      x["host"] == "203.0.113.99" for x in sess), f"{st}")
 check("...with the port it landed on, so it can be told from the others",
       all(x["listen_port"] == 443 for x in sess),
       str([x["listen_port"] for x in sess]))
-check("...and the one with no target says so rather than guessing",
-      sum(1 for x in sess if x["host"] is None) == 1,
-      str([x["host"] for x in sess]))
+
+# An address that cannot be a host is still refused, however it
+# arrives. A callback from one is a Ghost talking to itself.
+n_before = len(call("/api/targets?project=C2T&limit=300",
+                    token=admin)[1].get("items", []))
+asyncio.run(callback("0.0.0.0:40000"))
+n_after = len(call("/api/targets?project=C2T&limit=300",
+                   token=admin)[1].get("items", []))
+check("a callback from an impossible address invents no target",
+      n_after == n_before, f"{n_before} -> {n_after}")
 
 print("\n== the row says where a payload should call back to ==")
 # The two things an operator needs to write a payload, and which one
@@ -630,6 +650,61 @@ row = next(x for x in
                 token=admin)[1] if x["id"] == SCAN_ID)
 check("...carrying the reason it was judged one",
       row["probe"] == "scanner" and row["probe_note"], str(row))
+
+print("\n== moving a session to the host it is really on ==")
+# A callback arrives from an ADDRESS, and the address is as often a
+# NAT egress as the box that was popped. The operator is the one
+# who knows which -- usually because the shell just told them.
+sid = asyncio.run(callback("203.0.113.50:41000"))
+sess = call("/api/c2/sessions?project=C2T&active=true", token=admin)[1]
+moving = next(x for x in sess if x["peer"] == "203.0.113.50:41000")
+
+st, r = call(f"/api/c2/sessions/{moving['id']}/target?project=C2T", "POST",
+             {"host": "dc01.acme.example"}, token=admin)
+check("a session can be moved to a named host",
+      st == 200 and r.get("host") == "dc01.acme.example", f"{st} {r}")
+check("...creating the target when the project has not got one",
+      r.get("created") is True, str(r.get("created")))
+
+sess = call("/api/c2/sessions?project=C2T&active=true", token=admin)[1]
+moved = next(x for x in sess if x["id"] == moving["id"])
+check("...and the session now reads against that host",
+      moved["host"] == "dc01.acme.example", str(moved["host"]))
+
+# The compromise follows the shell. Moving it means THAT host is
+# the one with a shell on it.
+st, rows = call("/api/targets?project=C2T&hacked=true&limit=50", token=admin)
+check("...and the host it moved to is marked compromised",
+      any(x["host"] == "dc01.acme.example" for x in rows.get("items", [])),
+      str([x["host"] for x in rows.get("items", [])][:5]))
+st, tl = call("/api/targets/C2T/dc01.acme.example/timeline", token=admin)
+check("...with a timeline entry saying why",
+      any("moved here" in (e.get("summary") or "")
+          for e in (tl or {}).get("items", [])),
+      str([e.get("summary") for e in (tl or {}).get("items", [])][:3]))
+
+# Moving to a host that already exists reuses it rather than
+# failing on the unique key.
+st, r = call(f"/api/c2/sessions/{moving['id']}/target?project=C2T", "POST",
+             {"host": "dc01.acme.example"}, token=admin)
+check("moving to an existing host reuses it",
+      st == 200 and r.get("created") is False, f"{st} {r}")
+
+# `hosts` decides what can be a target, here as everywhere.
+for bad, why in (("0.0.0.0", "an impossible address"),
+                 # NOT `localhost`: the harness sets
+                 # ODDJOB_ALLOW_LOOPBACK_TARGETS, so it is a legitimate
+                 # target here. `.invalid` is refused unconditionally.
+                 ("nope.invalid", "a reserved name"),
+                 ("*.acme.example", "a pattern, not a host"),
+                 ("", "nothing at all")):
+    st, r = call(f"/api/c2/sessions/{moving['id']}/target?project=C2T",
+                 "POST", {"host": bad}, token=admin)
+    check(f"{why} is refused as a target", st == 422, f"{bad!r} -> {st}")
+
+st, r = call(f"/api/c2/sessions/{moving['id']}/target?project=OTHER", "POST",
+             {"host": "dc01.acme.example"}, token=admin)
+check("a session in another engagement cannot be moved", st == 404, st)
 
 print("\n== a listener is the engagement's, not the world's ==")
 call("/api/projects", "POST", {"code": "OTHER", "name": "other"}, token=admin)
