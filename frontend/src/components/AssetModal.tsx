@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { ReactNode, Ref } from 'react'
 import {
   Alert, Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle,
   IconButton, Stack, Tooltip, Typography, alpha,
@@ -62,15 +62,34 @@ function AssetBody({ body, wrap, atLine, highlight }: {
   highlight: string | null
 }) {
   const hit = useRef<HTMLDivElement | null>(null)
+  const markRef = useRef<HTMLElement | null>(null)
+
+  const lines = useMemo(() => body.split('\n'), [body])
+  const numbered = lines.length <= MAX_NUMBERED_LINES
+
+  // Which line holds the first occurrence of the highlight, so the
+  // ref lands on one mark rather than on the last one rendered.
+  const firstHitLine = useMemo(() => {
+    if (!highlight || highlight.length < 4) return -1
+    return lines.findIndex((l) => l.includes(highlight))
+  }, [lines, highlight])
+
   useEffect(() => {
     // `block: center` rather than the default: a finding scrolled to
     // the very top of the pane has no context above it, and the lines
     // around a match are most of what makes it readable.
-    hit.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
-  }, [atLine])
-
-  const lines = useMemo(() => body.split('\n'), [body])
-  const numbered = lines.length <= MAX_NUMBERED_LINES
+    //
+    // The MARK wins when there is one. A secret finding carries both
+    // a line and a value, and the line is the coarser answer: on a
+    // minified bundle every match is on line 1, so scrolling to the
+    // line would be scrolling to the top of the file and calling it
+    // found.
+    const to = markRef.current ?? hit.current
+    to?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    // `highlight` as well as `atLine`: revealing a secret changes
+    // only the former, and without it the viewer highlighted the
+    // value and left it wherever the scroll happened to be.
+  }, [atLine, highlight, firstHitLine])
 
   const sx = {
     m: 0, p: 1.2, maxHeight: '60vh', overflow: 'auto',
@@ -86,7 +105,7 @@ function AssetBody({ body, wrap, atLine, highlight }: {
     return (
       <Box>
         <Box component="pre" sx={sx}>
-          <Marked text={body} needle={highlight} />
+          <Marked text={body} needle={highlight} first={markRef} />
         </Box>
         <Typography sx={{ fontSize: 10.5, color: neon.yellow, mt: 0.4 }}>
           {lines.length.toLocaleString()} lines — too many to number
@@ -112,7 +131,10 @@ function AssetBody({ body, wrap, atLine, highlight }: {
               flexShrink: 0,
             }}>{n}</Box>
             <Box component="span" sx={{ minWidth: 0 }}>
-              {text ? <Marked text={text} needle={highlight} /> : ' '}
+              {text
+                ? <Marked text={text} needle={highlight}
+                    first={i === firstHitLine ? markRef : undefined} />
+                : ' '}
             </Box>
           </Box>
         )
@@ -134,20 +156,32 @@ function AssetBody({ body, wrap, atLine, highlight }: {
  *  different key, and marking it would say we found this one here
  *  when we did not.
  */
-function Marked({ text, needle }: { text: string; needle: string | null }) {
+function Marked({ text, needle, first }: {
+  text: string
+  needle: string | null
+  /** Attached to the FIRST occurrence in this text, and only when
+   *  this is the first text that contains one. That is what the
+   *  viewer scrolls to: a key on line 4,000 of a bundle is
+   *  highlighted and off screen, which is a highlight nobody sees. */
+  first?: Ref<HTMLElement>
+}) {
   if (!needle || needle.length < 4 || !text.includes(needle)) {
     return <>{text}</>
   }
   const out: ReactNode[] = []
   let at = 0
+  let n = 0
   for (let i = text.indexOf(needle); i !== -1; i = text.indexOf(needle, at)) {
     if (i > at) out.push(text.slice(at, i))
     out.push(
-      <Box key={i} component="mark" sx={{
-        bgcolor: alpha(neon.yellow, 0.3), color: neon.yellow,
-        fontWeight: 700, borderRadius: 0.4, px: 0.2,
-      }}>{needle}</Box>,
+      <Box key={i} component="mark"
+        ref={n === 0 ? first : undefined}
+        sx={{
+          bgcolor: alpha(neon.yellow, 0.3), color: neon.yellow,
+          fontWeight: 700, borderRadius: 0.4, px: 0.2,
+        }}>{needle}</Box>,
     )
+    n += 1
     at = i + needle.length
   }
   if (at < text.length) out.push(text.slice(at))
@@ -359,8 +393,26 @@ export function AssetModal({ id, onClose }: {
                 result, not a gap.
               </Alert>
             ) : (
-              <AssetBody body={a.body} wrap={wrap} atLine={atLine}
-                highlight={shown?.secret ?? null} />
+              <>
+                {/* The value can be real and still not be in THIS
+                    text. A secret is found in a `WebAssetFile` --
+                    which may be an original recovered from a source
+                    map -- and what is on screen is the asset as it
+                    was served. Saying so beats highlighting nothing
+                    and leaving the reader to conclude the secret is
+                    not there. */}
+                {shown && !a.body.includes(shown.secret) && (
+                  <Alert severity="info" variant="outlined"
+                    sx={{ fontSize: 11.5, mb: 1 }}>
+                    The value is not in the file as it was served — it
+                    was found in a file recovered from this bundle, so
+                    there is nothing here to scroll to. The finding
+                    names the path.
+                  </Alert>
+                )}
+                <AssetBody body={a.body} wrap={wrap} atLine={atLine}
+                  highlight={shown?.secret ?? null} />
+              </>
             )}
 
             {denied && (
