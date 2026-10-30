@@ -1231,5 +1231,48 @@ check("...before anything is queued", _q2.index("check_task_targets")
       < _q2.index("for raw in subjects:"))
 
 
+# ===================================================================
+# When the scope document contradicts itself
+# ===================================================================
+#
+# A real engagement named a host as in scope and, in the same import,
+# excluded the address it resolves to. The gate refused the host --
+# correctly, because the packets would still reach an excluded
+# machine -- and the message said only "matches the out-of-scope
+# entry <ip>". The operator could see the hostname written in the
+# in-scope list, concluded the gate was broken, and reported it.
+#
+# The decision must NOT change. The message must say which two
+# entries disagree, so the person who can fix the document knows
+# there is one to fix.
+print("\n--- a name in scope at an address out of scope ---")
+_c = ScopeIndex([classify("web.acme.example"),
+                 classify("!203.0.113.7")])
+_r = _c.check("web.acme.example", ip="203.0.113.7")
+check("the host is still refused -- out wins, as it must",
+      not _r.allowed, _r.reason)
+check("...and the refusal names the address that did it",
+      "203.0.113.7" in _r.reason, _r.reason)
+check("...and says the name is ALSO in scope, which is the whole point",
+      "also named by the in-scope entry" in _r.reason, _r.reason)
+check("...and says which way to resolve it",
+      "out list" in _r.reason and "in list" in _r.reason, _r.reason)
+
+# No conflict, no note. A host that is simply not in scope must not
+# be told its scope document contradicts itself.
+_p = ScopeIndex([classify("web.acme.example"),
+                 classify("!203.0.113.7")])
+_r2 = _p.check("other.acme.example", ip="203.0.113.7")
+check("a host that is not in the in-list gets no conflict note",
+      not _r2.allowed and "contradicts" not in _r2.reason, _r2.reason)
+
+# The subject IS the address. Nothing contradictory about an excluded
+# address being excluded, and claiming otherwise would be noise on
+# every ordinary refusal.
+_r3 = _p.check("203.0.113.7")
+check("an excluded address refused by itself gets no note",
+      not _r3.allowed and "contradicts" not in _r3.reason, _r3.reason)
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 raise SystemExit(1 if fail else 0)

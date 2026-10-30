@@ -595,8 +595,9 @@ class ScopeIndex:
                       [(a, f"{h} (recorded as {x})") for a, x in others]:
             hit = self.out.match_ip(a)
             if hit:
-                return Ruling(BARRED, f"{why} matches the out-of-scope "
-                                      f"entry {hit}")
+                return Ruling(BARRED,
+                              f"{why} matches the out-of-scope entry {hit}"
+                              + _conflict_note(self, h, addr, hit))
 
         country = self.country_of(h, raw_ips[0] if raw_ips else None)
         if country and country in self.out.countries:
@@ -711,3 +712,35 @@ def _covers(a: _Attribution, host: str, addr) -> bool:
     except ValueError:
         return False
     return addr.version == net.version and addr in net
+
+
+def _conflict_note(sc, host: str, addr, hit: str) -> str:
+    """" — and the name is in scope", when the two lists disagree.
+
+    A scope document that NAMES a host as in scope and separately
+    excludes the address it lives at is contradicting itself about
+    that host. The decision does not change -- out still wins, which
+    is the only safe reading when the packets would go to an excluded
+    machine -- but the REFUSAL has to say so.
+
+    Without this the message reads "matches the out-of-scope entry
+    <ip>" and an operator who can see the hostname written in the
+    in-scope list concludes the gate is broken. It is not; their
+    document is, and nothing told them where to look.
+
+    Observed on a real engagement: a host explicitly in scope by name,
+    resolving to an address explicitly out of scope, both added by the
+    same import. Reported as a tool bug, and it was neither.
+    """
+    if addr is not None:
+        # The subject IS the address. Nothing contradictory about an
+        # excluded address being excluded.
+        return ""
+    named = sc.inc.match_name(host)
+    if not named:
+        return ""
+    return (f" — but {host} is also named by the in-scope entry "
+            f"{named}. The scope document contradicts itself here: out "
+            f"wins, because the traffic would still reach {hit}. Remove "
+            f"the address from the out list, or the name from the in "
+            f"list, depending on which the client meant.")
