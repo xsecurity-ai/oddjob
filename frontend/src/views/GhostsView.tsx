@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent,
   DialogTitle, Divider, IconButton, MenuItem, Select, Stack, Step, StepLabel,
@@ -15,12 +15,14 @@ import type { ColumnDef } from '../lib/columns'
 import { splitVersion } from '../lib/cellFacts'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  api, type AgentEnrolled, type GhostAgent, type GhostRouting,
+  api, type AgentEnrolled, type C2Listener, type GhostAgent,
+  type GhostRouting,
 } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { DataTable } from '../components/DataTable'
 import { GhostQueueDialog } from '../components/GhostQueueDialog'
 import { GhostTasksTable } from '../components/GhostTasksTable'
+import { PortPicker } from '../components/PortPicker'
 import { neon, glow, TAB_SX } from '../theme'
 import { ProxySetupDialog } from '../components/ProxySetupDialog'
 import { GhostDebugView } from './GhostDebugView'
@@ -573,6 +575,16 @@ function ParallelCell({ eff, own, reason, over, admin, busy, onPick }: {
 }
 
 
+/** Listeners this ghost was asked for and could not bind.
+ *
+ *  `failed` only -- `pending` means the ghost has not reported yet,
+ *  which is a third answer and not a quiet failure. Showing a
+ *  warning for one would train an operator to ignore the warning
+ *  that matters. */
+function failedHere(rows: C2Listener[]): C2Listener[] {
+  return rows.filter((l) => l.enabled && l.state === 'failed')
+}
+
 function EditAgentDialog({ project, agent, mode, geoipAvailable, onClose }: {
   project: string; agent: GhostAgent; mode?: string
   /** False when geolocation is off or no GeoLite2 database is on
@@ -586,6 +598,31 @@ function EditAgentDialog({ project, agent, mode, geoipAvailable, onClose }: {
   const [regions, setRegions] = useState((agent.regions ?? []).join(', '))
   const [countries, setCountries] = useState<string[]>(agent.scan_countries ?? [])
   const [notes, setNotes] = useState('')
+
+  // The ports this ghost holds for callbacks. Read from the C2
+  // listener list rather than from the agent row: a listener is its
+  // own record (which Ghost, which port, and what the Ghost managed
+  // to do about it), and duplicating it onto the agent would be two
+  // places to keep in step.
+  const listeners = useQuery({
+    queryKey: ['c2-listeners', project],
+    queryFn: () => api.c2Listeners(project),
+  })
+  const mine = useMemo(
+    () => (listeners.data ?? []).filter((l) => l.agent_id === agent.id),
+    [listeners.data, agent.id])
+  const [tcp, setTcp] = useState<number[] | null>(null)
+  const [udp, setUdp] = useState<number[] | null>(null)
+  // null until the server's list has loaded, so saving the dialog
+  // before it arrives cannot send an empty list -- which is
+  // DECLARATIVE and would close every port this ghost holds.
+  useEffect(() => {
+    if (!listeners.data) return
+    setTcp((cur) => cur ?? mine.filter((l) => l.protocol === 'tcp')
+      .map((l) => l.port))
+    setUdp((cur) => cur ?? mine.filter((l) => l.protocol === 'udp')
+      .map((l) => l.port))
+  }, [listeners.data, mine])
 
   const rotate = useMutation({
     mutationFn: () => api.reenrollAgent(project, agent.id),
@@ -605,9 +642,15 @@ function EditAgentDialog({ project, agent, mode, geoipAvailable, onClose }: {
       // anywhere, and "no change" would make that impossible.
       scan_countries: countries,
       notes: notes.trim() || undefined,
+      // Omitted while the list is still loading -- see the note on
+      // the state above. Sent even when empty otherwise, because
+      // emptying the box is how the last listener is removed.
+      ...(tcp === null ? {} : { listen_tcp: tcp }),
+      ...(udp === null ? {} : { listen_udp: udp }),
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['ghost-agents', project] })
+      qc.invalidateQueries({ queryKey: ['c2-listeners', project] })
       onClose()
     },
   })
@@ -649,6 +692,50 @@ function EditAgentDialog({ project, agent, mode, geoipAvailable, onClose }: {
             available={geoipAvailable}
             value={countries}
             onChange={setCountries} />
+
+          <Divider sx={{ borderColor: alpha(neon.cyan, 0.15) }} />
+
+          {/* Listeners. Here as well as on the C2 page because this
+              is where an operator already is when they are setting a
+              ghost up, and sending them to another page to finish
+              deploying one is how a ghost ends up holding nothing. */}
+          <Box>
+            <Typography sx={{ fontFamily: `'Orbitron', sans-serif`,
+                              fontSize: 11, letterSpacing: '0.12em',
+                              textTransform: 'uppercase', color: neon.cyan,
+                              mb: 0.8 }}>
+              Callback listeners
+            </Typography>
+            <Typography sx={{ fontSize: 11.5, color: neon.muted,
+                              lineHeight: 1.6, mb: 1.4 }}>
+              Ports this ghost holds open so a payload has somewhere to
+              call back to. It picks them up on its next heartbeat, and
+              the C2 page says whether each one actually bound.
+            </Typography>
+            <Stack spacing={1.8}>
+              <PortPicker label="TCP ports" value={tcp ?? []}
+                disabled={tcp === null}
+                help={tcp === null ? 'Loading what it holds now…' : undefined}
+                onChange={setTcp} />
+              <PortPicker label="UDP ports" value={udp ?? []}
+                disabled={udp === null}
+                help="For a payload that can only reach you over UDP."
+                onChange={setUdp} />
+            </Stack>
+            {failedHere(mine).length > 0 && (
+              // A bind that failed is the thing an operator most
+              // needs off this screen: the port looks configured and
+              // is catching nothing.
+              <Alert severity="warning" sx={{ fontSize: 11.5, mt: 1.4 }}>
+                {failedHere(mine).map((l) => (
+                  <Box key={l.id}>
+                    {l.protocol}/{l.port} did not bind
+                    {l.state_detail ? ` — ${l.state_detail}` : ''}
+                  </Box>
+                ))}
+              </Alert>
+            )}
+          </Box>
 
           <Divider sx={{ borderColor: alpha(neon.cyan, 0.15) }} />
           {!agent.sealed && (
