@@ -2259,6 +2259,15 @@ class ShellSession(Base, TimestampMixin):
     #: `silent` is kept and SHOWN. A real shell can be slow, or
     #: speak its own protocol, or have lost our probe -- hiding it
     #: would make an absence of evidence into evidence.
+    #: Whether the Ghost terminated TLS for this callback.
+    #:
+    #: A property of the SESSION, not of the listener: one port
+    #: takes both, decided per connection from the first bytes. An
+    #: operator needs it because it says whether the shell crossed
+    #: the client's network in cleartext, where their monitoring --
+    #: and anybody else's -- could read every command.
+    encrypted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false")
     probe: Mapped[str] = mapped_column(
         String(16), default="pending", server_default="pending", index=True)
     #: Why it was judged that way, in words an operator can check:

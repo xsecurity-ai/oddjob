@@ -35,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strconv"
 	"time"
@@ -114,14 +115,43 @@ func (l *Listener) Run(ctx context.Context) error {
 			// engagement's only way back in.
 			continue
 		}
-		id := l.m.add(conn{c: c})
-		// Announced BEFORE any bytes move, so the server has a
-		// session to attach them to. A DATA frame for a stream the
-		// server has never heard of has nowhere to go.
-		_ = l.m.send(ctx, socksrelay.ARRIVED, id,
-			announce(c.RemoteAddr().String(), "tcp", l.Port))
-		go l.read(ctx, id, c)
+		go l.greet(ctx, c)
 	}
+}
+
+// greet decides what a new connection is, then relays it.
+//
+// On its own goroutine because deciding can take up to
+// `HandshakeWait`, and the accept loop must not stop for it -- a
+// peer that connects and says nothing would otherwise hold every
+// other callback out of the listener for a second each.
+func (l *Listener) greet(ctx context.Context, raw net.Conn) {
+	cfg, err := serverTLS()
+	if err != nil {
+		// No certificate, so TLS cannot be offered. Plain still
+		// works and is the common case; saying so beats refusing
+		// the connection.
+		log.Printf("shell: no tls certificate (%v); taking %s as plain",
+			err, raw.RemoteAddr())
+		cfg = nil
+	}
+	c, encrypted, err := acceptMaybe(ctx, raw, cfg)
+	if err != nil {
+		// A ClientHello that could not finish. Not a shell, and
+		// feeding the raw socket on would put handshake bytes in a
+		// transcript as though somebody had typed them.
+		log.Printf("shell: %s on %d: %v", raw.RemoteAddr(), l.Port, err)
+		_ = raw.Close()
+		return
+	}
+
+	id := l.m.add(conn{c: c})
+	// Announced BEFORE any bytes move, so the server has a session
+	// to attach them to. A DATA frame for a stream the server has
+	// never heard of has nowhere to go.
+	_ = l.m.send(ctx, socksrelay.ARRIVED, id,
+		announceTLS(raw.RemoteAddr().String(), "tcp", l.Port, encrypted))
+	l.read(ctx, id, c)
 }
 
 // read copies one callback's output home until it ends.

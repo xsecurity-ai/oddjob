@@ -74,6 +74,13 @@ func (p *pipe) of(kind byte) []socksrelay.Frame {
 	return out
 }
 
+// A shell says nothing until it is typed at, so every dial in
+// these tests pays the TLS-detection window. Shortened here rather
+// than slept through: the behaviour under test is the relaying,
+// and a suite that costs a second per connection is one people
+// stop running.
+func init() { HandshakeWait = 40 * time.Millisecond }
+
 func waitFor(t *testing.T, what string, f func() bool) {
 	t.Helper()
 	for i := 0; i < 200; i++ {
@@ -111,6 +118,20 @@ func peerOf(t *testing.T, f socksrelay.Frame) announcement {
 		t.Fatalf("arrival is not an announcement: %q", f.Payload)
 	}
 	return a
+}
+
+// streamOf finds the stream id announced for one connection, by
+// the address it dialled from.
+func streamOf(t *testing.T, p *pipe, c net.Conn) uint32 {
+	t.Helper()
+	want := c.LocalAddr().String()
+	for _, f := range p.of(socksrelay.ARRIVED) {
+		if peerOf(t, f).Peer == want {
+			return f.Stream
+		}
+	}
+	t.Fatalf("no arrival announced for %s", want)
+	return 0
 }
 
 func dial(t *testing.T, l *Listener) net.Conn {
@@ -248,7 +269,12 @@ func TestServerCanCloseOneSession(t *testing.T) {
 	defer func() { _ = b.Close() }()
 	waitFor(t, "both arrivals",
 		func() bool { return len(p.of(socksrelay.ARRIVED)) == 2 })
-	first := p.of(socksrelay.ARRIVED)[0].Stream
+	// By PEER, not by position. Each connection is decided on its
+	// own goroutine now -- the listener has to work out whether it
+	// is TLS before it can relay -- so two callbacks arriving at
+	// once are announced in whichever order finishes first. Taking
+	// `[0]` closed whichever session won the race.
+	first := streamOf(t, p, a)
 
 	raw, _ := socksrelay.Encode(socksrelay.CLOSE, first, nil)
 	p.in <- raw

@@ -772,6 +772,22 @@ function Terminal({ project, session, onEdit, onChanged }: {
             {whose(session)}
           </Box>
         )}
+        {/* Said where the operator is about to type. A shell in
+            cleartext crossed the client's network where their
+            monitoring can read every command, and that changes
+            what you are willing to run on it. */}
+        <Tooltip title={session.encrypted
+          ? 'The ghost terminated TLS for this callback, so it did not '
+            + 'cross the network in cleartext.'
+          : 'Cleartext. Every command on this session crossed the '
+            + 'client’s network readable — call back with '
+            + '`socat openssl:host:port,verify=0` for TLS on the same port.'}>
+          <Chip size="small" label={session.encrypted ? 'TLS' : 'cleartext'}
+            sx={{ height: 17, fontSize: 9.5,
+                  color: session.encrypted ? neon.green : neon.yellow,
+                  border: `1px solid ${alpha(
+                    session.encrypted ? neon.green : neon.yellow, 0.45)}` }} />
+        </Tooltip>
         <Chip size="small" label={session.state} sx={{
           height: 17, fontSize: 9.5,
           color: STATE_COLOUR[session.state] ?? neon.muted,

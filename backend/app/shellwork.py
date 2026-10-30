@@ -50,8 +50,8 @@ async def on_frame(session: AsyncSession, agent: Agent,
         await _closed(session, agent, frame)
 
 
-def _announcement(payload: bytes) -> tuple[str, str | None, int | None]:
-    """`(peer, protocol, port)` out of an ARRIVED frame.
+def _announcement(payload: bytes) -> tuple[str, str | None, int | None, bool]:
+    """`(peer, protocol, port, encrypted)` out of an ARRIVED frame.
 
     JSON from an agent that knows which of its listeners caught the
     callback, a bare address from one that does not. Both are
@@ -66,16 +66,20 @@ def _announcement(payload: bytes) -> tuple[str, str | None, int | None]:
             port = doc.get("port")
             return (str(doc.get("peer") or "")[:64],
                     str(doc.get("protocol") or "") or None,
-                    int(port) if isinstance(port, int) else None)
+                    int(port) if isinstance(port, int) else None,
+                    bool(doc.get("tls")))
         except (ValueError, TypeError):
             pass
-    return raw[:64], None, None
+    # A bare address, from a Ghost that predates any of this. Not
+    # encrypted: that Ghost does not terminate TLS, so it is a fact
+    # about it rather than a default.
+    return raw[:64], None, None, False
 
 
 async def _arrived(session: AsyncSession, agent: Agent,
                    frame: proxytunnel.Frame) -> None:
     """A callback landed on the Ghost's listener."""
-    peer, proto, port = _announcement(frame.payload)
+    peer, proto, port, encrypted = _announcement(frame.payload)
     host = peer.rsplit(":", 1)[0].strip("[]")
 
     # File it against the target it came from, where the project has
@@ -91,12 +95,15 @@ async def _arrived(session: AsyncSession, agent: Agent,
     s = ShellSession(
         project_id=agent.project_id,
         target_id=target.id if target else None,
-        agent_id=agent.id, peer=peer, listen_port=port, state="open",
+        agent_id=agent.id, peer=peer, listen_port=port,
+        encrypted=encrypted, state="open",
         last_seen_at=datetime.now(UTC))
     session.add(s)
     await session.flush()
 
     where = f"{proto or 'tcp'}/{port}" if port else "the ghost's listener"
+    if encrypted:
+        where += " over TLS"
     if target is not None:
         # A shell IS the compromise. Nothing else an engagement
         # produces is better evidence that a host is owned, so this
