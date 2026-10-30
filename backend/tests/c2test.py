@@ -317,7 +317,7 @@ check("...and saying where it came from, because it may be a NAT egress",
       made and "callback" in (made.get("notes") or "").lower(),
       str(made.get("notes") if made else None))
 
-st, sess = call("/api/c2/sessions?project=C2T&active=true", token=admin)
+st, sess = call("/api/c2/sessions?project=C2T&state=live", token=admin)
 check("...and the shell is filed against it", st == 200 and any(
       x["host"] == "203.0.113.99" for x in sess), f"{st}")
 check("...with the port it landed on, so it can be told from the others",
@@ -542,7 +542,7 @@ print("\n== a session says WHOSE address called back ==")
 # dismissed as noise -- or noise gets written up as a shell. That
 # happened: a session from a cloud provider in Belgium was read as
 # the operator's own home connection.
-st, sess = call("/api/c2/sessions?project=C2T&active=false", token=admin)
+st, sess = call("/api/c2/sessions?project=C2T&state=all", token=admin)
 check("every session carries a peer_geo field, even when empty",
       st == 200 and all("peer_geo" in x for x in sess), f"{st}")
 
@@ -631,7 +631,7 @@ REAL_ID = asyncio.run(judged("203.0.113.202:40003", "shell",
                              "answered with text"))
 
 shown = {x["id"] for x in
-         call("/api/c2/sessions?project=C2T&active=true", token=admin)[1]}
+         call("/api/c2/sessions?project=C2T&state=live", token=admin)[1]}
 check("a scanner is hidden by default", SCAN_ID not in shown)
 check("a shell is shown", REAL_ID in shown)
 # The one that matters. Nothing answered, which is not the same as
@@ -641,12 +641,12 @@ check("a SILENT session is still shown -- absence of evidence is not "
       "evidence", QUIET_ID in shown)
 
 shown_all = {x["id"] for x in
-           call("/api/c2/sessions?project=C2T&active=true&scans=true",
+           call("/api/c2/sessions?project=C2T&state=live&scans=true",
                 token=admin)[1]}
 check("...and the scanner is still there when asked for",
       SCAN_ID in shown_all)
 row = next(x for x in
-           call("/api/c2/sessions?project=C2T&active=true&scans=true",
+           call("/api/c2/sessions?project=C2T&state=live&scans=true",
                 token=admin)[1] if x["id"] == SCAN_ID)
 check("...carrying the reason it was judged one",
       row["probe"] == "scanner" and row["probe_note"], str(row))
@@ -656,7 +656,7 @@ print("\n== moving a session to the host it is really on ==")
 # NAT egress as the box that was popped. The operator is the one
 # who knows which -- usually because the shell just told them.
 sid = asyncio.run(callback("203.0.113.50:41000"))
-sess = call("/api/c2/sessions?project=C2T&active=true", token=admin)[1]
+sess = call("/api/c2/sessions?project=C2T&state=live", token=admin)[1]
 moving = next(x for x in sess if x["peer"] == "203.0.113.50:41000")
 
 st, r = call(f"/api/c2/sessions/{moving['id']}/target?project=C2T", "POST",
@@ -666,7 +666,7 @@ check("a session can be moved to a named host",
 check("...creating the target when the project has not got one",
       r.get("created") is True, str(r.get("created")))
 
-sess = call("/api/c2/sessions?project=C2T&active=true", token=admin)[1]
+sess = call("/api/c2/sessions?project=C2T&state=live", token=admin)[1]
 moved = next(x for x in sess if x["id"] == moving["id"])
 check("...and the session now reads against that host",
       moved["host"] == "dc01.acme.example", str(moved["host"]))
@@ -706,6 +706,40 @@ st, r = call(f"/api/c2/sessions/{moving['id']}/target?project=OTHER", "POST",
              {"host": "dc01.acme.example"}, token=admin)
 check("a session in another engagement cannot be moved", st == 404, st)
 
+print("\n== live and ended are separate views ==")
+# Three tabs: what can be typed at now, what is kept for the
+# record, and the listeners. The first question on opening the
+# page is almost always the first one.
+live_ids = {x["id"] for x in
+            call("/api/c2/sessions?project=C2T&state=live&scans=true",
+                 token=admin)[1]}
+ended_ids = {x["id"] for x in
+             call("/api/c2/sessions?project=C2T&state=ended&scans=true",
+                  token=admin)[1]}
+all_ids = {x["id"] for x in
+           call("/api/c2/sessions?project=C2T&state=all&scans=true",
+                token=admin)[1]}
+check("live and ended do not overlap", not (live_ids & ended_ids),
+      str(sorted(live_ids & ended_ids)[:5]))
+check("...and together they are everything",
+      live_ids | ended_ids == all_ids,
+      f"{len(live_ids)}+{len(ended_ids)} vs {len(all_ids)}")
+check("every live session is open",
+      all(x["state"] == "open" for x in
+          call("/api/c2/sessions?project=C2T&state=live&scans=true",
+               token=admin)[1]))
+# `closed` and `lost` are different facts and both answer "not
+# live" -- the row says which, and the tab does not split on it.
+ended = call("/api/c2/sessions?project=C2T&state=ended&scans=true",
+             token=admin)[1]
+check("ended holds closed AND lost",
+      {x["state"] for x in ended} <= {"closed", "lost"}
+      and len({x["state"] for x in ended}) >= 1,
+      str({x["state"] for x in ended}))
+st, r = call("/api/c2/sessions?project=C2T&state=sideways", token=admin)
+check("a state nobody defined is refused rather than guessed at",
+      st == 422, st)
+
 print("\n== a listener is the engagement's, not the world's ==")
 call("/api/projects", "POST", {"code": "OTHER", "name": "other"}, token=admin)
 st, rows = call("/api/c2/listeners?project=OTHER", token=admin)
@@ -719,7 +753,7 @@ print("\n== deleting one keeps what it caught ==")
 st, _ = call(f"/api/c2/listeners/{ids[('tcp', 443)]}?project=C2T", "DELETE",
              token=admin)
 check("a listener can be removed", st == 204, st)
-st, sess = call("/api/c2/sessions?project=C2T&active=false", token=admin)
+st, sess = call("/api/c2/sessions?project=C2T&state=all", token=admin)
 check("...and the shells it caught are still there",
       sum(1 for x in sess if x["listen_port"] == 443) >= 3,
       str(len(sess)))

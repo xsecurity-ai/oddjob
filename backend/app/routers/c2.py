@@ -131,10 +131,11 @@ def _out(s: ShellSession, host: str | None, agent: str | None,
 
 @router.get("/sessions", response_model=list[SessionOut])
 async def list_sessions(project: str = Query(...),
-                        active: bool = Query(
-                            True, description="Only sessions that are open. "
-                                              "False includes closed ones, "
-                                              "which stay for the record."),
+                        state: str = Query(
+                            "live", pattern="^(live|ended|all)$",
+                            description="live: still open. ended: closed or "
+                                        "lost, which are kept for the "
+                                        "record. all: both."),
                         scans: bool = Query(
                             False, description="Include peers identified as "
                                                "port scanners. They are kept "
@@ -145,9 +146,9 @@ async def list_sessions(project: str = Query(...),
                         session: AsyncSession = Depends(get_session)):
     """Every shell on this engagement, newest first.
 
-    Active by default: a long engagement accumulates closed sessions
+    Live by default: a long engagement accumulates ended sessions
     and the question on opening this page is almost always "what can
-    I type at right now". The closed ones are a tick away and are
+    I type at right now". The ended ones are a tab away and are
     never deleted -- what was done on a host is part of the record.
 
     `readonly` to LOOK. Typing needs `user`; see `send`.
@@ -161,8 +162,15 @@ async def list_sessions(project: str = Query(...),
          .where(ShellSession.project_id == pr.id)
          .group_by(ShellSession.id, Target.host, Agent.name)
          .order_by(ShellSession.id.desc()))
-    if active:
+    if state == "live":
         q = q.where(ShellSession.state == "open")
+    elif state == "ended":
+        # `closed` and `lost` together. They are different facts --
+        # one is a shell that ended, the other is a route that went
+        # -- and the row says which, but both answer "not live", so
+        # separating them into two more tabs would be splitting on
+        # a distinction the operator is not browsing by.
+        q = q.where(ShellSession.state != "open")
     if not scans:
         # Only the ones POSITIVELY identified as something else --
         # an HTTP request, a TLS handshake, an SSH banner. `silent`

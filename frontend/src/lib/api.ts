@@ -1428,10 +1428,12 @@ export const api = {
     req<{ ok: boolean; id: number; target_url: string; note: string }>(
       `/api/pocs/${id}/run` + qs({ project }),
       { method: 'POST', body: JSON.stringify(url ? { url } : {}) }),
-  /** `scans` includes peers identified as port scanners. They are
-   *  kept either way — this only hides them. */
-  c2Sessions: (project: string, active = true, scans = false) =>
-    req<C2Session[]>('/api/c2/sessions' + qs({ project, active, scans })),
+  /** `state` is live | ended | all. `scans` includes peers
+   *  identified as port scanners — they are kept either way, this
+   *  only hides them. */
+  c2Sessions: (project: string, state: 'live' | 'ended' | 'all' = 'live',
+               scans = false) =>
+    req<C2Session[]>('/api/c2/sessions' + qs({ project, state, scans })),
   c2Listeners: (project: string) =>
     req<C2Listener[]>('/api/c2/listeners' + qs({ project })),
   /** Tell a Ghost to hold these ports. Several at once, because an

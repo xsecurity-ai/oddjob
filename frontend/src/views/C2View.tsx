@@ -63,8 +63,10 @@ function title(s: C2Session): string {
 export function C2View({ project }: { project: string | null }) {
   const qc = useQueryClient()
   const { canWrite } = useAuth()
-  const [tab, setTab] = useState<'sessions' | 'listeners'>('sessions')
-  const [activeOnly, setActiveOnly] = useState(true)
+  // Three: what can be typed at now, what is kept for the record,
+  // and the listeners. The first question on opening this page is
+  // almost always the first one, so it leads.
+  const [tab, setTab] = useState<'live' | 'ended' | 'listeners'>('live')
   // Scanners hidden by default. A listener open to the internet
   // catches them faster than it catches payloads, and each one
   // files a session.
@@ -73,9 +75,10 @@ export function C2View({ project }: { project: string | null }) {
   const [setup, setSetup] = useState(false)
 
   const sessions = useQuery({
-    queryKey: ['c2-sessions', project, activeOnly, showScans],
-    queryFn: () => api.c2Sessions(project as string, activeOnly, showScans),
-    enabled: !!project,
+    queryKey: ['c2-sessions', project, tab, showScans],
+    queryFn: () => api.c2Sessions(
+      project as string, tab === 'ended' ? 'ended' : 'live', showScans),
+    enabled: !!project && tab !== 'listeners',
     refetchInterval: POLL_MS * 4,
   })
   const rows = useMemo(() => sessions.data ?? [], [sessions.data])
@@ -125,7 +128,8 @@ export function C2View({ project }: { project: string | null }) {
           color: neon.pink, border: `1px solid ${alpha(neon.pink, 0.45)}` }} />
         <Tabs value={tab} onChange={(_e, v) => setTab(v)}
           sx={{ minHeight: 34 }}>
-          <Tab value="sessions" label="Sessions" sx={TAB_SX} />
+          <Tab value="live" label="Live" sx={TAB_SX} />
+          <Tab value="ended" label="Old" sx={TAB_SX} />
           {/* Its own tab, not a panel beside the terminal: "which
               ghost is listening on which port" is a question asked
               while nothing has called back yet, which is exactly
@@ -133,19 +137,7 @@ export function C2View({ project }: { project: string | null }) {
           <Tab value="listeners" label="Listeners" sx={TAB_SX} />
         </Tabs>
         <Box sx={{ flex: 1 }} />
-        {tab === 'sessions' && (
-          <Tooltip title="Closed and lost sessions are kept for the record —
-                          what was done on a host is part of the engagement.">
-            <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
-              <Typography sx={{ fontSize: 11.5, color: neon.muted }}>
-                active only
-              </Typography>
-              <Switch size="small" checked={activeOnly}
-                onChange={(e) => setActiveOnly(e.target.checked)} />
-            </Stack>
-          </Tooltip>
-        )}
-        {tab === 'sessions' && (
+        {tab !== 'listeners' && (
           <Tooltip title="Peers that answered with an HTTP request, a TLS
                           handshake or an SSH banner — somebody scanning the
                           port rather than a payload calling home. They are
@@ -168,11 +160,11 @@ export function C2View({ project }: { project: string | null }) {
         )}
       </Stack>
 
-      {tab === 'sessions' ? (
+      {tab !== 'listeners' ? (
         <Stack direction="row" sx={{ flex: 1, minHeight: 0 }}>
           <SessionList rows={rows} loading={sessions.isLoading}
             error={sessions.error as Error | null} project={project}
-            activeOnly={activeOnly} open={open} onOpen={setOpen} />
+            tab={tab} open={open} onOpen={setOpen} />
           {chosen
             ? <Terminal key={chosen.id} project={project} session={chosen}
                 onChanged={() => void qc.invalidateQueries(
@@ -181,7 +173,7 @@ export function C2View({ project }: { project: string | null }) {
               <Box sx={{ flex: 1, p: 3 }}>
                 <Typography sx={{ fontSize: 12.5, color: neon.muted,
                                   lineHeight: 1.8 }}>
-                  No session is open. A Ghost holding a listener files one
+                  Nothing selected. A Ghost holding a listener files one
                   here the moment something calls back, and goes straight
                   back to listening — so a shell that dies and a payload
                   that retries give you a second session rather than
@@ -515,13 +507,13 @@ function SetupListenerDialog({ project, onClose }: {
   )
 }
 
-function SessionList({ rows, loading, error, project, activeOnly, open,
+function SessionList({ rows, loading, error, project, tab, open,
                       onOpen }: {
   rows: C2Session[]
   loading: boolean
   error: Error | null
   project: string
-  activeOnly: boolean
+  tab: 'live' | 'ended'
   open: number | null
   onOpen: (id: number) => void
 }) {
@@ -569,10 +561,10 @@ function SessionList({ rows, loading, error, project, activeOnly, open,
       {!loading && !error && !rows.length && (
         <Typography sx={{ p: 2, fontSize: 11.5, color: neon.muted,
                           lineHeight: 1.7 }}>
-          {activeOnly
-            ? 'No live session. Untick “active only” to see ones that have '
-              + 'ended — they are kept.'
-            : 'Nothing has called back on this engagement yet.'}
+          {tab === 'live'
+            ? 'No live session. Old has the ones that have ended — they are '
+              + 'kept, and so is everything that was typed at them.'
+            : 'Nothing has ended on this engagement yet.'}
         </Typography>
       )}
       {rows.map((s) => {
