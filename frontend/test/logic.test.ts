@@ -35,6 +35,7 @@ import scopeCases from './scope-cases.json'
 import domainCases from './domain-cases.json'
 import { LIKELY_PORTS, parsePorts } from '../src/components/PortPicker'
 import { POC_COLOUR, POC_LABEL, POC_RANK, POC_STATES } from '../src/lib/lifecycle'
+import { claimTime, decodeJwt, looksLikeJwt } from '../src/lib/jwt'
 import { anyUnseen, key, readingSession, reset as resetUnseen,
          sessionSpoke, snapshot } from '../src/lib/c2unseen'
 
@@ -1039,6 +1040,104 @@ console.log('\n== a rollup expansion shows each thing once ==')
   check('...and "none" last', order[2] === 'Not Available', order[2])
   check('every state has a rank, so none sorts as 9 by accident',
         POC_STATES.every((st) => typeof POC_RANK[st] === 'number'))
+}
+
+// ---------------------------------------------------------------
+// Reading a JWT without verifying it
+// ---------------------------------------------------------------
+//
+// The whole risk here is overclaiming. A decoded token looks
+// authoritative, and the one word that must never appear is
+// "valid": the signature cannot be checked without the key, so
+// every claim below is what the token SAYS.
+//
+// Fixtures are built from `*.acme.example` and carry no real
+// credential: the signature segment is the literal "sig".
+{
+  const LIVE = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzdmMtYWNtZSIsIm'
+    + 'V4cCI6NDEwMjQ0NDgwMCwiaXNzIjoiaHR0cHM6Ly9hdXRoLmFjbWUuZXhhbXBsZSJ9.c2ln'
+  const EXPIRED = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1MSIsImV4cCI6'
+    + 'MTAwMDAwMDAwMH0.c2ln'
+  const NONE = 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiIsImV4cCI6NDEwMjQ0NDgwMH0.'
+  const NOEXP = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzdmMifQ.c2ln'
+
+  const live = decodeJwt(LIVE)
+  check('a token decodes into its header and payload',
+        live?.header.alg === 'HS256' && live?.payload.sub === 'svc-acme',
+        JSON.stringify(live?.payload))
+  check('...including who issued it',
+        live?.payload.iss === 'https://auth.acme.example')
+  check('...and a far-future exp reads as LIVE',
+        !!live?.notes.some((n) => n.level === 'alarm' && n.text.includes('LIVE')),
+        JSON.stringify(live?.notes.map((n) => n.text)))
+
+  const old_ = decodeJwt(EXPIRED)
+  check('an expired token says so',
+        !!old_?.notes.some((n) => n.text.startsWith('Expired')),
+        JSON.stringify(old_?.notes.map((n) => n.text)))
+  check('...and is NOT alarming about being live',
+        !old_?.notes.some((n) => n.text.includes('LIVE')))
+
+  // alg:none means anyone can mint one. If a service accepts it
+  // that is a finding in its own right, not a detail.
+  const none = decodeJwt(NONE)
+  check('alg "none" is called out as unsigned',
+        !!none?.notes.some((n) => n.level === 'alarm'
+                                  && n.text.includes('unsigned')),
+        JSON.stringify(none?.notes.map((n) => n.text)))
+
+  // The one people miss: a bearer token with no expiry is valid
+  // until something revokes it, which is usually never.
+  const noexp = decodeJwt(NOEXP)
+  check('a token with no exp is called out, not treated as expired',
+        !!noexp?.notes.some((n) => n.text.includes('does not expire')),
+        JSON.stringify(noexp?.notes.map((n) => n.text)))
+
+  // The assertion that matters most.
+  for (const [name, t] of [['live', LIVE], ['expired', EXPIRED],
+                           ['none', NONE], ['noexp', NOEXP]] as const) {
+    const d = decodeJwt(t)
+    check(`${name}: every decode carries the "not verified" caveat`,
+          !!d?.notes.some((n) => n.text.startsWith('Not verified.')))
+    check(`${name}: and never uses the word "valid" about the signature`,
+          !d?.notes.some((n) => /\bvalid signature\b|\bsignature is valid\b/i
+            .test(n.text)))
+  }
+
+  // Things that are not tokens must not produce a pane that
+  // asserts they are.
+  // Dotted things, because that is the only shape that gets as far
+  // as decoding. A credential with no dots never reaches the check,
+  // so one here would be testing the regex rather than the decoder
+  // -- and a credential-shaped fixture in this repo is a fixture
+  // the secrets hook has to be argued with, correctly.
+  for (const notToken of ['', 'hello', 'a.b.c', '1.2.3',
+                          'https://acme.example/a.b.c',
+                          'app.min.js.map',
+                          'eyJhbGciOiJIUzI1NiJ9.notbase64json.c2ln',
+                          // Decodes to JSON, but an ARRAY, not an
+                          // object -- a token's header and payload
+                          // are both objects.
+                          'WyJhIl0.WyJiIl0.c2ln',
+                          // Header decodes; payload is a bare
+                          // string. Both halves must be objects.
+                          'eyJhbGciOiJIUzI1NiJ9.ImhlbGxvIg.c2ln']) {
+    check(`${notToken.slice(0, 24) || '(empty)'} is not read as a JWT`,
+          decodeJwt(notToken) === null && !looksLikeJwt(notToken))
+  }
+
+  check('looksLikeJwt agrees with decodeJwt on a real one',
+        looksLikeJwt(LIVE))
+
+  // Seconds, per RFC 7519 — but a library that emitted
+  // milliseconds should not render as the year 55000.
+  check('a NumericDate in seconds reads as the right year',
+        claimTime(1000000000)?.getUTCFullYear() === 2001,
+        String(claimTime(1000000000)?.getUTCFullYear()))
+  check('...and one in milliseconds is not read as the year 55000',
+        claimTime(1000000000000)?.getUTCFullYear() === 2001,
+        String(claimTime(1000000000000)?.getUTCFullYear()))
+  check('a non-numeric claim is not a time', claimTime('soon') === null)
 }
 
 console.log(`\n${'='.repeat(56)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(56)}`)
