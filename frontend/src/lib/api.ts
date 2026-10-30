@@ -1428,10 +1428,12 @@ export const api = {
     req<{ ok: boolean; id: number; target_url: string; note: string }>(
       `/api/pocs/${id}/run` + qs({ project }),
       { method: 'POST', body: JSON.stringify(url ? { url } : {}) }),
-  /** `scans` includes peers identified as port scanners. They are
-   *  kept either way — this only hides them. */
-  c2Sessions: (project: string, active = true, scans = false) =>
-    req<C2Session[]>('/api/c2/sessions' + qs({ project, active, scans })),
+  /** `state` is live | ended | all. `scans` includes peers
+   *  identified as port scanners — they are kept either way, this
+   *  only hides them. */
+  c2Sessions: (project: string, state: 'live' | 'ended' | 'all' = 'live',
+               scans = false) =>
+    req<C2Session[]>('/api/c2/sessions' + qs({ project, state, scans })),
   c2Listeners: (project: string) =>
     req<C2Listener[]>('/api/c2/listeners' + qs({ project })),
   /** Tell a Ghost to hold these ports. Several at once, because an
@@ -1472,6 +1474,14 @@ export const api = {
   c2Close: (project: string, sid: number) =>
     req<{ ok: boolean; state: string; terminated: boolean; note: string }>(
       `/api/c2/sessions/${sid}/close` + qs({ project }), { method: 'POST' }),
+  /** File a session against a different host, creating the target
+   *  if the project has not got one. A callback arrives from an
+   *  ADDRESS, which is as often a NAT egress as the box that was
+   *  popped — this is how an operator records which. */
+  c2Retarget: (project: string, sid: number, host: string) =>
+    req<{ ok: boolean; host: string; target_id: number; created: boolean }>(
+      `/api/c2/sessions/${sid}/target` + qs({ project }),
+      { method: 'POST', body: JSON.stringify({ host }) }),
   c2Label: (project: string, sid: number, label: string) =>
     req<{ ok: boolean; label: string | null }>(
       `/api/c2/sessions/${sid}/label` + qs({ project }),
