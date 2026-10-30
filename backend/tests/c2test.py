@@ -515,6 +515,36 @@ check("...and a terminated one is left alone, not revived",
 check("a second startup finds nothing left to do",
       asyncio.run(restart()) == 0)
 
+print("\n== a session says WHOSE address called back ==")
+# The question a callback actually raises. A listener on 443 open
+# to the world catches a payload and the internet both, and telling
+# them apart by squinting at an octet is how a real shell gets
+# dismissed as noise -- or noise gets written up as a shell. That
+# happened: a session from a cloud provider in Belgium was read as
+# the operator's own home connection.
+st, sess = call("/api/c2/sessions?project=C2T&active=false", token=admin)
+check("every session carries a peer_geo field, even when empty",
+      st == 200 and all("peer_geo" in x for x in sess), f"{st}")
+
+# Documentation addresses have no geolocation, and that is the
+# ordinary case rather than an error: the field is null and the UI
+# simply shows the address.
+doc = [x for x in sess if (x["peer"] or "").startswith("198.51.100.")]
+check("a documentation address geolocates to nothing, without erroring",
+      doc and doc[0]["peer_geo"] is None,
+      str(doc[0]["peer_geo"]) if doc else "no such session")
+
+# The port must not reach the lookup, and an IPv6 peer is
+# `[::1]:4444` -- so the split is on the LAST colon, unwrapped.
+from app.routers.c2 import _peer_geo  # noqa: E402
+
+check("a v4 peer strips its port before looking up",
+      _peer_geo("203.0.113.9:40000") is None)   # no geo for TEST-NET-3
+check("a v6 peer is unwrapped rather than split on its first colon",
+      _peer_geo("[2001:db8::1]:4444") is None)
+check("no peer is no lookup", _peer_geo(None) is None
+      and _peer_geo("") is None)
+
 print("\n== a listener is the engagement's, not the world's ==")
 call("/api/projects", "POST", {"code": "OTHER", "name": "other"}, token=admin)
 st, rows = call("/api/c2/listeners?project=OTHER", token=admin)

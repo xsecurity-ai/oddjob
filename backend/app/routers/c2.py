@@ -42,6 +42,20 @@ class SessionOut(BaseModel):
     target_id: int | None
     agent_name: str | None
     peer: str | None
+    #: WHOSE address that is: country, city, ASN, organisation.
+    #:
+    #: Looked up on read, like a ghost's own address and for the same
+    #: reasons -- there are few sessions and a stored answer would go
+    #: stale. None when geolocation is off, no database is installed,
+    #: or the address is private.
+    #:
+    #: Here because "is this our payload or somebody scanning the
+    #: internet" is the first question a callback raises, and a bare
+    #: address does not answer it. A listener on 443 open to the
+    #: world catches both, and telling them apart by squinting at an
+    #: octet is how a real shell gets dismissed as noise -- or noise
+    #: gets written up as a shell.
+    peer_geo: dict | None
     listen_port: int | None
     state: str
     label: str | None
@@ -71,11 +85,38 @@ class InputIn(BaseModel):
     data: str = Field(min_length=1, max_length=65536)
 
 
+def _peer_geo(peer: str | None) -> dict | None:
+    """Where a callback came from, and whose network it is.
+
+    `peer` is `host:port` as the Ghost saw it, so the port is
+    stripped first -- and an IPv6 peer is `[::1]:4444`, which is why
+    this splits on the LAST colon and unwraps the brackets rather
+    than taking the first field.
+    """
+    if not peer:
+        return None
+    host = peer.rsplit(":", 1)[0].strip("[]")
+    if not host:
+        return None
+    try:
+        from .. import geoip
+        loc = geoip.lookup(host)
+    except Exception:                            # noqa: BLE001
+        # Geolocation being unavailable is ordinary and is not worth
+        # failing a session listing over.
+        return None
+    if not loc.known:
+        return None
+    return {"country": loc.country, "country_name": loc.country_name,
+            "city": loc.city, "asn": loc.asn, "org": loc.organisation}
+
+
 def _out(s: ShellSession, host: str | None, agent: str | None,
          code: str, n: int) -> SessionOut:
     return SessionOut(
         id=s.id, project_code=code, host=host, target_id=s.target_id,
-        agent_name=agent, peer=s.peer, listen_port=s.listen_port,
+        agent_name=agent, peer=s.peer, peer_geo=_peer_geo(s.peer),
+        listen_port=s.listen_port,
         state=s.state, label=s.label, connected=hub.holds(s.id),
         exchanges=n,
         opened_at=s.created_at.isoformat() if s.created_at else None,

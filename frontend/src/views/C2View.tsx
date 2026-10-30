@@ -41,6 +41,18 @@ const STATE_COLOUR: Record<string, string> = {
   closed: neon.muted,
 }
 
+/** "AT&T Enterprises, LLC · San Antonio, US" — who the far end is.
+ *
+ *  The organisation FIRST, because that is what separates a payload
+ *  calling home from the internet knocking on an open 443. A city
+ *  is interesting; "Google LLC" versus "AT&T" is the answer. */
+function whose(s: C2Session): string | null {
+  const g = s.peer_geo
+  if (!g) return null
+  const where = [g.city, g.country].filter(Boolean).join(', ')
+  return [g.org, where].filter(Boolean).join(' · ') || null
+}
+
 /** What a session is called. The label if somebody named one, else
  *  the host, else the address it called from — never a bare id, which
  *  tells an operator nothing about which box they are on. */
@@ -594,6 +606,16 @@ function SessionList({ rows, loading, error, project, activeOnly, open,
               {s.exchanges}
             </Box>
           </Stack>
+          {whose(s) && (
+            <Tooltip title={`${s.peer} — ${whose(s)}`
+                            + (s.peer_geo?.asn ? ` (AS${s.peer_geo.asn})` : '')}>
+              <Box sx={{ pl: 1.6, mt: 0.2, fontSize: 9.5,
+                         color: alpha(neon.muted, 0.85), overflow: 'hidden',
+                         textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {whose(s)}
+              </Box>
+            </Tooltip>
+          )}
         </Box>
         )
       })}
@@ -675,9 +697,21 @@ function Terminal({ project, session, onChanged }: {
         <Box sx={{ fontFamily: `'Share Tech Mono', monospace`,
                    fontSize: 12.5, color: neon.cyan }}>{title(session)}</Box>
         {session.peer && (
-          <Chip size="small" label={session.peer} sx={{
-            height: 17, fontSize: 9.5, color: neon.muted,
-            border: `1px solid ${alpha(neon.muted, 0.35)}` }} />
+          <Tooltip title={whose(session)
+            ? `${whose(session)}`
+              + (session.peer_geo?.asn ? ` (AS${session.peer_geo.asn})` : '')
+            : 'No geolocation for this address.'}>
+            <Chip size="small" label={session.peer} sx={{
+              height: 17, fontSize: 9.5, color: neon.muted,
+              border: `1px solid ${alpha(neon.muted, 0.35)}` }} />
+          </Tooltip>
+        )}
+        {whose(session) && (
+          <Box sx={{ fontSize: 10, color: neon.muted, overflow: 'hidden',
+                     textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                     maxWidth: 320 }}>
+            {whose(session)}
+          </Box>
         )}
         <Chip size="small" label={session.state} sx={{
           height: 17, fontSize: 9.5,
