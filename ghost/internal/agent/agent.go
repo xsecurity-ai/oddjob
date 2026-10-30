@@ -947,7 +947,11 @@ func (a *Agent) execute(ctx context.Context, t *client.Task) {
 					Error: "panic in runner: " + toString(p)}
 			}
 		}()
-		return runner(ctx, tasks.Decode(t.Args), a.cfg.WorkDir)
+		// Through tasks.Run, not the runner directly: a task that
+		// asked for an out-of-band callback needs a port bound and
+		// proved reachable BEFORE its payload goes anywhere, and
+		// kept open after the tool exits. See tasks/callback.go.
+		return tasks.Run(ctx, runner, tasks.Decode(t.Args), a.cfg.WorkDir)
 	}()
 
 	log.Printf("task %d: %s in %s — %s", t.ID, res.Status,

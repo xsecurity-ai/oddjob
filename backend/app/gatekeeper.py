@@ -58,6 +58,11 @@ PUBLIC_EXACT = {
     # serving both would make the read public to this middleware and
     # leave it standing on its route dependency by itself.
     "/api/ghosts/debug-lines",
+    # An agent asking whether the world can reach a port it just
+    # bound, so an out-of-band test can tell "not vulnerable" apart
+    # from "our listener was never reachable". The route authenticates
+    # the agent and will only dial THAT agent's own recorded address.
+    "/api/ghosts/callback/probe",
     # A crawl asking which bundles its project already holds, so it
     # fetches only what is new. Exact, like every entry here: the
     # operator-facing asset routes live under /api/web/assets and must
