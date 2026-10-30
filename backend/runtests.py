@@ -44,6 +44,7 @@ SUITES = [
     ("tests/budgettest.py",   TMP / "ms-budget.db"),
     # Also no server: a function over a Poc and a payload.
     ("tests/poctest.py",      TMP / "ms-poc.db"),
+    ("tests/pocbuildtest.py", TMP / "ms-pocb.db"),
     ("tests/projecttest.py",  TMP / "ms-proj.db"),
     ("tests/scantest.py",     TMP / "ms-scan.db"),
     ("tests/importtest.py",   TMP / "ms-imp.db"),
