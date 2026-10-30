@@ -14,6 +14,7 @@ import {
 } from '../lib/lifecycle'
 import { useAuth } from '../lib/auth'
 import { useStoredChoice } from '../lib/useStoredChoice'
+import { AutoPocButton } from '../components/AutoPocButton'
 import { SecretsPanel } from '../components/SecretsPanel'
 import { VulnsByTarget, VulnsByTitle } from '../components/VulnRollupPanel'
 import { LifecycleStrip } from '../components/LifecycleStrip'
@@ -281,6 +282,10 @@ export function VulnsView({ project }: { project: string | null }) {
                 engagement.
               </Box>
             )}
+            {/* Beside the import button: both are "do something to
+                this engagement's findings", and this is the one that
+                sends traffic. */}
+            <AutoPocButton project={project} />
             <ImportReportButton project={project} />
           </Stack>
         ) : undefined}

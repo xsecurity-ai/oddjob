@@ -3370,6 +3370,41 @@ _st, _nar = call("/api/ghosts/callback/probe", "POST",
 check("an agent with no outbound address is refused, not guessed at",
       _st == 409, f"status={_st} {str(_nar)[:160]}")
 _srv.close()
+print("\n== asking for a proof, and the two things it needs ==")
+# The spec: this only works if you have an agent built in and
+# working. Both halves -- a model to WRITE the template and a Ghost
+# to RUN it -- and the refusal says which is missing, because a
+# proof that silently never validates is indistinguishable from one
+# that failed.
+call("/api/projects", "POST", {"code": "POCP", "name": "Proofs"},
+     token=admin)
+call("/api/projects/POCP/scope", "POST",
+     {"lines": ["*.acme.example"]}, token=admin)
+call("/api/targets?project=POCP", "POST",
+     {"host": "app.acme.example"}, token=admin)
+_st, _v = call("/api/vulns?project=POCP", "POST",
+               {"host": "app.acme.example", "title": "Admin console open",
+                "severity": "high", "port": 443}, token=admin)
+_vid = (_v or {}).get("id")
+check("a finding to prove exists", _st == 201 and _vid, f"{_st} {str(_v)[:90]}")
+
+# No model configured in the suite, so this is the first gate.
+_st, _r = call(f"/api/vulns/{_vid}/poc?project=POCP", "POST", {}, token=admin)
+check("with no model configured it is refused, not queued",
+      _st == 409, f"status={_st} {str(_r)[:120]}")
+check("...and says it is the model that is missing",
+      "model" in str(_r).lower(), str(_r)[:140])
+
+# A finding in another engagement is not reachable through this one.
+_st, _ = call("/api/projects", "POST", {"code": "POCQ", "name": "Other"},
+              token=admin)
+_st, _x = call(f"/api/vulns/{_vid}/poc?project=POCQ", "POST", {}, token=admin)
+check("another engagement's finding is 404, not proved",
+      _st == 404, f"status={_st}")
+_st, _x = call("/api/vulns/99999999/poc?project=POCP", "POST", {}, token=admin)
+check("a finding that does not exist is 404", _st == 404, f"status={_st}")
+
+
 print("\n== giving freed memory back to the OS ==")
 # CPython frees to glibc and glibc mostly does not free to the kernel,
 # so a burst of allocation becomes a permanent high-water mark. This

@@ -95,6 +95,14 @@ async def lifespan(app: FastAPI):
     # The inbound half of Slack. Socket Mode, so it needs no public
     # endpoint: inert until an app-level token exists and answering is
     # switched on.
+    # Proofs for the findings a project asked to have proved. Inert
+    # until `auto_poc` is set on a project AND an agent is configured
+    # AND a Ghost is online -- it writes a template with the first
+    # and queues a task for the last, so without either there is
+    # nothing it can honestly do. See app/agent/pocworker.py.
+    from .agent.pocworker import worker as poc_worker
+    poc_worker.start()
+
     from .slack_socket import worker as slack_worker
     slack_worker.start()
 

@@ -20,6 +20,7 @@ from ..hosts import normalise_host
 from ..models import (
     ROLE_ORDER,
     TRIAGE_STATES,
+    Agent,
     FindingSecret,
     Poc,
     Project,
@@ -1187,6 +1188,82 @@ async def create_poc(body: PocCreate, project: str = Query(...),
     await session.commit()
     await broker.publish("pocs", action="create", host=t.host, project=project)
     return _poc_out((await session.execute(_base(Poc).where(Poc.id == p.id))).first())
+
+
+class PocRequest(BaseModel):
+    """Prove one finding, now."""
+    #: Where to point it. Omitted, the host and port on the finding
+    #: decide — which is right for a web finding and guessable for
+    #: anything else, so an operator who knows better may say.
+    url: str | None = None
+
+
+@router.post("/vulns/{vuln_id}/poc", response_model=dict, status_code=201)
+async def build_poc(vuln_id: int, body: PocRequest | None = None,
+                    project: str = Query(...),
+                    pr: Project = Depends(require_project("user")),
+                    user: User = Depends(get_current_user),
+                    session: AsyncSession = Depends(get_session)):
+    """Write a proof for this finding and queue it for validation.
+
+    The per-finding half of `auto_poc`. Same code, same checks, same
+    high-priority task; what differs is that somebody asked for this
+    one rather than a floor covering it.
+
+    **Both halves of the agent are required and the refusal says
+    which is missing.** Without a model there is nothing to write the
+    template; without a Ghost online there is nothing to run it, and
+    the proof would sit reading "not validated" with no way to tell
+    that from a failure. A 409 naming the missing half is actionable;
+    a proof that silently never validates is not.
+
+    `user`, not `readonly`. This writes a template and queues traffic
+    at the client — see `roe.IMPACT["poc"]`, which classes it
+    `state_changing` for the same reason.
+    """
+    from ..agent.pocbuild import Rejected
+    from ..agent.pocworker import _configured, build_one
+
+    vuln = (await session.execute(
+        select(Vuln).join(Target, Target.id == Vuln.target_id)
+        .where(Vuln.id == vuln_id, Target.project_id == pr.id))
+    ).scalar_one_or_none()
+    if vuln is None:
+        raise HTTPException(404, f"no finding {vuln_id} in {pr.code}")
+
+    if not await _configured():
+        raise HTTPException(
+            409, "no model is configured, so there is nothing to write the "
+                 "proof. Set one in Site Config → Agent.")
+    live = (await session.execute(
+        select(Agent.id).where(Agent.project_id == pr.id,
+                               Agent.status == "online").limit(1))).first()
+    if live is None:
+        raise HTTPException(
+            409, f"no Ghost is online for {pr.code}, so a proof could be "
+                 f"written but never run. It would read 'not validated' "
+                 f"for ever, which is indistinguishable from one that "
+                 f"failed. Bring an agent up and ask again.")
+
+    target = await session.get(Target, vuln.target_id)
+    host = (body.url if body and body.url else None) or target.host
+    try:
+        poc = await build_one(session, vuln, pr, host)
+    except Rejected as e:
+        # Not a server error: the model answered and the answer may
+        # not be run. Said plainly so the operator knows whether to
+        # write one by hand.
+        raise HTTPException(
+            422, f"no proof was written: {e}") from e
+    await session.commit()
+    await broker.publish("pocs", action="create", project=pr.code, id=poc.id)
+    await broker.publish("agents", action="task", project=pr.code)
+    await audit.record(session, "ui", "poc.build", user=user, commit=True,
+                       project_code=pr.code,
+                       detail=f"queued a proof for finding {vuln_id} "
+                              f"against {poc.target_url}")
+    return {"id": poc.id, "target_url": poc.target_url,
+            "status": "queued for validation"}
 
 
 @router.delete("/pocs/{poc_id}", status_code=204)
