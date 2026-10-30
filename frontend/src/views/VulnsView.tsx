@@ -7,10 +7,12 @@ import { DataTable } from '../components/DataTable'
 import { ImportReportButton } from '../components/ImportReportButton'
 import { useHostModal } from '../components/HostModal'
 import { VulnModal } from '../components/VulnModal'
+import { PocModal } from '../components/PocModal'
 import { SEVERITY_COLOUR as SEV_COLOUR } from '../lib/severity'
 import { TRIAGE, TRIAGE_COLOUR } from '../lib/triage'
 import {
   LIFECYCLE, LIFECYCLE_COLOUR, LIFECYCLE_LABEL, LIFECYCLE_RANK,
+  POC_COLOUR, POC_LABEL, POC_RANK, POC_STATES,
 } from '../lib/lifecycle'
 import { useAuth } from '../lib/auth'
 import { useStoredChoice } from '../lib/useStoredChoice'
@@ -32,6 +34,9 @@ export function VulnsView({ project }: { project: string | null }) {
   // the page reloads, which on a long triage is most of the session.
   const [tab, setTab] = useStoredChoice('vulns.tab', VULN_TABS, 'all')
   const [detail, setDetail] = useState<number | null>(null)
+  // The proof being read, separate from the finding being read: the
+  // PoC chip opens the script without opening the finding behind it.
+  const [poc, setPoc] = useState<{ id: number; title: string } | null>(null)
   const [selected, setSelected] = useState<number[]>([])
   // Named back by the server rather than silently skipped.
   const [refused, setRefused] = useState(0)
@@ -115,6 +120,42 @@ export function VulnsView({ project }: { project: string | null }) {
               height: 20, fontSize: 10, letterSpacing: '0.06em',
               bgcolor: alpha(c, 0.14), color: c,
               border: `1px solid ${alpha(c, 0.55)}`, cursor: 'help',
+            }} />
+        )
+      },
+    },
+    {
+      // Three states, because there are three answers. Available
+      // means a script EXISTS; Confirmed means it ran here and
+      // worked. The middle one is the one worth having: a proof
+      // that needs a credential nobody has, or a person to click a
+      // link, is real work that cannot be run from here -- neither
+      // "no proof" nor "proven".
+      field: 'poc_state', headerName: 'PoC', width: 168,
+      type: 'singleSelect',
+      valueOptions: [...POC_STATES],
+      sortComparator: (a, b) =>
+        (POC_RANK[a as string] ?? 9) - (POC_RANK[b as string] ?? 9),
+      renderCell: (p) => {
+        const c = POC_COLOUR[p.value] ?? neon.muted
+        const has = p.row.poc_id !== null && p.row.poc_id !== undefined
+        return (
+          <Chip size="small" label={POC_LABEL[p.value] ?? p.value}
+            onClick={has ? (e) => {
+              // The row's own click opens the finding; this opens
+              // the proof. Without this the modal would open behind
+              // the finding drawer.
+              e.stopPropagation()
+              setPoc({ id: p.row.poc_id as number, title: p.row.title })
+            } : undefined}
+            title={p.row.poc_detail
+              ?? (has ? 'Open the script' : 'No proof has been written')}
+            sx={{
+              height: 20, fontSize: 10, letterSpacing: '0.06em',
+              bgcolor: alpha(c, 0.14), color: c,
+              border: `1px solid ${alpha(c, 0.55)}`,
+              cursor: has ? 'pointer' : 'help',
+              '&:hover': has ? { bgcolor: alpha(c, 0.26) } : undefined,
             }} />
         )
       },
@@ -292,6 +333,13 @@ export function VulnsView({ project }: { project: string | null }) {
       />
       <VulnModal id={detail} onClose={() => setDetail(null)}
         onHost={(proj, h) => { setDetail(null); open(proj, h) }} />
+      {/* Only on this tab: the PoC column lives in the findings
+          table, and the rollup tabs show a collapsed row that no
+          single proof belongs to. */}
+      {poc && project && (
+        <PocModal project={project} pocId={poc.id} title={poc.title}
+          onClose={() => setPoc(null)} />
+      )}
     </>
   );
 }

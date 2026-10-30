@@ -34,6 +34,7 @@ import { parseDomains } from '../src/lib/domainInput'
 import scopeCases from './scope-cases.json'
 import domainCases from './domain-cases.json'
 import { LIKELY_PORTS, parsePorts } from '../src/components/PortPicker'
+import { POC_COLOUR, POC_LABEL, POC_RANK, POC_STATES } from '../src/lib/lifecycle'
 import { anyUnseen, key, readingSession, reset as resetUnseen,
          sessionSpoke, snapshot } from '../src/lib/c2unseen'
 
@@ -1000,6 +1001,44 @@ console.log('\n== a rollup expansion shows each thing once ==')
   check('the suggested ports lead with the ones that get out',
         LIKELY_PORTS.join() === '443,80,8443,8080,8000,10000',
         LIKELY_PORTS.join())
+}
+
+// ---------------------------------------------------------------
+// The PoC column's three words
+// ---------------------------------------------------------------
+//
+// The strings come from the server (`app/pocwork.py`) and are
+// compared against it HERE, because a column that renders
+// `poc_state` by lookup shows the raw server string when the two
+// disagree -- which looks like a styling bug and is actually two
+// files holding different ideas of what a state is called.
+{
+  const py = readFileSync(join(process.cwd(), '..', 'backend', 'app',
+                               'pocwork.py'), 'utf8')
+  const of = (name: string) => {
+    const m = py.match(new RegExp(`^${name} = "([^"]+)"`, 'm'))
+    return m ? m[1] : `<${name} not found>`
+  }
+  const fromPython = [of('CONFIRMED'), of('UNCONFIRMED'), of('NOT_AVAILABLE')]
+  check('the three states are spelled exactly as the server spells them',
+        [...POC_STATES].sort().join('|') === fromPython.sort().join('|'),
+        `ts=${[...POC_STATES].sort()} py=${fromPython.sort()}`)
+
+  // Every state needs a label and a colour, or the chip renders the
+  // raw string in grey and reads as a bug.
+  for (const st of POC_STATES) {
+    check(`${st} has a label and a colour`,
+          !!POC_LABEL[st] && !!POC_COLOUR[st])
+  }
+
+  // Proven first. Severity sorts worst-first; this sorts
+  // most-evidence-first, which is the same instinct.
+  const order = [...POC_STATES].sort((a, b) => POC_RANK[a] - POC_RANK[b])
+  check('sorting puts a confirmed proof above an unconfirmed one',
+        order[0] === 'Available, Confirmed', order[0])
+  check('...and "none" last', order[2] === 'Not Available', order[2])
+  check('every state has a rank, so none sorts as 9 by accident',
+        POC_STATES.every((st) => typeof POC_RANK[st] === 'number'))
 }
 
 console.log(`\n${'='.repeat(56)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(56)}`)

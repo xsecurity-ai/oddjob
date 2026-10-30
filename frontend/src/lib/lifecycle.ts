@@ -33,3 +33,43 @@ export const LIFECYCLE_COLOUR: Record<string, string> = {
 export const LIFECYCLE_RANK: Record<string, number> = {
   new: 0, present: 1, unconfirmed: 2, resolved: 3,
 }
+
+// --------------------------------------------------------- proofs
+//
+// What the PoC column says, and in what order it sorts. The words
+// come from the server (`app/pocwork.py`) -- they are not derived
+// here, because two places deciding what a state is called is how
+// the two come to disagree.
+
+export const POC_STATES = [
+  'Available, Confirmed',
+  'Available, Not Confirmed',
+  'Not Available',
+] as const
+
+/** Shorter, for a 168px column. The full words are in the modal's
+ *  header and in the tooltip, so nothing is lost. */
+export const POC_LABEL: Record<string, string> = {
+  'Available, Confirmed': 'confirmed',
+  'Available, Not Confirmed': 'not confirmed',
+  'Not Available': 'none',
+}
+
+/** The middle state is YELLOW and not red. A proof that needs a
+ *  credential nobody has is real work that cannot be run from here,
+ *  not a failure -- and colouring it like one would say the opposite
+ *  of what it means. */
+export const POC_COLOUR: Record<string, string> = {
+  'Available, Confirmed': neon.green,
+  'Available, Not Confirmed': neon.yellow,
+  'Not Available': neon.muted,
+}
+
+/** Sort order: proven first, then written, then nothing. Severity
+ *  sorts worst-first and this sorts most-evidence-first, which is
+ *  the same instinct -- the rows that need reading are at the top. */
+export const POC_RANK: Record<string, number> = {
+  'Available, Confirmed': 0,
+  'Available, Not Confirmed': 1,
+  'Not Available': 2,
+}
