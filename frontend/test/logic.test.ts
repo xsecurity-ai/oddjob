@@ -33,6 +33,7 @@ import { countryCell, extraAddresses, splitVersion } from '../src/lib/cellFacts'
 import { parseDomains } from '../src/lib/domainInput'
 import scopeCases from './scope-cases.json'
 import domainCases from './domain-cases.json'
+import { LIKELY_PORTS, parsePorts } from '../src/components/PortPicker'
 import { anyUnseen, key, readingSession, reset as resetUnseen,
          sessionSpoke, snapshot } from '../src/lib/c2unseen'
 
@@ -970,6 +971,35 @@ console.log('\n== a rollup expansion shows each thing once ==')
   check('a repeat of what we already know changes nothing',
         snapshot() === before)
   resetUnseen()
+}
+
+// ---------------------------------------------------------------
+// Ports typed into a listener form
+// ---------------------------------------------------------------
+{
+  check('commas separate', parsePorts('443,80').ports.join() === '443,80')
+  check('so do spaces and newlines',
+        parsePorts('443 80\n8443').ports.join() === '443,80,8443')
+  check('the same port twice is one port',
+        parsePorts('443, 443').ports.join() === '443')
+  check('whitespace alone is nothing', parsePorts('   ').ports.length === 0)
+
+  // Out of range is reported, not silently dropped: a form that
+  // quietly discards what was typed is a form that opened fewer
+  // ports than the operator believes.
+  check('0 is not a port', parsePorts('0').bad.join() === '0')
+  check('...nor is 65536', parsePorts('65536').bad.join() === '65536')
+  check('...nor is a word', parsePorts('https').bad.join() === 'https')
+  check('...and the good ones in the same box still land',
+        parsePorts('443, nope, 8080').ports.join() === '443,8080')
+
+  // The order is the point: a client's egress is usually filtered to
+  // browser ports, so a callback on a high port is refused by their
+  // firewall and the test then measures the firewall. Same list and
+  // order as the agent's own callback feature.
+  check('the suggested ports lead with the ones that get out',
+        LIKELY_PORTS.join() === '443,80,8443,8080,8000,10000',
+        LIKELY_PORTS.join())
 }
 
 console.log(`\n${'='.repeat(56)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(56)}`)

@@ -316,6 +316,35 @@ export interface SecretSource {
   located: string
 }
 
+/** A port a Ghost has been told to hold open for callbacks.
+ *
+ *  `enabled` and `state` are different facts and the UI must not
+ *  collapse them: one is what an operator asked for, the other is
+ *  what the Ghost managed. A port nginx already owns is a failure
+ *  somebody has to be told about.
+ */
+export interface C2Listener {
+  id: number
+  agent_id: number
+  agent_name: string | null
+  /** Whether this server is holding that Ghost's shell tunnel right
+   *  now. A listener on a Ghost nothing can reach is catching
+   *  nothing we can see. */
+  agent_online: boolean
+  protocol: string
+  port: number
+  enabled: boolean
+  /** pending | bound | failed. `pending` means the Ghost has not
+   *  reported — which is a third answer, not a quiet failure. */
+  state: string
+  state_detail: string | null
+  state_at: string | null
+  note: string | null
+  /** Shells that have landed on it. The number that says whether a
+   *  listener is doing its job. */
+  sessions: number
+}
+
 export interface C2Session {
   id: number
   project_code: string
@@ -1308,6 +1337,29 @@ export const api = {
    *  of the engagement record. */
   c2Sessions: (project: string, active = true) =>
     req<C2Session[]>('/api/c2/sessions' + qs({ project, active })),
+  c2Listeners: (project: string) =>
+    req<C2Listener[]>('/api/c2/listeners' + qs({ project })),
+  /** Tell a Ghost to hold these ports. Several at once, because an
+   *  operator setting up a catch opens the handful a client's egress
+   *  filter is likely to allow rather than one and then another.
+   *
+   *  `refused` is the other half of the answer: one bad port must
+   *  not refuse the rest of the form. */
+  c2AddListeners: (project: string, body: {
+    agent_id: number; protocol: 'tcp' | 'udp'; ports: number[]
+    note?: string
+  }) =>
+    req<{ ok: boolean; added: number[]; refused: string[]; note: string }>(
+      '/api/c2/listeners' + qs({ project }),
+      { method: 'POST', body: JSON.stringify(body) }),
+  c2PatchListener: (project: string, id: number,
+                    body: { enabled?: boolean; note?: string }) =>
+    req<{ ok: boolean; enabled: boolean }>(
+      `/api/c2/listeners/${id}` + qs({ project }),
+      { method: 'PATCH', body: JSON.stringify(body) }),
+  c2DeleteListener: (project: string, id: number) =>
+    req<void>(`/api/c2/listeners/${id}` + qs({ project }),
+      { method: 'DELETE' }),
   /** What was typed and what came back. `after` makes it pollable
    *  without re-sending the whole session. */
   c2Transcript: (project: string, sid: number, after = 0) =>
@@ -1768,6 +1820,11 @@ export const api = {
      *  hands the decision back to the agent — `undefined` means "not
      *  supplied", so there has to be an explicit value for "undo". */
     parallel_override?: number
+    /** Ports this ghost holds open for callbacks. DECLARATIVE: the
+     *  list is the configuration, so saving `[80]` after `[80, 443]`
+     *  stops 443. Omitting the field leaves that protocol alone. */
+    listen_tcp?: number[]
+    listen_udp?: number[]
   }) =>
     req<GhostAgent>(`/api/ghosts/${id}` + qs({ project }),
       { method: 'PATCH', body: JSON.stringify(body) }),
