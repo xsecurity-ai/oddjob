@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import addresses, lifecycle, webtargets
+from .. import addresses, lifecycle, pocwork, webtargets
 from ..db import get_session
 from ..events import broker
 from ..hosts import normalise_host
@@ -95,8 +95,14 @@ _SERVICE_KEYS = _keys(ServiceOut, "host", "project_code")
 # which is `_keys` doing exactly its job: a field added to the schema
 # reaches the client without anyone remembering a tuple, and that cuts
 # both ways.
+# The lifecycle three and the PoC three are both DERIVED -- worked
+# out per request rather than columns on the row -- so both sets are
+# excluded here and filled in below. The PoC three were not, and that
+# was a 500 on every target detail: `_keys` doing exactly its job,
+# which is why the note above says it cuts both ways.
 _VULN_KEYS = _keys(VulnOut, "host", "project_code",
-                   "lifecycle", "lifecycle_why", "last_looked_at")
+                   "lifecycle", "lifecycle_why", "last_looked_at",
+                   "poc_state", "poc_detail", "poc_id")
 _POC_KEYS = _keys(PocOut, "host", "project_code")
 _IMPLANT_KEYS = _keys(ImplantOut, "host", "project_code")
 # `pages` and `pages_total` are read from `web_asset_refs` per request,
@@ -655,12 +661,21 @@ async def target_detail(project: str, host: str,
     # directly, so it is worth the one round trip.
     sweeps = await lifecycle.sweeps_for_targets(session, [t.id])
 
+    # This host's proofs, by the finding each one proves. Built from
+    # the rows already loaded above rather than queried again: the
+    # detail page has them in hand.
+    poc_by_vuln = {x.vuln_id: x for x in pocs if x.vuln_id is not None}
+
     def _vuln(x):
         vd = lifecycle.verdict_for(x, sweeps)
+        poc = poc_by_vuln.get(x.id)
         return VulnOut(**{k: getattr(x, k) for k in _VULN_KEYS},
                        host=t.host, project_code=code,
                        lifecycle=vd.state, lifecycle_why=vd.why,
-                       last_looked_at=vd.last_looked)
+                       last_looked_at=vd.last_looked,
+                       poc_state=pocwork.availability(poc),
+                       poc_detail=pocwork.why_unconfirmed(poc),
+                       poc_id=poc.id if poc is not None else None)
 
     return TargetDetail(
         target=await _one(session, t.id),

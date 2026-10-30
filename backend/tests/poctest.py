@@ -190,5 +190,150 @@ for port, want in [(443, "https://h.acme.example"),
     check(f"port {port} -> {want}", got == want, got)
 
 
+# ===================================================================
+# What the findings table actually receives
+# ===================================================================
+#
+# The three states are only useful if they reach the client, and
+# `VulnOut` is built in TWO places -- the findings list and the
+# target detail. The second derives its field list from the schema
+# (`_keys` in routers/targets.py), so a field added here that is not
+# a column on `Vuln` is a 500 on every target page until it is
+# excluded and filled in. That is not hypothetical: it is what these
+# three fields did, and only an unrelated import test noticed.
+print("\n== the state reaches the client, from both places ==")
+import os  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
+
+BASE = os.environ.get("ODDJOB_TEST_BASE", "http://127.0.0.1:8035")
+
+
+def call(path, m="GET", b=None, token=None):
+    r = urllib.request.Request(BASE + path, method=m)
+    if b is not None:
+        r.data = json.dumps(b).encode()
+        r.add_header("Content-Type", "application/json")
+    if token:
+        r.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(r, timeout=60) as x:
+            raw = x.read()
+            return x.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw)
+        except Exception:
+            return e.code, raw[:300].decode("utf-8", "replace")
+
+
+admin = call("/api/auth/setup", "POST",
+             {"username": "root", "password": "root-password-1"})[1]["access_token"]
+call("/api/projects", "POST", {"code": "POCT", "name": "poc"}, token=admin)
+call("/api/projects/POCT/scope", "POST",
+     {"lines": ["web.acme.example"]}, token=admin)
+call("/api/targets?project=POCT", "POST",
+     {"host": "web.acme.example"}, token=admin)
+st, v = call("/api/vulns?project=POCT", "POST",
+             {"host": "web.acme.example", "title": "Exposed admin panel",
+              "severity": "high"}, token=admin)
+VID = (v or {}).get("id")
+check("a finding to hang a proof off", st in (200, 201) and VID, f"{st} {v}")
+
+st, page = call("/api/vulns?project=POCT&limit=10", token=admin)
+row = (page or {}).get("items", [{}])[0]
+check("a finding with no proof reads Not Available",
+      row.get("poc_state") == "Not Available", row.get("poc_state"))
+check("...and offers no proof to open", row.get("poc_id") is None)
+
+# The place that broke. A field on VulnOut that is not a column on
+# Vuln has to be excluded from `_keys` AND filled in, or this 500s.
+st, detail = call("/api/targets/POCT/web.acme.example/detail", token=admin)
+check("the target detail renders at all with the new fields",
+      st == 200, f"{st} {str(detail)[:120]}")
+dv = (detail or {}).get("vulns", [{}])[0] if st == 200 else {}
+check("...and carries the same state the list does",
+      dv.get("poc_state") == "Not Available", dv.get("poc_state"))
+
+TEMPLATE = """id: poc-admin-panel
+info:
+  name: Exposed admin panel
+  severity: high
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/admin"
+    matchers:
+      - type: status
+        status:
+          - 200
+"""
+
+
+async def attach(template):
+    async with SessionLocal() as s_:
+        pr = (await s_.execute(select(Project).where(
+            Project.code == "POCT"))).scalar_one()
+        t = (await s_.execute(select(Target).where(
+            Target.project_id == pr.id))).scalars().first()
+        row_ = Poc(target_id=t.id, vuln_id=VID, title="Proof: admin panel",
+                   status="unconfirmed", template=template,
+                   target_url="https://web.acme.example/")
+        s_.add(row_)
+        await s_.commit()
+        return row_.id
+
+
+import asyncio as _asyncio  # noqa: E402
+
+from sqlalchemy import select  # noqa: E402
+
+from app.db import SessionLocal  # noqa: E402
+from app.models import Project, Target  # noqa: E402
+
+PID = _asyncio.run(attach(TEMPLATE))
+
+st, page = call("/api/vulns?project=POCT&limit=10", token=admin)
+row = (page or {}).get("items", [{}])[0]
+check("a written proof reads Available, Not Confirmed",
+      row.get("poc_state") == "Available, Not Confirmed", row.get("poc_state"))
+check("...and says it has not run yet",
+      row.get("poc_detail") == "written, not run yet", row.get("poc_detail"))
+check("...and points at the proof to open",
+      row.get("poc_id") == PID, f"{row.get('poc_id')} != {PID}")
+
+print("\n== reading, editing and running one ==")
+st, got = call(f"/api/pocs/{PID}?project=POCT", token=admin)
+check("the proof hands back its script", st == 200 and "matchers" in
+      (got or {}).get("template", ""), f"{st}")
+check("...and its state", (got or {}).get("state") == "Available, Not Confirmed")
+
+st, r = call(f"/api/pocs/{PID}?project=POCT", "PATCH",
+             {"template": "id: x\ninfo:\n  name: y\n"}, token=admin)
+check("a script with no http block is refused, with the reason",
+      st == 422 and "http" in str(r), f"{st} {r}")
+st, r = call(f"/api/pocs/{PID}?project=POCT", "PATCH",
+             {"template": "id: x\nhttp:\n  - method: GET\n"}, token=admin)
+check("...and so is one with no matcher, which would read as FIXED",
+      st == 422 and "matcher" in str(r), f"{st} {r}")
+
+st, r = call(f"/api/pocs/{PID}?project=POCT", "PATCH",
+             {"template": TEMPLATE.replace("/admin", "/manage")}, token=admin)
+check("a good edit saves", st == 200 and "/manage" in r.get("template", ""),
+      f"{st}")
+
+# Nothing to run it on. The refusal has to say that rather than
+# leaving a proof queued against a fleet that is not there.
+st, r = call(f"/api/pocs/{PID}/run?project=POCT", "POST", {}, token=admin)
+check("running with no ghost online is refused, and says why",
+      st == 409 and "Ghost" in str(r), f"{st} {r}")
+
+st, r = call("/api/pocs/999999/run?project=POCT", "POST", {}, token=admin)
+check("a proof that does not exist is a 404", st == 404, st)
+st, r = call(f"/api/pocs/{PID}?project=OTHERP", token=admin)
+check("another engagement cannot read it by id", st in (403, 404), st)
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
