@@ -228,18 +228,51 @@ func (m *Manager) tunnel(ctx context.Context) (*Mux, error) {
 
 	go func() {
 		err := mux.Run(tctx)
-		if tctx.Err() == nil {
-			// The tunnel went while listeners still want it. Forget
-			// it so the next beat dials a fresh one: the ports stay
-			// bound meanwhile, so a callback during the gap is
-			// caught and simply has nowhere to go until the tunnel
-			// is back. Which is why the server marks sessions
-			// `lost` rather than `closed`.
-			log.Printf("shell: tunnel ended: %v", err)
-		}
+		// Read BEFORE stop(), which cancels this very context --
+		// asking afterwards always answers "deliberate" and the
+		// release below never runs.
+		deliberate := tctx.Err() != nil
 		stop()
+		if deliberate {
+			return // this manager shutting down on purpose
+		}
+		// The tunnel went while listeners still want it.
+		//
+		// The listeners have to be RELEASED, not kept. Each one
+		// holds a pointer to this mux, and the transport under it is
+		// dead -- so a port left bound would go on accepting
+		// callbacks and sending them into a closed socket, for ever.
+		// Reconcile would not fix it either: it sees the port as
+		// already held and leaves it alone, which is exactly right
+		// when the tunnel is up and exactly wrong here.
+		//
+		// Nothing announces that failure. The port answers, the
+		// payload connects, and no session ever appears in Oddjob.
+		// So: drop them, and let the next beat rebind against a
+		// fresh tunnel. The shells that were live are lost either
+		// way -- the route to them is what went -- which is why the
+		// server marks them `lost` rather than `closed`.
+		log.Printf("shell: tunnel ended (%v); releasing listeners to rebind", err)
+		m.releaseAll()
 	}()
 	return mux, nil
+}
+
+// releaseAll drops every listener and forgets what was reported
+// about them, so the next Reconcile binds them again from scratch.
+func (m *Manager) releaseAll() {
+	m.mu.Lock()
+	all := make([]*held, 0, len(m.held))
+	for key, h := range m.held {
+		all = append(all, h)
+		delete(m.held, key)
+		delete(m.status, h.spec.ID)
+	}
+	m.mu.Unlock()
+	for _, h := range all {
+		h.stop()
+		_ = h.ln.Close()
+	}
 }
 
 func (m *Manager) note(id int, bound bool, why string) {
@@ -250,18 +283,10 @@ func (m *Manager) note(id int, bound bool, why string) {
 
 // Close releases every listener and the tunnel.
 func (m *Manager) Close() {
+	m.releaseAll()
 	m.mu.Lock()
-	all := make([]*held, 0, len(m.held))
-	for key, h := range m.held {
-		all = append(all, h)
-		delete(m.held, key)
-	}
 	stop := m.closer
 	m.mu.Unlock()
-	for _, h := range all {
-		h.stop()
-		_ = h.ln.Close()
-	}
 	if stop != nil {
 		stop()
 	}

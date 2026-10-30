@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"sync/atomic"
 	"testing"
+
+	"github.com/xsecurity-ai/oddjob/ghost/internal/socksrelay"
 )
 
 // A manager over a pipe, counting how many tunnels it dialled.
@@ -210,4 +212,62 @@ func contains(s, sub string) bool {
 		}
 		return false
 	})()
+}
+
+// The silent one, and the reason this test exists at all.
+//
+// When the tunnel drops, every listener still holds a pointer to the
+// dead mux. Left alone, the port goes on accepting callbacks and
+// sending them into a closed socket for ever -- and Reconcile would
+// not notice, because it sees the port as already held and leaves it
+// alone, which is right while the tunnel is up and wrong here.
+//
+// Nothing announces it: the port answers, the payload connects, and
+// no session ever appears in Oddjob.
+func TestATunnelDropRebindsTheListeners(t *testing.T) {
+	ctx := context.Background()
+	var dials atomic.Int32
+	pipes := make(chan *pipe, 4)
+	m := NewManager(func(context.Context) (Transport, error) {
+		dials.Add(1)
+		p := newPipe()
+		pipes <- p
+		return p, nil
+	})
+	defer m.Close()
+
+	port := freePort(t)
+	want := []Spec{{ID: 1, Protocol: "tcp", Port: port}}
+	m.Reconcile(ctx, want)
+	if got := statuses(m); len(got) != 1 || !got[0].Bound {
+		t.Fatalf("first bind: %+v", got)
+	}
+	first := <-pipes
+
+	// Kill the tunnel the way a dropped websocket does: Recv fails.
+	first.fail()
+	waitFor(t, "the manager to notice", func() bool {
+		return len(statuses(m)) == 0
+	})
+
+	// The next beat asks for the same thing and must rebind, on a
+	// fresh tunnel, rather than treat the port as still held.
+	m.Reconcile(ctx, want)
+	if got := statuses(m); len(got) != 1 || !got[0].Bound {
+		t.Fatalf("did not rebind after the tunnel dropped: %+v", got)
+	}
+	if n := dials.Load(); n != 2 {
+		t.Errorf("dialled %d times; a dropped tunnel should be redialled", n)
+	}
+
+	// And the rebound listener's callbacks reach the NEW tunnel.
+	second := <-pipes
+	c, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	waitFor(t, "the arrival on the new tunnel", func() bool {
+		return len(second.of(socksrelay.ARRIVED)) == 1
+	})
 }

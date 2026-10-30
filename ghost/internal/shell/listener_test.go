@@ -3,6 +3,7 @@ package shell
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"strconv"
 	"strings"
@@ -32,12 +33,24 @@ func (p *pipe) Send(_ context.Context, b []byte) error {
 
 func (p *pipe) Recv(ctx context.Context) ([]byte, error) {
 	select {
-	case b := <-p.in:
+	case b, open := <-p.in:
+		if !open {
+			// The websocket went. Recv failing is the only way a
+			// transport tells anyone, which is what `fail` stands
+			// in for.
+			return nil, errTunnelGone
+		}
 		return b, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
+
+var errTunnelGone = errors.New("tunnel gone")
+
+// fail makes every later Recv return an error, as a dropped
+// websocket does.
+func (p *pipe) fail() { close(p.in) }
 
 func (p *pipe) frames() []socksrelay.Frame {
 	p.mu.Lock()
