@@ -238,6 +238,38 @@ export interface Vuln {
   /** When a tool that reports this kind of finding last looked at
    *  this host. null means never. */
   last_looked_at: string | null
+
+  /** "Not Available" | "Available, Confirmed" | "Available, Not
+   *  Confirmed". Available means a script exists; Confirmed means it
+   *  ran and worked. */
+  poc_state: string
+  /** The sentence behind "Not Confirmed" — never run, the host did
+   *  not answer, it ran and matched nothing. Three different places
+   *  to go, so the word alone is not enough. */
+  poc_detail: string | null
+  /** The proof to open, or null when there is none. */
+  poc_id: number | null
+}
+
+/** One proof, with the script in it. */
+export interface PocDetail {
+  id: number
+  vuln_id: number | null
+  target_id: number
+  host: string
+  project_code: string
+  title: string
+  state: string
+  detail: string | null
+  /** The nuclei template. null when the build was refused — the row
+   *  records that a proof was attempted and could not be written,
+   *  which is not the same as one nobody has asked for. */
+  template: string | null
+  target_url: string | null
+  exit_code: number | null
+  verdict: string | null
+  validated_at: string | null
+  updated_at: string | null
 }
 
 /** What changed between the last scan and the one before it. */
@@ -1357,6 +1389,27 @@ export const api = {
    *  on opening the page is almost always "what can I type at now".
    *  Closed ones are never deleted — what was done on a host is part
    *  of the engagement record. */
+  poc: (project: string, id: number) =>
+    req<PocDetail>(`/api/pocs/${id}` + qs({ project })),
+  /** Save an edited script. Refused by the same check a model's
+   *  answer goes through — no interpreter in the agent image, `code`
+   *  never enabled, and a template with no matcher matches nothing
+   *  and would read as FIXED.
+   *
+   *  Saving a CHANGED script clears the verdict: what the last run
+   *  said was about the script that ran. */
+  savePoc: (project: string, id: number, body: {
+    template: string; title?: string; target_url?: string
+  }) =>
+    req<PocDetail>(`/api/pocs/${id}` + qs({ project }),
+      { method: 'PATCH', body: JSON.stringify(body) }),
+  /** Run the script that is there. Distinct from asking a model for
+   *  a new one (`buildPoc`); this is the only way an edited proof
+   *  ever gets a verdict. Needs a Ghost online, not a model. */
+  runPoc: (project: string, id: number, url?: string) =>
+    req<{ ok: boolean; id: number; target_url: string; note: string }>(
+      `/api/pocs/${id}/run` + qs({ project }),
+      { method: 'POST', body: JSON.stringify(url ? { url } : {}) }),
   c2Sessions: (project: string, active = true) =>
     req<C2Session[]>('/api/c2/sessions' + qs({ project, active })),
   c2Listeners: (project: string) =>
