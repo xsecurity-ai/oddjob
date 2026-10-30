@@ -8,6 +8,7 @@ import CloseIcon from '@mui/icons-material/Close'
 import { useQuery } from '@tanstack/react-query'
 import { api, SEVERITY_RANK } from '../lib/api'
 import { Timeline } from './Timeline'
+import { VulnModal } from './VulnModal'
 import { useAuth } from '../lib/auth'
 import { neon, glow } from '../theme'
 
@@ -79,7 +80,14 @@ const cellSx = {
   borderBottom: `1px solid ${alpha(neon.purple, 0.12)}`, py: 0.6,
 } as const
 
-function Body({ project, host }: { project: string; host: string }) {
+function Body({ project, host, onVuln }: {
+  project: string; host: string
+  /** Open a finding's own window. The row shows a severity
+   *  and a title; everything an operator then wants --
+   *  description, remediation, triage, the other hosts it is
+   *  on -- lives in that window and nowhere else. */
+  onVuln: (id: number) => void
+}) {
   const { canWrite } = useAuth()
   const { data, isLoading, error } = useQuery({
     queryKey: ['target-detail', project, host],
@@ -347,12 +355,19 @@ function Body({ project, host }: { project: string; host: string }) {
             {vulns.map((v) => {
               const c = SEV_COLOUR[v.severity] ?? neon.muted
               return (
-                <TableRow key={v.id} hover>
+                <TableRow key={v.id} hover
+                  onClick={() => onVuln(v.id)}
+                  sx={{ cursor: 'pointer',
+                        '&:hover .vuln-title': { color: neon.cyan } }}>
                   <TableCell sx={{ ...cellSx, width: 92 }}>
                     <Box sx={{ color: c, textShadow: glow(c, 0.4), fontSize: 11,
                                letterSpacing: '0.06em' }}>{v.severity}</Box>
                   </TableCell>
-                  <TableCell sx={cellSx}>{v.title}</TableCell>
+                  <TableCell sx={cellSx}>
+                    <Box className="vuln-title" sx={{ transition: 'color 120ms' }}>
+                      {v.title}
+                    </Box>
+                  </TableCell>
                   <TableCell sx={{ ...cellSx, width: 86, color: neon.muted }}>{v.status}</TableCell>
                   <TableCell sx={{ ...cellSx, width: 70 }}>{v.port ?? ''}</TableCell>
                 </TableRow>
@@ -431,6 +446,10 @@ function Body({ project, host }: { project: string; host: string }) {
 
 export function HostModalProvider({ children }: { children: ReactNode }) {
   const [at, setAt] = useState<{ project: string; host: string } | null>(null)
+  // The finding being read, on top of the host. Held here rather
+  // than in `Body` so it survives the host dialog scrolling and so
+  // closing it returns to the host rather than to the page.
+  const [vuln, setVuln] = useState<number | null>(null)
   const ctx = useMemo<Ctx>(() => ({ open: (project, host) => setAt({ project, host }) }), [])
 
   return (
@@ -467,9 +486,16 @@ export function HostModalProvider({ children }: { children: ReactNode }) {
         </DialogTitle>
         <Divider sx={{ borderColor: alpha(neon.purple, 0.2) }} />
         <DialogContent>
-          {at && <Body project={at.project} host={at.host} />}
+          {at && <Body project={at.project} host={at.host}
+                       onVuln={setVuln} />}
         </DialogContent>
       </Dialog>
+      {/* Stacked ON the host window, not instead of it: closing the
+          finding puts the operator back where they were. Mounted
+          here rather than inside `Body` so it is not unmounted by
+          the host dialog's own scroll container. */}
+      <VulnModal id={vuln} onClose={() => setVuln(null)}
+        onHost={(project, host) => { setVuln(null); setAt({ project, host }) }} />
     </HostModalCtx.Provider>
   )
 }
