@@ -128,6 +128,22 @@ IMPACT: dict[str, str] = {
     #: to, and a client who wrote "no intrusive testing" did not mean
     #: "except by hand".
     "replay": "state_changing",
+    #: A proof of concept: one nuclei template, written for one
+    #: finding, run at one host to answer "does this still
+    #: reproduce".
+    #:
+    #: `state_changing` and not `read_only`, even though most proofs
+    #: only read. The template is written for THIS finding rather
+    #: than drawn from a reviewed corpus, so what it sends is not
+    #: knowable in advance the way `nuclei_tech`'s fingerprinting
+    #: is -- and a client who wrote "no intrusive testing" has not
+    #: agreed to a request composed for the occasion.
+    #:
+    #: Not `destructive`: the runner refuses anything but a template,
+    #: never enables nuclei's `code` protocol, and validates before
+    #: it sends. A proof that could delete something would have to
+    #: get past all three.
+    "poc": "state_changing",
     #: Narrower than `nuclei` -- only the CVEs already matched to
     #: something on the host -- but confirming a CVE means sending
     #: the thing that triggers it, which is the same act.

@@ -433,6 +433,32 @@ jobs:
               "masscan would refuse and nmap would silently connect-scan")
           EOF
 
+      - name: The proof-of-concept runner, against real nuclei
+        if: env.RUN == 'true'
+        working-directory: ghost
+        # In the IMAGE, not on the runner. These tests need nuclei and
+        # ubuntu-latest has none, so on the runner they skip -- and a
+        # skipped test is not a passing one. The image has it, which
+        # is the environment a Ghost actually runs in.
+        #
+        # They are worth this trouble: running them here is what
+        # caught `runPoc` reporting an unreachable host as "not
+        # reproduced". nuclei exits 0 when it cannot connect, so a
+        # target that was briefly down would have had its live
+        # finding closed.
+        run: |
+          GOOS=linux GOARCH=amd64 go test -c -o /tmp/tasks.test ./internal/tasks/
+          docker run --rm -v /tmp/tasks.test:/tmp/tasks.test:ro \
+            --entrypoint /tmp/tasks.test ghost-agent \
+            -test.run 'Poc|UnreachableIsNotFixed|BrokenTemplate' -test.v \
+            | tee /tmp/poc.log
+          # A skip here means the image lost nuclei, which would make
+          # every PoC untestable and this step silently green.
+          if grep -q '^--- SKIP' /tmp/poc.log; then
+            echo "::error::the PoC tests skipped — the image has no nuclei"
+            exit 1
+          fi
+
       - name: The binaries are static
         if: env.RUN == 'true'
         working-directory: ghost
