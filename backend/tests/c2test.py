@@ -147,8 +147,9 @@ import asyncio  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
 from app import listeners as L  # noqa: E402
+from app import shellhub  # noqa: E402
 from app.db import SessionLocal  # noqa: E402
-from app.models import Agent, Project, Target  # noqa: E402
+from app.models import Agent, Project, ShellExchange, ShellSession, Target  # noqa: E402
 
 
 async def plan():
@@ -362,6 +363,158 @@ check("...and one that says it cannot bind 443 says so plainly",
       row["agent_can_bind_privileged"] is False,
       str(row["agent_can_bind_privileged"]))
 
+print("\n== output reaches the transcript without a second frame ==")
+# The bug an operator saw as "I type `ls` and nothing comes back".
+#
+# Output was buffered and written only when the NEXT frame arrived
+# more than FLUSH_AFTER later -- so the last chunk of every
+# command's output was never written at all, because nothing else
+# arrived to make the comparison. A few hundred bytes of `ls` sat in
+# memory for ever. It only looked like it worked for a 256 KB dump,
+# which crosses MAX_PENDING on its own.
+#
+# So: ONE data frame, nothing after it, and the bytes must land.
+_out: list = []
+
+
+async def _devnull(b):
+    _out.append(b)
+
+
+async def one_command_one_frame():
+    async with SessionLocal() as s:
+        a = await s.get(Agent, GID)
+        hub.register(a.id, _devnull)
+        stream = callback.n
+        callback.n += 1
+        await shellwork.on_frame(s, a, proxytunnel.Frame(
+            kind=proxytunnel.ARRIVED, stream=stream,
+            payload=announcement("198.51.100.7:53000", "tcp", 443)))
+        sid = (await s.execute(select(ShellSession.id)
+                               .order_by(ShellSession.id.desc())
+                               .limit(1))).scalar_one()
+        # One frame of output, as `ls` produces. Nothing follows it.
+        await shellwork.on_frame(s, a, proxytunnel.Frame(
+            kind=proxytunnel.DATA, stream=stream,
+            payload=b"bin  etc  home  usr\n"))
+    # Longer than the debounce, and no further traffic.
+    await asyncio.sleep(shellhub.FLUSH_IDLE * 3)
+    async with SessionLocal() as s:
+        rows = (await s.execute(
+            select(ShellExchange.output).where(
+                ShellExchange.session_id == sid))).scalars().all()
+    return sid, [r for r in rows if r]
+
+
+SID_OUT, outputs = asyncio.run(one_command_one_frame())
+check("a single chunk of output is written without anything following it",
+      any("bin  etc  home  usr" in (o or "") for o in outputs),
+      f"transcript holds {outputs!r}")
+
+print("\n== terminating a session kills the shell, not just the row ==")
+# The row saying `closed` while our own shell keeps running on a
+# client's machine is the wrong direction for the record to be
+# wrong in. Terminating sends a CLOSE frame down the tunnel; the
+# Ghost closes the socket, which is what ends `nc -e /bin/sh`.
+#
+# The HUB is tested in-process and the ROUTE over HTTP, because the
+# hub is per-process state: a tunnel registered here is invisible to
+# the server handling the request, so an HTTP test could only ever
+# exercise the no-route path. Pretending otherwise would be a test
+# that passes because of the harness rather than the code.
+_sent: list = []
+
+
+async def _record(b):
+    _sent.append(b)
+
+
+async def terminate_with_tunnel():
+    """Register a tunnel, attach a session to it, terminate it."""
+    async with SessionLocal() as s:
+        a = await s.get(Agent, GID)
+        hub.register(a.id, _record)
+        frame = proxytunnel.Frame(
+            kind=proxytunnel.ARRIVED, stream=callback.n,
+            payload=announcement("198.51.100.7:52000", "tcp", 443))
+        callback.n += 1
+        await shellwork.on_frame(s, a, frame)
+        sid = (await s.execute(select(ShellSession.id)
+                               .order_by(ShellSession.id.desc())
+                               .limit(1))).scalar_one()
+    _sent.clear()
+    went = await hub.terminate(sid)
+    return sid, went
+
+
+SID, went = asyncio.run(terminate_with_tunnel())
+check("terminating reports that it reached the host", went is True, str(went))
+kinds = [proxytunnel.decode(b).kind for b in _sent]
+check("...and a CLOSE frame actually went down the tunnel",
+      proxytunnel.CLOSE in kinds, f"{len(_sent)} frame(s): {kinds}")
+check("...and the session is detached, so nobody can still type at it",
+      hub.holds(SID) is False)
+check("terminating one with no route says so rather than raising",
+      asyncio.run(hub.terminate(999999)) is False)
+
+# The route, over HTTP. The server process holds no tunnel for this
+# agent, which is exactly the no-route case -- and the answer must
+# say the far end was not reached rather than fold it into success.
+st, r = call(f"/api/c2/sessions/{SID}/close?project=C2T", "POST", {}, token=admin)
+check("the route closes the row", st == 200 and r.get("state") == "closed",
+      f"{st} {r}")
+check("...and with no route does NOT claim the shell was killed",
+      r.get("terminated") is False, str(r.get("terminated")))
+check("...and says so plainly", "still alive" in (r.get("note") or ""),
+      r.get("note"))
+
+print("\n== a restart does not leave a session claiming to be open ==")
+# `open` claims this process holds a tunnel to a live socket. At
+# startup it holds none, so every open row is a claim nothing backs
+# -- and the UI showed "it should come back on its own" for ever,
+# which it does not: the Ghost closes those sockets when its tunnel
+# drops.
+
+
+async def open_one():
+    async with SessionLocal() as s:
+        a = await s.get(Agent, GID)
+        hub.register(a.id, _record)
+        frame = proxytunnel.Frame(
+            kind=proxytunnel.ARRIVED, stream=callback.n,
+            payload=announcement("198.51.100.7:52001", "tcp", 443))
+        callback.n += 1
+        await shellwork.on_frame(s, a, frame)
+        return (await s.execute(select(ShellSession.id)
+                                .order_by(ShellSession.id.desc())
+                                .limit(1))).scalar_one()
+
+
+async def restart():
+    """What startup does, against rows a dead process left behind."""
+    async with SessionLocal() as s:
+        return await shellwork.adopt_orphans(s)
+
+
+async def state_of(sid):
+    async with SessionLocal() as s:
+        return (await s.get(ShellSession, sid)).state
+
+
+SID3 = asyncio.run(open_one())
+check("a fresh session is open", asyncio.run(state_of(SID3)) == "open",
+      asyncio.run(state_of(SID3)))
+
+n = asyncio.run(restart())
+check("startup marks orphaned sessions", n >= 1, str(n))
+check("...as LOST, not closed -- we know our route went, not that the "
+      "shell died", asyncio.run(state_of(SID3)) == "lost",
+      asyncio.run(state_of(SID3)))
+check("...and a terminated one is left alone, not revived",
+      asyncio.run(state_of(SID)) == "closed", asyncio.run(state_of(SID)))
+check("a second startup finds nothing left to do",
+      asyncio.run(restart()) == 0)
+
 print("\n== a listener is the engagement's, not the world's ==")
 call("/api/projects", "POST", {"code": "OTHER", "name": "other"}, token=admin)
 st, rows = call("/api/c2/listeners?project=OTHER", token=admin)
@@ -375,8 +528,9 @@ print("\n== deleting one keeps what it caught ==")
 st, _ = call(f"/api/c2/listeners/{ids[('tcp', 443)]}?project=C2T", "DELETE",
              token=admin)
 check("a listener can be removed", st == 204, st)
-st, sess = call("/api/c2/sessions?project=C2T&active=true", token=admin)
-check("...and the shells it caught are still there", len(sess) == 3,
+st, sess = call("/api/c2/sessions?project=C2T&active=false", token=admin)
+check("...and the shells it caught are still there",
+      sum(1 for x in sess if x["listen_port"] == 443) >= 3,
       str(len(sess)))
 
 print(f"\n{'=' * 56}\n  {ok} passed, {fail} failed\n{'=' * 56}")

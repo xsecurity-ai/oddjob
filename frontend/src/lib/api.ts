@@ -1445,8 +1445,12 @@ export const api = {
     req<{ seq: number; sent: boolean }>(
       `/api/c2/sessions/${sid}/input` + qs({ project }),
       { method: 'POST', body: JSON.stringify({ data }) }),
+  /** Terminate a session: kills the shell on the host, not just the
+   *  row. `terminated` is false when there was no route to the ghost
+   *  — the row closes here and that shell, if it is still alive,
+   *  stays alive. */
   c2Close: (project: string, sid: number) =>
-    req<{ ok: boolean; state: string }>(
+    req<{ ok: boolean; state: string; terminated: boolean; note: string }>(
       `/api/c2/sessions/${sid}/close` + qs({ project }), { method: 'POST' }),
   c2Label: (project: string, sid: number, label: string) =>
     req<{ ok: boolean; label: string | null }>(
