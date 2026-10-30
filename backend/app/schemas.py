@@ -30,6 +30,7 @@ from .models import (
     IMPACT_CHOICES,
     NMAP_CHOICES,
     NUCLEI_CHOICES,
+    POC_CHOICES,
     PROJECT_STATUSES,
     SEVERITIES,
     WEB_CHOICES,
@@ -158,6 +159,7 @@ class ProjectUpdate(BaseModel):
     auto_nuclei: str | None = None
     auto_vhost: bool | None = None
     auto_httpx: bool | None = None
+    auto_poc: str | None = None
     kitchen_sink: bool | None = None
     #: Extra content-discovery paths, one per line. Appended to the
     #: agent's wordlist, never replacing it.
@@ -222,6 +224,28 @@ class ProjectUpdate(BaseModel):
         if v not in NUCLEI_CHOICES:
             raise ValueError(
                 f"auto_nuclei must be one of {', '.join(NUCLEI_CHOICES)}")
+        return v
+
+    @field_validator("auto_poc")
+    @classmethod
+    def _poc(cls, v: str | None) -> str | None:
+        """Same refusal again, and it matters more here than anywhere.
+
+        The value is a FLOOR, not a mode: `medium` means medium, high
+        and critical. So a typo that fell through to a default would
+        not merely do the wrong amount of work -- it would silently
+        change which findings get a payload written for them and
+        fired, and the operator would have no way to tell from the
+        screen that the number they set is not the number in force.
+        """
+        if v is None:
+            return None
+        v = (v or "").strip().lower()
+        if v not in POC_CHOICES:
+            raise ValueError(
+                f"auto_poc must be one of {', '.join(POC_CHOICES)} — the "
+                f"value is the LOWEST severity to prove, so 'medium' "
+                f"covers medium, high and critical")
         return v
 
     @field_validator("auto_web")
@@ -299,6 +323,7 @@ class ProjectOut(ProjectBase):
     auto_web: str = "off"
     auto_vhost: bool = False
     auto_httpx: bool = False
+    auto_poc: str = "off"
     #: Everything on, at its most thorough. Resolved when the
     #: policies are read rather than copied into the fields above, so
     #: turning it off returns the project to whatever was set before.

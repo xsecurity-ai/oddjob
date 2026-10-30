@@ -114,6 +114,25 @@ const NMAP = [
   { value: 'full', label: 'Full TCP' },
 ]
 
+// A FLOOR, not a mode: the value is the lowest severity worth
+// proving, so `medium` means medium, high and critical. Labelled
+// "and worse" rather than naming the set, because the set changes
+// with the floor and a label that listed it would be the one thing
+// on screen that goes stale.
+//
+// `info` is last and is deliberately unappealing: it means a proof
+// for every technology-detection finding on the estate. It exists
+// because the floor has to be expressible, not because anybody
+// should pick it.
+const POC = [
+  { value: 'off', label: 'Off' },
+  { value: 'critical', label: 'Critical only' },
+  { value: 'high', label: 'High and worse' },
+  { value: 'medium', label: 'Medium and worse' },
+  { value: 'low', label: 'Low and worse' },
+  { value: 'info', label: 'Everything, including info' },
+]
+
 /** Everything the project does on its own, and what it costs the
  *  client when it does. */
 function useStandingOrders(project: string) {
@@ -147,6 +166,8 @@ function useStandingOrders(project: string) {
   // refetch while the database held the operator's choice.
   const web = String(pr.data?.auto_web ?? 'off')
   const nuclei = String(pr.data?.auto_nuclei ?? 'off')
+  // Not forced by the sink, deliberately — see the Row below.
+  const poc = String(pr.data?.auto_poc ?? 'off')
   const sink = Boolean(pr.data?.kitchen_sink)
   // What is ACTUALLY in force. With the sink open every policy is at
   // its most thorough regardless of the columns underneath, and a
@@ -157,11 +178,15 @@ function useStandingOrders(project: string) {
     : SWITCHES.filter((s) => on(s.field)).length
       + (nmap !== 'off' ? 1 : 0) + (web !== 'off' ? 1 : 0)
       + (nuclei !== 'off' ? 1 : 0)
+  // Counted outside the sink branch: the sink does not turn proving
+  // on, so a project with the sink open AND a floor set has one more
+  // order in force than the sink accounts for.
+  const inForce = live + (poc !== 'off' ? 1 : 0)
 
   return {
     admin: roleOn(project) === 'admin',
     busy: pr.isLoading || save.isPending,
-    save, on, nmap, web, nuclei, live, sink,
+    save, on, nmap, web, nuclei, poc, live: inForce, sink,
   }
 }
 
@@ -245,7 +270,7 @@ function Row({ label, help, children }: {
 /** The controls themselves. Separate from the dialog so the shape can
  *  be read without the chrome around it. */
 export function StandingOrdersControls({ project }: { project: string }) {
-  const { admin, busy, save, on, nmap, web, nuclei, sink } =
+  const { admin, busy, save, on, nmap, web, nuclei, poc, sink } =
     useStandingOrders(project)
 
   const pick = (value: string, options: { value: string; label: string }[],
@@ -343,6 +368,24 @@ export function StandingOrdersControls({ project }: { project: string }) {
           + 'authorised that.'}>
         {pick(sink ? 'both+confirm' : nuclei, NUCLEI,
               (v) => save.mutate({ auto_nuclei: v }), sink)}
+      </Row>
+
+      {/* Last, and the only one the kitchen sink does not touch. Every
+          other order turns a scanner up; this one has a model write a
+          check for a specific finding and then fires it, so what
+          reaches the client is something nobody reviewed first. */}
+      <Row label="prove findings"
+        help={'Builds a proof for every finding at or above the severity '
+          + 'you choose — the value is a floor, so Medium covers medium, '
+          + 'high and critical — runs it, and records whether it '
+          + 'reproduced. Covers the backlog as well as new findings. The '
+          + 'proof is re-runnable, so the same artefact answers “is this '
+          + 'real” now and “has it been fixed” later. Needs the agent '
+          + 'configured to write them and a Ghost online to run them. '
+          + 'Unlike every other order here this one sends a payload '
+          + 'written for the occasion rather than a scanner’s own '
+          + 'traffic, which is why the kitchen sink leaves it alone.'}>
+        {pick(poc, POC, (v) => save.mutate({ auto_poc: v }))}
       </Row>
 
       <Stack direction="row" spacing={1}

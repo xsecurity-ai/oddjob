@@ -99,6 +99,26 @@ NMAP_CHOICES = ("off", "top100", "full")
 #: Ordered least to most permissive, which is what "at most" means.
 IMPACT_CHOICES = ("read_only", "state_changing", "destructive")
 
+#: What `Project.auto_poc` may be: `off`, or the LOWEST severity worth
+#: proving. `medium` means medium, high and critical — the value is
+#: the floor, so one column carries both "is this on" and "how far
+#: down does it go" and the two cannot disagree.
+#:
+#: Ordered worst first, which is the order the floor is read against.
+#:
+#: Off by default, and this is the most deliberate `off` in the file.
+#: Every other standing order sends a scanner's own traffic. This one
+#: asks a model to WRITE a check for a specific finding on a specific
+#: host and then fires it, so what goes at the client is something
+#: nobody reviewed first. The nuclei note below describes CVE
+#: templates as "indistinguishable from an attack in a log"; this is
+#: that, with the template written to order.
+#:
+#: `info` is permitted and is a bad idea on a real estate: it means a
+#: PoC for every technology-detection finding. It is here because the
+#: floor has to be expressible, not because anybody should pick it.
+POC_CHOICES = ("off", "critical", "high", "medium", "low", "info")
+
 #: What `Project.auto_nuclei` may be, for the same reason as above.
 #:
 #: Two runs rather than one, because the filters that make each
@@ -246,6 +266,19 @@ class Project(Base, TimestampMixin):
     #: whether anything else is worth queueing against a URL.
     auto_httpx: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false")
+    #: "off" or the lowest severity worth proving. See POC_CHOICES.
+    #:
+    #: Build a proof for every finding at or above the floor, run it,
+    #: and record whether it reproduced. Covers the backlog as well as
+    #: new findings, because a floor somebody sets today is a
+    #: statement about the engagement rather than about this minute.
+    #:
+    #: The proof is a nuclei template and the exit contract is the one
+    #: `Poc.exit_code` already defines — 0 reproduced, 1 not
+    #: reproduced, 2 could not test — so the same artefact answers
+    #: "is this real" now and "has it been fixed" on any later run.
+    auto_poc: Mapped[str] = mapped_column(
+        String(16), default="off", server_default="off")
     # There is deliberately no `auto_geolocate`. Geolocation already
     # runs for every project this worker touches -- it is a walk of a
     # memory-mapped file on this machine, nothing leaves, and it
@@ -1050,6 +1083,18 @@ class Poc(Base, TimestampMixin):
     target_id: Mapped[int] = mapped_column(
         ForeignKey("targets.id", ondelete="CASCADE"), index=True
     )
+    #: The finding this proves, where it proves one.
+    #:
+    #: Nullable, because a PoC written by hand during an engagement
+    #: often predates the finding being filed -- and because the
+    #: column arrived after the table did. A PoC WITHOUT one is still
+    #: a PoC; what it cannot be is a candidate for the `auto_poc`
+    #: standing order, which is phrased in terms of findings.
+    #:
+    #: SET NULL rather than CASCADE: deleting a finding should not
+    #: destroy the evidence that it was real.
+    vuln_id: Mapped[int | None] = mapped_column(
+        ForeignKey("vulns.id", ondelete="SET NULL"), index=True)
     title: Mapped[str] = mapped_column(String(500))
     status: Mapped[str] = mapped_column(String(32), default="unconfirmed", index=True)
     path: Mapped[str | None] = mapped_column(String(1000))
