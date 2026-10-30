@@ -56,6 +56,10 @@ class SessionOut(BaseModel):
     #: octet is how a real shell gets dismissed as noise -- or noise
     #: gets written up as a shell.
     peer_geo: dict | None
+    #: pending | shell | scanner | silent. Whether anything on the
+    #: far end behaves like a shell -- see `app/shellprobe.py`.
+    probe: str
+    probe_note: str | None
     listen_port: int | None
     state: str
     label: str | None
@@ -116,6 +120,7 @@ def _out(s: ShellSession, host: str | None, agent: str | None,
     return SessionOut(
         id=s.id, project_code=code, host=host, target_id=s.target_id,
         agent_name=agent, peer=s.peer, peer_geo=_peer_geo(s.peer),
+        probe=s.probe, probe_note=s.probe_note,
         listen_port=s.listen_port,
         state=s.state, label=s.label, connected=hub.holds(s.id),
         exchanges=n,
@@ -129,6 +134,11 @@ async def list_sessions(project: str = Query(...),
                             True, description="Only sessions that are open. "
                                               "False includes closed ones, "
                                               "which stay for the record."),
+                        scans: bool = Query(
+                            False, description="Include peers identified as "
+                                               "port scanners. They are kept "
+                                               "either way; this only hides "
+                                               "them."),
                         pr: Project = Depends(require_project("readonly")),
                         _: User = Depends(get_current_user),
                         session: AsyncSession = Depends(get_session)):
@@ -152,6 +162,14 @@ async def list_sessions(project: str = Query(...),
          .order_by(ShellSession.id.desc()))
     if active:
         q = q.where(ShellSession.state == "open")
+    if not scans:
+        # Only the ones POSITIVELY identified as something else --
+        # an HTTP request, a TLS handshake, an SSH banner. `silent`
+        # stays visible: nothing answered, which is not the same as
+        # something answering wrongly, and a real shell can be slow
+        # or speak its own protocol. Hiding those would make an
+        # absence of evidence into evidence.
+        q = q.where(ShellSession.probe != "scanner")
     rows = (await session.execute(q)).all()
     return [_out(s, host, agent, pr.code, n) for s, host, agent, n in rows]
 

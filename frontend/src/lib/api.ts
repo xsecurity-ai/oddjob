@@ -408,6 +408,14 @@ export interface C2Session {
     country: string | null; country_name: string | null
     city: string | null; asn: number | null; org: string | null
   } | null
+  /** pending | shell | scanner | silent — whether anything on the
+   *  far end behaves like a shell.
+   *
+   *  `silent` is NOT `scanner`: nothing answered, which is not the
+   *  same as something answering wrongly. A real shell can be slow
+   *  or speak its own protocol, so these stay visible. */
+  probe: string
+  probe_note: string | null
   listen_port: number | null
   /** open | closed | lost. `lost` means the tunnel went, not the
    *  shell: the far end may be perfectly alive and what vanished is
@@ -1420,8 +1428,10 @@ export const api = {
     req<{ ok: boolean; id: number; target_url: string; note: string }>(
       `/api/pocs/${id}/run` + qs({ project }),
       { method: 'POST', body: JSON.stringify(url ? { url } : {}) }),
-  c2Sessions: (project: string, active = true) =>
-    req<C2Session[]>('/api/c2/sessions' + qs({ project, active })),
+  /** `scans` includes peers identified as port scanners. They are
+   *  kept either way — this only hides them. */
+  c2Sessions: (project: string, active = true, scans = false) =>
+    req<C2Session[]>('/api/c2/sessions' + qs({ project, active, scans })),
   c2Listeners: (project: string) =>
     req<C2Listener[]>('/api/c2/listeners' + qs({ project })),
   /** Tell a Ghost to hold these ports. Several at once, because an

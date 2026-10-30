@@ -65,12 +65,16 @@ export function C2View({ project }: { project: string | null }) {
   const { canWrite } = useAuth()
   const [tab, setTab] = useState<'sessions' | 'listeners'>('sessions')
   const [activeOnly, setActiveOnly] = useState(true)
+  // Scanners hidden by default. A listener open to the internet
+  // catches them faster than it catches payloads, and each one
+  // files a session.
+  const [showScans, setShowScans] = useState(false)
   const [open, setOpen] = useState<number | null>(null)
   const [setup, setSetup] = useState(false)
 
   const sessions = useQuery({
-    queryKey: ['c2-sessions', project, activeOnly],
-    queryFn: () => api.c2Sessions(project as string, activeOnly),
+    queryKey: ['c2-sessions', project, activeOnly, showScans],
+    queryFn: () => api.c2Sessions(project as string, activeOnly, showScans),
     enabled: !!project,
     refetchInterval: POLL_MS * 4,
   })
@@ -138,6 +142,20 @@ export function C2View({ project }: { project: string | null }) {
               </Typography>
               <Switch size="small" checked={activeOnly}
                 onChange={(e) => setActiveOnly(e.target.checked)} />
+            </Stack>
+          </Tooltip>
+        )}
+        {tab === 'sessions' && (
+          <Tooltip title="Peers that answered with an HTTP request, a TLS
+                          handshake or an SSH banner — somebody scanning the
+                          port rather than a payload calling home. They are
+                          never deleted, only hidden.">
+            <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
+              <Typography sx={{ fontSize: 11.5, color: neon.muted }}>
+                show scans
+              </Typography>
+              <Switch size="small" checked={showScans}
+                onChange={(e) => setShowScans(e.target.checked)} />
             </Stack>
           </Tooltip>
         )}

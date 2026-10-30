@@ -2247,6 +2247,23 @@ class ShellSession(Base, TimestampMixin):
 
     state: Mapped[str] = mapped_column(
         String(16), default="open", server_default="open", index=True)
+
+    #: pending | shell | scanner | silent -- whether anything on the
+    #: far end behaves like a shell. See `app/shellprobe.py`.
+    #:
+    #: A listener open to the internet catches scanners as well as
+    #: payloads, and on this fleet the scanners outnumbered the
+    #: shells four to one within hours. This is what lets the list
+    #: hide them without deleting them.
+    #:
+    #: `silent` is kept and SHOWN. A real shell can be slow, or
+    #: speak its own protocol, or have lost our probe -- hiding it
+    #: would make an absence of evidence into evidence.
+    probe: Mapped[str] = mapped_column(
+        String(16), default="pending", server_default="pending", index=True)
+    #: Why it was judged that way, in words an operator can check:
+    #: "sent an HTTP request (GET / HTTP/1.1), not shell output".
+    probe_note: Mapped[str | None] = mapped_column(String(200))
     #: Last time anything crossed the socket in either direction.
     #: Distinct from `updated_at`, which moves when somebody renames
     #: the session.

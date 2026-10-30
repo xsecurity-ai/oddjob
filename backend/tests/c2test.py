@@ -545,6 +545,92 @@ check("a v6 peer is unwrapped rather than split on its first colon",
 check("no peer is no lookup", _peer_geo(None) is None
       and _peer_geo("") is None)
 
+print("\n== a scanner is told apart from a shell ==")
+# A listener on 443 open to the internet catches both. On the first
+# fleet to run one, four scanner sessions arrived within hours and
+# were indistinguishable from the real one -- which is how a Google
+# Cloud range in Belgium got read as the operator's home connection.
+from app import shellprobe  # noqa: E402
+
+st, why = shellprobe.classify(b"GET / HTTP/1.1\r\nHost: 20.0.0.1\r\n")
+check("an HTTP request is a scanner, not a shell",
+      st == shellprobe.SCANNER and "HTTP" in why, f"{st} {why}")
+check("...and the reason quotes the request line so it can be checked",
+      "GET / HTTP/1.1" in why, why)
+
+st, _ = shellprobe.classify(bytes([0x16, 0x03, 0x01, 0x02, 0x00]) + b"\x01")
+check("a TLS handshake is a scanner", st == shellprobe.SCANNER, st)
+# A ClientHello carries plenty of ASCII -- the SNI for one -- so a
+# printability test alone would read it as shell output. Checked
+# structurally for that reason.
+st, _ = shellprobe.classify(
+    bytes([0x16, 0x03, 0x01, 0x00, 0x40]) + b"\x01\x00\x00<" + b"web.acme.example")
+check("...even one whose SNI makes it look like text",
+      st == shellprobe.SCANNER, st)
+
+st, _ = shellprobe.classify(b"SSH-2.0-OpenSSH_9.6\r\n")
+check("an SSH banner is a scanner", st == shellprobe.SCANNER, st)
+
+st, _ = shellprobe.classify(b"web01.acme.example\n")
+check("a hostname coming back is a SHELL", st == shellprobe.SHELL, st)
+st, _ = shellprobe.classify(b"DESKTOP-4F2A1B\r\n")
+check("...and so is a Windows one", st == shellprobe.SHELL, st)
+st, _ = shellprobe.classify(b"sh: 1: hostname: not found\n")
+check("...and so is a shell COMPLAINING, which is still a shell",
+      st == shellprobe.SHELL, st)
+
+check("nothing at all is undecided, not a verdict",
+      shellprobe.classify(b"")[0] == shellprobe.PENDING)
+
+print("\n== and the list hides scanners without deleting them ==")
+
+
+async def judged(peer, state, note="x"):
+    """A session already judged, as the probe would leave it."""
+    async with SessionLocal() as s:
+        a = await s.get(Agent, GID)
+        hub.register(a.id, _devnull)
+        stream = callback.n
+        callback.n += 1
+        await shellwork.on_frame(s, a, proxytunnel.Frame(
+            kind=proxytunnel.ARRIVED, stream=stream,
+            payload=announcement(peer, "tcp", 443)))
+        row = (await s.execute(select(ShellSession)
+                               .order_by(ShellSession.id.desc())
+                               .limit(1))).scalar_one()
+        row.probe, row.probe_note = state, note
+        await s.commit()
+        return row.id
+
+
+SCAN_ID = asyncio.run(judged("203.0.113.200:40001", "scanner",
+                             "sent an HTTP request"))
+QUIET_ID = asyncio.run(judged("203.0.113.201:40002", "silent",
+                              "nothing came back"))
+REAL_ID = asyncio.run(judged("203.0.113.202:40003", "shell",
+                             "answered with text"))
+
+shown = {x["id"] for x in
+         call("/api/c2/sessions?project=C2T&active=true", token=admin)[1]}
+check("a scanner is hidden by default", SCAN_ID not in shown)
+check("a shell is shown", REAL_ID in shown)
+# The one that matters. Nothing answered, which is not the same as
+# something answering wrongly: a real shell can be slow, speak its
+# own protocol, or never have got the probe.
+check("a SILENT session is still shown -- absence of evidence is not "
+      "evidence", QUIET_ID in shown)
+
+shown_all = {x["id"] for x in
+           call("/api/c2/sessions?project=C2T&active=true&scans=true",
+                token=admin)[1]}
+check("...and the scanner is still there when asked for",
+      SCAN_ID in shown_all)
+row = next(x for x in
+           call("/api/c2/sessions?project=C2T&active=true&scans=true",
+                token=admin)[1] if x["id"] == SCAN_ID)
+check("...carrying the reason it was judged one",
+      row["probe"] == "scanner" and row["probe_note"], str(row))
+
 print("\n== a listener is the engagement's, not the world's ==")
 call("/api/projects", "POST", {"code": "OTHER", "name": "other"}, token=admin)
 st, rows = call("/api/c2/listeners?project=OTHER", token=admin)
