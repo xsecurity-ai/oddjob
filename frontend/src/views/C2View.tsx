@@ -14,11 +14,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions,
-  DialogContent, DialogTitle, IconButton, Menu, MenuItem, Stack, Switch, Tab,
+  Autocomplete, DialogContent, DialogTitle, IconButton, Menu, MenuItem,
+  Stack, Switch, Tab,
   Tabs, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
 import DeleteIcon from '@mui/icons-material/DeleteOutlined'
+import EditIcon from '@mui/icons-material/EditOutlined'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   api, type C2Exchange, type C2Listener, type C2Session, type GhostAgent,
@@ -73,6 +75,11 @@ export function C2View({ project }: { project: string | null }) {
   const [showScans, setShowScans] = useState(false)
   const [open, setOpen] = useState<number | null>(null)
   const [setup, setSetup] = useState(false)
+  // Held here rather than in the session list: the list opens it
+  // from a context menu and the terminal from a button, and a
+  // right-click-only affordance is one nobody finds.
+  const [editing, setEditing] = useState<C2Session | null>(null)
+  const [note, setNote] = useState<string | null>(null)
 
   const sessions = useQuery({
     queryKey: ['c2-sessions', project, tab, showScans],
@@ -164,9 +171,11 @@ export function C2View({ project }: { project: string | null }) {
         <Stack direction="row" sx={{ flex: 1, minHeight: 0 }}>
           <SessionList rows={rows} loading={sessions.isLoading}
             error={sessions.error as Error | null} project={project}
-            tab={tab} open={open} onOpen={setOpen} />
+            tab={tab} open={open} onOpen={setOpen}
+          onEdit={setEditing} />
           {chosen
             ? <Terminal key={chosen.id} project={project} session={chosen}
+                onEdit={() => setEditing(chosen)}
                 onChanged={() => void qc.invalidateQueries(
                   { queryKey: ['c2-sessions', project] })} />
             : (
@@ -189,6 +198,16 @@ export function C2View({ project }: { project: string | null }) {
       {setup && (
         <SetupListenerDialog project={project}
           onClose={() => setSetup(false)} />
+      )}
+      {editing && (
+        <EditSessionDialog project={project} row={editing}
+          onDone={(msg) => { setEditing(null); if (msg) setNote(msg) }} />
+      )}
+      {note && (
+        <Alert severity="success" variant="outlined"
+          sx={{ m: 1.5, fontSize: 12 }} onClose={() => setNote(null)}>
+          {note}
+        </Alert>
       )}
     </Stack>
   )
@@ -508,7 +527,7 @@ function SetupListenerDialog({ project, onClose }: {
 }
 
 function SessionList({ rows, loading, error, project, tab, open,
-                      onOpen }: {
+                      onOpen, onEdit }: {
   rows: C2Session[]
   loading: boolean
   error: Error | null
@@ -516,6 +535,7 @@ function SessionList({ rows, loading, error, project, tab, open,
   tab: 'live' | 'ended'
   open: number | null
   onOpen: (id: number) => void
+  onEdit: (row: C2Session) => void
 }) {
   // One subscription for the list rather than one per row: the set is
   // the same object for every row and a hook inside `rows.map` would
@@ -530,8 +550,6 @@ function SessionList({ rows, loading, error, project, tab, open,
     { x: number; y: number; row: C2Session } | null>(null)
   const [said, setSaid] = useState<string | null>(null)
   // Which dialog the context menu opened, and for which session.
-  const [ask, setAsk] = useState<
-    { kind: 'name' | 'target'; row: C2Session } | null>(null)
 
   const kill = useMutation({
     mutationFn: (row: C2Session) => api.c2Close(project, row.id),
@@ -646,26 +664,20 @@ function SessionList({ rows, loading, error, project, tab, open,
           sx={{ fontSize: 12.5 }}>
           Open
         </MenuItem>
+        {/* One entry, not two. Naming a session and saying which
+            host it is on are the same gesture -- "this session is
+            actually X" -- and an operator who has just read a
+            hostname off the shell wants to record both without
+            opening two dialogs. */}
         <MenuItem
-          onClick={() => { if (menu) setAsk({ kind: 'name', row: menu.row }); setMenu(null) }}
+          onClick={() => { if (menu) onEdit(menu.row); setMenu(null) }}
           sx={{ fontSize: 12.5 }}>
-          Rename…
-        </MenuItem>
-        {/* A callback arrives from an ADDRESS, and the address is
-            as often a NAT egress as the box that was popped. This
-            is how an operator records which, usually because the
-            shell has just told them. */}
-        <MenuItem
-          onClick={() => { if (menu) setAsk({ kind: 'target', row: menu.row }); setMenu(null) }}
-          sx={{ fontSize: 12.5 }}>
-          Merge with target…
+          <EditIcon sx={{ fontSize: 16, mr: 1 }} />
+          Edit…
         </MenuItem>
       </Menu>
 
-      {ask && (
-        <AskDialog project={project} kind={ask.kind} row={ask.row}
-          onDone={(msg) => { setAsk(null); if (msg) setSaid(msg) }} />
-      )}
+
 
       {said && (
         <Alert severity="warning" variant="outlined"
@@ -684,9 +696,10 @@ function SessionList({ rows, loading, error, project, tab, open,
  *  because the transcript is an engagement record and a tidied
  *  version of it is not what happened.
  */
-function Terminal({ project, session, onChanged }: {
+function Terminal({ project, session, onEdit, onChanged }: {
   project: string
   session: C2Session
+  onEdit: () => void
   onChanged: () => void
 }) {
   const [input, setInput] = useState('')
@@ -733,6 +746,14 @@ function Terminal({ project, session, onChanged }: {
               borderBottom: `1px solid ${alpha(neon.purple, 0.2)}` }}>
         <Box sx={{ fontFamily: `'Share Tech Mono', monospace`,
                    fontSize: 12.5, color: neon.cyan }}>{title(session)}</Box>
+        {/* Visible, because a right-click menu is an affordance
+            nobody finds. The context menu stays for the list. */}
+        <Tooltip title="Rename this session, or say which host it is on">
+          <IconButton size="small" onClick={onEdit}
+            sx={{ color: neon.muted, '&:hover': { color: neon.cyan } }}>
+            <EditIcon sx={{ fontSize: 15 }} />
+          </IconButton>
+        </Tooltip>
         {session.peer && (
           <Tooltip title={whose(session)
             ? `${whose(session)}`
@@ -836,38 +857,60 @@ function Line({ e }: { e: C2Exchange }) {
 }
 
 
-/** Rename a session, or file it against a different host.
+/** Rename a session and say which host it is on.
  *
- *  One dialog for both because they are the same gesture -- "this
- *  session is actually X" -- and two near-identical modals is how
- *  the two come to validate differently.
+ *  Both in one dialog because they are the same gesture: an
+ *  operator who has just read a hostname off the shell wants to
+ *  record it and call the session something useful, and two modals
+ *  for that is two modals.
+ *
+ *  The host is a DROPDOWN over the project's targets, because the
+ *  answer is almost always a host the engagement already knows and
+ *  typing it out invites a typo that silently creates a second
+ *  target one character different. Free text is still allowed --
+ *  `freeSolo` -- for the host nobody has recorded yet, which is
+ *  the case a dropdown alone cannot serve.
  */
-function AskDialog({ project, kind, row, onDone }: {
+function EditSessionDialog({ project, row, onDone }: {
   project: string
-  kind: 'name' | 'target'
   row: C2Session
   onDone: (message?: string) => void
 }) {
   const qc = useQueryClient()
-  const [value, setValue] = useState(
-    kind === 'name' ? (row.label ?? '') : (row.host ?? ''))
+  const [label, setLabel] = useState(row.label ?? '')
+  const [host, setHost] = useState<string>(row.host ?? '')
   const [err, setErr] = useState<string | null>(null)
 
-  const save = useMutation<{ created?: boolean }>({
-    // Both calls return different shapes; only `created` is read
-    // here, so the union is narrowed at the boundary rather than
-    // threaded through the mutation's type.
-    mutationFn: async () => kind === 'name'
-      ? (await api.c2Label(project, row.id, value.trim()), {})
-      : await api.c2Retarget(project, row.id, value.trim()),
-    onSuccess: (r) => {
+  const targets = useQuery({
+    queryKey: ['targets', project],
+    queryFn: () => api.targets(project),
+  })
+  const hosts = useMemo(
+    () => (targets.data?.items ?? []).map((t) => t.host).sort(),
+    [targets.data])
+
+  const save = useMutation({
+    mutationFn: async () => {
+      // Only what changed. Re-pointing a session writes a timeline
+      // entry and moves the compromise, so doing it on every save
+      // would fill a target's history with moves that moved
+      // nothing.
+      let created = false
+      if (label.trim() !== (row.label ?? '')) {
+        await api.c2Label(project, row.id, label.trim())
+      }
+      const want = host.trim()
+      if (want && want !== (row.host ?? '')) {
+        created = (await api.c2Retarget(project, row.id, want)).created
+      }
+      return created
+    },
+    onSuccess: (created) => {
       void qc.invalidateQueries({ queryKey: ['c2-sessions', project] })
-      // Targets move too when a session does, so the grids that
-      // show them have to hear about it.
       void qc.invalidateQueries({ queryKey: ['targets'] })
-      const made = r.created
-      onDone(made ? `Created ${value.trim()} and moved the session to it.`
-                  : undefined)
+      onDone(created
+        ? `Created ${host.trim()} and moved the session to it.`
+        : undefined)
     },
     onError: (e) => setErr((e as Error).message),
   })
@@ -875,40 +918,41 @@ function AskDialog({ project, kind, row, onDone }: {
   return (
     <Dialog open onClose={() => onDone()} maxWidth="xs" fullWidth>
       <DialogTitle sx={{ color: neon.cyan, fontSize: 15 }}>
-        {kind === 'name' ? 'Rename this session' : 'Merge with target'}
+        Edit session
       </DialogTitle>
       <DialogContent>
-        <Typography sx={{ fontSize: 12, color: neon.muted, mb: 1.6,
-                          lineHeight: 1.6 }}>
-          {kind === 'name'
-            ? 'What to call it here. The address it came from is kept '
-              + 'either way.'
-            : `This shell came from ${row.peer ?? 'an unknown address'}, `
-              + 'which may be a NAT egress rather than the host itself. '
-              + 'Name the real host and the session — and the compromise '
-              + '— move to it. The target is created if there is not one.'}
-        </Typography>
-        <TextField fullWidth size="small" autoFocus value={value}
-          label={kind === 'name' ? 'Name' : 'Host'}
-          placeholder={kind === 'name' ? 'jump box' : 'dc01.acme.example'}
-          onChange={(e) => { setValue(e.target.value); setErr(null) }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && value.trim()) {
-              e.preventDefault()
-              save.mutate()
-            }
-          }} />
-        {err && (
-          <Alert severity="error" sx={{ mt: 1.5, fontSize: 11.5 }}>{err}</Alert>
-        )}
+        <Stack spacing={2.4} sx={{ mt: 0.5 }}>
+          <TextField fullWidth size="small" autoFocus value={label}
+            label="Name" placeholder="jump box"
+            helperText="What to call it here. The address it came from is
+                        kept either way."
+            onChange={(e) => { setLabel(e.target.value); setErr(null) }} />
+
+          <Autocomplete
+            freeSolo
+            options={hosts}
+            value={host}
+            loading={targets.isLoading}
+            onChange={(_e, v) => { setHost(v ?? ''); setErr(null) }}
+            onInputChange={(_e, v) => { setHost(v); setErr(null) }}
+            renderInput={(params) => (
+              <TextField {...params} size="small" label="Host"
+                placeholder="dc01.acme.example"
+                helperText={`This shell came from ${row.peer ?? 'an unknown '
+                  + 'address'}, which may be a NAT egress rather than the `
+                  + 'host itself. Pick the real one — or type a new one and '
+                  + 'it will be created.'} />
+            )} />
+
+          {err && <Alert severity="error" sx={{ fontSize: 11.5 }}>{err}</Alert>}
+        </Stack>
       </DialogContent>
       <DialogActions>
         <Button onClick={() => onDone()} sx={{ color: neon.muted }}>
           Cancel
         </Button>
-        <Button
-          disabled={save.isPending || (kind === 'target' && !value.trim())}
-          onClick={() => save.mutate()} sx={{ color: neon.green }}>
+        <Button disabled={save.isPending} onClick={() => save.mutate()}
+          sx={{ color: neon.green }}>
           {save.isPending ? 'Saving…' : 'Save'}
         </Button>
       </DialogActions>
