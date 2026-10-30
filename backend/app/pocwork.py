@@ -35,24 +35,54 @@ VERDICTS = {
     2: "could not test",
 }
 
-#: What the operator reads on a finding. The spec for this feature
-#: named these two strings; the third is what the three-state
-#: contract needs and the other two cannot say.
-CREATED = "PoC created"
-UNVALIDATED = "PoC created, not validated"
+#: What the operator reads in the PoC column of the findings table.
+#:
+#: Three states because there are three answers, and the middle one
+#: is the reason the first two are not enough: a proof that needs a
+#: credential nobody has, or a person to click a link, is a real
+#: proof that cannot be run from here. Calling that "not available"
+#: would throw away work somebody did; calling it "confirmed" would
+#: claim a result nobody has seen.
+NOT_AVAILABLE = "Not Available"
+CONFIRMED = "Available, Confirmed"
+UNCONFIRMED = "Available, Not Confirmed"
 
 
-def label(poc: Poc) -> str:
-    """The one line a table cell shows for a proof.
+def availability(poc: Poc | None) -> str:
+    """What the PoC column says for a finding. `poc` may be None.
 
-    `validated_at` and not `exit_code`, because a proof that ran and
-    could not test is still an unvalidated proof -- the run happened
-    and settled nothing. Reading the exit code alone would call that
-    validated and show a verdict nobody should act on.
+    **Available means there is a script.** A `Rejected` build writes
+    a row with no template, to record that a proof was attempted and
+    could not be written -- that row must read "Not Available", or
+    the column would advertise a proof that does not exist.
+
+    **Confirmed means it ran here and worked**: exit 0, and a run
+    that actually happened. `validated_at` and not `exit_code` alone,
+    because a row that has never run has no exit code and a run that
+    could not test settled nothing. Exit 1 -- it ran and matched
+    nothing -- is also unconfirmed: that is a proof which did not
+    work, which is exactly not confirmed.
     """
-    if poc.validated_at is None or poc.exit_code == 2:
-        return UNVALIDATED
-    return CREATED
+    if poc is None or not (poc.template or "").strip():
+        return NOT_AVAILABLE
+    if poc.validated_at is not None and poc.exit_code == 0:
+        return CONFIRMED
+    return UNCONFIRMED
+
+
+def why_unconfirmed(poc: Poc | None) -> str | None:
+    """The sentence behind "Not Confirmed", or None.
+
+    A state word without its reason is a state word the reader has to
+    take on trust, and this is the one that most deserves not to be:
+    "never run", "the host did not answer" and "it ran and matched
+    nothing" send an operator to three different places.
+    """
+    if availability(poc) != UNCONFIRMED or poc is None:
+        return None
+    if poc.validated_at is None:
+        return "written, not run yet"
+    return poc.verdict or VERDICTS.get(poc.exit_code or 2, "could not test")
 
 
 async def apply_result(session: AsyncSession, poc_id: int,

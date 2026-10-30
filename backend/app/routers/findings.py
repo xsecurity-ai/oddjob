@@ -9,11 +9,11 @@ import contextlib
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import assetfetch, assetwork, audit, lifecycle, manifest, slack
+from .. import assetfetch, assetwork, audit, lifecycle, manifest, pocwork, slack
 from ..db import get_session
 from ..events import broker
 from ..hosts import normalise_host
@@ -21,6 +21,7 @@ from ..models import (
     ROLE_ORDER,
     TRIAGE_STATES,
     Agent,
+    AgentTask,
     FindingSecret,
     Poc,
     Project,
@@ -52,18 +53,26 @@ def _base(model):
             .join(Project, Project.id == Target.project_id))
 
 
-def _vuln_out(row, sweeps: dict | None = None) -> VulnOut:
-    """One finding, with its lifecycle worked out.
+def _vuln_out(row, sweeps: dict | None = None,
+              pocs: dict | None = None) -> VulnOut:
+    """One finding, with its lifecycle and its proof worked out.
 
     `sweeps` is the (target, scanner) -> last-looked table for the
     rows being returned, loaded once for the page. Without it every
     finding answers `unconfirmed`, which is the correct answer to
     "has anybody looked since" when nobody has consulted the table —
     not a silent default.
+
+    `pocs` is vuln_id -> Poc, loaded the same way and for the same
+    reason. Absent, every finding reads "Not Available", which is
+    also the correct answer to "is there a proof" when nobody has
+    looked — and is why this takes a table rather than lazy-loading
+    a relationship per row.
     """
     v = row[0]
     sweeps = sweeps if sweeps is not None else {}
     vd = lifecycle.verdict_for(v, sweeps)
+    poc = (pocs or {}).get(v.id)
     return VulnOut(
         **{k: getattr(v, k) for k in
            ("id", "target_id", "title", "severity", "status", "triage",
@@ -72,7 +81,26 @@ def _vuln_out(row, sweeps: dict | None = None) -> VulnOut:
             "scanner", "first_seen_at", "last_seen_at")},
         host=row[1], project_code=row[2],
         lifecycle=vd.state, lifecycle_why=vd.why,
-        last_looked_at=vd.last_looked)
+        last_looked_at=vd.last_looked,
+        poc_state=pocwork.availability(poc),
+        poc_detail=pocwork.why_unconfirmed(poc),
+        poc_id=poc.id if poc is not None else None)
+
+
+async def _pocs_for(session, vuln_ids: list[int]) -> dict[int, Poc]:
+    """vuln_id -> its proof, for a page of findings.
+
+    The newest proof per finding wins. A finding can have several --
+    one written by `auto_poc` and one somebody wrote by hand after it
+    was rejected -- and the column is about whether a proof exists
+    now, not about how many attempts there were.
+    """
+    if not vuln_ids:
+        return {}
+    rows = (await session.execute(
+        select(Poc).where(Poc.vuln_id.in_(vuln_ids))
+        .order_by(Poc.vuln_id, Poc.id))).scalars().all()
+    return {p.vuln_id: p for p in rows if p.vuln_id is not None}
 
 
 async def _with_lifecycle(session, rows) -> list[VulnOut]:
@@ -85,7 +113,8 @@ async def _with_lifecycle(session, rows) -> list[VulnOut]:
     """
     sweeps = await lifecycle.sweeps_for_targets(
         session, [r[0].target_id for r in rows])
-    return [_vuln_out(r, sweeps) for r in rows]
+    pocs = await _pocs_for(session, [r[0].id for r in rows])
+    return [_vuln_out(r, sweeps, pocs) for r in rows]
 
 
 def _poc_out(row) -> PocOut:
@@ -1264,6 +1293,198 @@ async def build_poc(vuln_id: int, body: PocRequest | None = None,
                               f"against {poc.target_url}")
     return {"id": poc.id, "target_url": poc.target_url,
             "status": "queued for validation"}
+
+
+class PocDetail(BaseModel):
+    """One proof, with the script in it."""
+    id: int
+    vuln_id: int | None
+    target_id: int
+    host: str
+    project_code: str
+    title: str
+    #: Not Available | Available, Confirmed | Available, Not Confirmed.
+    state: str
+    detail: str | None
+    #: The nuclei template, as YAML. None when the build was refused
+    #: -- the row exists to record that a proof was attempted and
+    #: could not be written, which is a different thing from a proof
+    #: nobody has asked for.
+    template: str | None
+    target_url: str | None
+    exit_code: int | None
+    verdict: str | None
+    validated_at: str | None
+    updated_at: str | None
+
+
+class PocEdit(BaseModel):
+    """What an operator may change about a proof by hand.
+
+    The template, and nothing that would make the row claim a result.
+    `exit_code`, `validated_at` and `verdict` are what a RUN produced
+    and are not editable: a proof whose verdict can be typed in is
+    not evidence of anything.
+    """
+    template: str = Field(min_length=1, max_length=200_000)
+    title: str | None = Field(default=None, max_length=500)
+    target_url: str | None = Field(default=None, max_length=2000)
+
+
+async def _poc_for(session: AsyncSession, poc_id: int,
+                   pr: Project) -> tuple[Poc, Target]:
+    poc = await session.get(Poc, poc_id)
+    if poc is None:
+        raise HTTPException(404, f"no proof {poc_id}")
+    target = await session.get(Target, poc.target_id)
+    if target is None or target.project_id != pr.id:
+        # Scoped to the project like every other id here: a proof id
+        # must not be a way to read another engagement's work.
+        raise HTTPException(404, f"no proof {poc_id} in {pr.code}")
+    return poc, target
+
+
+def _poc_detail(poc: Poc, target: Target, code: str) -> PocDetail:
+    return PocDetail(
+        id=poc.id, vuln_id=poc.vuln_id, target_id=poc.target_id,
+        host=target.host, project_code=code, title=poc.title,
+        state=pocwork.availability(poc),
+        detail=pocwork.why_unconfirmed(poc),
+        template=poc.template, target_url=poc.target_url,
+        exit_code=poc.exit_code, verdict=poc.verdict,
+        validated_at=poc.validated_at.isoformat() if poc.validated_at else None,
+        updated_at=poc.updated_at.isoformat() if poc.updated_at else None)
+
+
+@router.get("/pocs/{poc_id}", response_model=PocDetail)
+async def get_poc(poc_id: int, project: str = Query(...),
+                  pr: Project = Depends(require_project("readonly")),
+                  _: User = Depends(get_current_user),
+                  session: AsyncSession = Depends(get_session)):
+    """One proof, with its script.
+
+    `readonly` to READ it. Running it needs `user`, and so does
+    editing -- see below.
+    """
+    poc, target = await _poc_for(session, poc_id, pr)
+    return _poc_detail(poc, target, pr.code)
+
+
+@router.patch("/pocs/{poc_id}", response_model=PocDetail)
+async def edit_poc(poc_id: int, body: PocEdit, project: str = Query(...),
+                   pr: Project = Depends(require_project("user")),
+                   user: User = Depends(get_current_user),
+                   session: AsyncSession = Depends(get_session)):
+    """Save an edited script.
+
+    Checked by the same `pocbuild.check` a model's answer goes
+    through, and refused the same way. The check is not about trusting
+    the operator -- it is about what a Ghost will run: the agent image
+    has no interpreter, nuclei's `code` protocol is never enabled, and
+    a template with no matcher matches nothing and would read as
+    FIXED. An operator who hand-writes one of those gets told here
+    rather than discovering it from a verdict.
+
+    **Editing clears the verdict.** What the last run said was about
+    the script that ran, and keeping it against a changed one would
+    show a confirmation for code that was never confirmed -- which is
+    the single most misleading thing this table could do.
+    """
+    from ..agent.pocbuild import Rejected, check
+
+    poc, target = await _poc_for(session, poc_id, pr)
+    try:
+        template = check(body.template)
+    except Rejected as e:
+        raise HTTPException(422, f"this will not run: {e}") from e
+
+    changed = (poc.template or "") != template
+    poc.template = template
+    if body.title is not None:
+        poc.title = body.title.strip()[:500] or poc.title
+    if body.target_url is not None:
+        poc.target_url = body.target_url.strip()[:2000] or None
+    if changed:
+        poc.exit_code = None
+        poc.validated_at = None
+        poc.verdict = None
+        poc.status = "unconfirmed"
+    await session.commit()
+    await audit.record(session, "ui", "poc.edit", user=user, commit=True,
+                       project_code=pr.code,
+                       detail=f"edited the proof for {target.host} "
+                              f"(proof {poc_id})")
+    await broker.publish("pocs", action="update", project=pr.code, id=poc.id)
+    if poc.vuln_id:
+        # The findings table carries the state, so it has to hear
+        # that an edit un-confirmed it.
+        await broker.publish("vulns", action="update", project=pr.code,
+                             host=target.host)
+    return _poc_detail(poc, target, pr.code)
+
+
+@router.post("/pocs/{poc_id}/run", response_model=dict, status_code=202)
+async def run_poc(poc_id: int, body: PocRequest | None = None,
+                  project: str = Query(...),
+                  pr: Project = Depends(require_project("user")),
+                  user: User = Depends(get_current_user),
+                  session: AsyncSession = Depends(get_session)):
+    """Run this script against its target, now.
+
+    Distinct from `POST /vulns/{id}/poc`, which ASKS A MODEL to write
+    a new one. This runs the script that is there -- which is what an
+    operator who has just edited it wants, and the only way an edited
+    proof ever gets a verdict.
+
+    No model is needed, so the only requirement is a Ghost: the image
+    has nuclei and this host does not, and a proof that runs from
+    Oddjob would be traffic at the client from the wrong address.
+
+    `user`, not `readonly`. This sends traffic at the client -- see
+    `roe.IMPACT["poc"]`.
+    """
+    # The same priority `auto_poc` queues at. A proof an operator is
+    # sitting in front of waiting for should not queue behind a scan.
+    from ..agent.pocworker import PRIORITY
+
+    poc, target = await _poc_for(session, poc_id, pr)
+    if not (poc.template or "").strip():
+        raise HTTPException(
+            409, "this proof has no script to run. It records that one was "
+                 "attempted and could not be written; write one in the "
+                 "editor, or ask for a new proof from the finding.")
+
+    live = (await session.execute(
+        select(Agent.id).where(Agent.project_id == pr.id,
+                               Agent.status == "online").limit(1))).first()
+    if live is None:
+        raise HTTPException(
+            409, f"no Ghost is online for {pr.code}, so there is nothing to "
+                 f"run it on. Oddjob does not run proofs itself: the agent "
+                 f"image has nuclei and this host does not, and traffic "
+                 f"from here comes from the wrong address.")
+
+    url = ((body.url if body and body.url else None)
+           or poc.target_url or target.host)
+    poc.target_url = str(url)[:2000]
+    # Queued, not run. Everything a Ghost does is a task, and a
+    # synchronous run would hold the request open for however long
+    # nuclei takes against a host that may not answer.
+    session.add(AgentTask(
+        agent_id=None, project_id=pr.id, requested_by=user.id,
+        kind="poc", priority=PRIORITY, status="queued",
+        args=json.dumps({"poc_id": poc.id, "url": poc.target_url,
+                         "template": poc.template})))
+    await session.commit()
+    await audit.record(session, "ui", "poc.run", user=user, commit=True,
+                       project_code=pr.code,
+                       detail=f"ran the proof for {target.host} against "
+                              f"{poc.target_url} (proof {poc_id})")
+    await broker.publish("agents", action="task", project=pr.code)
+    await broker.publish("pocs", action="run", project=pr.code, id=poc.id)
+    return {"ok": True, "id": poc.id, "target_url": poc.target_url,
+            "note": "queued at high priority. The verdict lands here when "
+                    "a Ghost has run it."}
 
 
 @router.delete("/pocs/{poc_id}", status_code=204)

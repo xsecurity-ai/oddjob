@@ -12,7 +12,14 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from app.models import Poc  # noqa: E402
-from app.pocwork import CREATED, UNVALIDATED, apply_result, label  # noqa: E402
+from app.pocwork import (  # noqa: E402
+    CONFIRMED,
+    NOT_AVAILABLE,
+    UNCONFIRMED,
+    apply_result,
+    availability,
+    why_unconfirmed,
+)
 
 passed = failed = 0
 
@@ -81,21 +88,55 @@ check("a PoC that did not reproduce leaves the finding alone",
 check("...and the PoC's own status is not 'fixed' or 'closed'",
       r.status not in ("fixed", "closed", "resolved"), r.status)
 
-print("\n== the label the operator reads ==")
-_val = Poc(id=1, target_id=1, title="t")
+print("\n== the three words the PoC column says ==")
+# Available means there is a SCRIPT. Confirmed means it ran here and
+# worked. Every other case is the middle state, which is the one the
+# column exists to be able to say.
+_val = Poc(id=1, target_id=1, title="t", template="id: x")
 asyncio.run(apply_result(FakeSession(_val), 1, payload(0)))
-check("a validated proof reads 'PoC created'",
-      label(_val) == CREATED, label(_val))
+check("a proof that ran and worked is confirmed",
+      availability(_val) == CONFIRMED, availability(_val))
+check("...and has nothing to qualify", why_unconfirmed(_val) is None)
+
 _built = Poc(id=2, target_id=1, title="t", template="id: x")
-check("one that has never run reads 'PoC created, not validated'",
-      label(_built) == UNVALIDATED, label(_built))
-# The case the two strings in the spec cannot express on their own: a
-# run happened and settled nothing. Reading `exit_code` alone would
-# call that validated and show a verdict nobody should act on.
-_untested = Poc(id=3, target_id=1, title="t")
-asyncio.run(apply_result(FakeSession(_untested), 3, payload(2)))
-check("...and so does one that ran but could not test",
-      label(_untested) == UNVALIDATED, label(_untested))
+check("one that has never run is available, not confirmed",
+      availability(_built) == UNCONFIRMED, availability(_built))
+check("...and says it has not run, which is where the operator goes next",
+      why_unconfirmed(_built) == "written, not run yet",
+      why_unconfirmed(_built))
+
+# A run happened and settled nothing. Reading `exit_code` alone would
+# call that confirmed and show a verdict nobody should act on.
+_untested = Poc(id=3, target_id=1, title="t", template="id: x")
+asyncio.run(apply_result(FakeSession(_untested), 3, payload(
+    2, why="the host did not answer")))
+check("one that ran but could not test is not confirmed",
+      availability(_untested) == UNCONFIRMED, availability(_untested))
+check("...and keeps the reason it could not",
+      "did not answer" in (why_unconfirmed(_untested) or ""),
+      why_unconfirmed(_untested))
+
+# It ran and matched nothing. That is a proof which did not work,
+# which is exactly "not confirmed" -- and it must not read as a
+# missing proof, because somebody wrote it.
+_missed = Poc(id=4, target_id=1, title="t", template="id: x")
+asyncio.run(apply_result(FakeSession(_missed), 4, payload(1)))
+check("one that ran and matched nothing is still AVAILABLE",
+      availability(_missed) == UNCONFIRMED, availability(_missed))
+
+check("no proof at all is not available",
+      availability(None) == NOT_AVAILABLE, availability(None))
+# The row `auto_poc` writes when the model's answer was refused. It
+# records that a proof was attempted and could not be written -- if
+# this read "available" the column would advertise a script that
+# does not exist.
+_refused = Poc(id=5, target_id=1, title="t", template=None,
+               verdict="no proof was written — no matcher")
+check("a row recording a refused build is NOT available",
+      availability(_refused) == NOT_AVAILABLE, availability(_refused))
+check("...and nor is one whose template is blank",
+      availability(Poc(id=6, target_id=1, title="t", template="  "))
+      == NOT_AVAILABLE)
 
 print("\n== a payload it cannot read is 'could not test' ==")
 # Never an exception: this runs inside the result handler, and
