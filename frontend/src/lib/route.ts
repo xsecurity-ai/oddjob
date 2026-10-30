@@ -57,6 +57,9 @@ export const GLOBAL_VIEWS = ['projects', 'config', 'users', 'profile',
 export const SCOPED_VIEWS = ['targets', 'services', 'web', 'vulns',
                              'credentials', 'reports', 'ghosts',
                              'ghost-debug', 'import', 'settings',
+                             // Shell sessions a Ghost caught. Scoped,
+                             // like everything else an engagement owns.
+                             'c2',
                              // The agent's conversations filling a page.
                              // Not in the nav: it is reached from the
                              // panel's pop-out, which opens it in a window

@@ -62,6 +62,8 @@ from .. import (
     proxytunnel,
     roe,
     scopegate,
+    shellhub,
+    shellwork,
 )
 from ..db import get_session
 from ..events import broker
@@ -4099,6 +4101,62 @@ async def _tunnel_agent(ws: WebSocket, session: AsyncSession) -> Agent | None:
 #: Must match `socksrelay.TunnelPath` in the agent. The signature
 #: covers the path, so a disagreement is a 401 on every tunnel.
 TUNNEL_PATH = "/api/ghosts/proxy/tunnel"
+
+
+@router.websocket("/shell/tunnel")
+async def shell_tunnel(ws: WebSocket,
+                       session: AsyncSession = Depends(get_session)):
+    """A Ghost offering the shells it catches.
+
+    Its own socket rather than a second kind of stream on the proxy
+    tunnel, deliberately. The two have different lifetimes and
+    different failure modes: a SOCKS tunnel dropping should not take
+    a live shell with it, and a shell dropping should not interrupt
+    somebody's browsing. They share the CODEC and nothing else.
+
+    The same authentication as every other agent route -- enrolled,
+    signed, not disabled. There is no separate switch for this the
+    way `proxy_enabled` gates proxying: a Ghost only ever holds a
+    listener because an operator asked it to, so the decision is
+    already made upstream of here.
+    """
+    agent = await _tunnel_agent(ws, session)
+    if agent is None:
+        await ws.accept()
+        await ws.close(code=1008, reason="tunnel authentication failed")
+        return
+    if agent.status == "disabled":
+        await ws.accept()
+        await ws.close(code=1008, reason="this agent is disabled")
+        return
+
+    await ws.accept()
+    shellhub.hub.register(agent.id, ws.send_bytes)
+    log.info("shell tunnel up for agent %d (%s)", agent.id, agent.name)
+    try:
+        while True:
+            raw = await ws.receive_bytes()
+            try:
+                frame = proxytunnel.decode(raw)
+            except proxytunnel.FrameError as e:
+                log.warning("agent %d sent an unreadable shell frame: %s",
+                            agent.id, e)
+                break
+            await shellwork.on_frame(session, agent, frame)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("shell tunnel for agent %d ended: %s", agent.id, e)
+    finally:
+        # Lost, not closed. The shell on the far end may be perfectly
+        # alive and what went is our route to it -- recording that as
+        # "closed" would be a claim about the host made on the
+        # strength of our own network.
+        lost = shellhub.hub.drop(agent.id)
+        if lost:
+            await shellwork.mark_lost(session, lost)
+        log.info("shell tunnel down for agent %d (%d session(s) lost)",
+                 agent.id, len(lost))
 
 
 @router.websocket("/proxy/tunnel")

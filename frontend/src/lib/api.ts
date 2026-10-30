@@ -316,6 +316,40 @@ export interface SecretSource {
   located: string
 }
 
+export interface C2Session {
+  id: number
+  project_code: string
+  host: string | null
+  target_id: number | null
+  agent_name: string | null
+  peer: string | null
+  listen_port: number | null
+  /** open | closed | lost. `lost` means the tunnel went, not the
+   *  shell: the far end may be perfectly alive and what vanished is
+   *  our route to it. */
+  state: string
+  label: string | null
+  /** Whether the server can reach it RIGHT NOW. A session can be
+   *  `open` and not connected — the Ghost reconnected and has not
+   *  re-offered it — and somebody about to type needs to know. */
+  connected: boolean
+  exchanges: number
+  opened_at: string | null
+  last_seen_at: string | null
+}
+
+export interface C2Exchange {
+  id: number
+  seq: number
+  /** Null for output that arrived unprompted — a banner, a background
+   *  job. A shell emits no marker saying where one command's output
+   *  ends, so the pairing is best effort and says so. */
+  command: string | null
+  output: string | null
+  actor: string | null
+  at: string | null
+}
+
 export interface SecretRow {
   vuln_id: number
   secret: string
@@ -1267,6 +1301,31 @@ export const api = {
   buildPoc: (project: string, vulnId: number) =>
     req<{ id: number; target_url: string; status: string }>(
       `/api/vulns/${vulnId}/poc` + qs({ project }), { method: 'POST' }),
+  // ------------------------------------------------------------ c2
+  /** Shell sessions a Ghost caught. Active by default: the question
+   *  on opening the page is almost always "what can I type at now".
+   *  Closed ones are never deleted — what was done on a host is part
+   *  of the engagement record. */
+  c2Sessions: (project: string, active = true) =>
+    req<C2Session[]>('/api/c2/sessions' + qs({ project, active })),
+  /** What was typed and what came back. `after` makes it pollable
+   *  without re-sending the whole session. */
+  c2Transcript: (project: string, sid: number, after = 0) =>
+    req<C2Exchange[]>(`/api/c2/sessions/${sid}` + qs({ project, after })),
+  /** Type at a shell. Needs `user` — this runs a command on a host in
+   *  the client's estate and is audited with the command itself. */
+  c2Send: (project: string, sid: number, data: string) =>
+    req<{ seq: number; sent: boolean }>(
+      `/api/c2/sessions/${sid}/input` + qs({ project }),
+      { method: 'POST', body: JSON.stringify({ data }) }),
+  c2Close: (project: string, sid: number) =>
+    req<{ ok: boolean; state: string }>(
+      `/api/c2/sessions/${sid}/close` + qs({ project }), { method: 'POST' }),
+  c2Label: (project: string, sid: number, label: string) =>
+    req<{ ok: boolean; label: string | null }>(
+      `/api/c2/sessions/${sid}/label` + qs({ project }),
+      { method: 'POST', body: JSON.stringify({ label }) }),
+
   vulnsForHost: (project: string, host: string) =>
     req<Page<Vuln>>('/api/vulns' + qs({ project, host, limit: 500 })),
   vulnsForTitle: (project: string, title: string, severity?: string) =>

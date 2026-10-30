@@ -22,6 +22,7 @@ from .routers import (
     audit,
     auth,
     bulk,
+    c2,
     credentials,
     domains,
     explore,
@@ -406,6 +407,7 @@ for r in (auth.router, google.router, magic.router, projects.router, targets.rou
           explore.router, actions.router, settings.router, bulk.router,
           scans.router, web.router, domains.router, agent.router,
           rest.router, api_index.router, agents.router, enumerate_routes.router,
+          c2.router,
           reports.router,
           audit.router,
           vulnfeeds.router,
@@ -465,7 +467,7 @@ if _DIST.is_dir():
     SPA_ROUTES = ("projects", "targets", "services", "web", "vulns",
                   "credentials", "reports", "import", "config", "users",
                   "profile", "ghosts", "ghost-debug", "settings", "health",
-                  "agent")
+                  "agent", "c2")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(request: Request, full_path: str):
