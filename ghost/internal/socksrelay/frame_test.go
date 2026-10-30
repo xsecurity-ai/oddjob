@@ -32,6 +32,12 @@ var vectors = []struct {
 	// must agree here or every long-lived tunnel breaks once the
 	// counter climbs.
 	{"high stream id", DATA, 0xFFFFFFFF, []byte("x"), "04ffffffff78"},
+	// Agent -> server only: a callback landed on a listener. Copied
+	// from the Python half like every vector above, because a codec
+	// two languages implement from one paragraph of prose is a codec
+	// that disagrees in production.
+	{"a callback arrived", ARRIVED, 5, []byte("203.0.113.9:51234"),
+		"0600000005" + "3230332e302e3131332e393a3531323334"},
 }
 
 func TestVectorsMatchThePythonHalf(t *testing.T) {

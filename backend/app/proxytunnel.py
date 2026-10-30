@@ -55,8 +55,14 @@ DATA = 0x04
 #: Either direction. Half-close is not modelled: a proxied TCP stream
 #: that is done one way is, in practice, done.
 CLOSE = 0x05
+#: Agent -> server only: something connected to a port the agent is
+#: listening on. A proxy stream starts because this server asked for
+#: a destination; a shell stream starts because a callback arrived,
+#: which the server could not have asked for and learns no other way.
+#: Payload is the peer address as the agent saw it.
+ARRIVED = 0x06
 
-TYPES = (OPEN, OPENED, FAILED, DATA, CLOSE)
+TYPES = (OPEN, OPENED, FAILED, DATA, CLOSE, ARRIVED)
 
 #: Biggest payload in one frame. Not a protocol limit -- it is a cap
 #: on how much a single misbehaving stream can make the other side
@@ -146,6 +152,8 @@ VECTORS: tuple[tuple[str, int, int, bytes, str], ...] = (
      "0300000002" + "6e6f20726f757465"),
     ("data", DATA, 3, b"\x00\xff", "040000000300ff"),
     ("close", CLOSE, 4, b"", "0500000004"),
+    ("a callback arrived", ARRIVED, 5, b"203.0.113.9:51234",
+     "0600000005" + "3230332e302e3131332e393a3531323334"),
     # The boundary that catches a signed/unsigned mistake in either
     # language: a stream id with the top bit set.
     ("high stream id", DATA, 0xFFFFFFFF, b"x", "04ffffffff78"),

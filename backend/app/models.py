@@ -2187,6 +2187,125 @@ class Report(Base, TimestampMixin):
     email_error: Mapped[str | None] = mapped_column(String(500))
 
 
+#: What a shell session can be. `open` means the socket is up and a
+#: command sent now would reach it; everything else is history.
+SHELL_STATES = ("open", "closed", "lost")
+
+
+class ShellSession(Base, TimestampMixin):
+    """A reverse shell a Ghost caught, and the record of what was done on it.
+
+    Distinct from `Implant`, which is a callback IMPORTED from
+    somebody else's framework -- a Cobalt Strike beacon, a Mythic
+    callback -- and is a record of a session Oddjob never held. This
+    is one Oddjob is holding: a socket on a Ghost, right now, that
+    commands go down and output comes back from.
+
+    **It belongs to a target, because that is the point.** A shell is
+    the strongest evidence an engagement produces about a host and it
+    is routinely the least well recorded -- it lives in a terminal
+    scrollback on one operator's laptop and is gone. Filing the
+    session against the target means "what did we do on this box" has
+    an answer in the same place as "what is open on it".
+
+    The listener is on the GHOST, not here. Oddjob has no inbound
+    path to a client's estate and should not have one; the Ghost is
+    already the thing sitting on infrastructure the engagement chose,
+    and it already holds a websocket out to this server. See
+    `app/shelltunnel.py`.
+    """
+    __tablename__ = "shell_sessions"
+    __table_args__ = (
+        Index("ix_shell_sessions_project_state", "project_id", "state"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Denormalised from the target so the C2 list is one query. A
+    #: session is always on a target and a target is always in one
+    #: project, so this cannot drift -- and the list reads by project
+    #: and state, which is an index this table can have and the join
+    #: cannot.
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    #: Nullable: a callback can arrive from an address the project has
+    #: no target for, and refusing it would throw away a live shell
+    #: because the inventory was behind. The session is filed against
+    #: the target as soon as one exists.
+    target_id: Mapped[int | None] = mapped_column(
+        ForeignKey("targets.id", ondelete="SET NULL"), index=True)
+    #: Which Ghost is holding the socket. SET NULL rather than
+    #: CASCADE: losing the agent record should not erase what was
+    #: done through it.
+    agent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), index=True)
+
+    #: Where the callback came FROM, as the Ghost saw it, and the
+    #: port it landed on. Both recorded because "a shell arrived on
+    #: 443 from 203.0.113.9" is the whole provenance of the session.
+    peer: Mapped[str | None] = mapped_column(String(64))
+    listen_port: Mapped[int | None] = mapped_column(Integer)
+
+    state: Mapped[str] = mapped_column(
+        String(16), default="open", server_default="open", index=True)
+    #: Last time anything crossed the socket in either direction.
+    #: Distinct from `updated_at`, which moves when somebody renames
+    #: the session.
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    #: What the operator calls it. Null until somebody names one.
+    label: Mapped[str | None] = mapped_column(String(200))
+
+    target: Mapped[Target | None] = relationship()
+    exchanges: Mapped[list[ShellExchange]] = relationship(
+        back_populates="session", cascade="all, delete-orphan")
+
+
+class ShellExchange(Base, TimestampMixin):
+    """One thing typed, and what came back.
+
+    **The pairing is best effort and the schema says so**, because a
+    shell is a byte stream and not a request/response protocol. There
+    is no marker in `sh` that says "this is where the output of your
+    last command ends"; what arrives is bytes, when they arrive.
+
+    So: a command is recorded when it is sent, and output is
+    attributed to the most recent command until the next one goes
+    down. Output with no command in front of it -- a banner, a
+    background job writing to the terminal, the second half of
+    something slow -- is stored with `command` NULL rather than
+    glued onto whichever command happened to be last. A transcript
+    that invented the attachment would be worse than one that admits
+    the bytes arrived on their own.
+
+    `seq` orders them within a session. Wall-clock time is recorded
+    too but is not the sort key: two frames in the same millisecond
+    are ordinary on a fast shell.
+    """
+    __tablename__ = "shell_exchanges"
+    __table_args__ = (
+        UniqueConstraint("session_id", "seq", name="uq_shell_exchange_seq"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("shell_sessions.id", ondelete="CASCADE"), index=True)
+    seq: Mapped[int] = mapped_column(Integer)
+    #: What was typed. NULL for output that arrived unprompted.
+    command: Mapped[str | None] = mapped_column(Text)
+    #: What came back, as it came back. Stored raw, including the
+    #: control bytes: a transcript that stripped them would not be
+    #: what the operator saw, and an engagement record of a shell has
+    #: to be what happened rather than a tidied version of it.
+    output: Mapped[str | None] = mapped_column(Text)
+    #: Who typed it. NULL for output.
+    actor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
+
+    session: Mapped[ShellSession] = relationship(back_populates="exchanges")
+
+
 class Implant(Base, TimestampMixin):
     """A C2 callback: an agent running on a host we control.
 
