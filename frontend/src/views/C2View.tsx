@@ -30,6 +30,7 @@ import { DataTable } from '../components/DataTable'
 import { PortPicker } from '../components/PortPicker'
 import type { ColumnDef } from '../lib/columns'
 import { neon, glow, blink, TAB_SX } from '../theme'
+import { render } from '../lib/terminal'
 import { key, readingSession, useUnseenSessions } from '../lib/c2unseen'
 
 /** How often an open session re-reads its tail. A shell is
@@ -705,6 +706,11 @@ function Terminal({ project, session, onEdit, onChanged }: {
 }) {
   const [input, setInput] = useState('')
   const [said, setSaid] = useState<string | null>(null)
+  // Cleaned by default. A PTY echoes what you type and paints a
+  // prompt after it, so two of every four lines are noise -- but
+  // the stored bytes are the engagement record, so raw is one
+  // click away and nothing is rewritten.
+  const [raw, setRaw] = useState(false)
   const endRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
 
@@ -793,6 +799,16 @@ function Terminal({ project, session, onEdit, onChanged }: {
           color: STATE_COLOUR[session.state] ?? neon.muted,
           border: `1px solid ${alpha(STATE_COLOUR[session.state]
                                      ?? neon.muted, 0.45)}` }} />
+        <Box sx={{ flex: 1 }} />
+        <Tooltip title="Show exactly what the host sent — the echo of your
+                        own command, the prompt, and the escape sequences.
+                        That is what is stored; this view only hides it.">
+          <Stack direction="row" spacing={0.4} sx={{ alignItems: 'center' }}>
+            <Typography sx={{ fontSize: 10.5, color: neon.muted }}>raw</Typography>
+            <Switch size="small" checked={raw}
+              onChange={(e) => setRaw(e.target.checked)} />
+          </Stack>
+        </Tooltip>
       </Stack>
 
       <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', px: 2, py: 1.5,
@@ -802,7 +818,7 @@ function Terminal({ project, session, onEdit, onChanged }: {
         {tail.isLoading && (
           <CircularProgress size={14} sx={{ color: neon.cyan }} />
         )}
-        {lines.map((e) => <Line key={e.id} e={e} />)}
+        {lines.map((e) => <Line key={e.id} e={e} raw={raw} />)}
         <div ref={endRef} />
       </Box>
 
@@ -849,7 +865,8 @@ function Terminal({ project, session, onEdit, onChanged }: {
   )
 }
 
-function Line({ e }: { e: C2Exchange }) {
+function Line({ e, raw }: { e: C2Exchange; raw: boolean }) {
+  const body = raw ? (e.output ?? '') : render(e.output, e.command)
   return (
     <Box sx={{ mb: 0.4 }}>
       {e.command !== null && (
@@ -865,9 +882,9 @@ function Line({ e }: { e: C2Exchange }) {
           )}
         </Box>
       )}
-      {e.output && (
+      {body && (
         <Box sx={{ color: neon.text, whiteSpace: 'pre-wrap',
-                   wordBreak: 'break-all' }}>{e.output}</Box>
+                   wordBreak: 'break-all' }}>{body}</Box>
       )}
     </Box>
   )

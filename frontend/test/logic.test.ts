@@ -36,6 +36,7 @@ import domainCases from './domain-cases.json'
 import { LIKELY_PORTS, parsePorts } from '../src/components/PortPicker'
 import { POC_COLOUR, POC_LABEL, POC_RANK, POC_STATES } from '../src/lib/lifecycle'
 import { claimTime, decodeJwt, looksLikeJwt } from '../src/lib/jwt'
+import { clean, dropEcho, render } from '../src/lib/terminal'
 import { anyUnseen, key, readingSession, reset as resetUnseen,
          sessionSpoke, snapshot } from '../src/lib/c2unseen'
 
@@ -1138,6 +1139,66 @@ console.log('\n== a rollup expansion shows each thing once ==')
         claimTime(1000000000000)?.getUTCFullYear() === 2001,
         String(claimTime(1000000000000)?.getUTCFullYear()))
   check('a non-numeric claim is not a time', claimTime('soon') === null)
+}
+
+// ---------------------------------------------------------------
+// Making a shell's output readable without rewriting it
+// ---------------------------------------------------------------
+//
+// A PTY echoes what you type and prints a prompt after it, so a
+// faithfully stored transcript reads: the command, the echo of the
+// command, the answer, the prompt. Two of those four are noise and
+// one of them is not even text.
+//
+// The rule these enforce: cleaning may only REMOVE what the
+// terminal itself added. Anything the host said survives, because
+// the transcript is evidence.
+{
+  const ESC = '\u001B'
+  check('a CSI sequence goes',
+        clean(`sh-3.2$ ${ESC}[Khello`) === 'sh-3.2$ hello',
+        JSON.stringify(clean(`sh-3.2$ ${ESC}[Khello`)))
+  check('colour goes too',
+        clean(`${ESC}[0;31mred${ESC}[0m`) === 'red',
+        clean(`${ESC}[0;31mred${ESC}[0m`))
+  check('an OSC title goes',
+        clean(`${ESC}]0;a title\u0007done`) === 'done',
+        clean(`${ESC}]0;a title\u0007done`))
+  check('CRLF becomes a newline, not a blank line',
+        clean('a\r\nb') === 'a\nb', JSON.stringify(clean('a\r\nb')))
+  // A bare CR is a terminal overwriting what it just drew. Without
+  // a screen, the last thing written is the useful one.
+  check('a progress bar keeps its last state',
+        clean('10%\r50%\r100%') === '100%', clean('10%\r50%\r100%'))
+
+  // What must NOT be touched.
+  check('ordinary output is untouched',
+        clean('uid=0(root) gid=0(wheel)') === 'uid=0(root) gid=0(wheel)')
+  check('tabs and newlines survive, because they are content',
+        clean('a\tb\nc') === 'a\tb\nc', JSON.stringify(clean('a\tb\nc')))
+
+  // The echo. Only an exact first line, because anything looser
+  // eats real output: `grep whoami /etc/passwd` prints lines
+  // containing the word and losing the first would lose evidence.
+  check('the shell echoing our command is dropped',
+        dropEcho('whoami\nbrandon\n', 'whoami') === 'brandon\n',
+        JSON.stringify(dropEcho('whoami\nbrandon\n', 'whoami')))
+  check('...but a line that merely CONTAINS it is kept',
+        dropEcho('whoami is a command\nbrandon\n', 'whoami')
+          === 'whoami is a command\nbrandon\n')
+  check('...and a grep whose first hit looks like the command is kept',
+        dropEcho('whoami\n', 'grep whoami /etc/passwd') === 'whoami\n')
+  check('no command means nothing to drop',
+        dropEcho('output\n', null) === 'output\n')
+  check('an echo with nothing after it leaves nothing',
+        dropEcho('whoami\n', 'whoami') === '')
+
+  // End to end, on the shape a real session produced.
+  const out = `ls\r\naitf.md\r\nDesktop\r\n${ESC}[Ksh-3.2$ `
+  check('a real PTY exchange renders as just its output',
+        render(out, 'ls') === 'aitf.md\nDesktop\nsh-3.2$ ',
+        JSON.stringify(render(out, 'ls')))
+  check('nothing stored means nothing shown', render(null, 'ls') === '')
 }
 
 console.log(`\n${'='.repeat(56)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(56)}`)

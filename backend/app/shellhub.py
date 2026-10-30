@@ -83,6 +83,15 @@ class Live:
     agent_id: int
     #: What was last typed, waiting for its output.
     command: str | None = None
+    #: The exchange row it was written to.
+    #:
+    #: The ROW, not the text. Pairing by `command == live.command`
+    #: looked equivalent and is not: run the same command twice and
+    #: both rows match, the newest wins, and the first is left with
+    #: no output for ever. An operator sees their command listed
+    #: twice with one answer and reasonably concludes the first one
+    #: did not run.
+    exchange_id: int | None = None
     buf: list[str] = field(default_factory=list)
     last_at: float = 0.0
     #: The debounce in flight, if any. Cancelled and re-armed on
