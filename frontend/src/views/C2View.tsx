@@ -592,6 +592,11 @@ function SessionList({ rows, loading, error, project, tab, open,
           onContextMenu={(e) => {
             if (!canWrite(project)) return
             e.preventDefault()
+            // Select it too, so the menu visibly acts on the row
+            // under the cursor. Without this the highlight stayed
+            // on whatever was open and the menu looked like it
+            // belonged to that one instead.
+            onOpen(s.id)
             setMenu({ x: e.clientX, y: e.clientY, row: s })
           }}
           sx={{ px: 1.5, py: 1, cursor: 'pointer',
@@ -659,10 +664,6 @@ function SessionList({ rows, loading, error, project, tab, open,
           sx={{ fontSize: 12.5, color: neon.red }}>
           <DeleteIcon sx={{ fontSize: 16, mr: 1 }} />
           {kill.isPending ? 'Terminating…' : 'Terminate'}
-        </MenuItem>
-        <MenuItem onClick={() => { if (menu) onOpen(menu.row.id); setMenu(null) }}
-          sx={{ fontSize: 12.5 }}>
-          Open
         </MenuItem>
         {/* One entry, not two. Naming a session and saying which
             host it is on are the same gesture -- "this session is
@@ -895,22 +896,18 @@ function EditSessionDialog({ project, row, onDone }: {
       // entry and moves the compromise, so doing it on every save
       // would fill a target's history with moves that moved
       // nothing.
-      let created = false
       if (label.trim() !== (row.label ?? '')) {
         await api.c2Label(project, row.id, label.trim())
       }
       const want = host.trim()
       if (want && want !== (row.host ?? '')) {
-        created = (await api.c2Retarget(project, row.id, want)).created
+        await api.c2Retarget(project, row.id, want)
       }
-      return created
     },
-    onSuccess: (created) => {
+    onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['c2-sessions', project] })
       void qc.invalidateQueries({ queryKey: ['targets'] })
-      onDone(created
-        ? `Created ${host.trim()} and moved the session to it.`
-        : undefined)
+      onDone()
     },
     onError: (e) => setErr((e as Error).message),
   })
@@ -928,20 +925,26 @@ function EditSessionDialog({ project, row, onDone }: {
                         kept either way."
             onChange={(e) => { setLabel(e.target.value); setErr(null) }} />
 
+          {/* Known targets ONLY -- no `freeSolo`. Typing filters the
+              list; it does not add to it. A free-text box made a
+              typo into a second target one character from the real
+              one, with the session on it and the evidence for one
+              machine split across two rows. A host is added on the
+              Targets page, deliberately and once. */}
           <Autocomplete
-            freeSolo
             options={hosts}
-            value={host}
+            value={host || null}
             loading={targets.isLoading}
             onChange={(_e, v) => { setHost(v ?? ''); setErr(null) }}
-            onInputChange={(_e, v) => { setHost(v); setErr(null) }}
+            noOptionsText={targets.isLoading
+              ? 'Loading this engagement’s hosts…'
+              : 'No host matches. Add it on the Targets page first.'}
             renderInput={(params) => (
               <TextField {...params} size="small" label="Host"
-                placeholder="dc01.acme.example"
+                placeholder="start typing a host…"
                 helperText={`This shell came from ${row.peer ?? 'an unknown '
                   + 'address'}, which may be a NAT egress rather than the `
-                  + 'host itself. Pick the real one — or type a new one and '
-                  + 'it will be created.'} />
+                  + 'host itself. Pick the real one from this engagement.'} />
             )} />
 
           {err && <Alert severity="error" sx={{ fontSize: 11.5 }}>{err}</Alert>}
