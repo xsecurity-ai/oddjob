@@ -8,6 +8,8 @@ import CloseIcon from '@mui/icons-material/Close'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { TRIAGE } from '../lib/triage'
+import { decodeJwt } from '../lib/jwt'
+import { JwtPane } from './JwtPane'
 import { neon, glow } from '../theme'
 
 /** What `origin` means, said once rather than in three tooltips.
@@ -115,6 +117,17 @@ export function SecretSourceModal({ vulnId, triage, onClose }: {
 
   const markRef = useRef<HTMLSpanElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
+
+  // The matched text, read as a token where it is one.
+  //
+  // From `match_start`/`match_end` rather than from the secrets
+  // table: this is the value as it appears IN THIS rendering, which
+  // is the one on screen. Null when the value was not located --
+  // decoding a guess would be worse than showing nothing.
+  const jwt = useMemo(() => {
+    if (!data || data.match_start == null || data.match_end == null) return null
+    return decodeJwt(data.body.slice(data.match_start, data.match_end))
+  }, [data])
 
   // Split once per payload, not per render: the body can be 120 kB.
   const rows = useMemo(() => {
@@ -297,8 +310,9 @@ export function SecretSourceModal({ vulnId, triage, onClose }: {
                 Lines are numbered from the file, not from this window.
               </Alert>
             )}
+            <Box sx={{ flex: 1, minHeight: 0, display: 'flex' }}>
             <Box ref={scrollRef} sx={{
-              flex: 1, overflow: 'auto', m: 1.5, mt: 1,
+              flex: 1, minWidth: 0, overflow: 'auto', m: 1.5, mt: 1,
               border: `1px solid ${alpha(neon.muted, 0.25)}`,
               borderRadius: 1, bgcolor: alpha('#000', 0.35),
             }}>
@@ -340,6 +354,11 @@ export function SecretSourceModal({ vulnId, triage, onClose }: {
                   </Box>
                 ))}
               </Box>
+            </Box>
+            {/* Only when the value really is a token. A pane headed
+                "Decoded JWT" over two empty objects would assert
+                that a path or a hash is one. */}
+            {jwt && <JwtPane jwt={jwt} />}
             </Box>
           </>
         )}
