@@ -275,6 +275,7 @@ async def send(sid: int, body: InputIn, project: str = Query(...),
         # quiet. See shellhub's docstring on what that does and does
         # not claim.
         live.command = row.command
+        live.exchange_id = row.id
         live.buf = []
     ok = await hub.write(sid, data.encode())
 

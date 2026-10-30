@@ -441,6 +441,80 @@ check("a single chunk of output is written without anything following it",
       any("bin  etc  home  usr" in (o or "") for o in outputs),
       f"transcript holds {outputs!r}")
 
+print("\n== the same command twice gets two answers ==")
+# Pairing used to match on the command TEXT and take the newest
+# row, so running `whoami` twice left the first with no output for
+# ever: the operator sees their command listed twice with one
+# answer under it and reasonably concludes the first did not run.
+# Seen on a real session.
+#
+# Driven in-process. The `input` route runs in the SERVER process,
+# whose hub holds no tunnel for a session this one made -- an HTTP
+# test could only ever exercise the no-route refusal, which is a
+# different thing from what is being checked here.
+
+
+async def two_commands_before_either_answers():
+    async with SessionLocal() as s:
+        a = await s.get(Agent, GID)
+        hub.register(a.id, _devnull)
+        stream = callback.n
+        callback.n += 1
+        await shellwork.on_frame(s, a, proxytunnel.Frame(
+            kind=proxytunnel.ARRIVED, stream=stream,
+            payload=announcement("198.51.100.7:54000", "tcp", 443)))
+        sid = (await s.execute(select(ShellSession.id)
+                               .order_by(ShellSession.id.desc())
+                               .limit(1))).scalar_one()
+        live = hub.live(sid)
+
+    # BOTH sent before either answers. That is the case that broke:
+    # a shell is happy to be typed at twice and an operator does
+    # it constantly.
+    async with SessionLocal() as s:
+        for cmd in ("whoami", "id"):
+            nxt = ((await s.execute(
+                select(func.coalesce(func.max(ShellExchange.seq), 0))
+                .where(ShellExchange.session_id == sid))).scalar_one()) + 1
+            s.add(ShellExchange(session_id=sid, seq=nxt, command=cmd))
+            await s.commit()
+            live.command = cmd
+
+    # Then the answers, in the order a shell produces them. The
+    # FIRST belongs to the probe's own `hostname`, which was sent
+    # before either of these and is correctly still waiting.
+    for answer in ("Mac.lan\n", "brandon\n", "uid=501(brandon)\n"):
+        async with SessionLocal() as s:
+            a = await s.get(Agent, GID)
+            await shellwork.on_frame(s, a, proxytunnel.Frame(
+                kind=proxytunnel.DATA, stream=stream,
+                payload=answer.encode()))
+        await asyncio.sleep(shellhub.FLUSH_IDLE * 3)
+
+    async with SessionLocal() as s:
+        return sid, [(r.command, r.output) for r in (await s.execute(
+            select(ShellExchange)
+            .where(ShellExchange.session_id == sid,
+                   # NOT the probe's own `hostname`, which is a real
+                   # exchange and correctly takes the first answer:
+                   # it was sent first.
+                   ShellExchange.command.in_(("whoami", "id")))
+            .order_by(ShellExchange.seq))).scalars().all()]
+
+
+from sqlalchemy import func  # noqa: E402
+
+SID_TWICE, typed = asyncio.run(two_commands_before_either_answers())
+check("both commands are recorded", len(typed) == 2, str(typed))
+check("...and BOTH have an answer, not just the newest",
+      all(o for _c, o in typed), str(typed))
+# In order. A shell runs what it is given in order and emits the
+# output in that order, which is the part it actually guarantees.
+check("...paired in the order the shell would have produced them",
+      typed[0][1].strip() == "brandon"
+      and typed[1][1].strip() == "uid=501(brandon)",
+      str(typed))
+
 print("\n== terminating a session kills the shell, not just the row ==")
 # The row saying `closed` while our own shell keeps running on a
 # client's machine is the wrong direction for the record to be

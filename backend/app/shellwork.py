@@ -134,10 +134,12 @@ async def _arrived(session: AsyncSession, agent: Agent,
     # WE generated and the record should not suggest otherwise.
     live.command = PROBE.decode().strip()
     if await hub.write(s.id, PROBE):
-        session.add(ShellExchange(session_id=s.id, seq=1,
+        probe_row = ShellExchange(session_id=s.id, seq=1,
                                   command=live.command, output=None,
-                                  actor_id=None))
+                                  actor_id=None)
+        session.add(probe_row)
         await session.commit()
+        live.exchange_id = probe_row.id
     _arm_probe(live, s.id)
     code = await _code(session, agent.project_id)
     await broker.publish("c2", action="arrived", project=code,
@@ -246,16 +248,35 @@ async def flush(session: AsyncSession, session_id: int, live) -> None:
     # Attach to the command that was waiting, if one still is. Past
     # that the output stands on its own with a NULL command -- see
     # the pairing note on `ShellExchange`.
-    row = None
-    if live.command is not None:
-        row = (await session.execute(
-            select(ShellExchange)
-            .where(ShellExchange.session_id == session_id,
-                   ShellExchange.command == live.command,
-                   ShellExchange.output.is_(None))
-            .order_by(ShellExchange.seq.desc()).limit(1))).scalars().first()
+    # By ROW id, not by matching the command text. Two identical
+    # commands both match the text, the newest wins, and the older
+    # one keeps a NULL output for ever -- which on screen is the
+    # same command listed twice with one answer under it.
+    # The OLDEST command still waiting, not the newest, and not
+    # matched on its text.
+    #
+    # A shell runs what it is given in order and emits the output in
+    # that order, so the next thing to arrive belongs to the oldest
+    # unanswered command. Matching on the newest meant that typing
+    # two commands before the first answered left the first with no
+    # output for ever -- the operator sees it listed with nothing
+    # under it and concludes it did not run. Matching on the TEXT
+    # was worse in the same situation with two DIFFERENT commands:
+    # `live.command` is the second one, so the first never matched
+    # anything again.
+    #
+    # This is still best effort and the module docstring says why:
+    # `sh` emits no marker saying where one command's output ends.
+    # What it gets right is the ORDER, which is the part a shell
+    # actually guarantees.
+    row = (await session.execute(
+        select(ShellExchange)
+        .where(ShellExchange.session_id == session_id,
+               ShellExchange.command.is_not(None),
+               ShellExchange.output.is_(None))
+        .order_by(ShellExchange.seq).limit(1))).scalars().first()
     if row is not None:
-        row.output = (row.output or "") + text
+        row.output = text
     else:
         nxt = ((await session.execute(
             select(func.coalesce(func.max(ShellExchange.seq), 0))
