@@ -272,6 +272,34 @@ export interface PocDetail {
   updated_at: string | null
 }
 
+/** One place the scope document says two things about a host. */
+export interface ScopeConflict {
+  host: string
+  address: string
+  in_entry_id: number
+  in_entry: string
+  out_entry_id: number
+  out_entry: string
+  /** How many in-scope hosts share this address. One means the
+   *  exclusion was about this host; several means it was about
+   *  shared infrastructure, which points the other way. */
+  shared_with: number
+  /** shared | single */
+  kind: string
+  /** Which of the two entries the evidence points at removing:
+   *  `out_entry` or `in_entry`. */
+  suggestion: string
+}
+
+export interface ScopeConflicts {
+  project: string
+  conflicts: ScopeConflict[]
+  hosts: number
+  shared: number
+  single: number
+  detail: string
+}
+
 /** What changed between the last scan and the one before it. */
 export interface VulnLifecycle {
   project_code: string
@@ -2453,6 +2481,22 @@ export const api = {
 
   /** Which hosts the project already holds that the lists would refuse.
    *  Read-only: nothing is deleted until `applyProjectScope`. */
+  /** Where these lists contradict themselves: a host in scope by
+   *  name whose address is out of scope. The gate refuses it, so
+   *  each one is a host the engagement believes it is testing and
+   *  is not. */
+  scopeConflicts: (project: string) =>
+    req<ScopeConflicts>(
+      `/api/projects/${encodeURIComponent(project)}/scope/conflicts`),
+  /** Delete the entries that resolve them. The rows are NAMED and
+   *  checked against what the strategy would choose now, so a stale
+   *  page cannot delete an entry that stopped being a conflict. */
+  resolveScopeConflicts: (project: string, strategy: string,
+                          entryIds: number[]) =>
+    req<ScopeConflicts>(
+      `/api/projects/${encodeURIComponent(project)}/scope/conflicts/resolve`,
+      { method: 'POST',
+        body: JSON.stringify({ strategy, entry_ids: entryIds }) }),
   scopeViolations: (project: string) =>
     req<ScopeApplyResult>(
       `/api/projects/${encodeURIComponent(project)}/scope/violations`),

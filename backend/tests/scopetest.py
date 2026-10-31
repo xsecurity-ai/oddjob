@@ -1274,5 +1274,106 @@ check("an excluded address refused by itself gets no note",
       not _r3.allowed and "contradicts" not in _r3.reason, _r3.reason)
 
 
+# ===================================================================
+# Finding the contradictions, so somebody can resolve them
+# ===================================================================
+#
+# One engagement had 891 of these across 264 hosts, from a single
+# import: the client supplied names to test and addresses not to
+# touch, and they overlap wherever a named application lives on an
+# excluded box. Each one is a host the engagement believes it is
+# testing and is not.
+print("\n--- the conflicts report ---")
+call("/api/projects", "POST", {"code": "CONF", "name": "conflicts"},
+     token=admin)
+# The NAMES first, then the hosts, then the exclusions -- which is
+# the order a real engagement produces them in. The gate refuses a
+# target whose address is already excluded (and says so, loudly),
+# so a conflict can only arise when the host was recorded BEFORE
+# the exclusion arrived, or its address was discovered after. That
+# is exactly what a scope import on top of an existing inventory
+# does, and why 891 of them turned up on one project.
+#
+# One address serving THREE in-scope names -- a CDN edge -- and one
+# serving a single host. The two point opposite ways.
+call("/api/projects/CONF/scope", "POST", {"lines": [
+    "a.acme.example", "b.acme.example", "c.acme.example",
+    "lonely.acme.example",
+]}, token=admin)
+for h in ("a.acme.example", "b.acme.example", "c.acme.example"):
+    _st, _t = call("/api/targets?project=CONF", "POST",
+                   {"host": h, "ip_addresses": ["203.0.113.10"]},
+                   token=admin)
+    check(f"{h} was created with its address",
+          _st in (200, 201) and "203.0.113.10" in str(_t), f"{_st} {_t}")
+_st, _t = call("/api/targets?project=CONF", "POST",
+               {"host": "lonely.acme.example",
+                "ip_addresses": ["203.0.113.99"]}, token=admin)
+check("the single-host target was created with its address",
+      _st in (200, 201) and "203.0.113.99" in str(_t), f"{_st} {_t}")
+
+# NOW the exclusions land, contradicting the names already there.
+call("/api/projects/CONF/scope", "POST",
+     {"lines": ["!203.0.113.10", "!203.0.113.99"]}, token=admin)
+
+st, rep = call("/api/projects/CONF/scope/conflicts", token=admin)
+check("the report finds them", st == 200 and rep["conflicts"],
+      f"{st} {str(rep)[:120]}")
+check("...counting the hosts affected", rep["hosts"] == 4, str(rep["hosts"]))
+check("...and splitting shared from single",
+      rep["shared"] == 3 and rep["single"] == 1,
+      f"shared={rep['shared']} single={rep['single']}")
+
+shared = [c for c in rep["conflicts"] if c["kind"] == "shared"]
+single = [c for c in rep["conflicts"] if c["kind"] == "single"]
+check("a shared address counts the in-scope hosts on it",
+      all(c["shared_with"] == 3 for c in shared),
+      str([c["shared_with"] for c in shared]))
+# The suggestion is the whole point: the two shapes mean different
+# things and one rule for both is how an engagement either scans an
+# excluded box or drops authorised coverage.
+check("shared points at dropping the EXCLUSION",
+      all(c["suggestion"] == "out_entry" for c in shared))
+check("single points at dropping the NAME",
+      single and single[0]["suggestion"] == "in_entry",
+      str(single[0]["suggestion"]) if single else "none")
+
+print("\n--- resolving them names the rows ---")
+st, r = call("/api/projects/CONF/scope/conflicts/resolve", "POST",
+             {"strategy": "suggested"}, token=admin)
+check("a strategy with no rows named is refused", st == 422, f"{st} {r}")
+check("...and says how many it would remove", "entr" in str(r), str(r)[:90])
+
+st, r = call("/api/projects/CONF/scope/conflicts/resolve", "POST",
+             {"strategy": "suggested", "entry_ids": [999999]}, token=admin)
+check("a row the strategy would not touch is refused", st == 409, f"{st} {r}")
+
+want = sorted({c["out_entry_id"] if c["kind"] == "shared"
+               else c["in_entry_id"] for c in rep["conflicts"]})
+st, r = call("/api/projects/CONF/scope/conflicts/resolve", "POST",
+             {"strategy": "suggested", "entry_ids": want}, token=admin)
+check("naming exactly what it would remove works", st == 200, f"{st} {r}")
+check("...and nothing contradictory is left",
+      r["conflicts"] == [], str(r["detail"]))
+
+# What it did, checked from the other side: the shared address is
+# testable now and the single-host NAME is gone.
+st, left = call("/api/projects/CONF/scope", token=admin)
+vals = {e["value"] for e in left}
+check("the shared exclusion was dropped", "203.0.113.10" not in vals,
+      str(sorted(vals)))
+check("...and the names on it kept",
+      {"a.acme.example", "b.acme.example", "c.acme.example"} <= vals)
+check("the single host's NAME was dropped",
+      "lonely.acme.example" not in vals, str(sorted(vals)))
+check("...and its exclusion kept", "203.0.113.99" in vals)
+
+st, rep2 = call("/api/projects/CONF/scope/conflicts", token=admin)
+check("the report agrees it is clean", rep2["conflicts"] == [],
+      str(rep2["detail"]))
+check("...and says so rather than returning an empty list silently",
+      "do not contradict" in rep2["detail"], rep2["detail"])
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 raise SystemExit(1 if fail else 0)
