@@ -1066,6 +1066,82 @@ async def noloop():
 
 asyncio.run(noloop())
 
+print("\n--- a cancelled task is not an attempt ---")
+# The other half of the loop above, and its cost.
+#
+# Cleaning up those 97,959 tasks cancelled them. `tasked_subjects`
+# counted cancelled as "attempted", so every subject in that cleanup
+# was retired permanently: the standing order would never propose it
+# again, and the only record of it was the proof it must not be
+# repeated. On the engagement that prompted this, 54,147 subjects
+# were in that state and 4,982 of them were in scope and had never
+# been scanned. The operator found them by hand.
+#
+# A task is only ever cancelled while queued -- the UI refuses to
+# delete one past that and says why, and killing an agent marks its
+# work `failed` -- so nothing was sent and nothing has been learnt.
+call("/api/projects", "POST",
+     {"code": "CANCELLED", "name": "Cancelled", "scope": ["in.acme.example"]},
+     token=admin)
+call("/api/targets?project=CANCELLED", "POST",
+     {"host": "in.acme.example"}, token=admin)
+call("/api/projects/CANCELLED", "PATCH",
+     {"auto_nmap": "top100", "auto_amass": False, "auto_resolve_ips": False,
+      "auto_reverse_dns": False, "auto_web": "off"}, token=admin)
+
+
+async def cancelled_is_not_done():
+    async with SessionLocal() as s:
+        pr = (await s.execute(
+            select(Project).where(
+                Project.code == "CANCELLED"))).scalar_one()
+        s.add(Agent(project_id=pr.id, name="cancel-test", status="online",
+                    callback_key_hash="c" * 64))
+        await s.commit()
+
+        async def nmaps():
+            return (await s.execute(select(AgentTask).where(
+                AgentTask.project_id == pr.id,
+                AgentTask.kind == "nmap"))).scalars().all()
+
+        await run_once(s, pr)
+        rows = await nmaps()
+        check("the in-scope host is port scanned once", len(rows) == 1, rows)
+
+        # While it is queued, the host is not owed: work in flight is
+        # not work to propose again.
+        g = {x.policy: x.outstanding for x in _au.gaps(await snapshot(s, pr))}
+        check("a queued task means the host is not owed",
+              g.get("auto_nmap", 0) == 0, g)
+
+        # Cancel it. Nothing was sent, so the question is open again --
+        # and the gap report is the surface the operator reads, so it
+        # has to say so before the next cycle acts on it.
+        rows[0].status = "cancelled"
+        await s.commit()
+        g = {x.policy: x.outstanding for x in _au.gaps(await snapshot(s, pr))}
+        check("...and cancelling it puts the host back in the report",
+              g.get("auto_nmap") == 1, g)
+
+        await run_once(s, pr)
+        rows = await nmaps()
+        check("...and the next cycle scans it", len(rows) == 2,
+              [(r.status, r.id) for r in rows])
+
+        # A FAILED task is the opposite case and must stay retired: it
+        # ran, or was refused at dispatch, and either way re-running it
+        # is traffic at a client for a question already answered.
+        for r in rows:
+            r.status = "failed"
+        await s.commit()
+        await run_once(s, pr)
+        rows = await nmaps()
+        check("a failed task does NOT come back", len(rows) == 2,
+              [(r.status, r.id) for r in rows])
+
+
+asyncio.run(cancelled_is_not_done())
+
 print("\n--- the seed query, against a real database ---")
 # `group_seeds` above covers the grouping. This covers the WHERE
 # clause, which is where the one-way edge actually lives and which no
