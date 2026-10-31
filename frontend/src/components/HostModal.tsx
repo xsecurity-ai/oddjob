@@ -1,14 +1,16 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from 'react'
 import {
-  Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, Divider,
-  IconButton, Stack, Table, TableBody, TableCell, TableHead, TableRow,
-  Tooltip, Typography, alpha,
+  Box, Button, Chip, CircularProgress, Dialog, DialogContent, DialogTitle,
+  Divider, IconButton, Stack, Table, TableBody, TableCell, TableHead,
+  TableRow, Tooltip, Typography, alpha,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
+import MergeTypeIcon from '@mui/icons-material/MergeType'
 import { useQuery } from '@tanstack/react-query'
 import { api, SEVERITY_RANK } from '../lib/api'
 import { Timeline } from './Timeline'
 import { VulnModal } from './VulnModal'
+import { MergeTargetsDialog } from './MergeTargetsDialog'
 import { useAuth } from '../lib/auth'
 import { neon, glow } from '../theme'
 
@@ -79,6 +81,64 @@ const cellSx = {
   fontFamily: `'Share Tech Mono', monospace`, fontSize: 12.5, color: neon.text,
   borderBottom: `1px solid ${alpha(neon.purple, 0.12)}`, py: 0.6,
 } as const
+
+/** Combine this target with another, from the window that is showing it.
+ *
+ *  Merging was reachable only from the row menu in the targets grid.
+ *  An operator who has opened a host -- read its services, seen the
+ *  findings, and only then recognised it as a row they already have
+ *  under another name -- had to close the window, find the row again
+ *  and use the menu. That is the moment the decision is actually made,
+ *  so the action belongs here too.
+ *
+ *  Reads the same `target-detail` query `Body` does, so the header
+ *  shares that cache rather than fetching the host a second time.
+ *  Rendered as nothing at all until it arrives: a merge button that
+ *  appears before the thing it would merge is a button that can be
+ *  pressed with no source.
+ */
+function MergeButton({ project, host, onMerged }: {
+  project: string; host: string
+  onMerged: (survivingHost: string) => void
+}) {
+  const { canWrite } = useAuth()
+  const [open, setOpen] = useState(false)
+  const { data } = useQuery({
+    queryKey: ['target-detail', project, host],
+    queryFn: () => api.targetDetail(project, host),
+  })
+  // `canWrite` takes the project code -- it is a function, not a
+  // flag, because the role is per project and this window is opened
+  // from views that span several.
+  const mayWrite = canWrite(project)
+  const t = data?.target
+  if (!t) return null
+  return (
+    <>
+      <Tooltip title={mayWrite
+        ? 'Combine this target with another — services, findings and '
+          + 'web exchanges move, and you choose which name survives'
+        : 'Read-only on this project'}>
+        <span>
+          <Button size="small" disabled={!mayWrite}
+            startIcon={<MergeTypeIcon fontSize="small" />}
+            onClick={() => setOpen(true)}
+            sx={{ fontSize: 11.5, color: neon.yellow,
+                  borderColor: alpha(neon.yellow, 0.45) }}
+            variant="outlined">
+            Merge
+          </Button>
+        </span>
+      </Tooltip>
+      {open && (
+        // No `candidates`: this window has no target list of its own,
+        // so the dialog fetches one on the same key the grid uses.
+        <MergeTargetsDialog project={project} source={t}
+          onMerged={onMerged} onClose={() => setOpen(false)} />
+      )}
+    </>
+  )
+}
 
 function Body({ project, host, onVuln }: {
   project: string; host: string
@@ -479,6 +539,9 @@ export function HostModalProvider({ children }: { children: ReactNode }) {
             color: neon.cyan, textShadow: glow(neon.cyan, 0.6),
           }}>TARGET</Typography>
           <Box sx={{ flex: 1 }} />
+          {at && <MergeButton project={at.project} host={at.host}
+                              onMerged={(h) => setAt({ project: at.project,
+                                                       host: h })} />}
           <IconButton size="small" onClick={() => setAt(null)}
             sx={{ color: neon.muted, '&:hover': { color: neon.pink } }}>
             <CloseIcon fontSize="small" />
