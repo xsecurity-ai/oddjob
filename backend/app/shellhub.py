@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -118,6 +119,10 @@ class Hub:
     """Every shell tunnel this process is holding."""
 
     def __init__(self) -> None:
+        #: session id -> browsers watching it live. In memory and
+        #: per process, like the tunnels: a websocket is only ever
+        #: true of the process holding it.
+        self._watchers: dict[int, list[Send]] = {}
         self._tunnels: dict[int, Tunnel] = {}
         self._by_session: dict[int, tuple[int, int]] = {}
 
@@ -180,6 +185,45 @@ class Hub:
 
     def holds(self, session_id: int) -> bool:
         return self.live(session_id) is not None
+
+    def watch(self, session_id: int, send: Send) -> None:
+        """A browser wants this session's output as it happens.
+
+        Separate from the transcript, which is written on a debounce
+        and is the engagement record. A terminal needs the bytes
+        NOW -- a prompt that arrives 300ms late is a prompt that
+        arrives after you have typed the next thing.
+
+        Several watchers per session on purpose: two operators on
+        one shell is a normal way to work an engagement, and the
+        alternative is the second one silently seeing nothing.
+        """
+        self._watchers.setdefault(session_id, []).append(send)
+
+    def unwatch(self, session_id: int, send: Send) -> None:
+        got = self._watchers.get(session_id)
+        if not got:
+            return
+        with suppress(ValueError):
+            got.remove(send)
+        if not got:
+            self._watchers.pop(session_id, None)
+
+    async def fanout(self, session_id: int, data: bytes) -> None:
+        """Push raw bytes to everyone watching this session.
+
+        Failures drop the watcher rather than raising: a browser
+        that closed its tab must not break the relay for the shell
+        or for anybody else looking at it.
+        """
+        for send in list(self._watchers.get(session_id, ())):
+            try:
+                await send(data)
+            except Exception:                            # noqa: BLE001
+                self.unwatch(session_id, send)
+
+    def watchers(self, session_id: int) -> int:
+        return len(self._watchers.get(session_id, ()))
 
     def has_tunnel(self, agent_id: int) -> bool:
         """Whether THIS process is holding that Ghost's shell tunnel.

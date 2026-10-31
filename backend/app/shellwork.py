@@ -174,6 +174,13 @@ async def _data(session: AsyncSession, agent: Agent,
         if state != shellprobe.PENDING:
             await _judge(live.session_id, state, why)
 
+    # Straight to anyone watching, before anything else. The
+    # transcript is written on a debounce because a row per chunk
+    # would be thousands of rows for one `find /` -- but a terminal
+    # needs the bytes now, and a prompt that arrives 300ms late is
+    # a prompt that arrives after you have typed the next thing.
+    await hub.fanout(live.session_id, frame.payload)
+
     text = frame.payload.decode("utf-8", "replace")
     live.buf.append(text)
     live.last_at = now()

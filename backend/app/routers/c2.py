@@ -11,19 +11,21 @@ lives in one operator's scrollback and then it is gone.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import suppress
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import audit, hosts, listeners
-from ..db import get_session
+from ..db import SessionLocal, get_session
 from ..events import broker
 from ..models import Agent, Project, ShellExchange, ShellListener, ShellSession, Target, User
-from ..security import get_current_user, require_project
+from ..security import COOKIE, decode_token, effective_role, get_current_user, require_project
 from ..shellhub import hub
 from ..timeline import record
 
@@ -420,6 +422,141 @@ async def relabel(sid: int, body: LabelIn, project: str = Query(...),
     s.label = (body.label or "").strip()[:200] or None
     await session.commit()
     return {"ok": True, "label": s.label}
+
+
+#: How much typing to hold before writing it to the transcript.
+#:
+#: A terminal sends a keystroke at a time, and a row per keystroke
+#: would be a transcript nobody can read and a database nobody
+#: should have. Buffered and written as a line, which is the unit
+#: an operator thinks in.
+TYPING_IDLE = 0.6
+
+
+@router.websocket("/sessions/{sid}/ws")
+async def terminal(ws: WebSocket, sid: int, project: str = Query(...),
+                   session: AsyncSession = Depends(get_session)):
+    """A live terminal on one session.
+
+    Raw bytes both ways, which is what a terminal is. The polled
+    transcript stays as the engagement record and is a different
+    view of the same session -- this is for working the shell, that
+    is for reading what was done.
+
+    **Authenticated from the cookie.** A WebSocket cannot carry an
+    Authorization header any more than an EventSource can, which is
+    why login sets an httpOnly cookie; this is the same path
+    `/api/events` takes. `user` on the project, not `readonly`:
+    everything typed here runs on a host in the client's estate.
+
+    What is typed is recorded, buffered into lines. A row per
+    keystroke would be a transcript nobody can read -- but dropping
+    attribution entirely would mean the record cannot say who ran
+    what, and on an engagement that is the question that matters.
+    """
+    user = await _ws_user(ws, session)
+    if user is None:
+        await ws.accept()
+        await ws.close(code=1008, reason="not authenticated")
+        return
+    pr = await _ws_project(session, user, project)
+    if pr is None:
+        await ws.accept()
+        await ws.close(code=1008, reason=f"no write access to {project}")
+        return
+    s = await session.get(ShellSession, sid)
+    if s is None or s.project_id != pr.id:
+        await ws.accept()
+        await ws.close(code=1008, reason=f"no session {sid} in {project}")
+        return
+
+    await ws.accept()
+
+    async def push(data: bytes) -> None:
+        await ws.send_bytes(data)
+
+    hub.watch(sid, push)
+    typed: list[str] = []
+    flusher: asyncio.Task | None = None
+
+    async def record_typing() -> None:
+        """Write what was typed, once it stops."""
+        try:
+            await asyncio.sleep(TYPING_IDLE)
+        except asyncio.CancelledError:
+            return
+        text, typed[:] = "".join(typed), []
+        if not text.strip():
+            return
+        async with SessionLocal() as own:
+            nxt = ((await own.execute(
+                select(func.coalesce(func.max(ShellExchange.seq), 0))
+                .where(ShellExchange.session_id == sid))).scalar_one()) + 1
+            own.add(ShellExchange(session_id=sid, seq=nxt,
+                                  command=text.rstrip("\r\n"),
+                                  actor_id=user.id))
+            await own.commit()
+        await audit.record(
+            session, "ui", "c2.command", user=user, commit=True,
+            project_code=pr.code,
+            detail=f"session {sid}: {text.rstrip()[:300]}")
+
+    try:
+        while True:
+            data = await ws.receive_bytes()
+            if not await hub.write(sid, data):
+                # No route. Said rather than swallowed: an operator
+                # typing into a dead session needs to know, and the
+                # alternative is characters that vanish.
+                await ws.send_bytes(
+                    b"\r\n[oddjob] no route to this shell right now\r\n")
+                continue
+            typed.append(data.decode("utf-8", "replace"))
+            if flusher is not None:
+                flusher.cancel()
+            flusher = asyncio.create_task(record_typing())
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:                                   # noqa: BLE001
+        log.info("terminal for session %d ended: %s", sid, e)
+    finally:
+        hub.unwatch(sid, push)
+        if flusher is not None:
+            flusher.cancel()
+        # Whatever was mid-flight still gets recorded: a tab closed
+        # after typing is not a reason to lose what was typed.
+        if typed:
+            with suppress(Exception):
+                await record_typing()
+
+
+async def _ws_user(ws: WebSocket, session: AsyncSession) -> User | None:
+    """The signed-in user behind a websocket, from the cookie.
+
+    The same token the rest of the application takes, read from the
+    place a browser can actually put it. Returns None rather than
+    raising: the socket is not accepted yet, so there is nothing to
+    send a status on.
+    """
+    token = ws.cookies.get(COOKIE)
+    if not token:
+        return None
+    payload = decode_token(token)
+    if not payload:
+        return None
+    u = await session.get(User, int(payload.get("sub", 0)))
+    return u if u and u.is_active else None
+
+
+async def _ws_project(session: AsyncSession, user: User,
+                      code: str) -> Project | None:
+    """The project, if this user may WRITE to it."""
+    pr = (await session.execute(
+        select(Project).where(Project.code == code))).scalar_one_or_none()
+    if pr is None:
+        return None
+    role = await effective_role(session, user, pr.id)
+    return pr if role in ("user", "admin") else None
 
 
 # ------------------------------------------------------------ listeners

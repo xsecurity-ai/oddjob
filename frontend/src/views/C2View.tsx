@@ -31,6 +31,7 @@ import { PortPicker } from '../components/PortPicker'
 import type { ColumnDef } from '../lib/columns'
 import { neon, glow, blink, TAB_SX } from '../theme'
 import { render } from '../lib/terminal'
+import { LiveTerminal } from '../components/LiveTerminal'
 import { key, readingSession, useUnseenSessions } from '../lib/c2unseen'
 
 /** How often an open session re-reads its tail. A shell is
@@ -704,6 +705,13 @@ function Terminal({ project, session, onEdit, onChanged }: {
   onEdit: () => void
   onChanged: () => void
 }) {
+  // Terminal for working the shell, transcript for reading what
+  // was done. They are different jobs and the same pane cannot do
+  // both: a terminal shows a screen, a record shows who typed
+  // what. Live sessions open on the terminal; ended ones have no
+  // terminal to open.
+  const [pane, setPane] = useState<'terminal' | 'transcript'>(
+    session.state === 'open' ? 'terminal' : 'transcript')
   const [input, setInput] = useState('')
   const [said, setSaid] = useState<string | null>(null)
   // Cleaned by default. A PTY echoes what you type and paints a
@@ -800,6 +808,14 @@ function Terminal({ project, session, onEdit, onChanged }: {
           border: `1px solid ${alpha(STATE_COLOUR[session.state]
                                      ?? neon.muted, 0.45)}` }} />
         <Box sx={{ flex: 1 }} />
+        <Tabs value={pane} onChange={(_e, v) => setPane(v)}
+          sx={{ minHeight: 28, mr: 1 }}>
+          <Tab value="terminal" label="Terminal" disabled={session.state !== 'open'}
+            sx={{ ...TAB_SX, minHeight: 28, fontSize: 11 }} />
+          <Tab value="transcript" label="Transcript"
+            sx={{ ...TAB_SX, minHeight: 28, fontSize: 11 }} />
+        </Tabs>
+        {pane === 'transcript' && (
         <Tooltip title="Show exactly what the host sent — the echo of your
                         own command, the prompt, and the escape sequences.
                         That is what is stored; this view only hides it.">
@@ -809,8 +825,12 @@ function Terminal({ project, session, onEdit, onChanged }: {
               onChange={(e) => setRaw(e.target.checked)} />
           </Stack>
         </Tooltip>
+        )}
       </Stack>
 
+      {pane === 'terminal' ? (
+        <LiveTerminal project={project} session={session} />
+      ) : (<>
       <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', px: 2, py: 1.5,
                  bgcolor: alpha('#000', 0.35),
                  fontFamily: `'Share Tech Mono', monospace`, fontSize: 12,
@@ -861,6 +881,7 @@ function Terminal({ project, session, onEdit, onChanged }: {
             style: { fontFamily: `'Share Tech Mono', monospace`,
                      fontSize: 12.5 } } }} />
       </Box>
+      </>)}
     </Stack>
   )
 }
