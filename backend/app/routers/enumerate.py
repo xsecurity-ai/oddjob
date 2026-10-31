@@ -57,6 +57,7 @@ from ..lookups import BLOCKED, CHOICE, LOOKUP_KINDS
 from ..models import (
     AgentTask,
     DomainCandidate,
+    Event,
     Project,
     ProjectScope,
     Target,
@@ -556,6 +557,53 @@ async def _take_name(session: AsyncSession, pr: Project, user: User | None,
     return "merged"
 
 
+async def _note_refused_only(session: AsyncSession, target_id: int,
+                             subject: str, refused: dict[str, str]) -> bool:
+    """A reverse lookup that found names and was allowed to use none.
+
+    The row keeps an address for a name, and until this existed
+    nothing anywhere said why. `refused` went into the API response of
+    whoever happened to trigger the apply and then vanished; the row
+    itself got no entry at all. The next person to look saw an
+    address-named target and a lookup that appeared never to have run,
+    and went and ran it again by hand.
+
+    This is the distinction `_note_others` was written to preserve --
+    "we did not look" against "we looked and were not allowed to
+    follow it up" -- defeated in the one case that needs it most.
+    `_note_others` is only reached once a name has been TAKEN, and
+    here none was, so there was no surviving row to hang it on and no
+    `chosen` to describe it against.
+
+    Idempotent, and it has to be: the apply loop makes several passes,
+    a blocked decision stays blocked across all of them, and the same
+    decision is re-evaluated on every later apply. Without the check
+    one refusal would become an entry per pass for ever. Returns
+    whether it wrote one.
+    """
+    if not refused:
+        return False
+    summary = (f"{subject} resolves to {len(refused)} name(s), none of "
+               f"which this project may use")
+    if (await session.execute(
+            select(Event.id).where(Event.target_id == target_id,
+                                   Event.summary == summary)
+            .limit(1))).first() is not None:
+        return False
+    await record(
+        session, target_id, "discovered", summary,
+        detail=("A reverse lookup on " + subject + " returned these "
+                "names, and the scope list refused every one, so the "
+                "row keeps its address. The lookup is not what failed "
+                "here -- the names were found:\n\n"
+                + "\n".join(f"{k} \u2014 {v}"
+                             for k, v in sorted(refused.items()))
+                + "\n\nIf one of them belongs in this engagement, "
+                  "putting it in the scope list is what unblocks it."),
+        source="ghost:reverse_ip")
+    return True
+
+
 async def _note_others(session: AsyncSession, target_id: int, subject: str,
                        chosen: str, others: list[str],
                        refused: dict[str, str] | None = None) -> None:
@@ -959,6 +1007,14 @@ async def apply_auto(session: AsyncSession, pr: Project, *,
                 report.deferred.setdefault(key, d.plan)
                 continue
             if d.verdict == BLOCKED or not d.apply:
+                # The refusal belongs on the ROW, not only in this
+                # response, which the next operator will never see.
+                # Addresses are excluded: a forward lookup that
+                # returned nothing usable is not a name the scope list
+                # turned down. See `_note_refused_only`.
+                if field != "ip_address":
+                    await _note_refused_only(session, t.id, subject,
+                                             d.refused)
                 continue
 
             if field == "ip_address":
