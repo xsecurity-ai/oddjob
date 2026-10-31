@@ -23,7 +23,7 @@ import { Alert, Box, Chip, Stack, Typography, alpha } from '@mui/material'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal as XTerm } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
-import type { C2Session } from '../lib/api'
+import { api, type C2Session } from '../lib/api'
 import { neon } from '../theme'
 
 type State = 'connecting' | 'live' | 'closed'
@@ -39,7 +39,22 @@ export function LiveTerminal({ project, session }: {
   useEffect(() => {
     if (!host.current) return
     const term = new XTerm({
-      convertEol: false,
+      // LF is treated as CRLF.
+      //
+      // A shell WITHOUT a pty -- `nc -e /bin/sh`, which is the
+      // commonest callback there is -- ends its lines with a bare
+      // \n. A terminal takes that as "down one row" and not "back
+      // to column one", so every line starts where the last one
+      // ended and the output walks off the right of the screen:
+      //
+      //     uname -a
+      //             Darwin Mac.lan 25.6.0 ...
+      //                                      sh-3.2$
+      //
+      // Harmless for a pty, which sends \r\n: the \r returns to
+      // column one and the converted \n returns to a column it is
+      // already in.
+      convertEol: true,
       cursorBlink: true,
       fontFamily: "'Share Tech Mono', ui-monospace, monospace",
       fontSize: 12.5,
@@ -65,9 +80,22 @@ export function LiveTerminal({ project, session }: {
       + `/ws?project=${encodeURIComponent(project)}`)
     ws.binaryType = 'arraybuffer'
 
+    // Live bytes are held until the history is on screen.
+    //
+    // A terminal that opens blank is a terminal that has lost the
+    // session: switch to another and back, or reload the page, and
+    // everything that happened was gone. So what the host already
+    // sent is replayed from the transcript first -- and anything
+    // arriving while that is being fetched waits its turn rather
+    // than landing above it.
+    let replayed = false
+    const waiting: Uint8Array[] = []
+
     ws.onopen = () => { setState('live'); term.focus() }
     ws.onmessage = (e) => {
-      term.write(new Uint8Array(e.data as ArrayBuffer))
+      const b = new Uint8Array(e.data as ArrayBuffer)
+      if (replayed) term.write(b)
+      else waiting.push(b)
     }
     ws.onclose = (e) => {
       setState('closed')
@@ -76,6 +104,32 @@ export function LiveTerminal({ project, session }: {
       if (e.reason) setWhy(e.reason)
     }
     ws.onerror = () => setState('closed')
+
+    // The replay itself. Output only: what the host sent is what a
+    // terminal would have shown, and with a pty the commands are
+    // in it already as the shell's echo. The Transcript tab is
+    // where the typed side lives, attributed to whoever typed it.
+    let dead = false
+    void api.c2Transcript(project, session.id)
+      .then((rows) => {
+        if (dead) return
+        for (const r of rows) if (r.output) term.write(r.output)
+        if (rows.some((r) => r.output)) {
+          term.write('\r\n\u001b[2m── live ──\u001b[0m\r\n')
+        }
+      })
+      .catch(() => {
+        if (!dead) {
+          term.write('\u001b[2m[oddjob] could not load this session\u2019s '
+                     + 'history; what follows is live only\u001b[0m\r\n')
+        }
+      })
+      .finally(() => {
+        if (dead) return
+        replayed = true
+        for (const b of waiting) term.write(b)
+        waiting.length = 0
+      })
 
     const typed = term.onData((data) => {
       if (ws.readyState !== WebSocket.OPEN) return
@@ -91,6 +145,7 @@ export function LiveTerminal({ project, session }: {
     ro.observe(host.current)
 
     return () => {
+      dead = true
       typed.dispose()
       ro.disconnect()
       window.removeEventListener('resize', onResize)
