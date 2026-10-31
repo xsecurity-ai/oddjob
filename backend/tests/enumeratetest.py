@@ -1306,6 +1306,72 @@ _st2, _r2 = call("/api/domains/roots?project=ROOTS2", token=admin)
 _n2 = {row["domain"] for row in (_r2 or [])}
 check("a plain FQDN is still walked back to its registrable domain",
       "walk.example" in _n2, sorted(_n2))
+
+# `searched` says whether the zone has already been walked.
+#
+# It was hardcoded False, with a comment correctly placing the answer
+# in the task table and then not asking it. So every zone in this list
+# read as never enumerated, for ever. An operator with `auto_amass` on
+# had no way to tell a finished zone from a waiting one, went through
+# them one at a time, and re-ran work the fleet had already done --
+# which is the complaint that produced this test.
+check("a zone nothing has walked reads as not searched",
+      all(row["searched"] is False for row in (_r2 or [])), _r2)
+
+
+# And the positive half, which is the one that was broken: raise an
+# amass task for the zone and it must stop being offered as new work.
+# A task is enough -- `auto_amass` skips a zone it has already asked
+# for, so this list has to agree or the two send an operator to do
+# what the fleet is already doing.
+async def _mark_searched():
+    import json as _json
+
+    from app.models import AgentTask as _AT
+    async with _SL() as _s:
+        _pr = (await _s.execute(
+            _sel(_P).where(_P.code == "ROOTS2"))).scalar_one()
+        _s.add(_AT(agent_id=None, project_id=_pr.id, requested_by=None,
+                   kind="amass", status="queued",
+                   args=_json.dumps({"domain": "walk.example",
+                                     "mode": "passive"})))
+        await _s.commit()
+
+
+_aio.run(_mark_searched())
+_st3, _r3 = call("/api/domains/roots?project=ROOTS2", token=admin)
+_by3 = {row["domain"]: row for row in (_r3 or [])}
+check("a zone with an amass task raised reads as searched",
+      _by3.get("walk.example", {}).get("searched") is True, _r3)
+check("...and it is still listed, not hidden -- the operator may rescan",
+      "walk.example" in _by3, sorted(_by3))
+
+# A searched NAME does not become a row of its own. Most of what the
+# task table holds are individual hostnames somebody enumerated
+# directly, not registrable domains, and this endpoint's contract is
+# domains. On one project the old block would have added 478 rows,
+# none of them a root.
+async def _search_a_hostname():
+    import json as _json
+
+    from app.models import AgentTask as _AT
+    async with _SL() as _s:
+        _pr = (await _s.execute(
+            _sel(_P).where(_P.code == "ROOTS2"))).scalar_one()
+        _s.add(_AT(agent_id=None, project_id=_pr.id, requested_by=None,
+                   kind="amass", status="queued",
+                   args=_json.dumps({"domain": "deep.sub.walk.example",
+                                     "mode": "passive"})))
+        await _s.commit()
+
+
+_aio.run(_search_a_hostname())
+_st4, _r4 = call("/api/domains/roots?project=ROOTS2", token=admin)
+_n4 = {row["domain"] for row in (_r4 or [])}
+check("a searched hostname is not offered as a root of its own",
+      "deep.sub.walk.example" not in _n4 or "deep.sub.walk.example" in _n2,
+      sorted(_n4))
+
 # What the gate makes of the roots that are offered.
 #
 # Asked of the scope index directly, not through /enumerate: that

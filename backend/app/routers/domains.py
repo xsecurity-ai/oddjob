@@ -33,6 +33,7 @@ from ..roots import known_hosts, scope_roots
 from ..schemas import DomainCandidateOut, PromoteRequest
 from ..scopegate import index_for
 from ..security import get_current_user, require_project
+from ..tasking import tasked_subjects
 from ..timeline import record
 
 
@@ -73,19 +74,39 @@ async def roots(project: str = Query(...),
     There was a third: domains the offline generator had already
     guessed under. That generator is gone — enumeration is amass on a
     ghost now, and whether it has run is a question about tasks, not
-    about a table here. `searched` stays in the response and is always
-    false, so an older client does not break on its absence.
+    about a table here.
+
+    `searched` answers that question. It used to be hardcoded empty,
+    with the comment above correctly identifying where the answer
+    lived and then not going and getting it, so every domain in this
+    list read as never enumerated for ever. An operator with
+    `auto_amass` on therefore had no way to tell the finished zones
+    from the waiting ones, and went through them one at a time
+    re-running work the fleet had already done. That is the whole
+    complaint this field exists to answer.
 
     `known_hosts` is the count from targets only, so a root that is in
     scope and otherwise untouched still reads as 0 and sorts last
     without being hidden.
     """
     hosts = await known_hosts(session, pr.id)
-    # `searched` used to mean "the offline generator has already
-    # guessed under this". There is no generator now — enumeration is
-    # amass on a ghost, and whether that has run is a question about
-    # tasks, not about this table.
-    searched: set[str] = set()
+
+    # Enumerated, or already asked for: the same disjunction the
+    # standing order skips a zone on (`automation.plan`). Asked
+    # through `tasked_subjects` rather than with a second query, so
+    # this list and the automation cannot answer differently about
+    # the same zone -- which is the failure mode `roots.py` was
+    # extracted to end, arriving here by a third door.
+    #
+    # A completed `DomainSearch` is the record of a walk that
+    # finished. An amass task is the record of one that was asked
+    # for, which is enough: queueing a second is the duplicate the
+    # standing order is careful never to raise.
+    searched = set((await session.execute(
+        select(DomainSearch.domain).where(
+            DomainSearch.project_id == pr.id))).scalars().all())
+    searched |= {sub for _, sub in
+                 await tasked_subjects(session, pr.id, ("amass",))}
 
     counts = dict(gen.roots_in(hosts))
     origin = dict.fromkeys(counts, "targets")
@@ -116,10 +137,16 @@ async def roots(project: str = Query(...),
             counts[r] = 0
             origin[r] = "scope"
 
-    for d in searched:
-        if d not in counts:
-            counts[d] = 0
-            origin[d] = "searched"
+    # A searched name is NOT offered as a root in its own right.
+    #
+    # This block used to add one row per searched name, which cost
+    # nothing while `searched` was hardcoded empty. Now that it is
+    # real, most of what it holds are individual hostnames an
+    # operator enumerated directly -- `acat.api.acme.example`, not
+    # `acme.example` -- and this endpoint's contract is registrable
+    # domains. On one project it would have added 478 rows, none of
+    # them a root. `searched` marks the rows that are here for a
+    # reason of their own; it does not make rows.
 
     # Offer only what may actually be enumerated.
     #

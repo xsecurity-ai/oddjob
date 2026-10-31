@@ -724,8 +724,11 @@ export interface DomainCandidate {
   source: string; score: number; reason: string | null
   state: string; times_seen: number; created_at: string
 }
-/** `searched` is always false now that nothing generates names to search
- *  for. Kept so an older client does not break on a missing field. */
+/** `searched` means amass has already walked this zone, or a task to
+ *  walk it has already been raised — the same disjunction the
+ *  `auto_amass` standing order skips on. It was hardcoded false for a
+ *  while, which left an operator no way to tell a finished zone from a
+ *  waiting one and had them re-running work the fleet had done. */
 export interface DomainRoot { domain: string; known_hosts: number; searched: boolean }
 export interface AgentStep {
   kind: string; text: string; tool: string | null
