@@ -419,6 +419,26 @@ class Gap:
     outstanding: int
 
 
+def resolvable(s: Snapshot) -> list[str]:
+    """Hostnames owed a forward lookup, before `tasked` and the gate.
+
+    Shared by `plan` and `gaps` because they derived it separately and
+    disagreed. `plan` excludes an address-named target -- there is
+    nothing to forward-resolve about `198.51.100.10`, and asking a
+    resolver for the A record of an A record is not a lookup anyone
+    wants -- and `gaps` did not. So a project with 348 address-named
+    rows reported 348 "hostname(s) with no address recorded", every
+    one of them work the planner would never propose and no cycle
+    would ever clear.
+
+    That is the same shape as the gate missing from the gap report,
+    one policy further down: two readings of one question. There is
+    now one.
+    """
+    return [h for h, has_addr in name_subjects(s)
+            if not has_addr and not is_ip(h)]
+
+
 def cleared(idx: ScopeIndex | None, kind: str, subject: str) -> bool:
     """Would the scope gate let a task of this kind at this subject in?
 
@@ -498,7 +518,7 @@ def gaps(s: Snapshot) -> list[Gap]:
                  if cleared(s.scope, "amass", z)]))
     if s.auto_resolve_ips:
         add("auto_resolve_ips", "hostname(s) with no address recorded",
-            owed("nslookup", [h for h, has in name_subjects(s) if not has]))
+            owed("nslookup", resolvable(s)))
     if s.auto_reverse_dns:
         add("auto_reverse_dns", "address(es) with no reverse lookup",
             owed("reverse_ip", s.addresses))
@@ -603,9 +623,8 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
                 for z in allow("amass", sorted(zones))[:limit]]
 
     if s.auto_resolve_ips:
-        want = sorted(
-            h for h, has_addr in name_subjects(s)
-            if not has_addr and not is_ip(h) and ("nslookup", h) not in s.tasked)
+        want = sorted(h for h in resolvable(s)
+                      if ("nslookup", h) not in s.tasked)
         out += [Candidate("nslookup", h, {}, "auto_resolve_ips")
                 for h in allow("nslookup", want)[:limit]]
 
@@ -678,8 +697,18 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
         # this task is also what stops it being queued again.
         if "katana" in WEB_KINDS[s.auto_web]:
             cap = WEB_PER_CYCLE if limit is None else min(limit, WEB_PER_CYCLE)
+            # Every seed, not just the origin.
+            #
+            # `run_once` gates a task on EVERY address it will touch,
+            # and a seeded crawl carries its seeds in `targets`. Gating
+            # only the origin here proposed candidates that the gate
+            # then refused on a seed -- which is the starvation this
+            # whole function was just fixed for, in miniature: two
+            # slots of the cap spent every cycle on work that could
+            # never run.
             seeded = [(o, u) for o, u in sorted(s.seeds.items()) if u
-                      and cleared(s.scope, "katana", o)]
+                      and cleared(s.scope, "katana", o)
+                      and all(cleared(s.scope, "katana", x) for x in u)]
             out += [Candidate("katana", o, {"targets": list(urls)},
                               "auto_web_seeded")
                     for o, urls in seeded[:cap]]
