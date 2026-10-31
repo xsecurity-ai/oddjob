@@ -463,6 +463,33 @@ def _compound_identifier(v: str) -> bool:
     return len(words) >= 2
 
 
+#: `\x41`, `\u0041` and `\101` -- how a minifier writes a character
+#: it would rather not put in the source literally.
+_ESCAPE = re.compile(r"\\(?:x([0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|([0-7]{1,3}))")
+
+
+def _unescape(v: str) -> str:
+    """Turn `Forgot\x20password\x3F` back into `Forgot password?`.
+
+    Only the numeric escapes, and only into printable characters.
+    A real credential does not contain them -- it is issued as the
+    characters it is -- so anything this changes was a string
+    literal somebody's build tool rewrote.
+    """
+    def one(m):
+        hexpart, upart, octpart = m.groups()
+        try:
+            code = (int(hexpart or upart, 16) if (hexpart or upart)
+                    else int(octpart, 8))
+        except ValueError:
+            return m.group(0)
+        # Printable only. Decoding into control characters would
+        # invent whitespace that was never there.
+        return chr(code) if 0x20 <= code <= 0x7E else m.group(0)
+
+    return _ESCAPE.sub(one, v)
+
+
 def implausible_secret(value: str, detector: str) -> str | None:
     """-> why this is not a credential, or None if it might be.
 
@@ -500,6 +527,18 @@ def implausible_secret(value: str, detector: str) -> str | None:
     # password, which is exactly what the keyword matched on.
     if any(ch.isspace() for ch in v):
         return "contains whitespace, so it is prose rather than a value"
+    # The same prose, written the way a minified bundle writes it.
+    #
+    # `Forgot\x20password\x3F` is "Forgot password?" with the space
+    # and the question mark escaped, which is what a minifier does
+    # to a string literal. It has no literal whitespace, so the
+    # rule above never saw it, and it contains the word a keyword
+    # detector was looking for. Seen on a real estate, reported as
+    # a secret.
+    decoded = _unescape(v)
+    if decoded != v and any(ch.isspace() for ch in decoded):
+        return (f"escaped text ({decoded[:40]!r}), so it is prose "
+                f"rather than a value")
     # A keyword match only says a credential-ish WORD was nearby;
     # the value still has to look generated. See the note on
     # MIN_KEYWORD_ENTROPY for what this does and does not catch.

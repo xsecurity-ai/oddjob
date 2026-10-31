@@ -37,6 +37,7 @@ import { LIKELY_PORTS, parsePorts } from '../src/components/PortPicker'
 import { POC_COLOUR, POC_LABEL, POC_RANK, POC_STATES } from '../src/lib/lifecycle'
 import { claimTime, decodeJwt, looksLikeJwt } from '../src/lib/jwt'
 import { clean, dropEcho, render } from '../src/lib/terminal'
+import { decodeB64 } from '../src/lib/b64'
 import { anyUnseen, key, readingSession, reset as resetUnseen,
          sessionSpoke, snapshot } from '../src/lib/c2unseen'
 
@@ -1199,6 +1200,78 @@ console.log('\n== a rollup expansion shows each thing once ==')
         render(out, 'ls') === 'aitf.md\nDesktop\nsh-3.2$ ',
         JSON.stringify(render(out, 'ls')))
   check('nothing stored means nothing shown', render(null, 'ls') === '')
+}
+
+// ---------------------------------------------------------------
+// What a "high entropy base64 string" actually is
+// ---------------------------------------------------------------
+//
+// The detector is saying the characters are varied, not that the
+// value is a credential. Most of them in a minified bundle decode
+// to a sourcemap fragment, a compressed payload or a sentence of
+// English, and seeing that answers it in a glance.
+{
+  const b64 = (s: string) => btoa(s)
+
+  const prose = decodeB64(b64('the quick brown fox jumps over it'))
+  check('prose decodes and is named as prose',
+        prose?.kind === 'text'
+        && prose.text?.startsWith('the quick brown'),
+        JSON.stringify(prose?.text))
+  check('...and says why that matters',
+        !!prose?.notes.some((n) => n.includes('prose')),
+        JSON.stringify(prose?.notes))
+
+  const json = decodeB64(b64('{"type":"service_account","id":1}'))
+  check('a JSON blob is recognised', json?.kind === 'json', json?.kind)
+  check('...and points at the thing worth reading',
+        !!json?.notes.some((n) => n.includes('service-account')))
+  // Looks like JSON, is not. Must not claim it parsed.
+  const notJson = decodeB64(b64('{not actually json at all here}'))
+  check('something that merely looks like JSON is not called JSON',
+        notJson?.kind !== 'json', notJson?.kind)
+
+  // A CERTIFICATE header, not a private-key one. The branch is
+  // the same -- any PEM block -- and a credential-shaped fixture
+  // in this repo is one the secrets hook has to be argued with,
+  // correctly. The note it emits still names the case that
+  // matters.
+  const pem = decodeB64(b64('-----BEGIN CERTIFICATE-----\nMIIEvQIBADANBg'))
+  check('a PEM block is recognised', pem?.kind === 'pem', pem?.kind)
+  check('...and says which PEM type would be the finding',
+        !!pem?.notes.some((n) => n.includes('PRIVATE')),
+        JSON.stringify(pem?.notes))
+
+  const url = decodeB64(b64('postgres://user:pw@db.acme.example/app'))
+  check('a connection string is recognised as a URL',
+        url?.kind === 'url', url?.kind)
+
+  // Binary must not render as a wall of replacement characters.
+  // A realistic length: the 16-character floor exists so that a
+  // short identifier is not decoded into noise, and a real gzip
+  // blob in a bundle is far longer than that.
+  const gzBytes = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+                   0x00, 0x03, 0xed, 0xbd, 0x07, 0x60, 0x1c, 0x49,
+                   0x96, 0x62, 0x24, 0x2a, 0x61, 0x02, 0xf4, 0x6c]
+  const gz = decodeB64(btoa(String.fromCharCode(...gzBytes)))
+  check('gzip is named rather than shown as mojibake',
+        gz?.kind === 'binary' && gz.text === null, JSON.stringify(gz?.kind))
+  check('...by its magic bytes',
+        !!gz?.notes.some((n) => n.includes('gzip')),
+        JSON.stringify(gz?.notes))
+
+  // The caveat, last, like the JWT pane's.
+  for (const d of [prose, json, pem, url]) {
+    check(`${d?.kind}: the caveat is the last note`,
+          d?.notes[d.notes.length - 1].includes('High entropy only means'))
+  }
+
+  // Things that are not base64 must not produce a pane.
+  for (const no of ['', 'short', 'not base64 at all!!',
+                    'has spaces in it here', '====']) {
+    check(`${no.slice(0, 20) || '(empty)'} is not decoded`,
+          decodeB64(no) === null)
+  }
 }
 
 console.log(`\n${'='.repeat(56)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(56)}`)

@@ -9,7 +9,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { TRIAGE } from '../lib/triage'
 import { decodeJwt } from '../lib/jwt'
+import { decodeB64 } from '../lib/b64'
 import { JwtPane } from './JwtPane'
+import { B64Pane } from './B64Pane'
 import { neon, glow } from '../theme'
 
 /** What `origin` means, said once rather than in three tooltips.
@@ -124,10 +126,16 @@ export function SecretSourceModal({ vulnId, triage, onClose }: {
   // table: this is the value as it appears IN THIS rendering, which
   // is the one on screen. Null when the value was not located --
   // decoding a guess would be worse than showing nothing.
-  const jwt = useMemo(() => {
+  const matched = useMemo(() => {
     if (!data || data.match_start == null || data.match_end == null) return null
-    return decodeJwt(data.body.slice(data.match_start, data.match_end))
+    return data.body.slice(data.match_start, data.match_end)
   }, [data])
+  const jwt = useMemo(() => (matched ? decodeJwt(matched) : null), [matched])
+  // Only when it is NOT a token: a JWT is base64 too, and showing
+  // both panes would be answering the same question twice with the
+  // less useful answer beside the better one.
+  const b64 = useMemo(
+    () => (matched && !jwt ? decodeB64(matched) : null), [matched, jwt])
 
   // Split once per payload, not per render: the body can be 120 kB.
   const rows = useMemo(() => {
@@ -359,6 +367,7 @@ export function SecretSourceModal({ vulnId, triage, onClose }: {
                 "Decoded JWT" over two empty objects would assert
                 that a path or a hash is one. */}
             {jwt && <JwtPane jwt={jwt} />}
+            {b64 && <B64Pane decoded={b64} />}
             </Box>
           </>
         )}
