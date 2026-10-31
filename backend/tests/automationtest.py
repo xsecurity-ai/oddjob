@@ -242,6 +242,65 @@ for _s in (Snapshot(auto_nmap="full", targets=BOTH, scope=SCOPED),
 check("no gate means no filtering, not everything refused",
       _au.cleared(None, "nmap", "anything.acme.example"))
 
+
+# ------------------------------------------- the gate runs BEFORE the cap
+# A cycle must not spend its budget on names it is about to refuse.
+#
+# Every policy sorts its backlog and takes the first N. `run_once`
+# then asks the gate about each one and drops what it refuses. With
+# the cap applied FIRST, a project whose scope is narrower than its
+# target list spends the whole per-cycle budget on candidates that are
+# about to be refused, queues nothing, and never makes progress --
+# for ever, because the list is sorted and the same refused names come
+# up first on every cycle.
+#
+# Measured on a real engagement: 1,027 in-scope URLs owed an `httpx`
+# probe, a cycle proposing 250 candidates, and the gate clearing ZERO
+# of them. The in-scope work sat behind the refused names with the
+# toggle on and nothing moving.
+#
+# `aaa` sorts first and is out of scope; `zzz` sorts last and is in.
+# With a cap of one, the only acceptable answer is the one that can
+# actually run.
+STARVE = ScopeIndex([classify("zzz.acme.example")])
+MANY = [(f"aaa{i:03}.acme.example", True) for i in range(50)]
+MANY.append(("zzz.acme.example", True))
+
+p1 = plan(Snapshot(auto_nmap="full", targets=MANY, scope=STARVE), limit=1)
+check("a capped cycle reaches the in-scope host past the refused ones",
+      [c.subject for c in p1] == ["zzz.acme.example"],
+      [c.subject for c in p1])
+
+# ...and with no cap it is still the only candidate, so the filter is
+# the gate and not an artefact of the slice.
+pall = plan(Snapshot(auto_nmap="full", targets=MANY, scope=STARVE))
+check("...and it is the only candidate at all",
+      [c.subject for c in pall] == ["zzz.acme.example"],
+      [c.subject for c in pall])
+
+# The same shape for a web policy, which is capped by WEB_PER_CYCLE
+# rather than by `limit` -- a separate code path and the one the real
+# engagement was starved on.
+WEBSTARVE = {f"https://aaa{i:03}.acme.example/" for i in range(400)}
+WEBSTARVE.add("https://zzz.acme.example/")
+pw = plan(Snapshot(auto_httpx=True, web_urls=WEBSTARVE, scope=STARVE))
+check("a web policy is not starved by its per-cycle cap either",
+      [c.subject for c in pw] == ["https://zzz.acme.example/"],
+      [c.subject for c in pw][:4])
+
+# Without a gate nothing is filtered, and the cap still applies --
+# which is what every Snapshot built by hand in this file relies on.
+pn = plan(Snapshot(auto_nmap="full", targets=MANY), limit=1)
+check("with no gate the cap alone decides, as it always did",
+      len(pn) == 1 and pn[0].subject == "aaa000.acme.example",
+      [c.subject for c in pn])
+
+# The report and the planner still agree once the gate is in play.
+_st = Snapshot(auto_nmap="full", targets=MANY, scope=STARVE)
+check("the gap report agrees with what the planner can reach",
+      sum(x.outstanding for x in _au.gaps(_st)) == len(plan(_st)),
+      [(x.policy, x.outstanding) for x in _au.gaps(_st)])
+
 # Deliberately NOT filtered: a bucket usually has an address, and
 # dropping it from a port scan would leave a real asset uncovered. It
 # is the NAME that is unusable, not the asset.
@@ -850,6 +909,14 @@ async def cloud_is_not_a_name():
               snap.not_dns_named == {"backups.storage.example",
                                      "arn:aws:s3:::acme-backups"},
               sorted(snap.not_dns_named))
+        # The scope gate is deliberately taken out of the picture for
+        # the rest of this block. It is not what is under test, and
+        # leaving it in would let these assertions pass for the wrong
+        # reason: `storage.example` is out of scope on purpose, so the
+        # gate alone would drop the cloud rows and the KIND filter --
+        # the thing this section exists to protect -- could rot
+        # untested. `plan` gating is covered on its own below.
+        snap.scope = None
         cands = {(c.kind, c.subject) for c in _au.plan(snap)}
         check("no amass task is planned for a cloud target",
               ("amass", "storage.example") not in cands, sorted(cands))
