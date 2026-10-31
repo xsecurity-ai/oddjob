@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import audit, clouds, slack
+from .. import audit, clouds, scopeconflicts, slack
 from ..db import get_session
 from ..events import broker
 from ..models import (
@@ -760,6 +760,136 @@ async def scope_violations(project: str,
                 "no host in this project violates these lists"
                 if idx.defined else
                 "this project has no scope lists, so nothing is enforced"))
+
+
+class ConflictOut(BaseModel):
+    host: str
+    address: str
+    in_entry_id: int
+    in_entry: str
+    out_entry_id: int
+    out_entry: str
+    #: How many in-scope hosts share this address. One means the
+    #: exclusion was about this host; several means it was about
+    #: shared infrastructure, which points the other way.
+    shared_with: int
+    kind: str
+    #: Which of the two entries the evidence points at removing.
+    suggestion: str
+
+
+class ConflictsOut(BaseModel):
+    project: str
+    conflicts: list[ConflictOut]
+    hosts: int
+    shared: int
+    single: int
+    detail: str
+
+
+@router.get("/{project}/scope/conflicts", response_model=ConflictsOut)
+async def scope_conflicts(project: str,
+                          pr: Project = Depends(require_project("readonly")),
+                          session: AsyncSession = Depends(get_session)):
+    """Where these lists contradict themselves. Changes nothing.
+
+    A host named in the IN list whose recorded address is named in
+    the OUT list. The gate refuses it -- out wins -- so each one is
+    a host the engagement believes it is testing and is not.
+    """
+    rows = await scopeconflicts.find(session, pr.id)
+    shared = sum(1 for c in rows if c.kind == "shared")
+    return ConflictsOut(
+        project=pr.code,
+        conflicts=[ConflictOut(**{**c.__dict__, "kind": c.kind,
+                                  "suggestion": c.suggestion})
+                   for c in rows],
+        hosts=len({c.host for c in rows}),
+        shared=shared, single=len(rows) - shared,
+        detail=(f"{len(rows)} contradiction(s) across "
+                f"{len({c.host for c in rows})} host(s): these are in "
+                f"scope by name and out of scope by address, so the gate "
+                f"refuses them"
+                if rows else "these lists do not contradict themselves"))
+
+
+class ResolveIn(BaseModel):
+    strategy: str = Field(
+        "report",
+        description="report | suggested | keep_exclusions | keep_names. "
+                    "report changes nothing. suggested drops the "
+                    "exclusion where an address is shared by several "
+                    "in-scope hosts and the name where it serves one. "
+                    "keep_exclusions drops every conflicting name. "
+                    "keep_names drops every conflicting address "
+                    "exclusion, which makes those hosts testable.")
+    #: The scope rows to delete. Required for anything but `report`,
+    #: and checked against what the strategy would choose NOW --
+    #: applying to "whatever the report said" invites acting on a
+    #: list that moved between the reading and the clicking, which
+    #: for a scope list means testing something nobody authorised.
+    entry_ids: list[int] = []
+
+
+@router.post("/{project}/scope/conflicts/resolve", response_model=ConflictsOut)
+async def resolve_conflicts(project: str, body: ResolveIn,
+                            pr: Project = Depends(require_project("admin")),
+                            user: User = Depends(get_current_user),
+                            session: AsyncSession = Depends(get_session)):
+    """Delete the scope entries that resolve these contradictions.
+
+    **`admin`, and never automatic.** Every row deleted here changes
+    what the engagement is authorised to touch. `keep_names` in
+    particular makes hosts testable that the gate is currently
+    refusing, which is a decision about somebody else's network.
+
+    The caller names the rows. The strategy is recomputed here and
+    anything outside it is refused, so a stale page cannot delete an
+    entry that stopped being a conflict while it was being read.
+    """
+    rows = await scopeconflicts.find(session, pr.id)
+    strategy = (body.strategy or "report").strip().lower()
+    if strategy == "report":
+        return await scope_conflicts(project, pr, session)
+
+    try:
+        allowed, what = scopeconflicts.entries_to_remove(rows, strategy)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    asked = set(body.entry_ids or [])
+    if not asked:
+        raise HTTPException(
+            422, f"name the entries to delete. `{strategy}` {what}, which "
+                 f"is {len(allowed)} entr(ies) right now.")
+    if stale := (asked - allowed):
+        raise HTTPException(
+            409, f"{len(stale)} of those are not what `{strategy}` would "
+                 f"remove now — the lists moved while the page was open. "
+                 f"Re-read the conflicts and try again.")
+
+    gone = (await session.execute(
+        select(ProjectScope).where(ProjectScope.project_id == pr.id,
+                                   ProjectScope.id.in_(asked)))).scalars().all()
+    for row in gone:
+        await session.delete(row)
+    await session.commit()
+    await audit.record(
+        session, "ui", "scope.conflicts.resolve", user=user, commit=True,
+        project_code=pr.code,
+        detail=f"{strategy}: deleted {len(gone)} scope entr(ies)")
+    await broker.publish("projects", action="scope", project=pr.code)
+
+    left = await scopeconflicts.find(session, pr.id)
+    shared = sum(1 for c in left if c.kind == "shared")
+    return ConflictsOut(
+        project=pr.code,
+        conflicts=[ConflictOut(**{**c.__dict__, "kind": c.kind,
+                                  "suggestion": c.suggestion})
+                   for c in left],
+        hosts=len({c.host for c in left}),
+        shared=shared, single=len(left) - shared,
+        detail=f"deleted {len(gone)} entr(ies); {len(left)} contradiction(s) "
+               f"left")
 
 
 class ApplyIn(BaseModel):

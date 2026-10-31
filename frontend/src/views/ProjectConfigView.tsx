@@ -15,7 +15,9 @@ import { PillInput } from '../components/PillInput'
 import { ProjectSlackCard } from '../components/ProjectSlackCard'
 import { RulesOfEngagementCard } from '../components/RulesOfEngagementCard'
 import { makeScopePills } from '../components/scopePills'
+import { useAuth } from '../lib/auth'
 import { neon, glow } from '../theme'
+import { ScopeConflicts } from '../components/ScopeConflicts'
 import { ConfigSections } from '../components/ConfigSections'
 
 /**
@@ -68,6 +70,10 @@ function KindChip({ kind }: { kind: string }) {
 
 export function ProjectConfigView({ project }: { project: string | null }) {
   const qc = useQueryClient()
+  // Resolving a contradiction deletes a scope entry, which changes
+  // what the engagement may touch -- `admin`, like every other
+  // scope write.
+  const { isAdmin } = useAuth()
   const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [details, setDetails] = useState({ name: '', client: '', codename: '',
@@ -560,6 +566,10 @@ export function ProjectConfigView({ project }: { project: string | null }) {
         {list('Out of scope', outList, neon.red,
               'Barred outright. Always wins over the in-scope list.')}
       </Stack>
+      {/* Right under the two lists, because it is about the two
+          lists disagreeing -- not under "Already in this project",
+          which is about hosts the lists would refuse. */}
+      <ScopeConflicts project={project} canAdmin={isAdmin(project)} />
         </>) },
         { key: 'apply', label: 'Already in this project', node: (<>
       {/* ------------------------------------------------------ apply */}
