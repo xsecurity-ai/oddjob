@@ -39,7 +39,22 @@ export function LiveTerminal({ project, session }: {
   useEffect(() => {
     if (!host.current) return
     const term = new XTerm({
-      convertEol: false,
+      // LF is treated as CRLF.
+      //
+      // A shell WITHOUT a pty -- `nc -e /bin/sh`, which is the
+      // commonest callback there is -- ends its lines with a bare
+      // \n. A terminal takes that as "down one row" and not "back
+      // to column one", so every line starts where the last one
+      // ended and the output walks off the right of the screen:
+      //
+      //     uname -a
+      //             Darwin Mac.lan 25.6.0 ...
+      //                                      sh-3.2$
+      //
+      // Harmless for a pty, which sends \r\n: the \r returns to
+      // column one and the converted \n returns to a column it is
+      // already in.
+      convertEol: true,
       cursorBlink: true,
       fontFamily: "'Share Tech Mono', ui-monospace, monospace",
       fontSize: 12.5,
