@@ -1089,6 +1089,33 @@ call("/api/enumerate/auto?project=AUTO", "POST", {}, token=admin)
 check("the address-named row is untouched", "198.51.100.80" in atargets(),
       str(sorted(atargets())))
 
+# ...and the row says WHY it is still an address.
+#
+# The refusal used to exist only in the response of whoever happened
+# to trigger the apply. The row got nothing, so the next person to
+# look saw an address-named target and a lookup that appeared never to
+# have run -- and went and ran it again by hand. That is the
+# difference between "we did not look" and "we looked and were not
+# allowed to follow it up", and it has to be on the row.
+_st, _tl = call("/api/targets/AUTO/198.51.100.80/timeline", token=admin)
+_ev = _tl if isinstance(_tl, list) else (_tl or {}).get("items", [])
+_blob = json.dumps(_ev)
+check("the row records that a name was found and refused",
+      "none of which this project may use" in _blob, _blob[:260])
+check("...and names the one it could not use",
+      "nope.acme.example" in _blob, _blob[:260])
+
+# The apply loop makes several passes and a blocked decision stays
+# blocked, so without a guard this becomes one entry per pass and per
+# later apply, for ever.
+call("/api/enumerate/auto?project=AUTO", "POST", {}, token=admin)
+call("/api/enumerate/auto?project=AUTO", "POST", {}, token=admin)
+_st2, _tl2 = call("/api/targets/AUTO/198.51.100.80/timeline", token=admin)
+_ev2 = _tl2 if isinstance(_tl2, list) else (_tl2 or {}).get("items", [])
+_n = len([e for e in _ev2
+          if "none of which this project may use" in json.dumps(e)])
+check("running it again does not append the same refusal", _n == 1, f"{_n}")
+
 print("-- a lookup that found nothing is reported, not asked about --")
 call("/api/targets?project=AUTO", "POST", {"host": "198.51.100.90"}, token=admin)
 afinish("reverse_ip", {"targets": ["198.51.100.90"]},
