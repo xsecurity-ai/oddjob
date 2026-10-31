@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert, Autocomplete, Box, Button, Chip, CircularProgress, Dialog,
   DialogActions, DialogContent, DialogTitle, Divider, FormControlLabel,
@@ -36,12 +36,40 @@ export function MergeTargetsDialog({ project, source, candidates, onClose,
   onMerged?: (survivingHost: string) => void
 }) {
   const qc = useQueryClient()
-  const fetched = useQuery({
-    queryKey: ['targets', project],
-    queryFn: () => api.targets(project),
-    enabled: !candidates,
+
+  // Type-ahead against the database, not a copy of the project.
+  //
+  // The first version of this fetched every target so the Autocomplete
+  // could filter them in the browser. On a real engagement that is
+  // 10,105 rows and 8.5 MB, and the box sat on "Loading..." until it
+  // arrived -- which read as a hang, because for the several seconds
+  // it took that is exactly what it was.
+  //
+  // Searching in SQL also means the match is against every target
+  // rather than against whichever ones were loaded, which is the same
+  // correctness point the web listing's own comment makes.
+  const [typed, setTyped] = useState('')
+  const [term, setTerm] = useState('')
+  useEffect(() => {
+    const t = window.setTimeout(() => setTerm(typed.trim()), 250)
+    return () => window.clearTimeout(t)
+  }, [typed])
+
+  const found = useQuery({
+    queryKey: ['target-search', project, term],
+    queryFn: () => api.searchTargets(project, term),
+    // Nothing typed is not a reason to fetch the whole project. Two
+    // characters is where a search starts being a search.
+    enabled: !candidates && term.length >= 2,
+    placeholderData: (prev) => prev,
   })
-  const options = candidates ?? fetched.data?.items ?? []
+
+  // A caller that already holds the list keeps filtering in the
+  // browser: the grid has the rows in hand and a second round trip
+  // would be slower than the work it saves.
+  const options = useMemo(
+    () => candidates ?? found.data?.items ?? [],
+    [candidates, found.data])
   const [into, setInto] = useState<Target | null>(null)
   // Which name the surviving row carries. Defaults to the
   // destination's, which is what a merge did before the choice
@@ -97,12 +125,21 @@ export function MergeTargetsDialog({ project, source, candidates, onClose,
         </Typography>
 
         <Autocomplete
-          loading={fetched.isLoading}
+          loading={found.isFetching}
           options={options.filter((t) => t.host !== source.host)}
+          // The server already matched; filtering again here would
+          // hide rows it deliberately returned.
+          filterOptions={candidates ? undefined : (x) => x}
+          noOptionsText={
+            candidates ? 'No match'
+              : term.length < 2 ? 'Type at least two characters'
+              : found.isFetching ? 'Searching...' : 'No match'}
           getOptionLabel={(t) => t.host}
+          isOptionEqualToValue={(a, b) => a.id === b.id}
           value={into}
           onChange={(_e, v) => setInto(v)}
-          onInputChange={(_e, _v, reason) => {
+          onInputChange={(_e, v, reason) => {
+            if (reason === 'input') setTyped(v)
             // A new destination makes the old name choice meaningless.
             // Clearing it rather than carrying it over: a stale
             // `keep` pointing at a row no longer in the merge is the
