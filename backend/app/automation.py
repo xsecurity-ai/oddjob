@@ -528,7 +528,7 @@ def gaps(s: Snapshot) -> list[Gap]:
 
 
 def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
-    """What the policies would like to do, before the gate is consulted.
+    """What the policies would like to do, in the order they would do it.
 
     Pure. `limit` is per policy and defaults to None, meaning all of
     them: an operator who switched a policy on wants the backlog done,
@@ -538,12 +538,47 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
 
     The order is stable regardless, so an interrupted cycle resumes
     where it was rather than starting somewhere different.
+
+    **Every candidate is gated here as well as in `run_once`, and it
+    has to happen before the cap.** `run_once` remains the authority
+    on what may be touched; this only decides what is worth proposing.
+    Skipping it here does not queue anything forbidden, but it does
+    let refused names eat a whole cycle's budget and starve the work
+    that would have passed -- see `allow`.
+
+    A Snapshot with no `scope` is not filtered, which is what a test
+    describing an estate wants and what every caller got before the
+    gate was available here.
     """
     # The kitchen sink is resolved HERE and not at the call sites.
     # Two readings of what a project asked for is how they come to
     # differ, and the gap report below reads the same function.
     s = effective(s)
     out: list[Candidate] = []
+
+    def allow(kind: str, subjects: list[str]) -> list[str]:
+        """The ones the gate will take -- BEFORE the cap, not after.
+
+        This order is the whole point. Every policy below sorts its
+        backlog and takes the first N; `run_once` then asks the gate
+        about each and drops what it refuses. With the cap applied
+        first, a project whose scope is narrower than its target list
+        spends its entire per-cycle budget on candidates that are
+        about to be refused, queues nothing, and makes no progress --
+        for ever, because the list is sorted and the same refused
+        names come up first every single time.
+
+        That is not a rounding error. One engagement had 1,027
+        in-scope URLs owed an `httpx` probe and a cycle proposing 250
+        candidates, of which the gate cleared ZERO: the first 250
+        names in sort order were all out of scope, and the in-scope
+        work sat behind them indefinitely with the toggle on.
+
+        `run_once` still gates every candidate on the way out. This
+        does not replace that check -- it stops the budget being
+        spent before the check is reached.
+        """
+        return [x for x in subjects if cleared(s.scope, kind, x)]
 
     if s.auto_amass:
         zones: list[str] = []
@@ -565,14 +600,14 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
             zones.append(z)
         out += [Candidate("amass", z, {"domain": z, "mode": "passive"},
                           "auto_amass")
-                for z in sorted(zones)[:limit]]
+                for z in allow("amass", sorted(zones))[:limit]]
 
     if s.auto_resolve_ips:
         want = sorted(
             h for h, has_addr in name_subjects(s)
             if not has_addr and not is_ip(h) and ("nslookup", h) not in s.tasked)
         out += [Candidate("nslookup", h, {}, "auto_resolve_ips")
-                for h in want[:limit]]
+                for h in allow("nslookup", want)[:limit]]
 
     if s.auto_reverse_dns:
         # Two sources, and for a long time only the first was read.
@@ -600,7 +635,7 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
             {h for h, _ in s.targets if is_ip(h)} | s.addresses)
         want = [h for h in want if ("reverse_ip", h) not in s.tasked]
         out += [Candidate("reverse_ip", h, {}, "auto_reverse_dns")
-                for h in want[:limit]]
+                for h in allow("reverse_ip", want)[:limit]]
 
     if s.auto_web in WEB_KINDS:
         # Queued per ORIGIN. Neither tool can be pointed at a bare
@@ -629,7 +664,7 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
             # scanning before anybody looks.
             cap = WEB_PER_CYCLE if limit is None else min(limit, WEB_PER_CYCLE)
             out += [Candidate(kind, u, {"targets": [u]}, "auto_web")
-                    for u in want[:cap]]
+                    for u in allow(kind, want)[:cap]]
 
         # Crawls seeded with what content discovery found, which only
         # applies when crawling is part of the mode: `gobuster` on its
@@ -643,10 +678,11 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
         # this task is also what stops it being queued again.
         if "katana" in WEB_KINDS[s.auto_web]:
             cap = WEB_PER_CYCLE if limit is None else min(limit, WEB_PER_CYCLE)
+            seeded = [(o, u) for o, u in sorted(s.seeds.items()) if u
+                      and cleared(s.scope, "katana", o)]
             out += [Candidate("katana", o, {"targets": list(urls)},
                               "auto_web_seeded")
-                    for o, urls in sorted(s.seeds.items())[:cap]
-                    if urls]
+                    for o, urls in seeded[:cap]]
 
     # What else does this address answer to? A host serving twelve
     # virtual hosts is twelve applications behind one socket, and
@@ -662,7 +698,7 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
                       if ("vhost", u.lower()) not in s.tasked)
         cap = WEB_PER_CYCLE if limit is None else min(limit, WEB_PER_CYCLE)
         out += [Candidate("vhost", u, {"targets": [u]}, "auto_vhost")
-                for u in want[:cap]]
+                for u in allow("vhost", want)[:cap]]
 
     # And the cheapest thing in the catalogue: ask every known URL
     # what it answers with. It is what decides whether anything
@@ -673,7 +709,7 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
                       if ("httpx", u.lower()) not in s.tasked)
         cap = WEB_PER_CYCLE if limit is None else min(limit, WEB_PER_CYCLE)
         out += [Candidate("httpx", u, {"targets": [u]}, "auto_httpx")
-                for u in want[:cap]]
+                for u in allow("httpx", want)[:cap]]
 
     if s.auto_nuclei in NUCLEI_KINDS:
         # Per URL, like auto_web and for the same reason: nuclei takes
@@ -712,20 +748,20 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
                                             + " -id "
                                             + ",".join(sorted(set(ids)))},
                                   "auto_nuclei")
-                        for u in want[:cap]
+                        for u in allow(kind, want)[:cap]
                         if (ids := s.suspected.get(u))]
             else:
                 out += [Candidate(kind, u,
                                   {"targets": [u],
                                    "extra": NUCLEI_PROFILES[kind]},
                                   "auto_nuclei")
-                        for u in want[:cap]]
+                        for u in allow(kind, want)[:cap]]
 
     if s.auto_nmap in NMAP_PROFILES:
         args = NMAP_PROFILES[s.auto_nmap]
         want = sorted(h for h, _ in s.targets if ("nmap", h) not in s.tasked)
         out += [Candidate("nmap", h, dict(args), "auto_nmap")
-                for h in want[:limit]]
+                for h in allow("nmap", want)[:limit]]
 
     return out
 
