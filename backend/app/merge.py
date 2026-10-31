@@ -170,16 +170,30 @@ async def plan(session: AsyncSession, src: Target, dst: Target) -> Plan:
     p.pocs_moved = await count(Poc, Poc.target_id == src.id)
     p.events_moved = await count(Event, Event.target_id == src.id)
 
-    dst_hashes = {h for (h,) in (await session.execute(
-        select(WebAddress.exchange_hash)
-        .where(WebAddress.target_id == dst.id))).all()}
-    for (h,) in (await session.execute(
+    # Counted in SQL rather than by pulling both sides into Python.
+    #
+    # This used to build a set of every `exchange_hash` the
+    # DESTINATION holds and then walk the source's hashes against it.
+    # That is one 64-character string per captured exchange, and a
+    # busy host carries 12,339 of them on this estate while the table
+    # as a whole holds 202,416 -- so the cost of asking "what would
+    # this merge do" grew with how much had been captured, which is
+    # exactly backwards for a question asked before deciding whether
+    # to do anything at all.
+    #
+    # `exchange_hash` is NOT NULL and unique per target, so there is
+    # no three-valued logic to be careful about here and no
+    # possibility of a hash appearing twice on one side. The previous
+    # version was also subtly wrong about that: `None in dst_hashes`
+    # is true when both sides hold a null, which would have counted a
+    # row as a duplicate of one it has nothing in common with.
+    src_web = await count(WebAddress, WebAddress.target_id == src.id)
+    p.web_duplicates = await count(
+        WebAddress, WebAddress.target_id == src.id,
+        WebAddress.exchange_hash.in_(
             select(WebAddress.exchange_hash)
-            .where(WebAddress.target_id == src.id))).all():
-        if h in dst_hashes:
-            p.web_duplicates += 1
-        else:
-            p.web_moved += 1
+            .where(WebAddress.target_id == dst.id)))
+    p.web_moved = src_web - p.web_duplicates
 
     dst_imp = {(i.framework, i.implant_id) for i in (await session.execute(
         select(Implant).where(Implant.target_id == dst.id))).scalars()}
