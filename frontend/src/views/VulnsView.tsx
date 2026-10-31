@@ -10,6 +10,7 @@ import { VulnModal } from '../components/VulnModal'
 import { PocModal } from '../components/PocModal'
 import { SEVERITY_COLOUR as SEV_COLOUR } from '../lib/severity'
 import { TRIAGE, TRIAGE_COLOUR } from '../lib/triage'
+import { parse, push, useRouteFinding } from '../lib/route'
 import {
   LIFECYCLE, LIFECYCLE_COLOUR, LIFECYCLE_LABEL, LIFECYCLE_RANK,
   POC_COLOUR, POC_LABEL, POC_RANK, POC_STATES,
@@ -33,7 +34,19 @@ export function VulnsView({ project }: { project: string | null }) {
   // and landing back on All means re-finding your place every time
   // the page reloads, which on a long triage is most of the session.
   const [tab, setTab] = useStoredChoice('vulns.tab', VULN_TABS, 'all')
-  const [detail, setDetail] = useState<number | null>(null)
+  // The finding being read lives in the URL, not in this component.
+  //
+  // `?finding=1234` on top of whatever path is showing, so a finding
+  // can be linked to, reloaded and closed with Back -- and so opening
+  // one from the grid and opening one from a pasted link are the same
+  // operation rather than two that have to be kept in step.
+  const detail = useRouteFinding()
+  const setDetail = (id: number | null) => {
+    const r = parse(window.location.pathname)
+    if (id) r.finding = id
+    else delete r.finding
+    push(r)
+  }
   // The proof being read, separate from the finding being read: the
   // PoC chip opens the script without opening the finding behind it.
   const [poc, setPoc] = useState<{ id: number; title: string } | null>(null)
