@@ -1413,6 +1413,17 @@ export const api = {
   projectContacts: (project: string) =>
     req<Contact[]>(`/api/projects/${encodeURIComponent(project)}/contacts`),
   targets: (project?: string) => req<Page<Target>>('/api/targets' + qs({ project, limit: 100000 })),
+
+  /** A handful of targets matching what someone has typed.
+   *
+   *  For a picker, not a listing. `targets()` above asks for the whole
+   *  project -- 10,105 rows and 8.5 MB on a real engagement -- which
+   *  is fine for a grid that is going to show all of them and far too
+   *  much for an autocomplete that will show ten. The search runs in
+   *  the database, so what comes back is matched against every target
+   *  rather than against whichever ones happened to be loaded. */
+  searchTargets: (project: string | undefined, q: string, limit = 25) =>
+    req<Page<Target>>('/api/targets' + qs({ project, q, limit })),
   ports: (project?: string) => req<Page<Service>>('/api/ports' + qs({ project, limit: 100000 })),
   services: (project?: string) => req<Page<Service>>('/api/services' + qs({ project, limit: 100000 })),
   vulns: (project?: string) => req<Page<Vuln>>('/api/vulns' + qs({ project, limit: 100000 })),
