@@ -250,6 +250,16 @@ export function TableGrid({
     },
     '& [role="cell"], & [role="columnheader"]': {
       display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden',
+      // One line, always. `overflow: hidden` says the cell clips, and
+      // a wrapping cell does not clip -- it GROWS, taking the row and
+      // every row beside it with it. `minHeight` on the row is a
+      // floor, not a height, so one long hostname in a flex column
+      // silently made every row in the table two lines tall.
+      //
+      // A cell that genuinely wants several lines sets its own
+      // `whiteSpace`; the expanded detail is not a cell at all and is
+      // styled by `.detail` below, so it is unaffected.
+      whiteSpace: 'nowrap',
       px: 1.25, py, fontSize: 12.5,
     },
     '& .tick': { display: 'flex', alignItems: 'center', justifyContent: 'center' },

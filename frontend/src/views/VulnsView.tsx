@@ -74,9 +74,14 @@ export function VulnsView({ project }: { project: string | null }) {
         <Box
           onClick={() => open(p.row.project_code, p.row.host)}
           sx={{
+            // Ellipsis like `title` below, which had it and this did
+            // not. A flex column holding names of very different
+            // lengths is exactly where a missing one shows.
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             color: neon.pink, textShadow: glow(neon.pink, 0.35), fontWeight: 600,
             cursor: 'pointer', '&:hover': { textShadow: glow(neon.pink, 1) },
           }}
+          title={String(p.value ?? '')}
         >{p.value}</Box>
       ),
     },
