@@ -124,8 +124,14 @@ export function DetectDomainsDialog({ project, onClose, seed = [], onQueued }: {
   // not offered a second time.
   const suggestions = useMemo(() => {
     const have = new Set(typed)
-    return (roots.data ?? []).map((r) => r.domain)
-      .filter((d) => d && !have.has(d.toLowerCase())).slice(0, 10)
+    return (roots.data ?? [])
+      .filter((r) => r.domain && !have.has(r.domain.toLowerCase()))
+      // Not yet enumerated first. The whole point of showing the
+      // state is that the work still owed is the work in reach, and
+      // a finished zone sorting above a waiting one is how an
+      // operator ends up clicking through the finished ones.
+      .sort((a, b) => Number(a.searched) - Number(b.searched))
+      .slice(0, 10)
   }, [roots.data, typed])
 
   const run = {
@@ -232,16 +238,29 @@ export function DetectDomainsDialog({ project, onClose, seed = [], onQueued }: {
                                 letterSpacing: '0.08em' }}>
                 ALREADY IN THIS PROJECT
               </Typography>
-              {suggestions.map((d) => (
-                <Chip key={d} size="small" clickable label={d}
-                  onClick={() => setDomain(domain.trim()
-                    ? `${domain.replace(/\s+$/, '')}\n${d}` : d)}
-                  sx={{ height: 20, fontSize: 10.5,
-                        fontFamily: `'Share Tech Mono', monospace`,
-                        color: neon.green,
-                        bgcolor: alpha(neon.green, 0.1),
-                        border: `1px solid ${alpha(neon.green, 0.4)}` }} />
-              ))}
+              {suggestions.map((r) => {
+                // Said plainly rather than by colour alone: "done" is
+                // a fact about the zone and the operator is deciding
+                // what still needs doing.
+                const c = r.searched ? neon.muted : neon.green
+                return (
+                  <Chip key={r.domain} size="small" clickable
+                    label={r.searched ? `${r.domain} · enumerated` : r.domain}
+                    title={r.searched
+                      ? 'amass has already walked this zone, or a task to '
+                        + 'walk it is already raised. Adding it again '
+                        + 're-runs it.'
+                      : 'not enumerated yet'}
+                    onClick={() => setDomain(domain.trim()
+                      ? `${domain.replace(/\s+$/, '')}\n${r.domain}`
+                      : r.domain)}
+                    sx={{ height: 20, fontSize: 10.5,
+                          fontFamily: `'Share Tech Mono', monospace`,
+                          color: c,
+                          bgcolor: alpha(c, 0.1),
+                          border: `1px solid ${alpha(c, 0.4)}` }} />
+                )
+              })}
             </Stack>
           )}
 
