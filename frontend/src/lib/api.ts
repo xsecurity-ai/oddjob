@@ -2358,11 +2358,19 @@ export const api = {
     warnings: string[]
   }>('/api/enumerate/merge-plan' + qs({ project, host, into })),
 
-  /** Fold one target into another. The destination survives. */
-  mergeTargets: (project: string, host: string, into: string) =>
+  /** Fold one target into another. The destination survives.
+   *
+   *  `keepName` is which of the two names the survivor carries, and
+   *  must be one of them — the server refuses a third. Omitted means
+   *  the destination's, which is what this call did before the choice
+   *  existed. The name not carried is kept as an alternate name, so
+   *  choosing moves a name rather than losing one. */
+  mergeTargets: (project: string, host: string, into: string,
+                 keepName?: string) =>
     req<{ ok: boolean; surviving: string; removed: string; summary: string }>(
       '/api/enumerate/merge' + qs({ project, host }),
-      { method: 'POST', body: JSON.stringify({ into, confirm: true }) }),
+      { method: 'POST',
+        body: JSON.stringify({ into, confirm: true, keep_name: keepName }) }),
 
   /** What deleting a project would destroy. Counted, not estimated. */
   deletionPreview: (project: string) => req<{

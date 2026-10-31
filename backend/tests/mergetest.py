@@ -259,5 +259,60 @@ st, _ = call("/api/enumerate/merge-plan?project=MRG"
              "&host=spare.acme.example&into=web.acme.example", token=rtok)
 check("but may look at what it would do", st == 200, f"status={st}")
 
+print("== the survivor's name is a choice, and neither name is lost ==")
+# A merge used to drop the source's name outright. Now the operator
+# picks which of the two the surviving row carries, so the one not
+# carried has to go somewhere -- otherwise choosing a name would be a
+# way to delete a hostname the estate really answered to.
+call("/api/targets?project=MRG", "POST", {"host": "old.acme.example"},
+     token=admin)
+call("/api/targets?project=MRG", "POST", {"host": "new.acme.example"},
+     token=admin)
+st, body = call("/api/enumerate/merge?project=MRG&host=old.acme.example",
+                "POST", {"into": "new.acme.example", "confirm": True,
+                         "keep_name": "old.acme.example"}, token=admin)
+check("a merge may carry the absorbed row's name", st == 200, f"{st} {body}")
+
+st, t = call("/api/targets/MRG/old.acme.example", token=admin)
+check("the survivor answers to the name that was chosen", st == 200,
+      f"status={st}")
+check("...and the absorbed row's name is gone as a row of its own",
+      call("/api/targets/MRG/new.acme.example", token=admin)[0] == 404)
+alts = json.dumps((t or {}).get("hostnames") or [])
+check("...while the name NOT carried is kept as an alternate",
+      "new.acme.example" in alts, alts)
+
+st, tl = call("/api/targets/MRG/old.acme.example/timeline", token=admin)
+_ev = tl if isinstance(tl, list) else (tl or {}).get("items", [])
+check("the rename is on the timeline, not only the merge",
+      "old.acme.example" in json.dumps(_ev), json.dumps(_ev)[:200])
+
+# The default is unchanged, because every caller before this field
+# got the destination's name and the automatic reverse-DNS merge
+# still does.
+call("/api/targets?project=MRG", "POST", {"host": "a1.acme.example"},
+     token=admin)
+call("/api/targets?project=MRG", "POST", {"host": "b1.acme.example"},
+     token=admin)
+call("/api/enumerate/merge?project=MRG&host=a1.acme.example", "POST",
+     {"into": "b1.acme.example", "confirm": True}, token=admin)
+check("omitting the choice keeps the destination's name",
+      call("/api/targets/MRG/b1.acme.example", token=admin)[0] == 200)
+
+# A third name is refused rather than ignored. Quietly substituting
+# the destination's would leave a caller that typo'd a name believing
+# it had renamed the row.
+call("/api/targets?project=MRG", "POST", {"host": "a2.acme.example"},
+     token=admin)
+call("/api/targets?project=MRG", "POST", {"host": "b2.acme.example"},
+     token=admin)
+st, body = call("/api/enumerate/merge?project=MRG&host=a2.acme.example",
+                "POST", {"into": "b2.acme.example", "confirm": True,
+                         "keep_name": "somewhere.else.example"}, token=admin)
+check("a name that is neither of the two is refused", st == 422, f"{st} {body}")
+check("...and both rows are still there",
+      call("/api/targets/MRG/a2.acme.example", token=admin)[0] == 200
+      and call("/api/targets/MRG/b2.acme.example", token=admin)[0] == 200)
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
