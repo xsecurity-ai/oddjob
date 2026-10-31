@@ -301,6 +301,48 @@ check("the gap report agrees with what the planner can reach",
       sum(x.outstanding for x in _au.gaps(_st)) == len(plan(_st)),
       [(x.policy, x.outstanding) for x in _au.gaps(_st)])
 
+
+# ------------------------------- an address is not owed a forward lookup
+# `plan` has always excluded an address-named target from `nslookup`:
+# there is nothing to forward-resolve about 198.51.100.10, and asking a
+# resolver for the A record of an A record is not a lookup anyone wants.
+# `gaps` derived the same list separately and did not exclude it, so a
+# project reported "hostname(s) with no address recorded" for rows the
+# planner would never propose -- 348 of them on one engagement, a
+# backlog no cycle could ever clear. One derivation now, in `resolvable`.
+ADDRS = [("198.51.100.10", False), ("198.51.100.11", False),
+         ("real.acme.example", False)]
+g = {x.policy: x.outstanding
+     for x in _au.gaps(Snapshot(auto_resolve_ips=True, targets=ADDRS))}
+check("the report owes a lookup for the name, not the two addresses",
+      g.get("auto_resolve_ips") == 1, g)
+check("...which is exactly what the planner proposes",
+      [c.subject for c in plan(Snapshot(auto_resolve_ips=True,
+                                        targets=ADDRS))
+       if c.kind == "nslookup"] == ["real.acme.example"])
+
+# A seeded crawl is only as cleared as its least-cleared seed, because
+# `run_once` gates every address a task will touch and the seeds ride
+# in `targets`. Gating the origin alone proposed candidates the gate
+# then refused on a seed -- the same starvation in miniature.
+SEEDGATE = ScopeIndex([classify("ok.acme.example")])
+seeded = Snapshot(
+    auto_web="crawl", scope=SEEDGATE,
+    web_urls={"https://ok.acme.example/"},
+    seeds={"https://ok.acme.example/": ["https://ok.acme.example/a",
+                                        "https://nope.acme.example/b"]})
+check("a seeded crawl carrying an out-of-scope seed is not proposed",
+      not [c for c in plan(seeded) if c.policy == "auto_web_seeded"],
+      [(c.kind, c.subject, c.policy) for c in plan(seeded)])
+
+ok_seeded = Snapshot(
+    auto_web="crawl", scope=SEEDGATE,
+    web_urls={"https://ok.acme.example/"},
+    seeds={"https://ok.acme.example/": ["https://ok.acme.example/a"]})
+check("...and one whose seeds are all in scope still is",
+      [c for c in plan(ok_seeded) if c.policy == "auto_web_seeded"],
+      [(c.kind, c.subject, c.policy) for c in plan(ok_seeded)])
+
 # Deliberately NOT filtered: a bucket usually has an address, and
 # dropping it from a port scan would leave a real asset uncovered. It
 # is the NAME that is unusable, not the asset.
