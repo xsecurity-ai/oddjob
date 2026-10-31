@@ -18,14 +18,30 @@ import { neon, glow } from '../theme'
  * list is the only thing that tells you whether this is the merge you
  * meant.
  */
-export function MergeTargetsDialog({ project, source, candidates, onClose }: {
+export function MergeTargetsDialog({ project, source, candidates, onClose,
+                                    onMerged }: {
   project: string
   /** The target that will be absorbed and removed. */
   source: Target
-  candidates: Target[]
+  /** Every target that could be merged into, when the caller already
+   *  holds the list. Omitted, the dialog fetches it on the same query
+   *  key the targets view uses, so opening this from somewhere with no
+   *  list -- the target window -- costs nothing where there is one and
+   *  one fetch where there is not. */
+  candidates?: Target[]
   onClose: () => void
+  /** The merge happened. The source row is GONE, so a caller showing
+   *  it has to do something about that -- the target window closes
+   *  rather than sitting on a 404. */
+  onMerged?: (survivingHost: string) => void
 }) {
   const qc = useQueryClient()
+  const fetched = useQuery({
+    queryKey: ['targets', project],
+    queryFn: () => api.targets(project),
+    enabled: !candidates,
+  })
+  const options = candidates ?? fetched.data?.items ?? []
   const [into, setInto] = useState<Target | null>(null)
   // Which name the surviving row carries. Defaults to the
   // destination's, which is what a merge did before the choice
@@ -43,7 +59,17 @@ export function MergeTargetsDialog({ project, source, candidates, onClose }: {
   const run = useMutation({
     mutationFn: () => api.mergeTargets(project, source.host, into!.host,
                                        keeping ?? undefined),
-    onSuccess: async () => { await qc.invalidateQueries(); onClose() },
+    onSuccess: async (res) => {
+      // The SERVER's answer for what the row ended up called, not a
+      // recomputation of it here. The rename happens after the source
+      // row is deleted and the route reports the name the survivor
+      // actually carries; deriving it a second time in the client is
+      // the two-readings mistake this codebase keeps paying for.
+      const survivor = res?.surviving ?? keeping ?? into!.host
+      await qc.invalidateQueries()
+      onMerged?.(survivor)
+      onClose()
+    },
   })
 
   const p = plan.data
@@ -71,7 +97,8 @@ export function MergeTargetsDialog({ project, source, candidates, onClose }: {
         </Typography>
 
         <Autocomplete
-          options={candidates.filter((t) => t.host !== source.host)}
+          loading={fetched.isLoading}
+          options={options.filter((t) => t.host !== source.host)}
           getOptionLabel={(t) => t.host}
           value={into}
           onChange={(_e, v) => setInto(v)}
