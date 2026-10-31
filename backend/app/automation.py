@@ -98,6 +98,7 @@ from .models import (
     Vuln,
 )
 from .roots import enumerable_roots
+from .scope import ScopeIndex
 from .scopegate import as_host, index_for
 from .tasking import outstanding_subjects, tasked_subjects
 from .webtargets import WEB_KINDS, crawl_seeds, discoverable
@@ -327,6 +328,15 @@ class Snapshot:
     #: vendor ever had, and a confirmation run built from that is the
     #: unfiltered scan this avoids.
     suspected: dict[str, list[str]] = field(default_factory=dict)
+    #: The project's scope gate. `gaps` and `plan`'s caller both ask
+    #: it, so what is reported outstanding and what actually gets
+    #: queued cannot disagree -- see `cleared`.
+    #:
+    #: None means there is no gate to ask and everything passes, which
+    #: is what a Snapshot built by hand in a test wants. It does NOT
+    #: mean "a project with an empty scope document": an empty
+    #: `ScopeIndex` answers that case for itself, and differently.
+    scope: ScopeIndex | None = None
     #: {origin: [url, ...]} -- paths content discovery found that no
     #: crawl has started from. See `webtargets.crawl_seeds`, which
     #: explains at length why this one source is allowed to point a
@@ -409,6 +419,37 @@ class Gap:
     outstanding: int
 
 
+def cleared(idx: ScopeIndex | None, kind: str, subject: str) -> bool:
+    """Would the scope gate let a task of this kind at this subject in?
+
+    One implementation, asked by both `gaps` and `run_once`, because
+    they used to answer differently: `run_once` consulted the gate and
+    the gap report did not. A project whose scope is narrower than its
+    target list then reports a backlog that can never be worked off,
+    and the operator with the toggle on goes and runs it by hand --
+    which is the exact complaint this function exists to end, and the
+    third time this file has been bitten by two readings of one
+    question (`tasked_subjects`, `enumerable_roots`, now this).
+
+    It is not a small discrepancy. One engagement reported 3,827
+    outstanding items across nine policies; the gate allowed none of
+    them. The standing orders had in fact finished every host they
+    were permitted to touch, and no surface could say so.
+
+    A zone handed to amass is asked `check_zone`; everything else is a
+    host something will be done TO, and gets `check`. The two disagree
+    on exactly one input -- the apex of a wildcard -- and collapsing
+    them would let a standing order queue a scan at a host the
+    wildcard never covered. `as_host` because a web subject is a URL
+    and the scope document names hosts.
+    """
+    if idx is None:
+        return True
+    if kind == "amass":
+        return idx.check_zone(subject).allowed
+    return idx.check(as_host(subject) or subject).allowed
+
+
 def gaps(s: Snapshot) -> list[Gap]:
     """What the policies that are ON have still not done.
 
@@ -417,15 +458,18 @@ def gaps(s: Snapshot) -> list[Gap]:
     done", and the only honest answer is derived from the estate
     rather than from whether the worker ran.
 
-    Reads `effective`, the same resolution `plan` uses. Two readings
-    of what a project asked for is how they come to differ, and a
-    gap report that disagreed with the planner would be worse than
-    none: it would be a clean bill of health for work nobody did.
+    Reads `effective`, the same resolution `plan` uses, and `cleared`,
+    the same gate `run_once` applies. Two readings of what a project
+    asked for is how they come to differ, and a gap report that
+    disagreed with the planner would be worse than none: it would be
+    a clean bill of health for work nobody did -- or, as it actually
+    shipped, a permanent backlog of work nobody is allowed to do.
 
     An empty list means every policy that is on has nothing
-    outstanding. It does NOT mean the estate is fully enumerated --
-    a policy that is off has no gap by definition, which is why the
-    report names the policy and not just the number.
+    outstanding that the project is permitted to touch. It does NOT
+    mean the estate is fully enumerated -- a policy that is off has no
+    gap by definition, which is why the report names the policy and
+    not just the number.
     """
     s = effective(s)
     out: list[Gap] = []
@@ -438,34 +482,38 @@ def gaps(s: Snapshot) -> list[Gap]:
         add("auto_poc",
             f"finding(s) at {s.auto_poc} or worse with no proof",
             s.poc_backlog)
+    # Every count below is filtered by the gate as well as by what
+    # has been tasked, because a subject the gate refuses is not work
+    # outstanding -- it is work that will never happen, and reporting
+    # it as a gap is how an operator ends up doing by hand what the
+    # automation was right to leave alone. See `cleared`.
+    def owed(kind: str, subjects) -> int:
+        return len([x for x in subjects
+                    if (kind, x.lower()) not in s.tasked
+                    and cleared(s.scope, kind, x)])
+
     if s.auto_amass:
-        zones = {z for z in s.scope_zones if z} - s.searched
         add("auto_amass", "in-scope zone(s) never handed to amass",
-            len(zones))
+            len([z for z in {z for z in s.scope_zones if z} - s.searched
+                 if cleared(s.scope, "amass", z)]))
     if s.auto_resolve_ips:
         add("auto_resolve_ips", "hostname(s) with no address recorded",
-            len([h for h, has in name_subjects(s)
-                 if not has and ("nslookup", h.lower()) not in s.tasked]))
+            owed("nslookup", [h for h, has in name_subjects(s) if not has]))
     if s.auto_reverse_dns:
         add("auto_reverse_dns", "address(es) with no reverse lookup",
-            len([a for a in s.addresses
-                 if ("reverse_ip", a.lower()) not in s.tasked]))
+            owed("reverse_ip", s.addresses))
     if s.auto_nmap != "off":
         add("auto_nmap", "host(s) never port scanned",
-            len([h for h, _ in s.targets
-                 if ("nmap", h.lower()) not in s.tasked]))
+            owed("nmap", [h for h, _ in s.targets]))
     for flag, kind, label in (
             (s.auto_vhost, "vhost", "URL(s) never asked for virtual hosts"),
             (s.auto_httpx, "httpx", "URL(s) never probed")):
         if flag:
-            add(f"auto_{kind}", label,
-                len([u for u in s.web_urls
-                     if (kind, u.lower()) not in s.tasked]))
+            add(f"auto_{kind}", label, owed(kind, s.web_urls))
     if s.auto_web in WEB_KINDS:
         for kind in WEB_KINDS[s.auto_web]:
             add("auto_web", f"URL(s) with no {kind} run",
-                len([u for u in s.web_urls
-                     if (kind, u.lower()) not in s.tasked]))
+                owed(kind, s.web_urls))
     if s.auto_nuclei in NUCLEI_KINDS:
         for kind in NUCLEI_KINDS[s.auto_nuclei]:
             # `nuclei_confirm` is owed only where a version was
@@ -475,7 +523,7 @@ def gaps(s: Snapshot) -> list[Gap]:
             pool = (set(s.suspected) if kind == "nuclei_confirm"
                     else s.web_urls)
             add("auto_nuclei", f"URL(s) with no {kind} run",
-                len([u for u in pool if (kind, u.lower()) not in s.tasked]))
+                owed(kind, pool))
     return out
 
 
@@ -840,7 +888,10 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
         targets=targets, not_dns_named=not_dns_named, addresses=addresses,
         searched=searched, tasked=tasked,
         scope_zones=scope_zones, web_urls=web_urls, seeds=seeds,
-        suspected=suspected)
+        suspected=suspected,
+        # Loaded here with the rest of the estate so `gaps` can ask it
+        # without a session, and so `run_once` does not load it twice.
+        scope=await index_for(session, pr.id))
 
 
 async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
@@ -881,7 +932,11 @@ async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
     if live is None:
         return {}
 
-    idx = await index_for(session, pr.id)
+    # The gate the snapshot already loaded. One per cycle, and the
+    # same object `gaps` answered from, so the report an operator
+    # reads and the decision made here come from one list.
+    idx = snap.scope if snap.scope is not None else await index_for(
+        session, pr.id)
     # The same floor the queueing path enforces, for the same reason.
     # `plan()` filters on what has ever been tasked and that filter
     # was once wrong by a lowercase; this makes a second outstanding
@@ -905,24 +960,16 @@ async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
                  else [str(x) for x in (c.args.get("targets") or [c.subject])])
         if any((c.kind, a.lower()) in in_flight for a in aimed):
             continue
-        # A zone handed to amass is asked `check_zone`; everything else
-        # is a host something will be done TO, and gets `check`. The two
-        # disagree on exactly one input -- the apex of a wildcard -- and
-        # collapsing them would let a standing order queue a scan at a
-        # host the wildcard never covered, with nobody watching.
-        # `as_host` on the else branch: a web candidate's subject is a
-        # URL, and the scope document names hosts, so `check` on the
-        # raw string matched nothing and refused every web candidate
-        # silently -- refusals here are deliberately not logged per
-        # candidate, so auto_web queued nothing and said nothing.
+        # `cleared` holds which question each kind is asked and why.
+        # It is shared with the gap report so the two cannot drift.
         if c.kind == "amass":
-            allowed = idx.check_zone(c.subject).allowed
+            allowed = cleared(idx, "amass", c.subject)
         else:
             # EVERY aimed address, not just the first. A task that
             # carries several is only as cleared as its least-cleared
             # entry, and "the subject passed" would be a gate that
             # checks one URL and scans twenty-five.
-            allowed = all(idx.check(as_host(a) or a).allowed for a in aimed)
+            allowed = all(cleared(idx, c.kind, a) for a in aimed)
         if not allowed:
             # Not an error and not logged per candidate: a project whose
             # scope is narrower than its target list refuses the same

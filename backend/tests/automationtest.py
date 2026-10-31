@@ -172,6 +172,76 @@ g = {x.policy: x.outstanding
 check("the gap report counts the one host, not the two cloud ids",
       g.get("auto_resolve_ips") == 1, g)
 
+# ------------------------------------------------- the gate, in the report
+# A gap the scope gate refuses is not a gap.
+#
+# This is the one that sent an operator to do the automation's job by
+# hand. `run_once` has always consulted the gate; `gaps` did not. So a
+# project whose scope is narrower than its target list reported a
+# backlog it could never work off: the toggle was on, the report said
+# thousands outstanding, and every cycle correctly queued none of it.
+# The operator reasonably concluded the automation was broken and went
+# and ran it themselves. One engagement showed 3,827 outstanding
+# across nine policies with the gate allowing exactly zero.
+from app.scope import ScopeIndex, classify  # noqa: E402
+
+SCOPED = ScopeIndex([classify("in.acme.example"),
+                     classify("!out.acme.example")])
+BOTH = [("in.acme.example", True), ("out.acme.example", True)]
+
+g = {x.policy: x.outstanding
+     for x in _au.gaps(Snapshot(auto_nmap="full", targets=BOTH))}
+check("with no gate to ask, both hosts are outstanding",
+      g.get("auto_nmap") == 2, g)
+
+g = {x.policy: x.outstanding
+     for x in _au.gaps(Snapshot(auto_nmap="full", targets=BOTH,
+                                scope=SCOPED))}
+check("the host the gate refuses is not reported as a gap",
+      g.get("auto_nmap") == 1, g)
+
+# The shape the engagement was actually in. The honest report is
+# silence, not a policy that can never be satisfied.
+check("a policy whose every subject is refused reports no gap at all",
+      not _au.gaps(Snapshot(auto_nmap="full",
+                            targets=[("out.acme.example", True)],
+                            scope=SCOPED)))
+
+# amass is asked `check_zone` and everything else `check`, here as in
+# the planner -- the two disagree on the apex of a wildcard, which is
+# the entry most likely to be the thing being enumerated.
+ZONE = ScopeIndex([classify("*.acme.example")])
+check("the apex of an in-scope wildcard is still a gap",
+      [x for x in _au.gaps(Snapshot(auto_amass=True,
+                                    scope_zones={"acme.example"},
+                                    scope=ZONE))
+       if x.policy == "auto_amass"])
+check("...and a zone nobody authorised is not",
+      not [x for x in _au.gaps(Snapshot(auto_amass=True,
+                                        scope_zones={"other.example"},
+                                        scope=ZONE))
+           if x.policy == "auto_amass"])
+
+# The property rather than the examples: what the report calls
+# outstanding is exactly what the planner would queue. Disagreeing in
+# either direction is the bug -- a phantom backlog on one side, a
+# clean bill of health for unqueued work on the other.
+for _s in (Snapshot(auto_nmap="full", targets=BOTH, scope=SCOPED),
+           Snapshot(auto_nmap="full", targets=BOTH),
+           Snapshot(auto_resolve_ips=True, targets=BOTH, scope=SCOPED)):
+    _queued = len([c for c in plan(_s)
+                   if _au.cleared(_s.scope, c.kind, c.subject)])
+    check("the gap report and the gated plan agree on the total",
+          sum(x.outstanding for x in _au.gaps(_s)) == _queued,
+          f"gaps={[(x.policy, x.outstanding) for x in _au.gaps(_s)]} "
+          f"plan={_queued}")
+
+# A Snapshot built by hand has no gate, and that must not be read as
+# "an empty scope document refuses everything" -- which would make the
+# report silent on a project nobody has scoped yet.
+check("no gate means no filtering, not everything refused",
+      _au.cleared(None, "nmap", "anything.acme.example"))
+
 # Deliberately NOT filtered: a bucket usually has an address, and
 # dropping it from a port scan would leave a real asset uncovered. It
 # is the NAME that is unusable, not the asset.

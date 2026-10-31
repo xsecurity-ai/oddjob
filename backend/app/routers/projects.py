@@ -1111,9 +1111,13 @@ async def standing_order_gaps(
     rather than from whether the worker ran.
 
     An empty list means every policy that is on has nothing
-    outstanding. It does NOT mean the estate is fully enumerated: a
-    policy that is off has no gap by definition, which is why each
-    entry names its policy and not just a number.
+    outstanding THAT THIS PROJECT MAY TOUCH. It does NOT mean the
+    estate is fully enumerated: a policy that is off has no gap by
+    definition, and a subject the scope gate refuses is not a gap
+    either, because no cycle will ever queue it. Counting those was
+    a backlog that could not be worked off, and an operator with the
+    toggle on went and ran it by hand. Which is why each entry names
+    its policy and not just a number.
     """
     from ..automation import gaps, snapshot
     return [GapOut(policy=g.policy, what=g.what, outstanding=g.outstanding)
