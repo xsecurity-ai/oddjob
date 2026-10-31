@@ -221,7 +221,7 @@ function GapReport({ project }: { project: string }) {
     return (
       <Box sx={{ fontSize: 11.5, color: neon.green, pb: 1 }}>
         Nothing outstanding — every policy that is on has been applied to
-        everything it covers.
+        everything the scope list allows it to touch.
       </Box>
     )
   }

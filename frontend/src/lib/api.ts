@@ -2433,9 +2433,11 @@ export const api = {
 
   /** What the standing orders that are ON have still not done.
    *
-   *  An empty list means nothing is outstanding. It does NOT mean the
-   *  estate is fully enumerated — a policy that is off has no gap by
-   *  definition, which is why each entry names its policy. */
+   *  An empty list means nothing is outstanding that the project is
+   *  permitted to touch. It does NOT mean the estate is fully
+   *  enumerated — a policy that is off has no gap by definition, and a
+   *  host the scope gate refuses is not a gap because no cycle will
+   *  ever queue it. Which is why each entry names its policy. */
   standingOrderGaps: (project: string) =>
     req<{ policy: string; what: string; outstanding: number }[]>(
       `/api/projects/${encodeURIComponent(project)}/standing-orders/gaps`),
