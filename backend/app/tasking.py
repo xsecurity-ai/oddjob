@@ -18,16 +18,45 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import AgentTask
 
+#: Statuses that mean no agent ever took the task, so nothing was sent.
+#:
+#: `cancelled` only. A task is cancelled while queued and never after:
+#: the UI's delete refuses anything past `queued` and says why, and
+#: killing an agent marks its work `failed`, not this. So this is the
+#: one status that proves the client saw no traffic.
+#:
+#: `failed` is deliberately NOT here. It covers a scan that ran and
+#: errored as well as one refused at dispatch, and re-running the
+#: first against a client because the second shares its status is the
+#: worse mistake of the two.
+NEVER_SENT = ("cancelled",)
+
 
 async def tasked_subjects(
         session: AsyncSession, project_id: int,
         kinds: tuple[str, ...]) -> set[tuple[str, str]]:
-    """Every (kind, subject) this project has ever tasked.
+    """Every (kind, subject) this project has ever really tasked.
 
-    "Ever", including failed and cancelled: the question both callers
-    ask is whether the work was ATTEMPTED, not whether it succeeded.
-    A scan that ran and found nothing has still been run, and the
-    packets still went to the client.
+    "Ever", including FAILED: the question both callers ask is whether
+    the work was ATTEMPTED, not whether it succeeded. A scan that ran
+    and found nothing has still been run, and the packets still went
+    to the client.
+
+    Cancelled is the other answer, and it used to be counted here as
+    though it were the same thing. It is not: a task is only ever
+    cancelled while it is still queued -- nothing in this codebase
+    moves a claimed task to `cancelled`, and the UI refuses to delete
+    one -- so no agent ever took it and nothing was sent anywhere. By
+    this docstring's own test it was not attempted, and marking its
+    subject done retires it permanently: a standing order will never
+    propose it again, because the only record of it is the proof that
+    it must not be repeated.
+
+    That is not theoretical. One engagement had 54,147 subjects whose
+    every task had been cancelled, 4,982 of them in scope and never
+    scanned, left behind by a queue cleanup. The operator with the
+    toggle on found them by hand, which is the thing these two
+    callers exist to make unnecessary.
 
     `args` is JSON, so it is parsed here rather than matched in SQL --
     a LIKE against a serialised blob would match `a.example` inside
@@ -42,7 +71,8 @@ async def tasked_subjects(
     for kind, raw in (await session.execute(
             select(AgentTask.kind, AgentTask.args).where(
                 AgentTask.project_id == project_id,
-                AgentTask.kind.in_(kinds)))).all():
+                AgentTask.kind.in_(kinds),
+                AgentTask.status.notin_(NEVER_SENT)))).all():
         try:
             a = json.loads(raw or "{}")
         except ValueError:
