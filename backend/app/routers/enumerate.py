@@ -1058,6 +1058,17 @@ async def _add_leads(session: AsyncSession, pr: Project, user: User | None,
 class MergeIn(BaseModel):
     #: The target that will survive, named as the inventory names it.
     into: str
+    #: Which of the two names the survivor carries. One of them, or
+    #: None for the destination's -- which is what every caller before
+    #: this field got, so leaving it out keeps the old behaviour.
+    #:
+    #: Not free text. A merge may move a name between rows; it may not
+    #: invent a third one, because a name nobody has put in scope is a
+    #: host nobody authorised and this is not the route that decides
+    #: that. Refused at the edge rather than quietly ignored, so a
+    #: caller that typo'd a name is told instead of silently getting
+    #: the other one.
+    keep_name: str | None = None
     #: Refuse unless the caller has seen a plan. Merging moves findings
     #: and deletes a row; approving a verb is not the same as approving
     #: a list of consequences.
@@ -1083,8 +1094,14 @@ async def merge_targets(body: MergeIn, host: str = Query(...),
                         session: AsyncSession = Depends(get_session)):
     """Fold one target into another.
 
-    The destination survives and keeps its name. Everything the source
-    holds moves to it, and the source row goes.
+    The destination survives. Everything the source holds moves to it,
+    and the source row goes.
+
+    By default the survivor keeps its own name. `keep_name` may name
+    the source's instead, in which case the survivor is renamed once
+    the source row is gone. Either way both names are kept -- the one
+    not carried becomes an alternate name on the survivor, so choosing
+    is moving a name rather than losing one.
 
     Both sides get a timeline entry — the destination because it has
     absorbed another host's findings and that is material to anyone
@@ -1093,6 +1110,12 @@ async def merge_targets(body: MergeIn, host: str = Query(...),
     the question someone will have in three weeks.
     """
     src, dst = await _two(session, pr, host, body.into)
+    if body.keep_name is not None and body.keep_name.strip().lower() not in (
+            src.host.strip().lower(), dst.host.strip().lower()):
+        raise HTTPException(
+            422, f"keep_name must be {src.host!r} or {dst.host!r}. A merge "
+                 f"can move a name between these two rows; it cannot give "
+                 f"the survivor a name that is not one of them.")
     p = await merge_mod.plan(session, src, dst)
     blocking = [w for w in p.warnings
                 if w.startswith(("a target cannot", "these targets are"))]
@@ -1104,7 +1127,8 @@ async def merge_targets(body: MergeIn, host: str = Query(...),
                  "/api/enumerate/merge-plan, show it, and repeat with "
                  "confirm=true.")
 
-    done = await merge_mod.merge(session, src, dst, actor=user.username)
+    done = await merge_mod.merge(session, src, dst, actor=user.username,
+                                 keep_name=body.keep_name)
     summary = merge_mod.describe(done)
     await record(session, dst.id, "change", summary.split("\n")[0],
                  detail=summary, actor=user, source="merge")

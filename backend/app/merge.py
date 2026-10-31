@@ -25,6 +25,7 @@ not a verb.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 from sqlalchemy import func, select, update
@@ -48,6 +49,11 @@ class Plan:
     """What a merge would do. Produced without writing anything."""
     source: str
     destination: str
+    #: The name the survivor ended up carrying, when it is not the one
+    #: it had. Set by `merge`, never by `plan` -- the plan describes
+    #: what moves, and which name is kept is the operator's choice
+    #: made alongside it rather than a consequence of it.
+    renamed_to: str | None = None
     #: Rows that simply move.
     services_moved: int = 0
     vulns_moved: int = 0
@@ -88,6 +94,20 @@ class Plan:
 #: already had, and now means the host has both. See `_addresses`.
 CARRY = ("os", "os_accuracy", "mac_address", "mac_vendor",
          "provider", "notes", "tags")
+
+
+def alt_names(t: Target) -> set[str]:
+    """The alternate names recorded against a row, lowercased.
+
+    Tolerant of the column holding something other than a list: it is
+    free-form JSON written by several importers, and a merge is the
+    wrong place to start failing over a malformed one.
+    """
+    try:
+        v = json.loads(t.hostnames or "[]")
+    except (TypeError, ValueError):
+        return set()
+    return {str(x).strip().lower() for x in v if x} if isinstance(v, list) else set()
 
 
 def _source_addresses(src: Target) -> list[str]:
@@ -189,10 +209,17 @@ async def plan(session: AsyncSession, src: Target, dst: Target) -> Plan:
 
 
 async def merge(session: AsyncSession, src: Target, dst: Target,
-                actor: str) -> Plan:
+                actor: str, keep_name: str | None = None) -> Plan:
     """Fold `src` into `dst` and delete it. Caller commits.
 
     Returns the same Plan shape, now describing what was actually done.
+
+    `keep_name` is which of the two names the surviving row carries.
+    It must be one of them -- anything else is ignored in favour of
+    the destination's, because a merge is not a rename to a third
+    name nobody has authorised. Both names are kept either way: the
+    one not carried becomes an alternate name on the survivor, so
+    choosing a name moves it rather than losing it.
     """
     p = await plan(session, src, dst)
     if any(w.startswith(("a target cannot", "these targets are")) for w in p.warnings):
@@ -288,7 +315,36 @@ async def merge(session: AsyncSession, src: Target, dst: Target,
     if dst.alive is None and src.alive is not None:
         dst.alive = src.alive
 
+    # Both names survive, whichever one the row carries.
+    #
+    # A merge used to drop the source's name outright unless it
+    # happened to be an address. It is a name the estate really
+    # answered to and the survivor is the only row left that can
+    # record it, so it joins the DNS and TLS names in `hostnames`.
+    # That matters more now the operator can choose which name the
+    # row carries: without it, choosing would be the difference
+    # between renaming a host and losing one.
+    chosen = (keep_name or "").strip().lower()
+    if chosen not in (src.host.lower(), dst.host.lower()):
+        chosen = dst.host.lower()
+    names = alt_names(dst) | alt_names(src)
+    names |= {src.host.strip().lower(), dst.host.strip().lower()}
+    names.discard(chosen)
+    names.discard("")
+    dst.hostnames = json.dumps(sorted(names))
+
+    # The row goes first and the rename follows it.
+    #
+    # (project_id, host) is unique, and the name being adopted is the
+    # one still held by the row being deleted -- so renaming before
+    # the DELETE reaches the database violates the constraint. Not a
+    # scope decision: both names are already targets of this project
+    # and were cleared when they were created.
     await session.delete(src)
+    await session.flush()
+    if chosen != dst.host.strip().lower():
+        p.renamed_to = chosen
+        dst.host = chosen
     return p
 
 
@@ -314,6 +370,13 @@ def describe(p: Plan) -> str:
                        f"{n} {w}{'' if n == 1 else 's'}"
                        for n, w in ((p.vulns_moved, "finding"),
                                     (p.pocs_moved, "PoC")) if n))
+    # On the first line too. The row a reader is looking at is no
+    # longer called what the merge entry says it is called, and
+    # leaving them to work that out from two names in one sentence is
+    # how a timeline stops being an account of what happened.
+    if p.renamed_to:
+        out[0] += (f", and {p.destination} now goes by {p.renamed_to} — "
+                   f"{p.destination} is kept as an alternate name")
     if p.addresses_gained:
         out.append("addresses added: " + ", ".join(p.addresses_gained))
     if p.service_conflicts:

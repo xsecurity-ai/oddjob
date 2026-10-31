@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import {
   Alert, Autocomplete, Box, Button, Chip, CircularProgress, Dialog,
-  DialogActions, DialogContent, DialogTitle, Divider, Stack, TextField,
-  Typography, alpha,
+  DialogActions, DialogContent, DialogTitle, Divider, FormControlLabel,
+  Radio, RadioGroup, Stack, TextField, Typography, alpha,
 } from '@mui/material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Target } from '../lib/api'
@@ -27,6 +27,12 @@ export function MergeTargetsDialog({ project, source, candidates, onClose }: {
 }) {
   const qc = useQueryClient()
   const [into, setInto] = useState<Target | null>(null)
+  // Which name the surviving row carries. Defaults to the
+  // destination's, which is what a merge did before the choice
+  // existed, so the quick path is unchanged for anyone not
+  // interested in it.
+  const [keep, setKeep] = useState<string | null>(null)
+  const keeping = keep ?? into?.host ?? null
 
   const plan = useQuery({
     queryKey: ['merge-plan', project, source.host, into?.host],
@@ -35,7 +41,8 @@ export function MergeTargetsDialog({ project, source, candidates, onClose }: {
   })
 
   const run = useMutation({
-    mutationFn: () => api.mergeTargets(project, source.host, into!.host),
+    mutationFn: () => api.mergeTargets(project, source.host, into!.host,
+                                       keeping ?? undefined),
     onSuccess: async () => { await qc.invalidateQueries(); onClose() },
   })
 
@@ -58,8 +65,9 @@ export function MergeTargetsDialog({ project, source, candidates, onClose }: {
       <DialogContent>
         <Typography variant="body2" sx={{ color: neon.muted, mb: 2 }}>
           Everything <strong>{source.host}</strong> holds moves to the target
-          you pick, and {source.host} is removed. The one you pick keeps its
-          name.
+          you pick, and the {source.host} row is removed. You choose which of
+          the two names the surviving row carries — the other is kept on it as
+          an alternate name, so nothing stops answering to what it answered to.
         </Typography>
 
         <Autocomplete
@@ -67,11 +75,50 @@ export function MergeTargetsDialog({ project, source, candidates, onClose }: {
           getOptionLabel={(t) => t.host}
           value={into}
           onChange={(_e, v) => setInto(v)}
+          onInputChange={(_e, _v, reason) => {
+            // A new destination makes the old name choice meaningless.
+            // Clearing it rather than carrying it over: a stale
+            // `keep` pointing at a row no longer in the merge is the
+            // kind of thing that silently renames the wrong host.
+            if (reason !== 'reset') setKeep(null)
+          }}
           renderInput={(params) => (
             <TextField {...params} size="small" label="Merge into" autoFocus
-              helperText="This one survives." />
+              helperText="This row survives and absorbs the other." />
           )}
         />
+
+        {into && (
+          <Box sx={{ mt: 2 }}>
+            <Typography variant="overline" sx={{ color: neon.cyan }}>
+              What the surviving row is called
+            </Typography>
+            <RadioGroup value={keeping ?? ''}
+              onChange={(e) => setKeep(e.target.value)}>
+              {[into.host, source.host].map((h) => (
+                <FormControlLabel key={h} value={h}
+                  control={<Radio size="small" sx={{ color: neon.muted,
+                                 '&.Mui-checked': { color: neon.green } }} />}
+                  label={
+                    <Typography sx={{ fontSize: 12.5,
+                                      fontFamily: `'Share Tech Mono', monospace`,
+                                      color: keeping === h ? neon.green
+                                                           : neon.muted }}>
+                      {h}
+                      <Box component="span" sx={{ fontSize: 10.5,
+                                                  color: neon.muted,
+                                                  ml: 1,
+                                                  fontFamily: 'inherit' }}>
+                        {h === into.host
+                          ? "the row that survives — its own name"
+                          : "the absorbed row's name, moved onto the survivor"}
+                      </Box>
+                    </Typography>
+                  } />
+              ))}
+            </RadioGroup>
+          </Box>
+        )}
 
         {plan.isFetching && (
           <Stack
@@ -161,7 +208,7 @@ export function MergeTargetsDialog({ project, source, candidates, onClose }: {
                   )}
                   {p.fields_differing.length > 0 && (
                     <div>
-                      Differs, {into?.host} keeps its own:{' '}
+                      Differs, the surviving row keeps its own:{' '}
                       {p.fields_differing.join('; ')} — the other value goes
                       on the timeline.
                     </div>
@@ -183,7 +230,8 @@ export function MergeTargetsDialog({ project, source, candidates, onClose }: {
           disabled={!p || blocking.length > 0 || run.isPending || plan.isFetching}
           onClick={() => run.mutate()}
           sx={{ color: neon.red }}>
-          {run.isPending ? 'Merging…' : `Merge into ${into?.host ?? '…'}`}
+          {run.isPending ? 'Merging…'
+            : keeping ? `Merge, keeping ${keeping}` : 'Merge'}
         </Button>
       </DialogActions>
     </Dialog>
