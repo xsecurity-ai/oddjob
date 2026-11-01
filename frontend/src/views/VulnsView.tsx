@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Box, Chip, MenuItem, Select, Stack, Tab, Tabs, TextField, alpha } from '@mui/material'
 import type { ColumnDef } from '../lib/columns'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, SEVERITY_RANK, type Vuln } from '../lib/api'
+import { api, type Vuln } from '../lib/api'
 import { DataTable } from '../components/DataTable'
 import { ImportReportButton } from '../components/ImportReportButton'
 import { useHostModal } from '../components/HostModal'
@@ -11,9 +11,10 @@ import { PocModal } from '../components/PocModal'
 import { SEVERITY_COLOUR as SEV_COLOUR } from '../lib/severity'
 import { TRIAGE, TRIAGE_COLOUR } from '../lib/triage'
 import { parse, push, useRouteFinding } from '../lib/route'
+import { useServerTable } from '../lib/useServerTable'
 import {
   LIFECYCLE, LIFECYCLE_COLOUR, LIFECYCLE_LABEL, LIFECYCLE_RANK,
-  POC_COLOUR, POC_LABEL, POC_RANK, POC_STATES,
+  POC_COLOUR, POC_LABEL, POC_STATES,
 } from '../lib/lifecycle'
 import { useAuth } from '../lib/auth'
 import { useStoredChoice } from '../lib/useStoredChoice'
@@ -55,21 +56,66 @@ export function VulnsView({ project }: { project: string | null }) {
   const [refused, setRefused] = useState(0)
   const qc = useQueryClient()
   const { canWrite } = useAuth()
-  const { data, isLoading, error } = useQuery({
-    queryKey: ['vulns', project],
-    queryFn: () => api.vulns(project ?? undefined),
+  // Paged, sorted and filtered in the database.
+  //
+  // This asked for `limit: 100000` and let the browser do the rest --
+  // 30,207 rows and 67.3 MB on this engagement, against 0.4 MB for a
+  // page. The payload was the visible half of it; the quieter half was
+  // that the grid's own ranking only ever ordered the rows it had been
+  // handed, so "severity, worst first" meant worst of whatever was
+  // loaded. Both ranks are SQL now, so the order describes the
+  // project rather than the page.
+  const table = useServerTable('vulns', {
+    sort: 'severity', order: 'asc', pageSize: 100,
+    // Must match FILTERABLE on /api/vulns. A column left out here is
+    // shown but not offered in the filter panel, which is better than
+    // offering a filter the server rejects.
+    filterable: ['host', 'project_code', 'title', 'severity', 'status',
+                 'port', 'updated_at', 'created_at', 'triage',
+                 'external_id', 'poc_state', 'description',
+                 'severity_name'],
   })
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['vulns', project, table.query],
+    queryFn: () => api.vulnPage({
+      project: project ?? undefined,
+      q: table.query.q || undefined,
+      sort: table.query.sort,
+      order: table.query.order,
+      filters: table.query.filters || undefined,
+      logic: table.query.logic,
+      limit: table.query.pageSize,
+      offset: table.query.page * table.query.pageSize,
+    }),
+    // The old page stays on screen while the next one is fetched.
+    // Without it every sort and every page flashes the empty state.
+    placeholderData: (prev) => prev,
+  })
+
+  // The count the footer pages against. The hook cannot know it --
+  // only the response does -- so it has to be handed back, and
+  // without this the table reports nothing to page through and the
+  // second page is unreachable.
+  //
+  // Destructured because these are `useState` setters underneath and
+  // so are stable for the life of the component, which makes them
+  // honest dependencies.
+  const { setTotal, setPage } = table
+  useEffect(() => { setTotal(data?.total ?? 0) }, [setTotal, data?.total])
+  // A different project is a different result set, so page 7 of the
+  // old one means nothing.
+  useEffect(() => { setPage(0) }, [setPage, project])
 
   const columns: ColumnDef<Vuln>[] = [
     {
       field: 'severity', headerName: 'Severity', width: 112,
       type: 'singleSelect',
       valueOptions: ['critical', 'high', 'medium', 'low', 'info'],
-      // Severity is a string, so the default comparator sorts it
-      // alphabetically: critical, high, info, low, medium. That puts "info"
-      // third and is actively misleading, so rank explicitly.
-      sortComparator: (a, b) =>
-        (SEVERITY_RANK[a as string] ?? 9) - (SEVERITY_RANK[b as string] ?? 9),
+      // No `sortComparator`. The database ranks this now -- see
+      // `_SEV_RANK` in routers/findings.py -- and a comparator here
+      // would re-sort the one page it was handed, which is how "worst
+      // first" came to mean "worst of these hundred".
       renderCell: (p) => {
         const c = SEV_COLOUR[p.value] ?? neon.muted
         return (
@@ -152,8 +198,7 @@ export function VulnsView({ project }: { project: string | null }) {
       field: 'poc_state', headerName: 'PoC', width: 168,
       type: 'singleSelect',
       valueOptions: [...POC_STATES],
-      sortComparator: (a, b) =>
-        (POC_RANK[a as string] ?? 9) - (POC_RANK[b as string] ?? 9),
+      // Ranked in SQL too, for the same reason as severity.
       renderCell: (p) => {
         const c = POC_COLOUR[p.value] ?? neon.muted
         const has = p.row.poc_id !== null && p.row.poc_id !== undefined
@@ -309,6 +354,8 @@ export function VulnsView({ project }: { project: string | null }) {
         columns={columns as ColumnDef[]}
         loading={isLoading}
         error={error as Error | null}
+        tableId="vulns"
+        server={table}
         initialSort={{ field: 'severity', sort: 'asc' }}   // asc on rank = worst first
         hiddenColumns={project ? { project_code: false } : undefined}
         kind="vulns"
