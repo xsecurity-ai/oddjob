@@ -287,7 +287,7 @@ async def attach(template):
 
 import asyncio as _asyncio  # noqa: E402
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import func, select  # noqa: E402
 
 from app.db import SessionLocal  # noqa: E402
 from app.models import Project, Target  # noqa: E402
@@ -334,6 +334,96 @@ check("a proof that does not exist is a 404", st == 404, st)
 st, r = call(f"/api/pocs/{PID}?project=OTHERP", token=admin)
 check("another engagement cannot read it by id", st in (403, 404), st)
 
+
+print("== sorting a findings page in the database ==")
+# The grid ranked `severity` and `poc_state` in the browser, which only
+# ever ordered the rows it had been handed. Paging the listing in the
+# database makes that wrong -- it would rank one page -- so both ranks
+# are SQL now, and these say they mean the same thing they used to.
+call("/api/projects", "POST", {"code": "SORTV", "name": "Sort"}, token=admin)
+call("/api/targets?project=SORTV", "POST", {"host": "s1.acme.example"},
+     token=admin)
+for _t, _sev in (("info one", "info"), ("critical one", "critical"),
+                 ("medium one", "medium"), ("high one", "high"),
+                 ("low one", "low")):
+    call("/api/vulns?project=SORTV", "POST",
+         {"host": "s1.acme.example", "title": _t, "severity": _sev},
+         token=admin)
+
+_st, _pg = call("/api/vulns?project=SORTV&sort=severity&order=asc&limit=10",
+                token=admin)
+_order = [i["severity"] for i in (_pg or {}).get("items", [])]
+check("severity ascending is worst first, not alphabetical",
+      _order == ["critical", "high", "medium", "low", "info"], _order)
+_st, _pg = call("/api/vulns?project=SORTV&sort=severity&order=desc&limit=10",
+                token=admin)
+check("...and descending is the exact reverse",
+      [i["severity"] for i in (_pg or {}).get("items", [])]
+      == ["info", "low", "medium", "high", "critical"], _pg)
+
+# A finding can carry several proofs -- one written by auto_poc and one
+# written by hand after it was rejected. Joining them straight to the
+# listing would return that finding once per proof, and a table that
+# silently triples some of its rows is a worse bug than the one the
+# join is there to fix.
+_st, _v = call("/api/vulns?project=SORTV", "POST",
+               {"host": "s1.acme.example", "title": "many proofs",
+                "severity": "high"}, token=admin)
+_MV = (_v or {}).get("id")
+
+
+async def _three_proofs():
+    # Inserted, not asked for. `POST /vulns/{id}/poc` asks a MODEL to
+    # write one and creates nothing without one configured, so a test
+    # built on it would assert against zero proofs and pass whatever
+    # the join did -- which is exactly what the first version of this
+    # did, checked by breaking the join and watching it still pass.
+    from app.models import Vuln as _V
+    async with SessionLocal() as s_:
+        tid = (await s_.execute(
+            select(_V.target_id).where(_V.id == _MV))).scalar_one()
+        assert tid is not None
+        for n in range(3):
+            s_.add(Poc(vuln_id=_MV, target_id=tid, title=f"proof {n}",
+                       template="id: t\ninfo:\n  name: t\n",
+                       status="draft"))
+        await s_.commit()
+        return int((await s_.execute(
+            select(func.count()).select_from(Poc)
+            .where(Poc.vuln_id == _MV))).scalar_one())
+
+
+_np = asyncio.run(_three_proofs())
+check("three proofs really exist to join against", _np == 3, f"{_np}")
+_st, _pg = call("/api/vulns?project=SORTV&limit=50", token=admin)
+_ids = [i["id"] for i in (_pg or {}).get("items", [])]
+check("a finding with three proofs appears exactly once",
+      _ids.count(_MV) == 1, f"{_ids.count(_MV)} times")
+check("...and the page total counts it once too",
+      (_pg or {}).get("total") == len(_ids), _pg and _pg.get("total"))
+
+# Sorting by the proof column is now a database question as well.
+_st, _pg = call("/api/vulns?project=SORTV&sort=poc_state&order=asc&limit=50",
+                token=admin)
+_states = [i["poc_state"] for i in (_pg or {}).get("items", [])]
+check("poc_state ascending puts evidence first",
+      _states == sorted(_states,
+                        key=lambda x: {"Available, Confirmed": 0,
+                                       "Available, Not Confirmed": 1,
+                                       "Not Available": 2}[x]), _states)
+
+# And a chained filter, which this endpoint had no way to take before.
+_st, _pg = call('/api/vulns?project=SORTV&limit=50&filters='
+                '[{"field":"severity_name","op":"equals","value":"critical"}]',
+                token=admin)
+check("a column filter is applied in SQL", _st == 200, f"{_st} {_pg}")
+check("...and returns only that severity",
+      {i["severity"] for i in (_pg or {}).get("items", [])} == {"critical"},
+      _pg)
+_st, _ = call('/api/vulns?project=SORTV&filters='
+              '[{"field":"notacolumn","op":"equals","value":"x"}]', token=admin)
+check("...while a column the endpoint never exposed is refused",
+      _st in (400, 422), _st)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

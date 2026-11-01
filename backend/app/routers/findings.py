@@ -10,15 +10,17 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import assetfetch, assetwork, audit, lifecycle, manifest, pocwork, slack
 from ..db import get_session
 from ..events import broker
+from ..filtering import apply_filters
 from ..hosts import normalise_host
 from ..models import (
     ROLE_ORDER,
+    SEVERITIES,
     TRIAGE_STATES,
     Agent,
     AgentTask,
@@ -51,6 +53,78 @@ def _base(model):
     return (select(model, Target.host, Project.code)
             .join(Target, Target.id == model.target_id)
             .join(Project, Project.id == Target.project_id))
+
+
+#: Severity in the order a reader means by it, as SQL.
+#:
+#: Sorting the column itself is alphabetical -- critical, high, info,
+#: low, medium -- which puts "info" third and is actively misleading.
+#: The grid has always ranked it in the browser; that only ever
+#: ordered the rows it happened to have loaded, so with the listing
+#: paged in the database the rank has to be here instead.
+#:
+#: Ascending is worst-first, which matches what the column already did
+#: and is the order anybody opening a findings table wants.
+_SEV_RANK = case(
+    {s: i for i, s in enumerate(SEVERITIES)},
+    value=Vuln.severity, else_=len(SEVERITIES))
+
+#: The newest proof per finding. A finding can carry several -- one
+#: written by `auto_poc` and one somebody wrote by hand after it was
+#: rejected -- and the column is about whether a proof exists NOW.
+_NEWEST_POC = (
+    select(Poc.vuln_id.label("vid"), func.max(Poc.id).label("pid"))
+    .where(Poc.vuln_id.is_not(None))
+    .group_by(Poc.vuln_id).subquery())
+
+#: `pocwork.availability`, as SQL, in the order `POC_RANK` uses:
+#: proven first, then written, then nothing. The clauses are the same
+#: three that function makes and in the same order, because the column
+#: and the sort disagreeing about what a row IS would be worse than
+#: not sorting it at all.
+#:
+#: A `Rejected` build writes a row with no template to record that a
+#: proof was attempted and could not be written -- so "has a row" is
+#: not the question, "has a template" is.
+_POC_RANK = case(
+    (Poc.id.is_(None), 2),
+    (func.coalesce(func.trim(Poc.template), "") == "", 2),
+    (and_(Poc.validated_at.is_not(None), Poc.exit_code == 0), 0),
+    else_=1)
+
+
+def _vulns_base():
+    """`_base(Vuln)` with the newest proof joined, for sort and filter.
+
+    An OUTER join, and through `_NEWEST_POC` rather than straight to
+    `Poc`: a finding with three proofs joined directly would come back
+    three times, and a listing that silently triples some of its rows
+    is a worse bug than the one this exists to fix.
+    """
+    return (_base(Vuln)
+            .outerjoin(_NEWEST_POC, _NEWEST_POC.c.vid == Vuln.id)
+            .outerjoin(Poc, Poc.id == _NEWEST_POC.c.pid))
+
+
+#: What a caller may sort by. `severity` and `poc_state` are the two
+#: the grid used to rank in the browser; everything else is a column.
+SORTABLE = {
+    "host": Target.host, "project_code": Project.code,
+    "title": Vuln.title, "severity": _SEV_RANK, "status": Vuln.status,
+    "port": Vuln.port, "updated_at": Vuln.updated_at,
+    "created_at": Vuln.created_at, "triage": Vuln.triage,
+    "external_id": Vuln.external_id, "poc_state": _POC_RANK,
+}
+
+#: What a chained column filter may reference. Deliberately a list and
+#: not "whatever the model has", for the reason `web.py` gives: a
+#: filter is a query the caller composes, so the columns it can reach
+#: are part of this endpoint's contract.
+FILTERABLE = {
+    **SORTABLE,
+    "description": Vuln.description,
+    "severity_name": Vuln.severity,
+}
 
 
 def _vuln_out(row, sweeps: dict | None = None,
@@ -152,6 +226,11 @@ async def list_vulns(
                     "this finding. Applied to the page after it is "
                     "built, because the value is derived rather than "
                     "stored — `total` still counts the unfiltered query."),
+    filters: str | None = Query(
+        None,
+        description='chained column filters, as JSON: '
+                    '[{"field":"severity","op":"=","value":"critical"}]'),
+    logic: str = Query("and", pattern="^(and|or)$"),
     sort: str | None = Query("host"),
     order: str = Query("asc", pattern="^(asc|desc)$"),
     limit: int = Query(20000, ge=0),
@@ -159,7 +238,7 @@ async def list_vulns(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    stmt = _base(Vuln)
+    stmt = _vulns_base()
     vis = await visible_project_ids(session, user)
     if vis is not None:
         stmt = stmt.where(Target.project_id.in_(vis))
@@ -176,11 +255,15 @@ async def list_vulns(
         stmt = stmt.where(Vuln.severity == severity.lower())
     stmt = apply_search(stmt, q, [Target.host, Project.code, Vuln.title, Vuln.severity,
                                   Vuln.status, Vuln.description, Vuln.external_id])
-    stmt = apply_sort(stmt, sort, order, {
-        "host": Target.host, "project_code": Project.code, "title": Vuln.title,
-        "severity": Vuln.severity, "status": Vuln.status, "port": Vuln.port,
-        "updated_at": Vuln.updated_at,
-    }).order_by(Vuln.id)
+    stmt = apply_filters(stmt, filters, FILTERABLE, logic)
+    # `SORTABLE`, not a dict written out here. The two were the same
+    # literal in two places and `severity` in this one sorted the
+    # column alphabetically -- critical, high, info, low, medium --
+    # while the grid ranked it properly in the browser. With the
+    # listing paged in the database, a browser-side rank only orders
+    # the page it was handed, so the rank had to come here and there
+    # must be exactly one of it.
+    stmt = apply_sort(stmt, sort, order, SORTABLE).order_by(Vuln.id)
     rows, total = await paginate(session, stmt, limit, offset)
     items = await _with_lifecycle(session, rows)
     if state:

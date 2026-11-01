@@ -1106,6 +1106,19 @@ export interface ReplayResult {
  *  from inside `api` is circular, and TypeScript resolves the whole
  *  object to `{}` when it is — which shows up as unrelated errors in
  *  completely different files. */
+/** One page of findings, asked for the way the grid is showing them.
+ *
+ *  Mirrors `WebQuery`, because the two endpoints now take the same
+ *  wire contract and a second shape for the same idea is how they
+ *  drift. */
+export interface VulnQuery {
+  project?: string; host?: string; q?: string
+  severity?: string; title?: string
+  sort?: string; order?: 'asc' | 'desc'
+  filters?: string; logic?: 'and' | 'or'
+  limit?: number; offset?: number
+}
+
 export interface WebQuery {
   project?: string; host?: string; q?: string; crawled?: boolean
   /** Who FOUND the URL, as opposed to `crawled`, which is whether we
@@ -1426,7 +1439,21 @@ export const api = {
     req<Page<Target>>('/api/targets' + qs({ project, q, limit })),
   ports: (project?: string) => req<Page<Service>>('/api/ports' + qs({ project, limit: 100000 })),
   services: (project?: string) => req<Page<Service>>('/api/services' + qs({ project, limit: 100000 })),
+  /** EVERY finding, which is only ever what a rollup or an export
+   *  wants. 30,207 rows and 67.3 MB on a real engagement -- see
+   *  `vulnPage` for the listing. */
   vulns: (project?: string) => req<Page<Vuln>>('/api/vulns' + qs({ project, limit: 100000 })),
+
+  /** One page of findings, paged, sorted and filtered in the database.
+   *
+   *  The listing used to ask for all of them and let the browser do
+   *  the rest. Beyond the payload, that made the grid's own ranking a
+   *  lie the moment anything was paged: a browser-side comparator
+   *  orders the rows it was handed, so "worst first" meant worst of
+   *  this page. Severity and the proof column are ranked in SQL now
+   *  -- see SORTABLE in routers/findings.py. */
+  vulnPage: (p: VulnQuery = {}) =>
+    req<Page<Vuln>>('/api/vulns' + qs({ limit: 100, ...p })),
   /** One finding, with its full text and every host it appears on. */
   vuln: (id: number) => req<VulnDetail>(`/api/vulns/${id}`),
   /** The same findings rolled up two ways. Aggregated on the SERVER:
