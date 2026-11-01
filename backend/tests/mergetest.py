@@ -314,5 +314,78 @@ check("...and both rows are still there",
       call("/api/targets/MRG/a2.acme.example", token=admin)[0] == 200
       and call("/api/targets/MRG/b2.acme.example", token=admin)[0] == 200)
 
+print("== what the plan says about captured exchanges ==")
+# `web_duplicates` is the only thing a merge actually DELETES, so the
+# plan has to count it correctly before anybody approves one. It is
+# now counted in SQL rather than by pulling every hash on the
+# destination into a set -- a busy host carries 12,339 exchanges and
+# the table holds 202,416, so the old shape made "what would this do"
+# cost more the more had been captured.
+call("/api/targets?project=MRG", "POST", {"host": "w-src.acme.example"},
+     token=admin)
+call("/api/targets?project=MRG", "POST", {"host": "w-dst.acme.example"},
+     token=admin)
+
+
+async def _seed_exchanges():
+    from app.models import WebAddress as _W
+    from app.weburl import url_key as _uk
+    async with SessionLocal() as s:
+        pr = (await s.execute(
+            select(Project).where(Project.code == "MRG"))).scalar_one()
+
+        async def tid(h):
+            return (await s.execute(select(Target.id).where(
+                Target.project_id == pr.id, Target.host == h))).scalar_one()
+
+        src, dst = await tid("w-src.acme.example"), await tid("w-dst.acme.example")
+        # One exchange both sides hold -- the duplicate -- and two the
+        # source holds alone.
+        def row(t, u, xh):
+            # `url_hash` carries the index and the uniqueness -- `url`
+            # itself is unbounded Text and cannot be indexed. See
+            # CLAUDE.md.
+            return _W(target_id=t, url=u, url_hash=_uk(u), exchange_hash=xh)
+
+        s.add(row(dst, "https://w.acme.example/same", "h" * 64))
+        s.add(row(src, "https://w.acme.example/same", "h" * 64))
+        s.add(row(src, "https://w.acme.example/one", "a" * 64))
+        s.add(row(src, "https://w.acme.example/two", "b" * 64))
+        await s.commit()
+
+
+asyncio.run(_seed_exchanges())
+_st, _p = call("/api/enumerate/merge-plan?project=MRG"
+               "&host=w-src.acme.example&into=w-dst.acme.example", token=admin)
+check("the plan is returned", _st == 200, f"{_st} {_p}")
+check("the shared exchange is counted as a duplicate",
+      (_p or {}).get("web_duplicates") == 1, _p)
+check("...and the two the source holds alone are counted as moving",
+      (_p or {}).get("web_moved") == 2, _p)
+
+# And the merge agrees with its own plan: the duplicate goes, the two
+# move, so the survivor ends up with three.
+call("/api/enumerate/merge?project=MRG&host=w-src.acme.example", "POST",
+     {"into": "w-dst.acme.example", "confirm": True}, token=admin)
+
+
+async def _count_after():
+    from sqlalchemy import func as _f
+
+    from app.models import WebAddress as _W
+    async with SessionLocal() as s:
+        pr = (await s.execute(
+            select(Project).where(Project.code == "MRG"))).scalar_one()
+        dst = (await s.execute(select(Target.id).where(
+            Target.project_id == pr.id,
+            Target.host == "w-dst.acme.example"))).scalar_one()
+        return int((await s.execute(select(_f.count()).select_from(_W)
+                                    .where(_W.target_id == dst))).scalar_one())
+
+
+_n = asyncio.run(_count_after())
+check("the survivor holds the three distinct exchanges, not four",
+      _n == 3, f"{_n}")
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
