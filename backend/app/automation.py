@@ -982,6 +982,40 @@ async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
         # the scans are the job.
         log.warning("geoip: %s", e)
 
+    # A name the estate already told us, before any tasking.
+    #
+    # An address-named row whose certificate names it needs no lookup
+    # and no packet: the name arrived with a scan that already ran and
+    # has been sitting in `Target.hostnames` ever since. Doing it here
+    # means it happens on its own rather than when somebody opens the
+    # right page, and doing it BEFORE `plan` means the row is named
+    # before this cycle decides what to ask about it.
+    #
+    # Under `auto_reverse_dns` because that is the same intent -- give
+    # an address-named row a name -- from a cheaper source. A
+    # certificate we already hold costs nothing to read and sends
+    # nothing to the client, which a PTR lookup cannot say.
+    #
+    # Lazily imported: `routers.enumerate` imports plenty, and this
+    # module is imported by the worker at startup. Same shape as the
+    # `TASK_KINDS` import at the foot of this file.
+    if pr.auto_reverse_dns:
+        try:
+            from .routers.enumerate import adopt_cert_names
+            named = await adopt_cert_names(session, pr, who="standing-orders")
+            if named:
+                await session.commit()
+                log.info("certificates named %d host(s) in %s: %s",
+                         len(named), pr.code,
+                         ", ".join(f"{w} -> {n} ({how})"
+                                   for w, n, how in named[:5]))
+        except Exception as e:                   # noqa: BLE001
+            # Never fatal to the cycle. Naming a row is a nicety; the
+            # scans are the job -- the same rule geolocation follows
+            # above.
+            await session.rollback()
+            log.warning("cert naming: %s", e)
+
     snap = await snapshot(session, pr)
     want = plan(snap)
     if not want:

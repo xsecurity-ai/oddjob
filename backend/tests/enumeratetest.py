@@ -1604,5 +1604,71 @@ check("...and has no `why`, which is what the handler used to read",
 check("a barred ruling is not allowed", _r.allowed is False)
 
 
+print("== a certificate names the host it was read from ==")
+# A scan that reads a certificate already learns what the host calls
+# itself, and the importers already keep it in `Target.hostnames`.
+# Until now the row stayed `198.51.100.x` with the answer sitting in
+# its own column, and somebody had to run a reverse lookup to learn
+# what the scan had already been told.
+#
+# The CDN clause is the one that matters on a real estate: a shared
+# certificate names hundreds of other people's hosts, so a row is
+# named only when exactly ONE candidate survives the scope gate.
+call("/api/projects", "POST",
+     {"code": "CERTS", "name": "Certs",
+      "scope": ["*.acme.example", "198.51.100.0/24"]}, token=admin)
+
+
+async def cert_naming():
+    import json as _json
+
+    from app.models import Target as _T
+    from app.routers.enumerate import adopt_cert_names
+    async with _SL() as _s:
+        pr = (await _s.execute(
+            _sel(_P).where(_P.code == "CERTS"))).scalar_one()
+
+        # One in-scope name on the certificate: adopted.
+        _s.add(_T(project_id=pr.id, host="198.51.100.10", kind="host",
+                  hostnames=_json.dumps(["web.acme.example"])))
+        # Several in-scope names: a choice, and choices are left alone.
+        _s.add(_T(project_id=pr.id, host="198.51.100.11", kind="host",
+                  hostnames=_json.dumps(["a.acme.example", "b.acme.example"])))
+        # A shared certificate naming somebody else: refused by scope,
+        # so the row keeps its address. This is the CDN case.
+        _s.add(_T(project_id=pr.id, host="198.51.100.12", kind="host",
+                  hostnames=_json.dumps(["tenant.othercompany.example"])))
+        # Already has a name: nothing to gain, something to lose.
+        _s.add(_T(project_id=pr.id, host="named.acme.example", kind="host",
+                  hostnames=_json.dumps(["other.acme.example"])))
+        await _s.commit()
+
+        done = await adopt_cert_names(_s, pr, who="test")
+        await _s.commit()
+        got = {w: n for w, n, _how in done}
+        check("the row with one in-scope certificate name takes it",
+              got.get("198.51.100.10") == "web.acme.example", got)
+        check("...a certificate offering several names is left alone",
+              "198.51.100.11" not in got, got)
+        check("...a certificate naming another tenant is refused",
+              "198.51.100.12" not in got, got)
+        check("...and a row that already has a name is untouched",
+              "named.acme.example" not in got, got)
+
+        hosts = {h for (h,) in (await _s.execute(
+            _sel(_T.host).where(_T.project_id == pr.id))).all()}
+        check("the renamed row answers to the certificate's name",
+              "web.acme.example" in hosts and "198.51.100.10" not in hosts,
+              sorted(hosts))
+        check("...and the refused ones still answer to their address",
+              {"198.51.100.11", "198.51.100.12"} <= hosts, sorted(hosts))
+
+        # Running it again changes nothing: the row has a name now.
+        again = await adopt_cert_names(_s, pr, who="test")
+        check("a second pass does nothing", again == [], again)
+
+
+_aio.run(cert_naming())
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

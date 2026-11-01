@@ -37,6 +37,7 @@ offered as something to pick.
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -555,6 +556,97 @@ async def _take_name(session: AsyncSession, pr: Project, user: User | None,
                        project_code=pr.code,
                        detail=summary.replace("\n", "; ")[:4000])
     return "merged"
+
+
+async def adopt_cert_names(session: AsyncSession, pr: Project,
+                           who: str = "system",
+                           cap: int = 200) -> list[tuple[str, str, str]]:
+    """Give an address-named row the name its own certificate presents.
+
+    A scan that reads a certificate already learns what the host calls
+    itself, and the importers already keep it: `importers/certnames.py`
+    turns the subject and SANs into `Target.hostnames` for both nmap's
+    `ssl-cert` and httpx's `tls` block. Until now that name was only
+    ever a hint -- mined for zones worth enumerating -- while the row
+    itself stayed `198.51.100.10` with the answer sitting in its own
+    column.
+
+    **This is narrower than what `importers/certnames.py` warns
+    against, and the warning still stands.** It says a SAN list must
+    never become new targets, because a shared or CDN-issued
+    certificate names hundreds of other people's hosts. Nothing here
+    creates a target. It renames a row this project already holds, and
+    only when the row has no name of its own to lose.
+
+    Three rules keep that honest, and the middle one is the important
+    one on a real estate:
+
+    * **Only an address-named row.** A host that already has a name
+      has nothing to gain and something to lose.
+    * **Only when exactly ONE candidate survives the gate.** A CDN
+      certificate names many hosts; picking one of them would be
+      inventing a fact. Several in-scope names on one address is a
+      question for a person, and it is left as one. Measured on a
+      live engagement: 50 address-named rows carried a certificate
+      name and the gate allowed a name on 2 of them -- the other 48
+      were other tenants, which is exactly what this clause is for.
+    * **The gate, per name.** `_gate` refuses a name a person already
+      turned down, and the scope index refuses one the engagement
+      never covered.
+
+    `_take_name` does the work, so this renames or merges by the same
+    rule the reverse-DNS path uses and writes the same timeline entry.
+    Nothing is sent anywhere: the certificate was read when the scan
+    ran and this only reads the database.
+
+    Returns (was, name, outcome) per row changed. Caller commits.
+    """
+    idx = await index_for(session, pr.id)
+    rejected = await _rejected_names(session, pr.id)
+    known = {h for (h,) in (await session.execute(
+        select(Target.host).where(Target.project_id == pr.id))).all()}
+    allowed = _gate(idx, rejected, known)
+
+    done: list[tuple[str, str, str]] = []
+    rows = (await session.execute(
+        select(Target).where(Target.project_id == pr.id))).scalars().all()
+    for t in rows:
+        if len(done) >= cap:
+            break
+        if not _is_ip(t.host):
+            continue
+        try:
+            names = json.loads(t.hostnames or "[]")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(names, list):
+            continue
+        fresh = {str(n).strip().lower().rstrip(".") for n in names if n}
+        fresh = {n for n in fresh
+                 if n and "." in n and not _is_ip(n) and n != t.host}
+        ok = sorted(n for n in fresh if allowed(n) is None)
+        if len(ok) != 1:
+            # Nothing, or a choice. Both are left alone -- see the
+            # middle rule above.
+            continue
+        name = ok[0]
+        was = t.host
+        outcome = await _take_name(session, pr, None, t, name, who)
+        await record(
+            session,
+            (await session.execute(select(Target.id).where(
+                Target.project_id == pr.id,
+                Target.host == name))).scalar_one(),
+            "change",
+            f"{was} is {name}, from a certificate it presented",
+            detail=("The certificate read from this host named it, and the "
+                    "row had only an address for a name. No lookup was "
+                    "needed and nothing was sent: the name was already in "
+                    "this project's own scan output. It was the only name "
+                    "on that certificate this engagement covers."),
+            actor=who, source="cert")
+        done.append((was, name, outcome))
+    return done
 
 
 async def _note_refused_only(session: AsyncSession, target_id: int,
