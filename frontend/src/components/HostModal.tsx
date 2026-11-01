@@ -12,6 +12,7 @@ import { Timeline } from './Timeline'
 import { VulnModal } from './VulnModal'
 import { MergeTargetsDialog } from './MergeTargetsDialog'
 import { useAuth } from '../lib/auth'
+import { parse, push } from '../lib/route'
 import { neon, glow } from '../theme'
 
 /* --------------------------------------------------------------------------
@@ -21,7 +22,23 @@ import { neon, glow } from '../theme'
    flight.
    -------------------------------------------------------------------------- */
 
-type Ctx = { open: (project: string, host: string) => void }
+type Ctx = {
+  /** Open it. NAVIGATES -- the URL is what actually opens the window,
+   *  so a host clicked in a grid and a host in a pasted link take the
+   *  same path and the address bar is never behind. */
+  open: (project: string, host: string) => void
+  /** Render it. Called by App when the route says so, and by nothing
+   *  else: if this set state directly from a click there would be two
+   *  ways in and the bar would be one of them only sometimes. */
+  show: (project: string, host: string) => void
+  /** Stop rendering it, without touching the URL. The route already
+   *  says it is shut by the time this is called. */
+  hide: () => void
+  /** Shut it FROM the window -- the X, or clicking the backdrop. Goes
+   *  through the URL so Back behaves and the link stops naming a host
+   *  that is no longer on screen. */
+  close: () => void
+}
 const HostModalCtx = createContext<Ctx | null>(null)
 
 export function useHostModal(): Ctx {
@@ -510,13 +527,29 @@ export function HostModalProvider({ children }: { children: ReactNode }) {
   // than in `Body` so it survives the host dialog scrolling and so
   // closing it returns to the host rather than to the page.
   const [vuln, setVuln] = useState<number | null>(null)
-  const ctx = useMemo<Ctx>(() => ({ open: (project, host) => setAt({ project, host }) }), [])
+  const ctx = useMemo<Ctx>(() => ({
+    open: (project, host) => push({ ...parse(window.location.pathname),
+                                    project, host }),
+    show: (project, host) => setAt({ project, host }),
+    hide: () => setAt(null),
+    close: () => {
+      const r = parse(window.location.pathname)
+      // The host AND anything that was open on top of it. Closing the
+      // window and leaving `?finding=` behind would reopen the finding
+      // on the next render with nothing underneath it.
+      delete r.host
+      delete r.protocol
+      delete r.port
+      delete r.finding
+      push(r)
+    },
+  }), [])
 
   return (
     <HostModalCtx.Provider value={ctx}>
       {children}
       <Dialog
-        open={!!at} onClose={() => setAt(null)} maxWidth="xl" fullWidth scroll="paper"
+        open={!!at} onClose={() => ctx.close()} maxWidth="xl" fullWidth scroll="paper"
         slotProps={{
           paper: {
             sx: {
@@ -540,9 +573,8 @@ export function HostModalProvider({ children }: { children: ReactNode }) {
           }}>TARGET</Typography>
           <Box sx={{ flex: 1 }} />
           {at && <MergeButton project={at.project} host={at.host}
-                              onMerged={(h) => setAt({ project: at.project,
-                                                       host: h })} />}
-          <IconButton size="small" onClick={() => setAt(null)}
+                              onMerged={(h) => ctx.open(at.project, h)} />}
+          <IconButton size="small" onClick={() => ctx.close()}
             sx={{ color: neon.muted, '&:hover': { color: neon.pink } }}>
             <CloseIcon fontSize="small" />
           </IconButton>

@@ -1274,5 +1274,53 @@ console.log('\n== a rollup expansion shows each thing once ==')
   }
 }
 
+{
+  // --- a modal is a place, so it has a URL --------------------------
+  //
+  // Opening one used to be invisible to the address bar: a pasted link
+  // naming a host opened it, and clicking that same host did not write
+  // the URL. So the window could not be linked to, reloaded, or closed
+  // with Back -- the three things a URL is for.
+  //
+  // The scheme: the PATH names an asset (a host, and under it a
+  // service), a QUERY parameter names a window open on top of one.
+  // `parts[3]` of a scoped path already means "host" for every view
+  // there is, so spending it on a second meaning would make
+  // /projects/ACME/vulns/1234 ambiguous with a host called 1234.
+  const r = parseRoute('/projects/ACME/vulns/web01.acme.example', '')
+  check('a host in the path opens that host',
+        r.host === 'web01.acme.example' && r.view === 'vulns', JSON.stringify(r))
+
+  const f = parseRoute('/projects/ACME/vulns', '?finding=1234')
+  check('a finding in the query is read', f.finding === 1234, JSON.stringify(f))
+
+  // Presence is the whole signal, so the junk cases all mean "nothing
+  // is open" rather than "something is open and broken". A
+  // hand-edited URL most often means exactly that.
+  for (const q of ['?finding=', '?finding=nonsense', '?finding=0',
+                   '?finding=-3', '?finding=1.5', '']) {
+    const bad = parseRoute('/projects/ACME/vulns', q)
+    check(`${q || '(no query)'} opens nothing`,
+          bad.finding === undefined, JSON.stringify(bad))
+  }
+
+  // Both at once: a finding read from inside a host window.
+  const both = parseRoute('/projects/ACME/targets/web01.acme.example',
+                          '?finding=7')
+  check('a host and a finding can both be open',
+        both.host === 'web01.acme.example' && both.finding === 7,
+        JSON.stringify(both))
+
+  // `build` is the inverse and lives next to `parse` so the two cannot
+  // drift -- the round trip is what says so.
+  for (const path of ['/projects/ACME/vulns',
+                      '/projects/ACME/targets/web01.acme.example',
+                      '/projects/ACME/targets/web01.acme.example/services/tcp/443']) {
+    check(`round trip: ${path}`,
+          buildRoute(parseRoute(path, '')).split('?')[0] === path,
+          buildRoute(parseRoute(path, '')))
+  }
+}
+
 console.log(`\n${'='.repeat(56)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(56)}`)
 process.exit(fail ? 1 : 0)

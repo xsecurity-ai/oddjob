@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react'
+
 /**
  * The URL is the app's state, not a side effect of it.
  *
@@ -29,6 +31,24 @@ export interface Route {
   /** A service to open, when the path names one. */
   protocol?: string
   port?: number
+  /** A finding to open on top of whatever view is showing.
+   *
+   *  A QUERY parameter where `host` is a path segment, and the split
+   *  is not arbitrary. The path names an ASSET -- a host, and under
+   *  it a service -- which is a thing this engagement owns a record
+   *  of and which the server will redirect a non-browser client to
+   *  the JSON for. A finding is not an asset: it is something open
+   *  ON TOP of a view, it can be opened from several of them, and
+   *  `parts[3]` of a scoped path already means "host" for every view
+   *  there is. Spending that slot on a second meaning would make
+   *  `/projects/ACME/vulns/1234` ambiguous with a host called 1234.
+   *
+   *  Presence is the whole signal. There is deliberately no
+   *  `modal=true` beside it: a flag saying a modal is open, separate
+   *  from the thing it is open on, is a second copy of one fact and
+   *  the two can disagree -- `modal=true` with nothing to show is a
+   *  state that cannot render. */
+  finding?: number
 }
 
 /**
@@ -100,7 +120,19 @@ function clean(s: string): string {
  * is something people edit by hand, and a typo should land you somewhere
  * usable.
  */
-export function parse(pathname: string): Route {
+export function parse(pathname: string, search?: string): Route {
+  const r = parsePath(pathname)
+  const n = Number(new URLSearchParams(search ?? currentSearch()).get('finding'))
+  // `Number('')` is 0 and `Number(null)` is 0, so the guard is on the
+  // value being a positive integer rather than on the string being
+  // present -- `?finding=` and `?finding=nonsense` both mean nothing
+  // is open, which is what a hand-edited URL most often means.
+  if (Number.isInteger(n) && n > 0) r.finding = n
+  return r
+}
+
+
+function parsePath(pathname: string): Route {
   const parts = pathname.split('/').map(clean).filter(Boolean)
   if (parts.length === 0) return { view: ROOT_VIEW, project: null }
 
@@ -151,7 +183,52 @@ export function build(r: Route): string {
       bits.push('services', r.protocol, String(r.port))
     }
   }
-  return '/' + bits.map(encodeURIComponent).join('/')
+  return '/' + bits.map(encodeURIComponent).join('/') + query(r)
+}
+
+
+/** The address bar's query, or nothing when there is no address bar.
+ *
+ *  `parse` and `build` are pure functions over a URL and the logic
+ *  tests exercise them in node, where `window` does not exist. A bare
+ *  `window.location.search` as a default argument is evaluated at call
+ *  time and threw there -- which is the test doing its job, since the
+ *  same expression would throw in any non-browser caller. */
+function currentSearch(): string {
+  return typeof window === 'undefined' ? '' : window.location.search
+}
+
+
+/** The query half of `build`, kept beside it for the same reason. */
+function query(r: Route): string {
+  const q = new URLSearchParams(currentSearch())
+  // Only the keys this module owns are touched. Anything else in the
+  // bar belongs to somebody else -- `next` on the sign-in detour, for
+  // one -- and dropping it here would break them silently.
+  if (r.finding) q.set('finding', String(r.finding))
+  else q.delete('finding')
+  const out = q.toString()
+  return out ? `?${out}` : ''
+}
+
+
+//: Told when the address bar changes, so the app can re-read it.
+//:
+//: `popstate` fires for Back and Forward and NOT for `pushState`, so
+//: anything navigating in code has to say so. Without this the app's
+//: idea of the route silently diverged from the bar the moment
+//: something pushed: opening a host wrote the URL, the view did not
+//: know, and Back then had nothing to go back to as far as it was
+//: concerned.
+const listeners = new Set<() => void>()
+
+export function onNavigate(fn: () => void): () => void {
+  listeners.add(fn)
+  return () => { listeners.delete(fn) }
+}
+
+function announce(): void {
+  for (const fn of listeners) fn()
 }
 
 /** Replace the address bar without adding a history entry.
@@ -161,17 +238,26 @@ export function build(r: Route): string {
  *  than one that does not. */
 export function replace(r: Route): void {
   const next = build(r)
-  if (next !== window.location.pathname) {
-    window.history.replaceState(null, '', next + window.location.search)
+  if (next !== here()) {
+    window.history.replaceState(null, '', next)
+    announce()
   }
 }
 
 /** Add a history entry, so Back returns here. */
 export function push(r: Route): void {
   const next = build(r)
-  if (next !== window.location.pathname) {
-    window.history.pushState(null, '', next + window.location.search)
+  if (next !== here()) {
+    window.history.pushState(null, '', next)
+    announce()
   }
+}
+
+
+/** Path and query together: `build` now returns both, so comparing
+ *  against the pathname alone would make `?finding=` a no-op. */
+function here(): string {
+  return window.location.pathname + window.location.search
 }
 
 
@@ -257,4 +343,33 @@ export function rememberProject(code: string | null): void {
     if (code) window.localStorage.setItem(LAST_PROJECT, code)
     else window.localStorage.removeItem(LAST_PROJECT)
   } catch { /* best effort */ }
+}
+
+
+/** The finding the address bar says is open, or null.
+ *
+ *  A hook rather than a prop threaded down from App, because the
+ *  finding window is opened from four places -- the findings grid,
+ *  both rollups, and the host window -- and threading it through all
+ *  of them is four chances for one of them to set state without
+ *  touching the URL, which is the bug this replaced.
+ *
+ *  Subscribed to both kinds of navigation: `popstate` for Back and
+ *  Forward, `onNavigate` for anything that pushed in code.
+ */
+export function useRouteFinding(): number | null {
+  const read = () =>
+    parse(window.location.pathname, window.location.search).finding ?? null
+  const [id, setId] = useState<number | null>(read)
+  useEffect(() => {
+    const sync = () => setId(read())
+    window.addEventListener('popstate', sync)
+    const off = onNavigate(sync)
+    // Read once on mount too: a component can mount after the
+    // navigation that set this, and would otherwise show nothing
+    // until the next one.
+    sync()
+    return () => { window.removeEventListener('popstate', sync); off() }
+  }, [])
+  return id
 }

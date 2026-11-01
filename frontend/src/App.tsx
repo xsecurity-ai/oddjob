@@ -30,8 +30,8 @@ import { useAuth } from './lib/auth'
 import { useLive, type LiveState } from './lib/useLive'
 import { useAnyUnseen } from './lib/c2unseen'
 import { useStoredFlag } from './lib/useStoredFlag'
-import { lastProject, parse, push, rememberProject, replace, type Route,
-         type View } from './lib/route'
+import { lastProject, onNavigate, parse, push, rememberProject, replace,
+         type Route, type View } from './lib/route'
 import { C2View } from './views/C2View'
 import { GateView } from './views/GateView'
 import { ProjectsView } from './views/ProjectsView'
@@ -151,17 +151,33 @@ export default function App() {
 
   // Back and Forward have to work, or the URL is decoration.
   useEffect(() => {
+    // Back and Forward, AND anything that navigated in code.
+    // `popstate` does not fire for `pushState`, so `onNavigate` is
+    // how a modal opening reaches the route this component renders
+    // from -- without it the bar said one thing and the app believed
+    // another, and Back had nothing to undo.
     const onPop = () => setRoute(parse(window.location.pathname))
     window.addEventListener('popstate', onPop)
-    return () => window.removeEventListener('popstate', onPop)
+    const off = onNavigate(onPop)
+    return () => { window.removeEventListener('popstate', onPop); off() }
   }, [])
 
-  // A pasted link naming a host opens it. Keyed on the path so it fires
-  // once per navigation rather than on every render.
+  // The URL decides which modal is open, in BOTH directions.
+  //
+  // Opening one used to be invisible to the address bar: a pasted link
+  // naming a host opened it, and clicking that same host in the grid
+  // did not write the URL -- so the window could not be linked to,
+  // reloaded, or closed with Back. This effect is now the only thing
+  // that opens or closes it, and `open()` navigates rather than
+  // setting state, which is what keeps the two from disagreeing.
+  //
+  // Keyed on a string of the whole address so it fires once per
+  // navigation rather than on every render.
   const hostModal = useHostModal()
   const deepLink = route.host ? `${route.project}/${route.host}` : null
   useEffect(() => {
-    if (route.host && route.project) hostModal.open(route.project, route.host)
+    if (route.host && route.project) hostModal.show(route.project, route.host)
+    else hostModal.hide()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deepLink])
   const [navOpen, setNavOpen] = useState(false)
