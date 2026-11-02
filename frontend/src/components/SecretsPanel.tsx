@@ -5,6 +5,8 @@ import type { ColumnDef } from '../lib/columns'
 import { api, type SecretRow } from '../lib/api'
 import { DataTable } from './DataTable'
 import { SecretSourceModal } from './SecretSourceModal'
+import { ProofCell, ProveGroupDialog, type Group } from './ProveGroup'
+import { useAuth } from '../lib/auth'
 import { SEVERITY_COLOUR as SEV_COLOUR } from '../lib/severity'
 import { neon, glow } from '../theme'
 
@@ -71,11 +73,16 @@ function Unrecorded({ why }: { why: string }) {
  *  one finished page of rows — which is the same arrangement paging,
  *  sorting and filtering already use in this codebase.
  */
+/** `covers` is every credential finding under this row: one id on a
+ *  secret, its file's on a file, the host's on a host. It is what the
+ *  proof column counts and what "prove these" names, so the number in
+ *  the column and the number in the dialog cannot disagree. */
 type Row =
   | { kind: 'host'; id: string; host: string; files: number
-      secrets: number; worst: string }
+      secrets: number; worst: string; covers: SecretRow[] }
   | { kind: 'file'; id: string; host: string; url: string
-      path: string | null; secrets: number; worst: string }
+      path: string | null; secrets: number; worst: string
+      covers: SecretRow[] }
   | { kind: 'secret'; id: string; depth: 2; row: SecretRow }
 
 const SEV_RANK: Record<string, number> = {
@@ -131,6 +138,14 @@ export function SecretsPanel({ project, onFinding }: {
   // the row already carries it. Holding the id alone would mean
   // asking the server for something this table just rendered.
   const [sourceFor, setSourceFor] = useState<SecretRow | null>(null)
+  const { canWrite } = useAuth()
+  // What a click on the proof column asks for. Held as finding ids
+  // rather than as a host or a file: "the credentials in this file"
+  // is not a group the server can name, and naming it by host would
+  // reach every OTHER finding on that host too — which is the whole
+  // estate, not the credentials somebody is looking at.
+  const [prove, setProve] = useState<
+    { group: Group; total: number } | null>(null)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['secrets', project],
@@ -169,7 +184,7 @@ export function SecretsPanel({ project, onFinding }: {
     const all = [...files.values()].flat()
     rows.push({ kind: 'host', id: `h:${host}`, host,
                 files: files.size, secrets: all.length,
-                worst: worstOf(all) })
+                worst: worstOf(all), covers: all })
     if (!openHosts.has(host)) continue
     for (const [file, secrets] of [...files].sort((a, b) =>
         (SEV_RANK[worstOf(a[1])] ?? 9) - (SEV_RANK[worstOf(b[1])] ?? 9))) {
@@ -177,7 +192,7 @@ export function SecretsPanel({ project, onFinding }: {
       const [url, path] = file.split(' · ')
       rows.push({ kind: 'file', id: `f:${key}`, host, url,
                   path: path ?? null, secrets: secrets.length,
-                  worst: worstOf(secrets) })
+                  worst: worstOf(secrets), covers: secrets })
       if (!openFiles.has(key)) continue
       for (const r of [...secrets].sort((a, b) =>
           (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9))) {
@@ -317,6 +332,27 @@ export function SecretsPanel({ project, onFinding }: {
       },
     },
     {
+      // Validating a credential IS the proof question here: a key in
+      // a file is a finding about a file, and "does it still work"
+      // is a different claim that only a check can settle. Available
+      // at every level, because the job is usually "prove this
+      // file's worth of keys", not one at a time.
+      field: 'poc', headerName: 'Proof', width: 150,
+      sortable: false,
+      renderCell: (p) => {
+        const r = p.row as Row
+        const covers = r.kind === 'secret' ? [r.row] : r.covers
+        const proved = covers.filter((c) => c.poc_id !== null).length
+        const asked = covers.filter(
+          (c) => c.poc_id === null && c.poc_requested).length
+        return <ProofCell proofs={proved} requested={asked}
+          total={covers.length}
+          onProve={canWrite(project) ? () => setProve({
+            group: { vuln_ids: covers.map((c) => c.vuln_id) },
+            total: covers.length }) : undefined} />
+      },
+    },
+    {
       field: 'severity', headerName: 'Sev', width: 86,
       // The rank, not the word: sorted as a string, severity reads
       // critical, high, info, low, medium — "info" third, which is
@@ -395,6 +431,10 @@ export function SecretsPanel({ project, onFinding }: {
       vulnId={sourceFor?.vuln_id ?? null}
       triage={sourceFor?.triage ?? null}
       onClose={() => setSourceFor(null)} />
+    {project && (
+      <ProveGroupDialog project={project} group={prove?.group ?? null}
+        total={prove?.total} onClose={() => setProve(null)} />
+    )}
     </>
   )
 }

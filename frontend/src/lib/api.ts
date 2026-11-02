@@ -488,6 +488,14 @@ export interface SecretRow {
   severity: string
   triage: string
   title: string
+  /** The same three states the findings table shows. A credential is
+   *  a finding, so "has this been proved" is the same question here. */
+  poc_state: string
+  poc_detail: string | null
+  poc_id: number | null
+  /** Asked for, not yet written. Distinct from "no proof": one is
+   *  nobody asked, the other is a queue. */
+  poc_requested: boolean
 }
 
 /** A finding in full, with every host it was found on. */
@@ -496,6 +504,10 @@ export interface VulnsByTargetRow {
   project_code: string
   total: number
   critical: number; high: number; medium: number; low: number; info: number
+  /** Findings here that have a proof, and findings somebody asked to
+   *  have proved that the worker has not reached yet. */
+  proofs: number
+  requested: number
 }
 
 /** A rollup, and whether it is all of it. A bare list cannot say
@@ -515,6 +527,8 @@ export interface VulnsByTitleRow {
   severity: string
   hosts: number
   total: number
+  proofs: number
+  requested: number
 }
 
 export interface VulnDetail extends Vuln {
@@ -1476,6 +1490,21 @@ export const api = {
   buildPoc: (project: string, vulnId: number) =>
     req<{ id: number; target_url: string; status: string }>(
       `/api/vulns/${vulnId}/poc` + qs({ project }), { method: 'POST' }),
+  /** Ask for proofs of a whole GROUP, named the way the row that was
+   *  clicked names it: a host, a title at a severity, or finding ids.
+   *
+   *  Returns a COUNT, not proofs. Each proof is a model call and a
+   *  queued task, so four hundred of them cannot happen inside one
+   *  request — the worker drains them ahead of its floor sweep and
+   *  they appear over the following minutes. The caller must say so;
+   *  a dialog that closed on "done" would be claiming otherwise. */
+  requestPocs: (project: string, group: {
+    host?: string; title?: string; severity?: string; vuln_ids?: number[]
+  }) =>
+    req<{ requested: number; already_proved: number
+          already_requested: number; note: string }>(
+      '/api/vulns/poc/request' + qs({ project }),
+      { method: 'POST', body: JSON.stringify(group) }),
   // ------------------------------------------------------------ c2
   /** Shell sessions a Ghost caught. Active by default: the question
    *  on opening the page is almost always "what can I type at now".

@@ -36,12 +36,21 @@ import asyncio
 import json
 import logging
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import SessionLocal
 from ..events import broker
-from ..models import SEVERITIES, Agent, AgentTask, Poc, Project, Target, Vuln
+from ..models import (
+    SEVERITIES,
+    Agent,
+    AgentTask,
+    FindingSecret,
+    Poc,
+    Project,
+    Target,
+    Vuln,
+)
 from .pocbuild import SYSTEM, Rejected, check
 
 log = logging.getLogger("oddjob.pocworker")
@@ -62,22 +71,99 @@ _RANK = case({s: i for i, s in enumerate(SEVERITIES)},
 
 async def _next(session: AsyncSession, project_id: int,
                 severities: tuple[str, ...]) -> Vuln | None:
-    """The worst finding in this project that has no proof yet."""
-    if not severities:
-        return None
+    """The next finding in this project that has no proof yet.
+
+    Two sources, and asked-for beats swept:
+
+      requested  somebody clicked "prove these" on a host, a
+                 vulnerability or a credential. Regardless of
+                 severity -- the floor is a policy about the
+                 engagement and this is a person pointing at a row.
+      the floor  `auto_poc`, worst first.
+
+    Requested findings come first because a request is a question
+    somebody is waiting on and the sweep is a backlog. Without the
+    ordering, asking for a proof of one low-severity credential
+    behind 4,000 swept criticals means waiting three hours for it,
+    which reads as the button having done nothing.
+    """
     has_poc = select(Poc.id).where(Poc.vuln_id == Vuln.id).exists()
+    wanted = [Vuln.poc_requested_at.is_not(None)]
+    if severities:
+        wanted.append(Vuln.severity.in_(severities))
     return (await session.execute(
         select(Vuln)
         .join(Target, Target.id == Vuln.target_id)
-        .where(Target.project_id == project_id,
-               Vuln.severity.in_(severities),
-               ~has_poc)
-        .order_by(_RANK, Vuln.id)
+        .where(Target.project_id == project_id, or_(*wanted), ~has_poc)
+        # `is_(None)` sorts False(0) before True(1), so "has a
+        # request" lands above "has none" without a DESC that would
+        # also flip the severity rank under it.
+        .order_by(Vuln.poc_requested_at.is_(None), _RANK, Vuln.id)
         .limit(1))).scalars().first()
 
 
+def _target_url(vuln: Vuln, host: str,
+                secret: FindingSecret | None) -> str:
+    """Where to point the proof.
+
+    The credential's own asset, not the bare host. A key found in a
+    JS bundle is not provable at `https://host/` -- the check has to
+    fetch the file it is in, and a proof pointed anywhere else
+    reports "could not test" for ever, which reads on screen exactly
+    like one that was run and settled nothing.
+    """
+    if secret is not None and secret.asset_url:
+        return secret.asset_url
+    return _url_for(vuln, host)
+
+
+async def _secret_for(session: AsyncSession, vuln: Vuln) -> FindingSecret | None:
+    """The credential behind this finding, if it is one.
+
+    Fetched for its LOCATION, never its value -- see `_ask`.
+    """
+    return (await session.execute(
+        select(FindingSecret).where(FindingSecret.vuln_id == vuln.id)
+        .limit(1))).scalars().first()
+
+
+def _secret_brief(sec: FindingSecret) -> list[str]:
+    """What the model is told about an exposed credential.
+
+    **The value is not in here and must never be.** `FindingSecret`
+    exists precisely so a credential stays out of everything that
+    leaves the platform -- descriptions, exports, reports, Slack --
+    and the model is the furthest-travelling of those: the prompt
+    goes to a third party and may be logged there, and a key found
+    on a client's estate is still live after the engagement ends.
+    The same argument already keeps `get_finding_secret` off MCP.
+
+    What CAN go is where it was seen and what kind of thing it is,
+    which is not the secret. That is enough for a real check: fetch
+    the asset and match the detector's key FORMAT. A proof that says
+    "this URL still serves something shaped like an AWS access key"
+    is evidence the exposure is unfixed, and it is the honest limit
+    of what can be proved without replaying the credential at the
+    service -- which would be using it, not testing it.
+    """
+    where = sec.asset_url or sec.path or "(location not recorded)"
+    return [
+        "",
+        "This finding is an EXPOSED CREDENTIAL.",
+        f"Seen in: {where}" + (f" line {sec.line}" if sec.line else ""),
+        f"Detector: {sec.detector}" if sec.detector else None,
+        "The credential's VALUE is deliberately withheld from you, and a "
+        "template that tries to authenticate with it would be using the "
+        "credential rather than testing the exposure. Prove instead that "
+        "the asset above STILL SERVES a value of this kind: request it and "
+        "match on the key's well-known format for that detector. If you do "
+        "not know a format specific enough to avoid matching ordinary "
+        "text, say cannot-prove rather than writing a loose matcher.",
+    ]
+
+
 async def _ask(session: AsyncSession, project: Project, vuln: Vuln,
-               host: str) -> str:
+               host: str, secret: FindingSecret | None = None) -> str:
     """Put one finding to the model and return the raw reply."""
     from ..routers.agent import _resolve
     from .providers import anthropic_chat, openai_chat
@@ -91,6 +177,7 @@ async def _ask(session: AsyncSession, project: Project, vuln: Vuln,
         f"Reference: {vuln.external_id}" if vuln.external_id else None,
         "",
         (vuln.description or "(no description was recorded)")[:8000],
+        *(_secret_brief(secret) if secret is not None else []),
     ] if x is not None)
 
     args = (token, model, SYSTEM, [{"role": "user", "content": body}],
@@ -129,8 +216,13 @@ async def build_one(session: AsyncSession, vuln: Vuln, project: Project,
     forever -- a finding that cannot be expressed as an HTTP check
     will not become expressible on the third attempt.
     """
-    template = check(await _ask(session, project, vuln, host))
-    url = _url_for(vuln, host)
+    # The credential's own asset, not the bare host. A secret found
+    # in a JS bundle is not provable at `https://host/` -- the check
+    # has to fetch the file it is in, and pointing it anywhere else
+    # produces a proof that reports "could not test" for ever.
+    secret = await _secret_for(session, vuln)
+    template = check(await _ask(session, project, vuln, host, secret))
+    url = _target_url(vuln, host, secret)
     poc = Poc(target_id=vuln.target_id, vuln_id=vuln.id,
               title=f"Proof: {vuln.title}"[:500],
               status="unconfirmed", template=template, target_url=url)
@@ -185,9 +277,19 @@ async def _one(project_id: int, severities: tuple[str, ...]) -> str:
 
 
 async def _projects() -> list[tuple[int, str, tuple[str, ...]]]:
-    """Projects with a floor set, and what that floor covers.
+    """Projects with work: a floor set, outstanding requests, or both.
 
-    Only those with a Ghost online. A proof queued with nothing to
+    A project with `auto_poc` off is still here if somebody asked for
+    specific proofs. That is the whole point of a request -- proving
+    the findings on one host must not mean turning a standing order
+    on for the engagement, because the floor would then cover every
+    finding at that severity for ever and switching it back off does
+    not un-send what went out meanwhile.
+
+    The returned severities are the FLOOR's, and may be empty: an
+    empty tuple means "requests only", which `_next` reads correctly.
+
+    Only projects with a Ghost online. A proof queued with nothing to
     run it sits reading "not validated" for ever, which is
     indistinguishable on screen from one that was run and settled
     nothing -- so it is not queued at all, and the reason is said.
@@ -195,13 +297,18 @@ async def _projects() -> list[tuple[int, str, tuple[str, ...]]]:
     from ..automation import poc_severities
     out = []
     async with SessionLocal() as session:
+        asked = (select(Vuln.id)
+                 .join(Target, Target.id == Vuln.target_id)
+                 .where(Target.project_id == Project.id,
+                        Vuln.poc_requested_at.is_not(None),
+                        ~select(Poc.id).where(Poc.vuln_id == Vuln.id).exists())
+                 .exists())
         rows = (await session.execute(
-            select(Project).where(
-                func.coalesce(Project.auto_poc, "off") != "off"))).scalars()
+            select(Project).where(or_(
+                func.coalesce(Project.auto_poc, "off") != "off",
+                asked)))).scalars()
         for pr in rows:
             sev = poc_severities(str(pr.auto_poc or "off"))
-            if not sev:
-                continue
             live = (await session.execute(
                 select(Agent.id).where(Agent.project_id == pr.id,
                                        Agent.status == "online")
