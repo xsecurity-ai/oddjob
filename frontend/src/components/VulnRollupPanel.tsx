@@ -25,6 +25,8 @@ import type { ColumnDef } from '../lib/columns'
 import { api, type Vuln, type VulnsByTargetRow, type VulnsByTitleRow } from '../lib/api'
 import { SEVERITY_COLOUR as SEV } from '../lib/severity'
 import { DataTable } from './DataTable'
+import { ProofCell, ProveGroupDialog, type Group } from './ProveGroup'
+import { useAuth } from '../lib/auth'
 import { neon, glow } from '../theme'
 
 /** Worst first, and the order the server rolls up in. */
@@ -192,7 +194,13 @@ export function VulnsByTarget({ project, onFinding }: {
   project: string | null
   onFinding: (id: number) => void
 }) {
+  const { canWrite } = useAuth()
   const [open, setOpen] = useState<string | null>(null)
+  // What a click on the proof column is asking for, held until the
+  // dialog confirms it. The row, not just the host: the dialog names
+  // the finding count and that lives on the row.
+  const [prove, setProve] = useState<
+    { group: Group; total: number } | null>(null)
   const q = useQuery({
     queryKey: ['vulns-by-target', project],
     queryFn: () => api.vulnsByTarget(project as string),
@@ -219,9 +227,28 @@ export function VulnsByTarget({ project, onFinding }: {
       type: 'number',
       renderCell: (p) => <Count n={p.value as number} colour={SEV[s]} />,
     })),
+    {
+      // Sorted by how much of the host is PROVED, not by the raw
+      // count: "40 of 40" and "40 of 4,000" are the same number and
+      // opposite answers to "is this host evidenced".
+      field: 'proofs', headerName: 'Proof', width: 148, type: 'number',
+      // The COVERAGE, not the count: "40 of 40" and "40 of 4,000"
+      // are the same number and opposite answers to "is this host
+      // evidenced". `valueGetter` is what the sort reads, and the
+      // cell renders from the row regardless.
+      valueGetter: (_v, row) => row.total ? row.proofs / row.total : 0,
+      renderCell: (p) => {
+        const r = p.row as VulnsByTargetRow
+        return <ProofCell proofs={r.proofs} requested={r.requested}
+          total={r.total}
+          onProve={canWrite(project) ? () => setProve({
+            group: { host: r.host }, total: r.total }) : undefined} />
+      },
+    },
   ]
 
   return (
+    <>
     <DataTable
       rows={q.data?.items ?? []}
       columns={columns as ColumnDef[]}
@@ -252,12 +279,19 @@ export function VulnsByTarget({ project, onFinding }: {
           )} />
       )}
       note={'One row per host, worst first. Expand a host to see what '
-            + 'was found on it; the findings are fetched only when you do.'
+            + 'was found on it; the findings are fetched only when you do. '
+            + 'Proof shows how much of the host is evidenced — press it '
+            + 'to have one written for everything here that has none.'
             + (q.data?.truncated
                ? ' THIS LIST IS CUT SHORT — there are more hosts than the '
                  + 'rollup returns, so the totals below are not the whole '
                  + 'project.' : '')}
     />
+    {project && (
+      <ProveGroupDialog project={project} group={prove?.group ?? null}
+        total={prove?.total} onClose={() => setProve(null)} />
+    )}
+    </>
   )
 }
 
@@ -266,7 +300,10 @@ export function VulnsByTitle({ project, onFinding }: {
   project: string | null
   onFinding: (id: number) => void
 }) {
+  const { canWrite } = useAuth()
   const [open, setOpen] = useState<string | null>(null)
+  const [prove, setProve] = useState<
+    { group: Group; total: number } | null>(null)
   const q = useQuery({
     queryKey: ['vulns-by-title', project],
     queryFn: () => api.vulnsByTitle(project as string),
@@ -296,9 +333,25 @@ export function VulnsByTitle({ project, onFinding }: {
       ) },
     { field: 'total', headerName: 'Findings', width: 100, type: 'number',
       renderCell: (p) => <Count n={p.value as number} /> },
+    {
+      field: 'proofs', headerName: 'Proof', width: 148, type: 'number',
+      valueGetter: (_v, row) => row.total ? row.proofs / row.total : 0,
+      renderCell: (p) => {
+        const r = p.row as VulnsByTitleRow
+        return <ProofCell proofs={r.proofs} requested={r.requested}
+          total={r.total}
+          // The title AND its severity. The rollup groups on the
+          // pair, so proving "this row" without the severity would
+          // reach the other row that shares the title.
+          onProve={canWrite(project) ? () => setProve({
+            group: { title: r.title, severity: r.severity },
+            total: r.total }) : undefined} />
+      },
+    },
   ]
 
   return (
+    <>
     <DataTable
       rows={q.data?.items ?? []}
       columns={columns as ColumnDef[]}
@@ -338,5 +391,10 @@ export function VulnsByTitle({ project, onFinding }: {
                ? ' THIS LIST IS CUT SHORT — there are more findings than '
                  + 'the rollup returns.' : '')}
     />
+    {project && (
+      <ProveGroupDialog project={project} group={prove?.group ?? null}
+        total={prove?.total} onClose={() => setProve(null)} />
+    )}
+    </>
   )
 }

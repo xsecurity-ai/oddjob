@@ -50,6 +50,35 @@ _NEEDS = ("matchers",)
 
 MAX_TEMPLATE = 16_000
 
+#: The placeholder an authenticating proof uses in place of the
+#: credential. nuclei substitutes it from `-var secret=...`, which the
+#: Ghost supplies at run time from a value it fetches with its own
+#: identity. The value is never in the template, the task args, or the
+#: prompt.
+SECRET_VAR = "{{secret}}"
+
+
+def _paths(doc: dict) -> list[str]:
+    """Every request target in the template's `http` block.
+
+    Both spellings: `path:` (a list of URLs, normally rooted at
+    `{{BaseURL}}`) and `raw:` (a whole HTTP request, which carries its
+    own Host line and is therefore a way to address any server at
+    all).
+    """
+    out: list[str] = []
+    http = doc.get("http")
+    for entry in (http if isinstance(http, list) else [http]):
+        if not isinstance(entry, dict):
+            continue
+        for key in ("path", "raw"):
+            v = entry.get(key)
+            if isinstance(v, str):
+                out.append(v)
+            elif isinstance(v, list):
+                out += [x for x in v if isinstance(x, str)]
+    return out
+
 SYSTEM = """You write a single nuclei template that proves one penetration-test
 finding is still present on one host.
 
@@ -101,7 +130,7 @@ def clean(text: str) -> str:
     return t
 
 
-def check(text: str) -> str:
+def check(text: str, carries_secret: bool = False) -> str:
     """-> the template, or raise Rejected with a usable reason.
 
     Parsed rather than pattern-matched. A template is YAML and the
@@ -109,6 +138,12 @@ def check(text: str) -> str:
     the document, not about whether the characters `code:` appear in
     it -- a matcher looking for the word "code" in a response would
     trip a substring check and is perfectly legitimate.
+
+    `carries_secret` applies the extra rules a template gets when it
+    will be handed a live client credential at run time. They are
+    stricter than the ordinary ones and deliberately so: an ordinary
+    proof that reached the wrong host sends a probe, and this one
+    would send the key.
     """
     t = clean(text)
     if not t:
@@ -137,6 +172,43 @@ def check(text: str) -> str:
         raise Rejected("the template has no `http` block, so it sends nothing")
     if not doc.get("id"):
         raise Rejected("the template has no `id`")
+
+    if carries_secret:
+        # ---- where the credential may be sent --------------------
+        #
+        # Every request has to be rooted at `{{BaseURL}}`, which is
+        # the target Oddjob chose and already scope-checked. A
+        # hard-coded host would be this template deciding for itself
+        # where a live credential goes, and the obvious destination
+        # for a leaked key -- the third-party service that issued it
+        # -- is exactly the thing the engagement's scope does not
+        # cover. Refused rather than rewritten: a template reaching
+        # elsewhere misunderstood the job.
+        # `raw` carries its own request line and Host header, so it
+        # can address another server even while starting with
+        # {{BaseURL}}. There is no safe way to allow it here.
+        if any(isinstance(e, dict) and e.get("raw")
+               for e in (doc["http"] if isinstance(doc["http"], list)
+                         else [doc["http"]])):
+            raise Rejected(
+                "an authenticating proof may not use `raw`: it carries its "
+                "own Host line, so the check could send the credential to "
+                "a server other than the one being tested")
+        targets = _paths(doc)
+        if not targets:
+            raise Rejected("the template names no request path")
+        stray = [t for t in targets if not t.lstrip().startswith("{{BaseURL}}")]
+        if stray:
+            raise Rejected(
+                "an authenticating proof may only send to {{BaseURL}}, and "
+                f"this one addresses {stray[0][:80]!r}. The credential would "
+                f"go somewhere the engagement did not authorise.")
+        # ---- and that it actually tests the credential ------------
+        if SECRET_VAR not in t:
+            raise Rejected(
+                f"the template never uses {SECRET_VAR}, so it does not "
+                f"present the credential and cannot show whether it still "
+                f"works — which is the only thing this proof was for")
 
     blob = json.dumps(doc.get("http"), default=str)
     for needed in _NEEDS:

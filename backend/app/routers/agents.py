@@ -74,6 +74,8 @@ from ..models import (
     Agent,
     AgentDebugLog,
     AgentTask,
+    FindingSecret,
+    Poc,
     Project,
     ProxyGrant,
     Setting,
@@ -3897,6 +3899,74 @@ async def _dial(host: str, port: int, proto: str, nonce: str) -> tuple[bool, str
 #: An output big enough that parsing it moved real memory. Below
 #: this, trimming costs more than it returns.
 TRIM_OUTPUT_BYTES = 4 * 1024 * 1024
+
+
+@router.get("/tasks/{task_id}/secret", response_model=dict)
+async def task_secret(task_id: int, a: Agent = Depends(agent_from_key),
+                      session: AsyncSession = Depends(get_session)):
+    """The credential an authenticating proof presents.
+
+    **This is the one route that hands a client's credential to a
+    Ghost, and every narrowing on it is deliberate.**
+
+    It exists because the alternative is worse. Proving a leaked key
+    still works means presenting it, and the value has to reach the
+    thing that runs the check somehow. Writing it into the template
+    would put it in a row the PoC editor shows; writing it into
+    `agent_tasks.args` would put it in the tasks list. Both are read
+    far more widely than this, and neither leaves a record of who
+    took it.
+
+    What holds it in:
+
+    `agent_from_key`, so it is the agent's own identity and never a
+    user session — the same authentication `start` and `result` use.
+
+    **The task, not the proof.** The agent names a task it was
+    ASSIGNED (`t.agent_id != a.id` is a 404), so holding an agent key
+    is not enough: the server had to have given that agent that task.
+    An agent cannot ask about an arbitrary PoC, or about another
+    agent's.
+
+    **Only a proof that declared it needs one.** `needs_secret` is
+    set when the template was written and checked, and that template
+    was refused unless it sends only to `{{BaseURL}}`. So the value
+    goes to a check that can only put it back to the host under test.
+
+    **Only while the task is live.** A finished task's key is not
+    re-fetchable, so a stale queue entry is not a standing grant.
+
+    An audit entry every time, naming the agent and the finding,
+    because "who could have seen this key" has to stay answerable —
+    the same requirement that put one on the bulk secrets list.
+    """
+    t = await session.get(AgentTask, task_id)
+    if t is None or t.agent_id != a.id:
+        raise HTTPException(404, "no such task for this agent")
+    if t.kind != "poc" or t.status not in ("queued", "running"):
+        raise HTTPException(409, "that task is not a running proof")
+
+    try:
+        poc_id = int(json.loads(t.args or "{}").get("poc_id") or 0)
+    except (ValueError, TypeError):
+        poc_id = 0
+    poc = await session.get(Poc, poc_id) if poc_id else None
+    if poc is None or not poc.needs_secret or poc.vuln_id is None:
+        raise HTTPException(
+            404, "that proof does not authenticate with a stored credential")
+
+    sec = (await session.execute(
+        select(FindingSecret).where(FindingSecret.vuln_id == poc.vuln_id)
+        .limit(1))).scalars().first()
+    if sec is None:
+        raise HTTPException(404, "no credential is stored for that finding")
+
+    await audit.record(
+        session, "agent", "finding.secret.release", commit=True,
+        project_code=(await session.get(Project, t.project_id)).code,
+        detail=(f"released the credential on finding {poc.vuln_id} to agent "
+                f"{a.name!r} for proof {poc.id}"))
+    return {"secret": sec.secret}
 
 
 @router.post("/tasks/{task_id}/result", response_model=dict)

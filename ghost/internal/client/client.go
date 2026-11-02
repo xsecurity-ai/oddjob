@@ -502,6 +502,33 @@ func (c *Client) HeldAssets(ctx context.Context, urls []string) ([]string, error
 	return out.Held, nil
 }
 
+// TaskSecret fetches the credential an authenticating proof presents.
+//
+// **The only call this agent makes that returns a client's
+// credential**, and it is deliberately the narrowest one here: it
+// names a task, the server checks that this agent was assigned it and
+// that the proof behind it declared it needs a credential, and it
+// writes an audit entry before answering. See `task_secret` in
+// routers/agents.py for the rest of the reasoning.
+//
+// The value is returned to the caller and goes no further: `runPoc`
+// substitutes it into the template file and scrubs it back out of
+// anything sent home. It is never logged here -- an error from this
+// call is a plumbing failure and cannot contain the key, because the
+// fetch did not succeed.
+func (c *Client) TaskSecret(ctx context.Context, id int64) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var out struct {
+		Secret string `json:"secret"`
+	}
+	if err := c.do(ctx, http.MethodGet,
+		fmt.Sprintf("/api/ghosts/tasks/%d/secret", id), nil, &out); err != nil {
+		return "", err
+	}
+	return out.Secret, nil
+}
+
 func (c *Client) StartTask(ctx context.Context, id int) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()

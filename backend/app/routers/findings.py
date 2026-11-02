@@ -10,7 +10,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import assetfetch, assetwork, audit, lifecycle, manifest, pocwork, slack
@@ -25,6 +25,7 @@ from ..models import (
     Agent,
     AgentTask,
     FindingSecret,
+    FindingSweep,
     Poc,
     Project,
     RunManifest,
@@ -93,17 +94,67 @@ _POC_RANK = case(
     else_=1)
 
 
-def _vulns_base():
-    """`_base(Vuln)` with the newest proof joined, for sort and filter.
+#: The sweep that would speak for a finding: the same host, the same
+#: tool. `finding_sweeps` is unique on (target_id, scanner), so this
+#: outer join cannot multiply a row the way joining `pocs` directly
+#: would — see `_NEWEST_POC` for the version of that mistake that was
+#: made.
+_SWEEP = FindingSweep.__table__.alias("sweep_for_sort")
 
-    An OUTER join, and through `_NEWEST_POC` rather than straight to
-    `Poc`: a finding with three proofs joined directly would come back
-    three times, and a listing that silently triples some of its rows
-    is a worse bug than the one this exists to fix.
+#: Lifecycle, ranked in SQL so the listing can be ORDERED by it.
+#:
+#: **This mirrors `lifecycle.verdict` and does not replace it.** The
+#: word shown in the column is still that function's answer, computed
+#: per page from the sweep table; this decides only where a row sits
+#: in the order. So a drift between the two mis-sorts a listing and
+#: can never mislabel a finding — which is why expressing it twice is
+#: acceptable here and would not be for the verdict itself.
+#:
+#: `vulnlifecycletest` asserts the two agree over every branch, so the
+#: drift is caught rather than assumed not to happen.
+#:
+#: The order is the one an operator reads in: what is new, what is
+#: still there, what nothing has looked at, and last what a scan says
+#: has gone — the only group nobody has to act on.
+_LIFECYCLE_ORDER = ("new", "present", "unconfirmed", "resolved")
+_LIFECYCLE_STATE = case(
+    # No scanner, never seen, or never swept: nothing has looked, so
+    # the absence is unmeasured rather than fixed.
+    (Vuln.scanner.is_(None), "unconfirmed"),
+    (Vuln.last_seen_at.is_(None), "unconfirmed"),
+    (_SWEEP.c.at.is_(None), "unconfirmed"),
+    # A sweep ran after it was last seen. That only clears the
+    # finding if the sweep was looking for the same things.
+    (and_(_SWEEP.c.at > Vuln.last_seen_at,
+          Vuln.found_by_manifest.is_not(None),
+          _SWEEP.c.manifest.is_not(None),
+          Vuln.found_by_manifest != _SWEEP.c.manifest), "unconfirmed"),
+    (_SWEEP.c.at > Vuln.last_seen_at, "resolved"),
+    # Seen by the most recent sweep. New if that sweep is also the
+    # first time it was ever seen.
+    (and_(Vuln.first_seen_at.is_not(None),
+          Vuln.first_seen_at >= _SWEEP.c.at), "new"),
+    else_="present")
+_LIFECYCLE_RANK = case(
+    {s: i for i, s in enumerate(_LIFECYCLE_ORDER)},
+    value=_LIFECYCLE_STATE, else_=99)
+
+
+def _vulns_base():
+    """`_base(Vuln)` with the newest proof and the sweep joined.
+
+    OUTER joins throughout, and the proof goes through `_NEWEST_POC`
+    rather than straight to `Poc`: a finding with three proofs joined
+    directly would come back three times, and a listing that silently
+    triples some of its rows is a worse bug than the one this exists
+    to fix. `finding_sweeps` is unique on (target_id, scanner) and so
+    needs no such guard.
     """
     return (_base(Vuln)
             .outerjoin(_NEWEST_POC, _NEWEST_POC.c.vid == Vuln.id)
-            .outerjoin(Poc, Poc.id == _NEWEST_POC.c.pid))
+            .outerjoin(Poc, Poc.id == _NEWEST_POC.c.pid)
+            .outerjoin(_SWEEP, and_(_SWEEP.c.target_id == Vuln.target_id,
+                                    _SWEEP.c.scanner == Vuln.scanner)))
 
 
 #: What a caller may sort by. `severity` and `poc_state` are the two
@@ -114,6 +165,7 @@ SORTABLE = {
     "port": Vuln.port, "updated_at": Vuln.updated_at,
     "created_at": Vuln.created_at, "triage": Vuln.triage,
     "external_id": Vuln.external_id, "poc_state": _POC_RANK,
+    "lifecycle": _LIFECYCLE_RANK,
 }
 
 #: What a chained column filter may reference. Deliberately a list and
@@ -342,6 +394,37 @@ class Rollup(BaseModel):
     truncated: bool = False
 
 
+def _proved_subquery():
+    """Vuln ids that have a proof, exactly once each.
+
+    DISTINCT is load-bearing. A finding can carry more than one `Poc`
+    row -- a proof that was refused and a later one that was written
+    -- and joining the pocs table directly would return that finding
+    twice, inflating `total` and every severity count beside it. The
+    rollup would then disagree with the findings list about how many
+    findings there are, which is the one thing a summary must not do.
+    """
+    return (select(Poc.vuln_id).where(Poc.vuln_id.is_not(None))
+            .distinct().subquery())
+
+
+def _proof_counts(proved):
+    """How much of this group is proved, and how much is waiting.
+
+    Two numbers rather than one. "12 of 400 proved" and "12 proved,
+    30 more asked for" are different states and an operator deciding
+    whether to click needs to tell them apart -- a column showing
+    only coverage makes a request that is already queued look like a
+    button that did nothing.
+    """
+    return [
+        func.count(proved.c.vuln_id).label("proofs"),
+        func.count(case((and_(Vuln.poc_requested_at.is_not(None),
+                              proved.c.vuln_id.is_(None)), 1)))
+        .label("requested"),
+    ]
+
+
 class VulnsByTargetRow(BaseModel):
     host: str
     project_code: str
@@ -351,6 +434,10 @@ class VulnsByTargetRow(BaseModel):
     medium: int = 0
     low: int = 0
     info: int = 0
+    #: Findings on this host that have a proof, and findings somebody
+    #: has asked for a proof of that the worker has not reached.
+    proofs: int = 0
+    requested: int = 0
 
 
 class VulnsByTitleRow(BaseModel):
@@ -368,6 +455,8 @@ class VulnsByTitleRow(BaseModel):
     severity: str
     hosts: int
     total: int
+    proofs: int = 0
+    requested: int = 0
 
 
 @router.get("/vulns/by-target", response_model=Rollup)
@@ -385,10 +474,13 @@ async def vulns_by_target(
     findings themselves are fetched per host when a row is expanded,
     so opening one costs one query and opening none costs nothing.
     """
+    proved = _proved_subquery()
     stmt = (select(Target.host, Project.code,
-                   func.count(Vuln.id).label("total"), *_sev_counts())
+                   func.count(Vuln.id).label("total"), *_sev_counts(),
+                   *_proof_counts(proved))
             .join(Target, Target.id == Vuln.target_id)
-            .join(Project, Project.id == Target.project_id))
+            .join(Project, Project.id == Target.project_id)
+            .outerjoin(proved, proved.c.vuln_id == Vuln.id))
     vis = await visible_project_ids(session, user)
     if vis is not None:
         stmt = stmt.where(Target.project_id.in_(vis))
@@ -405,6 +497,7 @@ async def vulns_by_target(
     return Rollup(
         items=[VulnsByTargetRow(
             host=r.host, project_code=r.code, total=r.total,
+            proofs=r.proofs, requested=r.requested,
             **{sev: getattr(r, sev) for sev in ROLLUP_SEVERITIES})
             for r in rows[:limit]],
         truncated=len(rows) > limit)
@@ -425,11 +518,14 @@ async def vulns_by_title(
     things wrong" are different questions and neither answers the
     other.
     """
+    proved = _proved_subquery()
     stmt = (select(Vuln.title, Vuln.severity,
                    func.count(func.distinct(Target.host)).label("hosts"),
-                   func.count(Vuln.id).label("total"))
+                   func.count(Vuln.id).label("total"),
+                   *_proof_counts(proved))
             .join(Target, Target.id == Vuln.target_id)
-            .join(Project, Project.id == Target.project_id))
+            .join(Project, Project.id == Target.project_id)
+            .outerjoin(proved, proved.c.vuln_id == Vuln.id))
     vis = await visible_project_ids(session, user)
     if vis is not None:
         stmt = stmt.where(Target.project_id.in_(vis))
@@ -446,7 +542,8 @@ async def vulns_by_title(
     rows = (await session.execute(stmt)).all()
     return Rollup(
         items=[VulnsByTitleRow(title=r.title, severity=r.severity,
-                               hosts=r.hosts, total=r.total)
+                               hosts=r.hosts, total=r.total,
+                               proofs=r.proofs, requested=r.requested)
                for r in rows[:limit]],
         truncated=len(rows) > limit)
 
@@ -1125,6 +1222,16 @@ class SecretRow(BaseModel):
     severity: str
     triage: str
     title: str
+    #: The same three states the findings table shows, from the same
+    #: helper -- a credential is a finding, and two places reporting
+    #: its proof differently is two places one of which is wrong.
+    poc_state: str = "Not Available"
+    poc_detail: str | None = None
+    poc_id: int | None = None
+    #: A proof has been asked for and the worker has not reached it.
+    #: Distinct from "no proof": one is nobody asked, the other is a
+    #: queue.
+    poc_requested: bool = False
 
 
 @router.get("/secrets", response_model=list[SecretRow])
@@ -1187,6 +1294,10 @@ async def list_secrets(project: str | None = Query(None),
     # arrive in the hundreds.
     allowed: dict[int, bool] = {}
     out: list[SecretRow] = []
+    # One query for the whole list, not one per credential: these
+    # arrive in the hundreds and a lookup each would be hundreds of
+    # round trips for a column.
+    pocs = await _pocs_for(session, [v.id for _, v, _, _ in rows])
     for sec, vuln, host, code in rows:
         pid = (await session.get(Target, vuln.target_id)).project_id
         if pid not in allowed:
@@ -1198,7 +1309,12 @@ async def list_secrets(project: str | None = Query(None),
             vuln_id=vuln.id, secret=sec.secret, detector=sec.detector,
             asset_url=sec.asset_url, path=sec.path, line=sec.line,
             host=host, project_code=code, severity=vuln.severity,
-            triage=vuln.triage, title=vuln.title))
+            triage=vuln.triage, title=vuln.title,
+            poc_state=pocwork.availability(pocs.get(vuln.id)),
+            poc_detail=pocwork.why_unconfirmed(pocs.get(vuln.id)),
+            poc_id=(pocs.get(vuln.id).id if pocs.get(vuln.id) else None),
+            poc_requested=(vuln.poc_requested_at is not None
+                           and vuln.id not in pocs)))
 
     if out:
         codes = sorted({r.project_code for r in out})
@@ -1376,6 +1492,172 @@ async def build_poc(vuln_id: int, body: PocRequest | None = None,
                               f"against {poc.target_url}")
     return {"id": poc.id, "target_url": poc.target_url,
             "status": "queued for validation"}
+
+
+#: One click, one ceiling. A group request is a person pointing at a
+#: row, and the rows here are an estate: a single host on a large
+#: engagement carries thousands of findings, and proving all of them
+#: means thousands of model calls and thousands of checks fired at a
+#: client from one click. Above this the answer is a floor (`auto_poc`), which is the
+#: control that was built to say "everything this bad, for ever" --
+#: so the refusal names the number and points at it rather than
+#: quietly doing part of the job.
+MAX_GROUP_REQUEST = 2000
+
+
+class PocGroupRequest(BaseModel):
+    """Which findings to prove. Exactly one selector.
+
+    The three selectors are the three ways the Vulns page is read --
+    by target, by vulnerability, and the credentials list -- so a
+    request is phrased the same way as the row it was clicked on
+    rather than as a list of ids the browser had to assemble.
+
+    `vuln_ids` is the explicit form, and is what Secrets uses: a
+    credential is one finding, and "validate this cred" names it.
+    """
+    #: Every finding on this host, in this project.
+    host: str | None = None
+    #: Every finding with this title AT this severity. Both, because
+    #: the by-vuln rollup groups on the pair -- the same title at two
+    #: severities is two rows with two different host lists.
+    title: str | None = None
+    severity: str | None = None
+    #: Named findings.
+    vuln_ids: list[int] | None = Field(default=None, max_length=MAX_GROUP_REQUEST)
+    #: What the proof should claim about a credential.
+    #:
+    #: `exposure` — the key is still served at that URL. Sends nothing
+    #: of the client's anywhere and is the default.
+    #: `auth` — the key still works, which can only be shown by
+    #: presenting it. Ignored for findings that are not credentials.
+    mode: str = Field(default="exposure", pattern="^(exposure|auth)$")
+
+
+class PocGroupOut(BaseModel):
+    """What the request did, counted three ways.
+
+    "Queued 12" alone is misleading on a row reading 400: the other
+    388 are not lost, they already have proofs or were already asked
+    for. Saying so is the difference between a button that looks
+    broken and one that reports a no-op.
+    """
+    #: Findings newly flagged by this call.
+    requested: int
+    #: Already had a proof, so nothing to ask for.
+    already_proved: int
+    #: Already asked for and still waiting on the worker.
+    already_requested: int
+    note: str
+
+
+@router.post("/vulns/poc/request", response_model=PocGroupOut)
+async def request_group_pocs(body: PocGroupRequest, project: str = Query(...),
+                             pr: Project = Depends(require_project("user")),
+                             user: User = Depends(get_current_user),
+                             session: AsyncSession = Depends(get_session)):
+    """Ask for proofs of a whole group of findings.
+
+    The group half of `POST /vulns/{id}/poc`. That one writes a proof
+    inside the request, which is right for one finding and impossible
+    for four hundred -- each proof is a model call, and a request
+    that made them inline would hold a connection open for an hour
+    and lose the lot if it dropped.
+
+    So this records the ASK and returns. `pocworker` drains the
+    requests ahead of its floor sweep. What the operator gets back is
+    a count, not a proof, and the note says so -- a button that
+    claimed to have proved four hundred findings in 200 ms would be
+    lying about the one thing that matters here.
+
+    **Both halves of the agent are required, same as the single-finding
+    route.** Without a model there is nothing to write the templates;
+    without a Ghost online they would be written and never run, and a
+    proof reading "not validated" for ever is indistinguishable from
+    one that was run and settled nothing.
+
+    `user`, never `readonly`: this queues traffic at the client.
+    """
+    from ..agent.pocworker import _configured
+
+    picked = [k for k, v in (("host", body.host), ("title", body.title),
+                             ("vuln_ids", body.vuln_ids)) if v]
+    if len(picked) != 1:
+        raise HTTPException(
+            422, "name exactly one group: a host, a title with its severity, "
+                 f"or a list of finding ids — got {picked or 'none'}")
+    if body.title and not body.severity:
+        raise HTTPException(
+            422, "a title needs its severity: the same title at two "
+                 "severities is two different groups of findings")
+
+    if not await _configured():
+        raise HTTPException(
+            409, "no model is configured, so there is nothing to write the "
+                 "proofs. Set one in Site Config → Agent.")
+    live = (await session.execute(
+        select(Agent.id).where(Agent.project_id == pr.id,
+                               Agent.status == "online").limit(1))).first()
+    if live is None:
+        raise HTTPException(
+            409, f"no Ghost is online for {pr.code}, so the proofs would be "
+                 f"written and never run. Bring an agent up and ask again.")
+
+    stmt = (select(Vuln.id, Vuln.poc_requested_at,
+                   select(Poc.id).where(Poc.vuln_id == Vuln.id)
+                   .exists().label("proved"))
+            .join(Target, Target.id == Vuln.target_id)
+            .where(Target.project_id == pr.id))
+    if body.host:
+        stmt = stmt.where(Target.host == normalise_host(body.host))
+    elif body.title:
+        stmt = stmt.where(Vuln.title == body.title,
+                          Vuln.severity == body.severity)
+    else:
+        stmt = stmt.where(Vuln.id.in_(body.vuln_ids or []))
+    rows = (await session.execute(stmt)).all()
+    if not rows:
+        raise HTTPException(404, f"no findings in {pr.code} match that group")
+
+    proved = [r for r in rows if r.proved]
+    asked = [r for r in rows if not r.proved and r.poc_requested_at is not None]
+    todo = [r.id for r in rows
+            if not r.proved and r.poc_requested_at is None]
+    if len(todo) > MAX_GROUP_REQUEST:
+        raise HTTPException(
+            422,
+            f"that group is {len(todo)} findings without a proof, over the "
+            f"{MAX_GROUP_REQUEST} this route will queue in one click. Each "
+            f"one is a model call and a check fired at the client. Narrow "
+            f"it, or set an Auto PoC floor — that is the control for "
+            f"'everything this severity, for ever'.")
+
+    if todo:
+        await session.execute(
+            update(Vuln).where(Vuln.id.in_(todo))
+            .values(poc_requested_at=func.now(),
+                    poc_request_mode=body.mode))
+        await session.commit()
+        await broker.publish("pocs", action="request", project=pr.code)
+        await audit.record(
+            session, "ui", "poc.request", user=user, commit=True,
+            project_code=pr.code,
+            detail=f"asked for {body.mode} proofs of {len(todo)} "
+                   f"finding(s) — "
+                   f"{picked[0]}={body.host or body.title or len(todo)}")
+
+    note = (f"{len(todo)} queued. A proof is written by a model and run by "
+            f"a Ghost, one at a time — these will appear over the next few "
+            f"minutes, not now."
+            + (" Each one presents the stored credential to the host it was "
+               "found on; any that can only be checked against a "
+               "third-party service will say so rather than send it there."
+               if body.mode == "auth" else "")
+            if todo else
+            "Nothing to queue: every finding in this group already has a "
+            "proof or has already been asked for.")
+    return PocGroupOut(requested=len(todo), already_proved=len(proved),
+                       already_requested=len(asked), note=note)
 
 
 class PocDetail(BaseModel):

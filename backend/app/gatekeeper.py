@@ -90,7 +90,15 @@ PUBLIC_PREFIX = (
 # below it is public by default, and the one that gets added is an
 # operator-facing one. The two routes an agent actually calls are both
 # of the form /api/ghosts/tasks/{int}/{verb}, so say that.
-PUBLIC_AGENT_ROUTE = re.compile(r"^/api/ghosts/tasks/\d+/(start|result)$")
+#: `secret` releases a client credential, so it is here for exactly
+#: the same reason as the other two and under exactly the same rule:
+#: the route authenticates the AGENT itself, so the session
+#: middleware must not refuse it before its own auth runs. It is no
+#: more public than `result` is — see `task_secret`, which requires
+#: the agent to hold that task and the proof to have declared it
+#: needs a credential.
+PUBLIC_AGENT_ROUTE = re.compile(
+    r"^/api/ghosts/tasks/\d+/(start|result|secret)$")
 
 
 def is_public(path: str) -> bool:

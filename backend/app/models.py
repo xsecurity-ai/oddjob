@@ -48,6 +48,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    false,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -855,6 +856,35 @@ class Vuln(Base, TimestampMixin):
     # than forking a duplicate. Unique per project, not globally.
     external_id: Mapped[str | None] = mapped_column(String(128), index=True)
 
+    #: Somebody asked for a proof of this finding, and it has not been
+    #: written yet.
+    #:
+    #: `auto_poc` is a FLOOR and says "prove everything this bad or
+    #: worse, for ever". This is the other half: "prove these, the
+    #: ones I am looking at right now" -- a host, a vulnerability
+    #: across the estate, or a credential -- without moving the floor
+    #: and committing the engagement to every finding at that
+    #: severity from now on.
+    #:
+    #: A timestamp rather than a flag because a proof is queued, not
+    #: built: the worker drains these one at a time against a shared
+    #: model, so a request made at noon may be answered at ten past,
+    #: and "when did somebody ask" is the only thing that distinguishes
+    #: a backlog from a stall. It is NOT cleared when the proof is
+    #: written -- `pocs.vuln_id` existing is what takes the finding out
+    #: of the queue, and keeping the timestamp records that this proof
+    #: exists because a person asked rather than because a floor
+    #: covered it.
+    poc_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True)
+    #: WHICH proof was asked for: `exposure` (the key is still served
+    #: at that URL) or `auth` (the key still works). Two different
+    #: claims, and only the second needs the credential's value at run
+    #: time. NULL alongside a request means `exposure`, which is the
+    #: safe reading -- a request that lost its mode must not silently
+    #: become the one that authenticates.
+    poc_request_mode: Mapped[str | None] = mapped_column(String(16))
+
     # ---- lifecycle: what happened to this between scans -------------
     #
     # See `app/lifecycle.py`. These three answer "is it still there",
@@ -1098,6 +1128,13 @@ class Poc(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(500))
     status: Mapped[str] = mapped_column(String(32), default="unconfirmed", index=True)
     path: Mapped[str | None] = mapped_column(String(1000))
+    #: This proof AUTHENTICATES with a stored credential, so its
+    #: template carries a `{{secret}}` placeholder rather than a
+    #: value. The value is released to the agent holding the task,
+    #: over its own route, and is never written into the template,
+    #: the task args, or anything that is listed or exported.
+    needs_secret: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=false(), default=False)
     # 0 reproduced | 1 not reproduced | 2 could not test
     exit_code: Mapped[int | None] = mapped_column(Integer)
     notes: Mapped[str | None] = mapped_column(Text)
