@@ -25,6 +25,7 @@ from ..models import (
     Agent,
     AgentTask,
     FindingSecret,
+    FindingSweep,
     Poc,
     Project,
     RunManifest,
@@ -93,17 +94,67 @@ _POC_RANK = case(
     else_=1)
 
 
-def _vulns_base():
-    """`_base(Vuln)` with the newest proof joined, for sort and filter.
+#: The sweep that would speak for a finding: the same host, the same
+#: tool. `finding_sweeps` is unique on (target_id, scanner), so this
+#: outer join cannot multiply a row the way joining `pocs` directly
+#: would — see `_NEWEST_POC` for the version of that mistake that was
+#: made.
+_SWEEP = FindingSweep.__table__.alias("sweep_for_sort")
 
-    An OUTER join, and through `_NEWEST_POC` rather than straight to
-    `Poc`: a finding with three proofs joined directly would come back
-    three times, and a listing that silently triples some of its rows
-    is a worse bug than the one this exists to fix.
+#: Lifecycle, ranked in SQL so the listing can be ORDERED by it.
+#:
+#: **This mirrors `lifecycle.verdict` and does not replace it.** The
+#: word shown in the column is still that function's answer, computed
+#: per page from the sweep table; this decides only where a row sits
+#: in the order. So a drift between the two mis-sorts a listing and
+#: can never mislabel a finding — which is why expressing it twice is
+#: acceptable here and would not be for the verdict itself.
+#:
+#: `vulnlifecycletest` asserts the two agree over every branch, so the
+#: drift is caught rather than assumed not to happen.
+#:
+#: The order is the one an operator reads in: what is new, what is
+#: still there, what nothing has looked at, and last what a scan says
+#: has gone — the only group nobody has to act on.
+_LIFECYCLE_ORDER = ("new", "present", "unconfirmed", "resolved")
+_LIFECYCLE_STATE = case(
+    # No scanner, never seen, or never swept: nothing has looked, so
+    # the absence is unmeasured rather than fixed.
+    (Vuln.scanner.is_(None), "unconfirmed"),
+    (Vuln.last_seen_at.is_(None), "unconfirmed"),
+    (_SWEEP.c.at.is_(None), "unconfirmed"),
+    # A sweep ran after it was last seen. That only clears the
+    # finding if the sweep was looking for the same things.
+    (and_(_SWEEP.c.at > Vuln.last_seen_at,
+          Vuln.found_by_manifest.is_not(None),
+          _SWEEP.c.manifest.is_not(None),
+          Vuln.found_by_manifest != _SWEEP.c.manifest), "unconfirmed"),
+    (_SWEEP.c.at > Vuln.last_seen_at, "resolved"),
+    # Seen by the most recent sweep. New if that sweep is also the
+    # first time it was ever seen.
+    (and_(Vuln.first_seen_at.is_not(None),
+          Vuln.first_seen_at >= _SWEEP.c.at), "new"),
+    else_="present")
+_LIFECYCLE_RANK = case(
+    {s: i for i, s in enumerate(_LIFECYCLE_ORDER)},
+    value=_LIFECYCLE_STATE, else_=99)
+
+
+def _vulns_base():
+    """`_base(Vuln)` with the newest proof and the sweep joined.
+
+    OUTER joins throughout, and the proof goes through `_NEWEST_POC`
+    rather than straight to `Poc`: a finding with three proofs joined
+    directly would come back three times, and a listing that silently
+    triples some of its rows is a worse bug than the one this exists
+    to fix. `finding_sweeps` is unique on (target_id, scanner) and so
+    needs no such guard.
     """
     return (_base(Vuln)
             .outerjoin(_NEWEST_POC, _NEWEST_POC.c.vid == Vuln.id)
-            .outerjoin(Poc, Poc.id == _NEWEST_POC.c.pid))
+            .outerjoin(Poc, Poc.id == _NEWEST_POC.c.pid)
+            .outerjoin(_SWEEP, and_(_SWEEP.c.target_id == Vuln.target_id,
+                                    _SWEEP.c.scanner == Vuln.scanner)))
 
 
 #: What a caller may sort by. `severity` and `poc_state` are the two
@@ -114,6 +165,7 @@ SORTABLE = {
     "port": Vuln.port, "updated_at": Vuln.updated_at,
     "created_at": Vuln.created_at, "triage": Vuln.triage,
     "external_id": Vuln.external_id, "poc_state": _POC_RANK,
+    "lifecycle": _LIFECYCLE_RANK,
 }
 
 #: What a chained column filter may reference. Deliberately a list and
