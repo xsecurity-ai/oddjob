@@ -133,6 +133,12 @@ func New(cfg *config.Config) *Agent {
 	// way Parallelism is: a task runner takes (ctx, args, workDir)
 	// and has nowhere to be handed a client.
 	tasks.AssetsHeld = a.cli.HeldAssets
+	// A proof that authenticates carries a placeholder, not the
+	// credential: the value stays on the server until the task runs
+	// and is fetched here, once, over this agent's own identity.
+	// Wired the same way and for the same reason -- and nil is the
+	// safe answer, which `runPoc` reads as "could not test".
+	tasks.TaskSecret = a.cli.TaskSecret
 	return a
 }
 
@@ -1032,7 +1038,13 @@ func (a *Agent) execute(ctx context.Context, t *client.Task) {
 		// asked for an out-of-band callback needs a port bound and
 		// proved reachable BEFORE its payload goes anywhere, and
 		// kept open after the tool exits. See tasks/callback.go.
-		return tasks.Run(ctx, runner, tasks.Decode(t.Args), a.cfg.WorkDir)
+		// The task's own id, stamped AFTER decoding the server's
+		// arguments so a task cannot name a different one by putting
+		// the key in its own args. A runner needs it to ask the
+		// server about the task it is running -- see TaskSecret.
+		targs := tasks.Decode(t.Args)
+		targs[tasks.TaskIDKey] = t.ID
+		return tasks.Run(ctx, runner, targs, a.cfg.WorkDir)
 	}()
 
 	log.Printf("task %d: %s in %s — %s", t.ID, res.Status,

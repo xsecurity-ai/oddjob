@@ -51,7 +51,7 @@ from ..models import (
     Target,
     Vuln,
 )
-from .pocbuild import SYSTEM, Rejected, check
+from .pocbuild import SECRET_VAR, SYSTEM, Rejected, check
 
 log = logging.getLogger("oddjob.pocworker")
 
@@ -62,6 +62,14 @@ ERROR_SLEEP = 60.0
 STEP_DELAY = 3.0
 #: Above every sweep in the queue. See the module docstring.
 PRIORITY = 100
+
+#: The two things a proof of a credential can claim. `EXPOSURE` is
+#: the default everywhere, including when a stored request has lost
+#: its mode: asking "is the key still served here" sends nothing of
+#: the client's anywhere, and defaulting to the other one would have
+#: a dropped column decide to authenticate.
+EXPOSURE = "exposure"
+AUTH = "auth"
 
 #: Worst first, so a worker that is switched off after twenty
 #: findings proved the twenty that mattered.
@@ -127,6 +135,52 @@ async def _secret_for(session: AsyncSession, vuln: Vuln) -> FindingSecret | None
         .limit(1))).scalars().first()
 
 
+def _auth_brief(sec: FindingSecret) -> list[str]:
+    """What the model is told when the ask is "does this key work".
+
+    **Still no value.** The model writes the SHAPE of the check and
+    nuclei substitutes `{{secret}}` at run time from a value the
+    Ghost fetches with its own identity. So the credential reaches
+    the service it belongs to and nothing else -- not the model, not
+    the prompt logs, not the stored template, not the task args.
+
+    **Only against the host being tested.** A leaked key's natural
+    validator is the third party that issued it, and that host is not
+    in the engagement's scope: presenting a client's credential to a
+    service nobody authorised us to touch is a different act from
+    testing the client's own system. `check(carries_secret=True)`
+    refuses a template that addresses anything but `{{BaseURL}}`, and
+    the model is told to say so rather than write one.
+    """
+    where = sec.asset_url or sec.path or "(location not recorded)"
+    return [
+        "",
+        "This finding is an EXPOSED CREDENTIAL, and the question is "
+        "whether it STILL WORKS.",
+        f"Seen in: {where}" + (f" line {sec.line}" if sec.line else ""),
+        f"Detector: {sec.detector}" if sec.detector else None,
+        "",
+        "Write a template that presents the credential to the host under "
+        "test and matches on a reply that only a VALID credential "
+        "produces — an authenticated response body, a principal or "
+        "account identifier, a 200 where an invalid key gives 401 or 403. "
+        "Matching merely 'not 401' is not enough: many endpoints answer "
+        "200 to anyone.",
+        "",
+        f"Use {SECRET_VAR} wherever the credential goes. You are not "
+        f"given its value and must not invent one; it is substituted at "
+        f"run time.",
+        "",
+        "Send ONLY to {{BaseURL}}. If this kind of credential can only be "
+        "validated against a third-party service — a cloud provider, a "
+        "SaaS API — then it cannot be checked here, because that host is "
+        "not in this engagement's scope. Reply cannot-prove and say so.",
+        "Do not use `raw`.",
+        "Do not change anything: authenticate and read, never write, "
+        "delete or rotate.",
+    ]
+
+
 def _secret_brief(sec: FindingSecret) -> list[str]:
     """What the model is told about an exposed credential.
 
@@ -163,7 +217,8 @@ def _secret_brief(sec: FindingSecret) -> list[str]:
 
 
 async def _ask(session: AsyncSession, project: Project, vuln: Vuln,
-               host: str, secret: FindingSecret | None = None) -> str:
+               host: str, secret: FindingSecret | None = None,
+               mode: str | None = None) -> str:
     """Put one finding to the model and return the raw reply."""
     from ..routers.agent import _resolve
     from .providers import anthropic_chat, openai_chat
@@ -177,7 +232,8 @@ async def _ask(session: AsyncSession, project: Project, vuln: Vuln,
         f"Reference: {vuln.external_id}" if vuln.external_id else None,
         "",
         (vuln.description or "(no description was recorded)")[:8000],
-        *(_secret_brief(secret) if secret is not None else []),
+        *([] if secret is None else
+           _auth_brief(secret) if mode == AUTH else _secret_brief(secret)),
     ] if x is not None)
 
     args = (token, model, SYSTEM, [{"role": "user", "content": body}],
@@ -208,7 +264,7 @@ def _url_for(vuln: Vuln, host: str) -> str:
 
 
 async def build_one(session: AsyncSession, vuln: Vuln, project: Project,
-                    host: str) -> Poc:
+                    host: str, mode: str | None = None) -> Poc:
     """Write a proof for one finding and queue its validation.
 
     Raises `Rejected` when the model's answer must not be stored, and
@@ -221,21 +277,38 @@ async def build_one(session: AsyncSession, vuln: Vuln, project: Project,
     # has to fetch the file it is in, and pointing it anywhere else
     # produces a proof that reports "could not test" for ever.
     secret = await _secret_for(session, vuln)
-    template = check(await _ask(session, project, vuln, host, secret))
-    url = _target_url(vuln, host, secret)
+    # `auth` only means anything when there IS a credential to
+    # present. Asked for on an ordinary finding it falls back to the
+    # normal proof rather than refusing: the operator asked for the
+    # finding to be proved, and there is a way to do that.
+    auth = mode == AUTH and secret is not None
+    template = check(
+        await _ask(session, project, vuln, host, secret, mode),
+        carries_secret=auth)
+    # An authenticating proof goes at the SERVICE, not at the file the
+    # key was found in: you present a credential to something that
+    # checks it, and a JS bundle does not.
+    url = _url_for(vuln, host) if auth else _target_url(vuln, host, secret)
     poc = Poc(target_id=vuln.target_id, vuln_id=vuln.id,
               title=f"Proof: {vuln.title}"[:500],
-              status="unconfirmed", template=template, target_url=url)
+              status="unconfirmed", template=template, target_url=url,
+              needs_secret=auth)
     session.add(poc)
     await session.flush()
 
     # Unassigned, so the project's routing policy picks the agent --
     # the same way every other queued task is placed.
+    #
+    # `needs_secret` is a FLAG, not the credential. The value stays
+    # out of `args` because the tasks view lists them: a key written
+    # here would be a key on screen for anyone who can see the queue,
+    # which is the whole thing `FindingSecret` exists to prevent. The
+    # agent fetches it over its own route when it runs the task.
     session.add(AgentTask(
         agent_id=None, project_id=project.id, requested_by=None,
         kind="poc", priority=PRIORITY, status="queued",
         args=json.dumps({"poc_id": poc.id, "url": url,
-                         "template": template})))
+                         "template": template, "needs_secret": auth})))
     return poc
 
 
@@ -251,7 +324,8 @@ async def _one(project_id: int, severities: tuple[str, ...]) -> str:
             return "empty"
 
         try:
-            poc = await build_one(session, vuln, project, target.host)
+            poc = await build_one(session, vuln, project, target.host,
+                                  vuln.poc_request_mode)
         except Rejected as e:
             # A real answer, recorded as one. "We could not write a
             # check for this" is not "we wrote one and it failed",

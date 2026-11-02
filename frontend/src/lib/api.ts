@@ -1500,6 +1500,10 @@ export const api = {
    *  a dialog that closed on "done" would be claiming otherwise. */
   requestPocs: (project: string, group: {
     host?: string; title?: string; severity?: string; vuln_ids?: number[]
+    /** `exposure` (default) — the key is still served at that URL.
+     *  `auth` — it still works, which can only be shown by presenting
+     *  it. Only meaningful for credential findings. */
+    mode?: 'exposure' | 'auth'
   }) =>
     req<{ requested: number; already_proved: number
           already_requested: number; note: string }>(

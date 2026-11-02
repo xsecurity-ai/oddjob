@@ -40,12 +40,13 @@ def check(l, c, e=""):
     else: fail += 1; print(f"  FAIL  {l} {e}")
 
 
-def call(p, m="GET", b=None, token=None):
+def call(p, m="GET", b=None, token=None, key=None):
     r = urllib.request.Request(BASE + p, method=m)
     if b is not None:
         r.data = json.dumps(b).encode()
         r.add_header("Content-Type", "application/json")
     if token: r.add_header("Authorization", f"Bearer {token}")
+    if key: r.add_header("X-Ghost-Key", key)
     try:
         with urllib.request.urlopen(r, timeout=60) as x:
             raw = x.read(); return x.status, (json.loads(raw) if raw else None)
@@ -80,6 +81,10 @@ from sqlalchemy import select  # noqa: E402
 
 from app.db import SessionLocal  # noqa: E402
 from app.models import Agent, Poc, Project, Target, Vuln  # noqa: E402
+
+#: Not shaped like any real key — the secrets hook refuses a committed
+#: credential, and a fixture that looks like one is what it is for.
+FAKE_SECRET = "<<not-a-real-key>>"
 
 
 async def ids_for(s, pr, title):
@@ -226,13 +231,13 @@ async def credentials():
         # Deliberately not shaped like any real key: the secrets
         # hook refuses a committed credential, and a fixture that
         # looks like one is the thing it is there to catch.
-        vuln_id=1, secret="<<not-a-real-key>>",
+        vuln_id=1, secret=FAKE_SECRET,
         detector="aws-access-key-id",
         asset_url="https://app.acme.example/static/main.js", line=412)
     brief = "\n".join(x for x in _secret_brief(sec) if x is not None)
 
     check("the credential value is NOT in what the model is told",
-          "<<not-a-real-key>>" not in brief)
+          FAKE_SECRET not in brief)
     check("but where it was seen IS, or no check could be written",
           "https://app.acme.example/static/main.js" in brief)
     check("and so is the kind of thing it is",
@@ -264,6 +269,185 @@ async def credentials():
 
 
 asyncio.run(credentials())
+
+print("\n--- a template that carries a credential may only send it "
+      "to the host under test ---")
+
+
+def auth_check(body):
+    """`check(carries_secret=True)` -> 'ok' or the refusal."""
+    from app.agent.pocbuild import Rejected, check
+    try:
+        check(body, carries_secret=True)
+        return "ok"
+    except Rejected as e:
+        return str(e)
+
+
+GOOD = """id: cred-still-works
+info:
+  name: Credential still authenticates
+  severity: high
+http:
+  - method: GET
+    path: ["{{BaseURL}}/api/me"]
+    headers:
+      Authorization: "Bearer {{secret}}"
+    matchers:
+      - type: word
+        part: body
+        words: ["account_id"]
+"""
+
+check("a well-formed authenticating proof is accepted",
+      auth_check(GOOD) == "ok", auth_check(GOOD))
+
+# The realistic bad case, and the reason this check exists: a leaked
+# key's natural validator is the third party that issued it, and that
+# host is not in the engagement's scope.
+AWAY = GOOD.replace('["{{BaseURL}}/api/me"]',
+                    '["https://sts.third-party.example/"]')
+r = auth_check(AWAY)
+check("a proof addressing another host is refused",
+      r != "ok" and "BaseURL" in r, r)
+
+# `raw` carries its own Host line, so it can reach another server
+# even while the path looks local.
+RAW = """id: cred
+info:
+  name: n
+  severity: high
+http:
+  - raw:
+      - |
+        GET / HTTP/1.1
+        Host: sts.third-party.example
+        Authorization: Bearer {{secret}}
+    matchers:
+      - type: status
+        status: [200]
+"""
+r = auth_check(RAW)
+check("`raw` is refused outright — it carries its own Host",
+      r != "ok" and "raw" in r, r)
+
+# A template that never presents the credential answers a different
+# question and would be recorded as if it had answered this one.
+NOSECRET = GOOD.replace("Bearer {{secret}}", "Bearer none")
+r = auth_check(NOSECRET)
+check("a proof that never uses the credential is refused",
+      r != "ok" and "secret" in r, r)
+
+# The ordinary rules still apply underneath.
+CODE = """id: c
+info:
+  name: n
+  severity: high
+code:
+  - engine: [sh]
+    source: "echo {{secret}}"
+http:
+  - path: ["{{BaseURL}}"]
+    matchers:
+      - type: status
+        status: [200]
+"""
+r = auth_check(CODE)
+check("and a `code` block is still refused", r != "ok" and "code" in r, r)
+
+check("an ordinary proof is NOT held to the secret rules",
+      auth_check.__name__ == "auth_check"
+      and __import__("app.agent.pocbuild", fromlist=["check"])
+      .check(GOOD.replace("{{secret}}", "x")) is not None)
+
+print("\n--- releasing the credential to the Ghost that runs the proof ---")
+# The one route that hands a client's credential to an agent. What is
+# asserted is who is refused, because that is the whole control: the
+# value has to reach the thing that presents it, and everything else
+# must come away with nothing.
+
+st, en = call("/api/ghosts?project=PRQ", "POST",
+              {"name": "prq-runner"}, token=admin)
+GKEY = (en or {}).get("callback_key")
+GID = ((en or {}).get("agent") or {}).get("id")
+check("a ghost is enrolled for the release tests", st == 201 and bool(GKEY),
+      f"status={st}")
+
+st, en2 = call("/api/ghosts?project=PRQ", "POST",
+               {"name": "prq-bystander"}, token=admin)
+OTHER_KEY = (en2 or {}).get("callback_key")
+
+
+async def stage_release():
+    """A credential finding, a proof that needs it, a task holding it."""
+    from app.models import AgentTask, FindingSecret
+    async with SessionLocal() as s:
+        pr = (await s.execute(
+            select(Project).where(Project.code == "PRQ"))).scalar_one()
+        [vid] = await ids_for(s, pr, "A low thing")
+        v = await s.get(Vuln, vid)
+        s.add(FindingSecret(vuln_id=vid, secret=FAKE_SECRET,
+                            detector="generic-api-key",
+                            asset_url="https://one.acme.example/app.js"))
+        poc = Poc(target_id=v.target_id, vuln_id=vid, title="auth proof",
+                  status="unconfirmed", needs_secret=True,
+                  template="id: x\nhttp:\n  - path: [\"{{BaseURL}}\"]\n")
+        s.add(poc)
+        await s.flush()
+        task = AgentTask(agent_id=GID, project_id=pr.id, kind="poc",
+                         status="running",
+                         args=json.dumps({"poc_id": poc.id}))
+        s.add(task)
+        # A proof that does NOT declare it needs a credential, with
+        # its own task — the realistic mistake is asking for the key
+        # on an ordinary proof.
+        plain = Poc(target_id=v.target_id, vuln_id=vid, title="plain proof",
+                    status="unconfirmed", needs_secret=False)
+        s.add(plain)
+        await s.flush()
+        plain_task = AgentTask(agent_id=GID, project_id=pr.id, kind="poc",
+                               status="running",
+                               args=json.dumps({"poc_id": plain.id}))
+        s.add(plain_task)
+        await s.commit()
+        return task.id, plain_task.id
+
+
+TASK_ID, PLAIN_TASK_ID = asyncio.run(stage_release())
+
+st, body = call(f"/api/ghosts/tasks/{TASK_ID}/secret", key=GKEY)
+check("the agent holding the task gets the credential",
+      st == 200 and (body or {}).get("secret") == FAKE_SECRET, f"status={st}")
+
+st, _ = call(f"/api/ghosts/tasks/{TASK_ID}/secret", key=OTHER_KEY)
+check("another agent in the SAME project cannot take it", st == 404,
+      f"status={st}")
+
+st, _ = call(f"/api/ghosts/tasks/{TASK_ID}/secret")
+check("an unauthenticated caller cannot", st in (401, 403, 404), f"status={st}")
+
+st, _ = call(f"/api/ghosts/tasks/{TASK_ID}/secret", token=admin)
+check("and nor can a logged-in admin — this route is for agents",
+      st in (401, 403, 404), f"status={st}")
+
+st, _ = call(f"/api/ghosts/tasks/{PLAIN_TASK_ID}/secret", key=GKEY)
+check("a proof that did not declare it needs a credential gets none",
+      st == 404, f"status={st}")
+
+
+async def finished():
+    """A task that is over is not a standing grant."""
+    from app.models import AgentTask
+    async with SessionLocal() as s:
+        t = await s.get(AgentTask, TASK_ID)
+        t.status = "done"
+        await s.commit()
+
+
+asyncio.run(finished())
+st, _ = call(f"/api/ghosts/tasks/{TASK_ID}/secret", key=GKEY)
+check("and once the task is finished the key is not re-fetchable",
+      st == 409, f"status={st}")
 
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

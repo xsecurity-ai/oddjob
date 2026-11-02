@@ -23,7 +23,7 @@
 import { useState } from 'react'
 import {
   Alert, Box, Button, Dialog, DialogActions, DialogContent, DialogTitle,
-  Stack, Tooltip, Typography, alpha,
+  MenuItem, Stack, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import ScienceIcon from '@mui/icons-material/Science'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
@@ -51,9 +51,14 @@ function invalidate(qc: ReturnType<typeof useQueryClient>, project: string) {
   }
 }
 
-export function ProveGroupDialog({ project, group, total, onClose }: {
+export function ProveGroupDialog({ project, group, total, credentials,
+                                  onClose }: {
   project: string
   group: Group | null
+  /** These findings are stored credentials, so there is a second
+   *  question worth asking about them. Offered only here: "does it
+   *  still authenticate" is meaningless for an open port. */
+  credentials?: boolean
   /** How many findings the row reports. Shown so the number in the
    *  dialog is the number in the column, rather than one the server
    *  worked out after the click. */
@@ -62,13 +67,21 @@ export function ProveGroupDialog({ project, group, total, onClose }: {
 }) {
   const qc = useQueryClient()
   const [done, setDone] = useState<string | null>(null)
+  // `exposure` always, until somebody chooses otherwise. The two are
+  // not degrees of the same thing: one reads a file, the other
+  // presents a live client credential to a live service, and a
+  // default that did the second would make the ordinary button the
+  // dangerous one.
+  const [mode, setMode] = useState<'exposure' | 'auth'>('exposure')
 
   const ask = useMutation({
-    mutationFn: () => api.requestPocs(project, group as Group),
+    mutationFn: () => api.requestPocs(project, { ...(group as Group), mode }),
     onSuccess: (r) => { invalidate(qc, project); setDone(r.note) },
   })
 
-  const close = () => { setDone(null); ask.reset(); onClose() }
+  const close = () => {
+    setDone(null); setMode('exposure'); ask.reset(); onClose()
+  }
   if (!group) return null
 
   return (
@@ -102,6 +115,25 @@ export function ProveGroupDialog({ project, group, total, onClose }: {
                 proved, or already asked for, are left alone — asking
                 twice costs nothing and queues nothing.
               </Typography>
+
+              {/* Two different claims about a credential, and the
+                  difference is what the check does rather than how
+                  hard it looks. Spelled out, because picking the
+                  second one sends the client's own key somewhere. */}
+              {credentials && (
+                <TextField select size="small" value={mode}
+                  label="What the proof should show"
+                  onChange={(e) =>
+                    setMode(e.target.value as 'exposure' | 'auth')}>
+                  <MenuItem value="exposure" sx={{ fontSize: 12.5 }}>
+                    It is still exposed — the key is still served there
+                  </MenuItem>
+                  <MenuItem value="auth" sx={{ fontSize: 12.5 }}>
+                    It still works — present it and see
+                  </MenuItem>
+                </TextField>
+              )}
+
               <Alert severity="warning" variant="outlined"
                 sx={{ fontSize: 11.5 }}>
                 A model writes each check and a Ghost fires it at the
@@ -109,6 +141,22 @@ export function ProveGroupDialog({ project, group, total, onClose }: {
                 rather than one finding. The engagement has to have
                 authorised that.
               </Alert>
+
+              {mode === 'auth' && (
+                <Alert severity="error" variant="outlined"
+                  sx={{ fontSize: 11.5 }}>
+                  This one <b>uses the credential</b>. The stored value is
+                  sent to the host the key was found on, to see whether it
+                  is still accepted — which may show up in the client's
+                  own audit log as a successful sign-in.
+                  <Box sx={{ mt: 0.75 }}>
+                    It is never sent to the model, never written into the
+                    saved template, and a key that could only be checked
+                    against a third-party service is refused rather than
+                    sent there — that host is not in scope.
+                  </Box>
+                </Alert>
+              )}
             </>
           )}
 
@@ -134,7 +182,8 @@ export function ProveGroupDialog({ project, group, total, onClose }: {
             onClick={() => ask.mutate()}
             sx={{ textTransform: 'none', color: neon.yellow,
                   borderColor: alpha(neon.yellow, 0.5) }}>
-            {ask.isPending ? 'Queueing…' : 'Prove them'}
+            {ask.isPending ? 'Queueing…'
+              : mode === 'auth' ? 'Use the credential' : 'Prove them'}
           </Button>
         )}
       </DialogActions>

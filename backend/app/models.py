@@ -48,6 +48,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    false,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -876,6 +877,13 @@ class Vuln(Base, TimestampMixin):
     #: covered it.
     poc_requested_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True)
+    #: WHICH proof was asked for: `exposure` (the key is still served
+    #: at that URL) or `auth` (the key still works). Two different
+    #: claims, and only the second needs the credential's value at run
+    #: time. NULL alongside a request means `exposure`, which is the
+    #: safe reading -- a request that lost its mode must not silently
+    #: become the one that authenticates.
+    poc_request_mode: Mapped[str | None] = mapped_column(String(16))
 
     # ---- lifecycle: what happened to this between scans -------------
     #
@@ -1120,6 +1128,13 @@ class Poc(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(500))
     status: Mapped[str] = mapped_column(String(32), default="unconfirmed", index=True)
     path: Mapped[str | None] = mapped_column(String(1000))
+    #: This proof AUTHENTICATES with a stored credential, so its
+    #: template carries a `{{secret}}` placeholder rather than a
+    #: value. The value is released to the agent holding the task,
+    #: over its own route, and is never written into the template,
+    #: the task args, or anything that is listed or exported.
+    needs_secret: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=false(), default=False)
     # 0 reproduced | 1 not reproduced | 2 could not test
     exit_code: Mapped[int | None] = mapped_column(Integer)
     notes: Mapped[str | None] = mapped_column(Text)

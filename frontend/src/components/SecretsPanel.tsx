@@ -433,7 +433,13 @@ export function SecretsPanel({ project, onFinding }: {
       onClose={() => setSourceFor(null)} />
     {project && (
       <ProveGroupDialog project={project} group={prove?.group ?? null}
-        total={prove?.total} onClose={() => setProve(null)} />
+        total={prove?.total}
+        // Only here. Every row on this panel IS a stored credential,
+        // so "does it still work" is a question that can be asked —
+        // on the rollups it would be offered against open ports and
+        // TLS findings, where it means nothing.
+        credentials
+        onClose={() => setProve(null)} />
     )}
     </>
   )

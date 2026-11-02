@@ -1525,6 +1525,13 @@ class PocGroupRequest(BaseModel):
     severity: str | None = None
     #: Named findings.
     vuln_ids: list[int] | None = Field(default=None, max_length=MAX_GROUP_REQUEST)
+    #: What the proof should claim about a credential.
+    #:
+    #: `exposure` — the key is still served at that URL. Sends nothing
+    #: of the client's anywhere and is the default.
+    #: `auth` — the key still works, which can only be shown by
+    #: presenting it. Ignored for findings that are not credentials.
+    mode: str = Field(default="exposure", pattern="^(exposure|auth)$")
 
 
 class PocGroupOut(BaseModel):
@@ -1628,18 +1635,24 @@ async def request_group_pocs(body: PocGroupRequest, project: str = Query(...),
     if todo:
         await session.execute(
             update(Vuln).where(Vuln.id.in_(todo))
-            .values(poc_requested_at=func.now()))
+            .values(poc_requested_at=func.now(),
+                    poc_request_mode=body.mode))
         await session.commit()
         await broker.publish("pocs", action="request", project=pr.code)
         await audit.record(
             session, "ui", "poc.request", user=user, commit=True,
             project_code=pr.code,
-            detail=f"asked for proofs of {len(todo)} finding(s) — "
+            detail=f"asked for {body.mode} proofs of {len(todo)} "
+                   f"finding(s) — "
                    f"{picked[0]}={body.host or body.title or len(todo)}")
 
     note = (f"{len(todo)} queued. A proof is written by a model and run by "
             f"a Ghost, one at a time — these will appear over the next few "
             f"minutes, not now."
+            + (" Each one presents the stored credential to the host it was "
+               "found on; any that can only be checked against a "
+               "third-party service will say so rather than send it there."
+               if body.mode == "auth" else "")
             if todo else
             "Nothing to queue: every finding in this group already has a "
             "proof or has already been asked for.")
