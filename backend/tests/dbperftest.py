@@ -349,5 +349,148 @@ for a, b in same_origin:
           origin_of(_prefix(a)) == origin_of(_prefix(b)) == origin_of(a),
           f"{origin_of(_prefix(a))} vs {origin_of(_prefix(b))}")
 
+print("\n--- an origin served by two targets keeps both ---")
+# `discoverable` kept whichever host the database returned first and
+# dropped the rest. `suspected_cves` builds its set of hosts to
+# confirm CVEs against out of those values, so a host known ONLY as
+# the second target on a shared origin was never asked about.
+import asyncio as _aio  # noqa: E402
+
+from sqlalchemy.ext.asyncio import (  # noqa: E402
+    async_sessionmaker,
+    create_async_engine,
+)
+
+from app.models import Target, WebAddress  # noqa: E402
+from app.webtargets import discoverable  # noqa: E402
+
+
+async def shared_origin():
+    eng = create_async_engine("sqlite+aiosqlite://")
+    async with eng.begin() as c:
+        await c.run_sync(Target.metadata.create_all)
+    mk = async_sessionmaker(eng, expire_on_commit=False)
+    async with mk() as s:
+        s.add(Project(code="ORG", name="Origins"))
+        await s.flush()
+        # TWO TARGETS, ONE ORIGIN. Two different hostnames give two
+        # different origins, so that is NOT the case this guards --
+        # the first version of this test made that mistake and passed
+        # against the bug. The real case is two targets that have each
+        # recorded the SAME url, which is routine when a name and the
+        # address behind it were both scanned.
+        import hashlib
+        shared = "https://shared.acme.example/login"
+        for host in ("alpha.acme.example", "beta.acme.example"):
+            t = Target(project_id=1, host=host, kind="host")
+            s.add(t)
+            await s.flush()
+            s.add(WebAddress(
+                target_id=t.id, url=shared,
+                url_hash=hashlib.sha256(shared.encode()).hexdigest(),
+                exchange_hash=hashlib.sha256(
+                    f"{host}{shared}".encode()).hexdigest()))
+        await s.commit()
+
+        got = await discoverable(s, 1)
+        check("the two targets really do collapse to ONE origin",
+              len(got) == 1, sorted(got))
+        hosts = {h for hs in got.values() for h in hs}
+        check("both hosts survive, not just the first",
+              hosts == {"alpha.acme.example", "beta.acme.example"}, hosts)
+        check("and the values are lists, so nothing can be overwritten",
+              all(isinstance(v, list) for v in got.values()), got)
+        # Deterministic: the same call twice gives the same answer.
+        again = await discoverable(s, 1)
+        check("the answer is stable between calls", got == again)
+    await eng.dispose()
+
+
+_aio.run(shared_origin())
+
+
+
+print("\n--- the Enumerate gap counts, worked out where the rule lives ---")
+# TargetsView fetched every target in the project to count two things:
+# 10,338 rows and 8.2 MB to render two integers beside a menu.
+#
+# Deliberately NOT two `count(*)`s. Both answers turn on whether a
+# host is an ADDRESS or a NAME, and the authoritative answer to that
+# is `ipaddress.ip_address` — which understands IPv6 zones and has no
+# faithful regex. A CASE approximating it would be a second opinion
+# on a rule that decides what gets scanned.
+_GAPS_SRC = (_pathlib.Path(__file__).resolve().parents[1]
+             / "app" / "routers" / "targets.py").read_text()
+_g = _GAPS_SRC[_GAPS_SRC.index("async def gaps("):
+               _GAPS_SRC.index("@router.get(\"/unscanned\"")]
+
+check("the gap count uses ipaddress, not a regex",
+      "ipaddress.ip_address" in _g and "~" not in _g)
+check("it reads cloud_ephemeral from cloudnames, not from a column",
+      "cloudnames.classify" in _g)
+check("and it streams rather than loading the table",
+      "session.stream" in _g and ".all()" not in _g)
+check("it selects columns, never whole Target rows",
+      "select(Target.host" in _g and "select(Target)" not in _g)
+
+# The predicate itself, against the cases that decide the counts.
+import ipaddress as _ip  # noqa: E402
+
+
+def _is_address(value):
+    v = (value or "").strip()
+    if not v:
+        return False
+    try:
+        _ip.ip_address(v.split("%", 1)[0])
+    except ValueError:
+        return False
+    return True
+
+
+for v, want in [("198.51.100.5", True), ("2001:db8::1", True),
+                ("fe80::1%eth0", True), ("one.acme.example", False),
+                ("", False), (None, False), ("999.999.999.999", False),
+                ("1.2.3", False)]:
+    check(f"is_address({v!r}) is {want}", _is_address(v) is want)
+
+print("\n--- every column the Targets grid offers to sort, the server can ---")
+# The same guard the findings table got, for the same reason and
+# before the same bug: paging moved sorting into the database, and a
+# column the grid still lets you click is a 422 the moment somebody
+# does. `geo_country` and `kind` were both in that state.
+import re as _re2  # noqa: E402
+
+_TV = (_pathlib.Path(__file__).resolve().parents[2]
+       / "frontend" / "src" / "views" / "TargetsView.tsx")
+_TR = (_pathlib.Path(__file__).resolve().parents[1]
+       / "app" / "routers" / "targets.py").read_text()
+
+check("the Targets view source is where this expects it", _TV.exists(), _TV)
+_src2 = _TV.read_text()
+
+# The server's map, read out of the apply_sort call rather than
+# copied — a copy is the thing that goes stale.
+_blk = _TR[_TR.index("stmt = apply_sort(stmt, sort, order, {"):]
+_blk = _blk[:_blk.index("})")]
+SERVER_SORTS = set(_re2.findall(r'"([a-z_]+)":', _blk))
+check("the server's sort map was found and is not empty",
+      len(SERVER_SORTS) > 5, sorted(SERVER_SORTS))
+
+offered2 = []
+for c in _re2.split(r"(?=\bfield:\s*')", _src2):
+    m = _re2.match(r"field:\s*'([a-z_]+)'", c)
+    if not m or _re2.search(r"sortable:\s*false", c):
+        continue
+    offered2.append(m.group(1))
+check("the grid's columns were found", len(offered2) > 5, offered2)
+
+missing2 = sorted(set(offered2) - SERVER_SORTS)
+check("no sortable Targets column is one the server would refuse",
+      not missing2,
+      f"the grid offers {missing2}, which apply_sort in routers/targets.py "
+      f"does not have — add them there or mark the column "
+      f"`sortable: false`" if missing2 else f"{len(offered2)} columns")
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

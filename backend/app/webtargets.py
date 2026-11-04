@@ -285,15 +285,31 @@ def origin_of(url: str) -> str | None:
 
 
 async def discoverable(session: AsyncSession, project_id: int,
-                       ) -> dict[str, str]:
-    """-> {origin: the host it belongs to}, for the whole project.
+                       ) -> dict[str, list[str]]:
+    """-> {origin: every host it belongs to}, for the whole project.
 
     ORIGINS, not URLs -- see `origin_of` for why that is the whole
     design and not a tidying. Two sources: open web services, and the
     origins of every URL already recorded. Both collapse to the same
     strings, so a site known from both ways is one entry.
+
+    **Every host, not the first one seen.** An origin can be served by
+    more than one target -- the same name recorded twice, a name and
+    the address behind it, a vhost -- and this kept whichever row the
+    database happened to return first and dropped the rest. The
+    dropped ones were then missing from the set of hosts
+    `suspected_cves` confirms CVEs against, so a host known ONLY as
+    the second target on a shared origin was never asked about.
+
+    Sorted, so the answer is the same twice running. It used to depend
+    on the order of an unordered scan.
     """
-    out: dict[str, str] = {}
+    out: dict[str, list[str]] = {}
+
+    def add(origin: str, host: str | None) -> None:
+        seen = out.setdefault(origin, [])
+        if host and host not in seen:
+            seen.append(host)
 
     rows = (await session.execute(
         select(Target.host, Service.port, Service.name, Service.tunnel)
@@ -306,7 +322,7 @@ async def discoverable(session: AsyncSession, project_id: int,
             continue
         u = derive_url(host, int(port), name, tunnel)
         if u and (o := origin_of(u)):
-            out.setdefault(o, host)
+            add(o, host)
 
     # The ORIGIN of each recorded URL, collapsed in SQL rather than in
     # Python.
@@ -340,7 +356,7 @@ async def discoverable(session: AsyncSession, project_id: int,
         .order_by(prefix, Target.host))).all()
     for url, host in recorded:
         if url and (o := origin_of(url)):
-            out.setdefault(o, host or "")
+            add(o, host)
 
     return out
 

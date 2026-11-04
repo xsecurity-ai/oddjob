@@ -1060,12 +1060,12 @@ MAX_CONFIRM_IDS = 40
 
 
 async def suspected_cves(session: AsyncSession, project_id: int,
-                         origins: dict[str, str],
+                         origins: dict[str, list[str]],
                          limit: int = MAX_CONFIRM_IDS,
                          ) -> dict[str, list[str]]:
     """-> {origin: [CVE, …]} the corpus already links to that host.
 
-    `origins` is {origin: host}, as `webtargets.discoverable` gives
+    `origins` is {origin: hosts}, as `webtargets.discoverable` gives
     it. Read once per cycle so the planner stays pure data.
 
     Only services with BOTH a product and a version are asked about.
@@ -1077,7 +1077,11 @@ async def suspected_cves(session: AsyncSession, project_id: int,
 
     if not origins:
         return {}
-    hosts = {h for h in origins.values() if h}
+    # Flattened: `discoverable` gives every host serving an origin,
+    # not one of them. It used to give one, chosen by whatever order
+    # an unordered scan returned, so a host known only as the second
+    # target on a shared origin was silently never confirmed.
+    hosts = {h for hs in origins.values() for h in hs if h}
     if not hosts:
         return {}
 
