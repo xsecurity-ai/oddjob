@@ -1458,12 +1458,22 @@ export const api = {
     req<Contact[]>(`/api/projects/${encodeURIComponent(project)}/contacts`),
   /** EVERY target in the project, in one response.
    *
-   *  Kept for the two callers that genuinely need a lookup table of
-   *  the whole estate rather than a page — matching a C2 peer to a
-   *  host, and reconciling an import. The Targets grid does NOT use
-   *  it any more: it was 10,338 rows and 8.2 MB to show a screenful.
-   *  Reach for `targetPage` unless you really do need all of them. */
+   *  10,340 rows and 8.3 MB on a real engagement. Nothing in the UI
+   *  needs this: the grid pages, and the two callers that wanted a
+   *  whole-estate list only ever read `host`, which `targetHosts`
+   *  gives them for a thirtieth of the bytes.
+   *
+   *  Left here because the API is a public surface and a script may
+   *  well want whole rows — but reach for `targetPage` or
+   *  `targetHosts` from the UI. */
   targets: (project?: string) => req<Page<Target>>('/api/targets' + qs({ project, limit: 100000 })),
+  /** Every host NAME in the project, sorted.
+   *
+   *  For the two autocompletes that need the whole estate: re-pointing
+   *  a C2 session, and mapping an unknown host on import. Both read
+   *  `host` and nothing else. */
+  targetHosts: (project: string) =>
+    req<{ hosts: string[] }>('/api/targets/hosts' + qs({ project })),
   /** One page of targets, ordered and filtered in the database. */
   targetPage: (o: {
     project?: string; q?: string; sort?: string; order?: 'asc' | 'desc'

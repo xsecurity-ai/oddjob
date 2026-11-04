@@ -58,13 +58,16 @@ export function UnknownHostsDialog({
   const [choice, setChoice] = useState<Record<string, Action>>({})
   const [mapTo, setMapTo] = useState<Record<string, string>>({})
 
+  // Names only. This pulled every target row in the project to build
+  // one autocomplete out of the `host` field.
   const targets = useQuery({
-    queryKey: ['targets-for-mapping', project],
-    queryFn: () => api.targets(project),
+    queryKey: ['target-hosts', project],
+    queryFn: () => api.targetHosts(project),
   })
+  // Still through `sortedStrings`: the database sorts bytewise and
+  // this sorts the way the list is read.
   const names = useMemo(
-    () => sortedStrings((targets.data?.items ?? []).map((t) => t.host)),
-    [targets.data])
+    () => sortedStrings(targets.data?.hosts ?? []), [targets.data])
 
   const act = (h: string): Action => choice[h] ?? 'reject'
   const setAll = (a: Action) =>

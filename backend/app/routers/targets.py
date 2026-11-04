@@ -379,6 +379,32 @@ async def _cloud_ids(session: AsyncSession, project_id: int | None,
     return out
 
 
+@router.get("/hosts", response_model=dict)
+async def host_names(pr: Project = Depends(require_project("readonly")),
+                     _: User = Depends(get_current_user),
+                     session: AsyncSession = Depends(get_session)):
+    """Every host name in the project, and nothing else.
+
+    What the two places that need a whole-estate list actually want:
+    the autocomplete for re-pointing a C2 session, and the one for
+    mapping an unknown host during an import. Both read `t.host` and
+    no other field.
+
+    They were asking `/api/targets?limit=100000` for it, which on this
+    engagement is 10,340 full rows and 8.3 MB -- hostnames, notes,
+    addresses, timestamps, cloud classifications and vulnerability
+    counts -- to build a list of 10,340 strings.
+
+    One column, sorted in the database, so the caller gets the order
+    it was going to sort into anyway.
+    """
+    rows = (await session.execute(
+        select(Target.host)
+        .where(Target.project_id == pr.id, Target.host.is_not(None))
+        .order_by(Target.host))).scalars().all()
+    return {"hosts": [h for h in rows if h]}
+
+
 @router.get("/gaps", response_model=dict)
 async def gaps(subjects: str | None = Query(
                    None, pattern="^(name|address)$",

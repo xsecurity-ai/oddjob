@@ -492,5 +492,36 @@ check("no sortable Targets column is one the server would refuse",
       f"does not have — add them there or mark the column "
       f"`sortable: false`" if missing2 else f"{len(offered2)} columns")
 
+print("\n--- the whole-estate list is names, not rows ---")
+# Two autocompletes needed every host in the project: re-pointing a
+# C2 session, and mapping an unknown host on import. Both read `host`
+# and nothing else, and both asked for `limit=100000` to get it —
+# 10,340 full rows and 8.3 MB to build a list of 10,340 strings.
+_API = (_pathlib.Path(__file__).resolve().parents[2]
+        / "frontend" / "src" / "lib" / "api.ts")
+_C2 = (_pathlib.Path(__file__).resolve().parents[2]
+       / "frontend" / "src" / "views" / "C2View.tsx")
+_UH = (_pathlib.Path(__file__).resolve().parents[2]
+       / "frontend" / "src" / "components" / "UnknownHostsDialog.tsx")
+for f in (_API, _C2, _UH):
+    check(f"{f.name} is where this expects it", f.exists(), f)
+
+check("the narrow endpoint exists in the client",
+      "targetHosts" in _API.read_text())
+for f in (_C2, _UH):
+    body = f.read_text()
+    check(f"{f.name} asks for names, not rows", "api.targetHosts" in body)
+    check(f"{f.name} no longer fetches every row",
+          "api.targets(" not in body, "still calls api.targets(")
+
+# And the route returns ONE column. A `select(Target)` here would be
+# the same 8.3 MB with a different URL.
+_TR2 = (_pathlib.Path(__file__).resolve().parents[1]
+        / "app" / "routers" / "targets.py").read_text()
+_h = _TR2[_TR2.index("async def host_names("):_TR2.index("@router.get(\"/gaps\"")]
+check("the endpoint selects only the host column",
+      "select(Target.host)" in _h and "select(Target)" not in _h)
+check("and sorts in the database", "order_by(Target.host)" in _h)
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
