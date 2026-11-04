@@ -42,16 +42,18 @@ length, which has not happened and would be a bug worth seeing.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import re
 import time
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete
+from sqlalchemy import delete, insert
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-from .models import AuditEvent
+from .models import AuditEvent, utcnow
 
 log = logging.getLogger("oddjob.audit")
 
@@ -168,6 +170,35 @@ def _client_ip(request: Request) -> str | None:
     return request.client.host[:64] if request.client else None
 
 
+def _row(source: str, action: str, *,
+         user=None, username: str | None = None,
+         ip: str | None = None, method: str | None = None,
+         path: str | None = None, status: int | None = None,
+         ms: int | None = None, project_code: str | None = None,
+         detail: str | None = None) -> dict:
+    """The column values for one entry, clipped to what the table holds.
+
+    One place, because there are now two ways a row reaches the table --
+    `record` queues an ORM object on a caller's session, the spool below
+    inserts dicts in batches -- and a field clipped on one path and not
+    the other is the `source` bug in `_fit` all over again.
+    """
+    return {
+        "source": _fit("source", source), "action": _fit("action", action),
+        "username": _fit("username",
+                         username or getattr(user, "username", None)) or None,
+        "user_id": getattr(user, "id", None),
+        "ip": _fit("ip", ip), "method": _fit("method", method) or None,
+        "status": status, "ms": ms,
+        "path": (_fit("path", scrub_path(path)) if path else None),
+        "project_code": _fit("project_code", project_code) or None,
+        # `detail` is Text, so this is a policy cap rather than a
+        # column limit: one line for a person to read, not a place
+        # to put a payload.
+        "detail": (detail[:4000] if detail else None),
+    }
+
+
 async def record(session, source: str, action: str, *,
                  user=None, username: str | None = None,
                  ip: str | None = None, method: str | None = None,
@@ -179,21 +210,19 @@ async def record(session, source: str, action: str, *,
     `commit` is False by default so an entry joins the caller's
     transaction and cannot claim something happened that was then rolled
     back. Callers that have already committed pass True.
+
+    **This path is never batched**, and that is the point of it. A
+    deliberate entry -- a project created, a role granted -- shares the
+    fate of the thing it describes, so if the action rolls back the
+    claim that it happened rolls back with it. Only the middleware's
+    per-request line goes through the spool, because that one records a
+    request that has already been served either way.
     """
     try:
-        session.add(AuditEvent(
-            source=_fit("source", source), action=_fit("action", action),
-            username=_fit("username",
-                          username or getattr(user, "username", None)) or None,
-            user_id=getattr(user, "id", None),
-            ip=_fit("ip", ip), method=_fit("method", method) or None,
-            status=status, ms=ms,
-            path=(_fit("path", scrub_path(path)) if path else None),
-            project_code=_fit("project_code", project_code) or None,
-            # `detail` is Text, so this is a policy cap rather than a
-            # column limit: one line for a person to read, not a place
-            # to put a payload.
-            detail=(detail[:4000] if detail else None)))
+        session.add(AuditEvent(**_row(
+            source, action, user=user, username=username, ip=ip,
+            method=method, path=path, status=status, ms=ms,
+            project_code=project_code, detail=detail)))
         if commit:
             await session.commit()
     except Exception:                            # noqa: BLE001
@@ -232,6 +261,198 @@ async def retain_days(session) -> int:
         return d if d > 0 else DEFAULT_RETAIN_DAYS
     except Exception:                            # noqa: BLE001
         return DEFAULT_RETAIN_DAYS
+
+
+#: How deep the spool goes before it stops being a spool. A burst
+#: should be absorbed; a stall should NOT be hidden. At the rate one
+#: process serves requests this is on the order of a second of traffic,
+#: and a writer that cannot keep up for a whole second is not about to
+#: catch up quietly -- past this point entries are written the slow way,
+#: on the request, which is visible rather than silent.
+SPOOL_MAX = 2048
+
+#: The most rows one INSERT carries. The win is per-statement and
+#: per-commit, so it is already most of the way there by a few dozen;
+#: past this the batch is just a bigger thing to lose and a longer
+#: statement to parse.
+SPOOL_BATCH = 256
+
+#: How long a shutdown waits for the writer to finish. Long enough for
+#: a batch against a database under load, short enough that a database
+#: which has stopped answering does not hold the process open.
+STOP_GRACE = 5.0
+
+#: Put on the queue to close it. Identity, not a value, so it can never
+#: be confused with an entry.
+_CLOSE: dict = {}
+
+
+class _Spool:
+    """The middleware's per-request entries, off the request's path.
+
+    Auditing a request cost 1.75 ms on the request itself: a session
+    opened, one INSERT, one commit, all of it between the response being
+    ready and the response being sent. The work is the same work; the
+    person waiting for it is the difference.
+
+    Entries are handed to a queue and written by one background task,
+    which takes whatever has arrived and inserts it in a single
+    statement. Batching is not on a timer -- it falls out of the queue
+    depth. Idle, an entry is written immediately and the batch is one
+    row; under load the queue has a backlog by the time the writer comes
+    round, and the backlog IS the batch. A timer would add latency when
+    there is nothing to gain by waiting.
+
+    **The trade, stated plainly.** An entry in the queue is in memory. A
+    clean shutdown drains it (`stop`), and a crash loses it -- up to one
+    batch of per-request lines, for a process that was killed. That is a
+    real loss on a security tool's audit trail and it is why only the
+    middleware's line goes this way: `record`, which is what writes
+    "somebody granted themselves admin", stays synchronous and
+    transactional. This path records that a request was served, by a
+    process that then died, which is the fact an operator is least
+    likely to be relying on this table for.
+
+    **Nothing is ever dropped.** A full queue means the writer is not
+    keeping up, and the answer to that is back-pressure, not amnesia:
+    `offer` returns False and the caller writes the entry the old slow
+    way. The audit trail stays complete and the latency comes back,
+    which is the right way round for this table.
+    """
+
+    def __init__(self) -> None:
+        self._q: asyncio.Queue | None = None
+        self._task: asyncio.Task | None = None
+        #: Entries that had to take the slow path because the queue was
+        #: full. Not a drop count -- those entries were written -- but
+        #: the number worth knowing about, because a non-zero one says
+        #: the writer is behind.
+        self.overflowed = 0
+
+    def start(self) -> None:
+        """Begin draining. Safe to call twice."""
+        if self._task is not None and not self._task.done():
+            return
+        self._q = asyncio.Queue(maxsize=SPOOL_MAX)
+        self._task = asyncio.create_task(self._drain())
+
+    async def stop(self) -> None:
+        """Write what is queued, then stop. Safe to call without start."""
+        task, q = self._task, self._q
+        # From here `offer` refuses, so anything still arriving during
+        # the shutdown is written by its own caller rather than put on
+        # a queue that is closing.
+        self._task = self._q = None
+        if task is None or q is None:
+            return
+        # A sentinel, NOT a cancel. A cancel lands wherever the writer
+        # happens to be, and if that is inside `_flush` then the batch
+        # it had already taken off the queue is gone -- entries lost to
+        # a clean shutdown, which is the one case that has no excuse.
+        # The sentinel lets it finish what it is holding and then stop.
+        with contextlib.suppress(asyncio.QueueFull):
+            q.put_nowait(_CLOSE)
+        try:
+            await asyncio.wait_for(task, STOP_GRACE)
+        except (TimeoutError, asyncio.CancelledError):
+            # A writer wedged on a database that is not answering. The
+            # shutdown cannot wait for ever; say so rather than hang.
+            task.cancel()
+            log.warning("audit spool did not drain within %ss", STOP_GRACE)
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        except Exception:                        # noqa: BLE001
+            log.exception("audit spool stopped badly")
+        # Whatever the sentinel did not reach: a queue that was already
+        # full when `stop` was called (so the sentinel never went on),
+        # or a writer that had to be cancelled after all.
+        rows = []
+        while not q.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                item = q.get_nowait()
+                if item is not _CLOSE:
+                    rows.append(item)
+        if rows:
+            with contextlib.suppress(Exception):
+                await self._flush(rows)
+
+    def offer(self, row: dict) -> bool:
+        """Queue one entry. -> False if the caller must write it itself.
+
+        Never raises and never blocks: this runs on the request.
+        """
+        q = self._q
+        if q is None or self._task is None or self._task.done():
+            return False                 # not running; caller writes it
+        try:
+            q.put_nowait(row)
+        except asyncio.QueueFull:
+            self.overflowed += 1
+            return False
+        return True
+
+    async def _drain(self) -> None:
+        # Captured once: `stop` clears the attribute to close the door
+        # on new entries, and this loop still has what it was draining.
+        q = self._q
+        assert q is not None
+        while True:
+            # Blocks until there is something, so an idle process does
+            # no work at all rather than waking on a timer.
+            first = await q.get()
+            closing = first is _CLOSE
+            rows = [] if closing else [first]
+            while len(rows) < SPOOL_BATCH:
+                try:
+                    item = q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item is _CLOSE:
+                    closing = True
+                    break
+                rows.append(item)
+            if rows:
+                try:
+                    await self._flush(rows)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:                # noqa: BLE001
+                    log.exception("audit spool could not write %d entries",
+                                  len(rows))
+            if closing:
+                return
+
+    async def _flush(self, rows: list[dict]) -> None:
+        """One statement for the batch; one row at a time if it fails.
+
+        A batch is all-or-nothing, so without the retry a single row the
+        database refuses would take every good entry beside it down. The
+        audit trail is the wrong table to lose 255 rows from because of
+        the one in front of them.
+        """
+        from .db import SessionLocal
+        try:
+            async with SessionLocal() as s:
+                await s.execute(insert(AuditEvent), rows)
+                await s.commit()
+            return
+        except Exception:                        # noqa: BLE001
+            if len(rows) == 1:
+                log.exception("audit spool: entry refused by the database")
+                return
+            log.exception("audit spool: batch of %d refused, retrying singly",
+                          len(rows))
+        for row in rows:
+            with contextlib.suppress(Exception):
+                async with SessionLocal() as s:
+                    await s.execute(insert(AuditEvent), [row])
+                    await s.commit()
+
+
+#: The one spool. Started from the application lifespan; inert until
+#: then, which is what makes `offer` safe to call from a test that never
+#: ran one.
+spool = _Spool()
 
 
 #: Not worth a row each. The SPA's own assets and the liveness probe are
@@ -275,16 +496,27 @@ class AuditTrail(BaseHTTPMiddleware):
 
         try:
             user = getattr(request.state, "auth_user", None)
-            from .db import SessionLocal
-            # Its own session. The request's session is finished by now,
-            # and committing on it from out here would reach into a
-            # transaction this layer knows nothing about.
-            async with SessionLocal() as s:
-                await record(
-                    s, "middleware", "request",
-                    user=user, ip=_client_ip(request),
-                    method=request.method, path=path,
-                    status=response.status_code, ms=elapsed, commit=True)
+            row = _row("middleware", "request",
+                       user=user, ip=_client_ip(request),
+                       method=request.method, path=path,
+                       status=response.status_code, ms=elapsed)
+            # The time the request happened, not the time its row is
+            # written. The spool holds entries for as long as the writer
+            # takes to come round, and a batch stamped on arrival at the
+            # database would quietly compress a burst into one instant
+            # and reorder it against everything written synchronously.
+            row["at"] = utcnow()
+            if not spool.offer(row):
+                # Not running, or not keeping up. Either way the entry
+                # is written here and now -- slower, on the request, and
+                # complete.
+                from .db import SessionLocal
+                # Its own session. The request's session is finished by
+                # now, and committing on it from out here would reach
+                # into a transaction this layer knows nothing about.
+                async with SessionLocal() as s:
+                    s.add(AuditEvent(**row))
+                    await s.commit()
         except Exception:                        # noqa: BLE001
             log.exception("audit middleware could not record %s", for_log(path))
         return response

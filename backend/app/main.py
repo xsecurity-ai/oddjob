@@ -183,6 +183,13 @@ async def lifespan(app: FastAPI):
 
     audit_task = asyncio.create_task(_audit_retention())
 
+    # The per-request audit line, off the request's critical path. It
+    # has to start before anything is served, and it is the LAST thing
+    # stopped below, so a shutdown still records what it was doing
+    # while it shut down. See app/audit.py for what is and is not
+    # batched, and why.
+    _audit.spool.start()
+
     # Exploit and CVE data, kept current so "is anything known about
     # this version" can be answered without asking anybody. Off unless
     # switched on: the first NVD sync is ~290,000 records, and plenty of
@@ -319,6 +326,10 @@ async def lifespan(app: FastAPI):
     await worker.stop()
     await slack_worker.stop()
     await slack_digest.stop()
+    # Last: everything above can still be audited on its way out, and a
+    # queue thrown away at shutdown is a gap in the trail that nothing
+    # explains.
+    await _audit.spool.stop()
 
 
 app = FastAPI(
