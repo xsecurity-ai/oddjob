@@ -936,13 +936,14 @@ function EditSessionDialog({ project, row, onDone }: {
   const [host, setHost] = useState<string>(row.host ?? '')
   const [err, setErr] = useState<string | null>(null)
 
+  // Names only, and sorted by the database. This asked for every
+  // target row in the project — 8.3 MB on a real engagement — to
+  // build a list of strings for one autocomplete.
   const targets = useQuery({
-    queryKey: ['targets', project],
-    queryFn: () => api.targets(project),
+    queryKey: ['target-hosts', project],
+    queryFn: () => api.targetHosts(project),
   })
-  const hosts = useMemo(
-    () => (targets.data?.items ?? []).map((t) => t.host).sort(),
-    [targets.data])
+  const hosts = useMemo(() => targets.data?.hosts ?? [], [targets.data])
 
   const save = useMutation({
     mutationFn: async () => {
