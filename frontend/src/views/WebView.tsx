@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Alert, Box, Chip, Menu, MenuItem, Snackbar, Stack, Tab, Tabs, ToggleButton,
   ToggleButtonGroup, Tooltip, Typography, alpha,
@@ -116,7 +116,10 @@ export function WebView({ project }: { project: string | null }) {
     }
   }
 
-  const toggle = async (g: WebGroup) => {
+  // `useCallback` because the columns memo depends on it. A
+  // handler rebuilt every render is a dependency that changes
+  // every render, and the memo would never hit.
+  const toggle = useCallback(async (g: WebGroup) => {
     const key = rowKey(g)
     setExpanded((prev) => {
       const next = new Set(prev)
@@ -136,7 +139,7 @@ export function WebView({ project }: { project: string | null }) {
         setLoadingKey(null)
       }
     }
-  }
+  }, [children])
 
   // Paged, sorted and searched in the database. One engagement holds
   // 211,012 addresses; the previous version asked for 5,000 and showed
@@ -230,7 +233,10 @@ export function WebView({ project }: { project: string | null }) {
   }, [data?.items, expanded, children,
       table.query.page, table.query.pageSize])
 
-  const columns: ColumnDef<WebAddress>[] = [
+  // Memoised: a fresh array every render makes every memo in
+  // TableGrid keyed on `columns` recompute, and TanStack rebuild
+  // its column model from them.
+  const columns: ColumnDef<WebAddress>[] = useMemo(() => [
     {
       // A handle to refer to a row by. Position in the listing as it
       // is currently sorted and filtered — with the default sort and
@@ -408,7 +414,7 @@ export function WebView({ project }: { project: string | null }) {
     { field: 'notes', headerName: 'Notes', flex: 1, minWidth: 160,
       valueGetter: (v) => v ?? '' },
     { field: 'project_code', headerName: 'Project', width: 120 },
-  ]
+  ], [expanded, loadingKey, open, toggle])
 
   // Both of the non-URL tabs are a whole panel that owns its own
   // fetching, so they share one shell rather than each repeating the

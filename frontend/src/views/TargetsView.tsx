@@ -402,7 +402,11 @@ export function TargetsView({ project }: { project: string | null }) {
     }
   }, [rows])
 
-  const columns: ColumnDef<Target>[] = [
+  // Memoised. A fresh array every render makes every memo inside
+  // TableGrid that is keyed on `columns` recompute, and TanStack
+  // rebuild its column model from them — on every keystroke in the
+  // search box and every unrelated state change in this view.
+  const columns: ColumnDef<Target>[] = useMemo(() => [
     {
       field: 'host', headerName: 'Host', flex: 2, minWidth: 230,
       renderCell: (p) => (
@@ -605,7 +609,13 @@ export function TargetsView({ project }: { project: string | null }) {
           onPick={(a) => onRowAction(p.row, a)} />
       ),
     },
-  ]
+  // Values, not objects: `widths.*` are numbers and `live.length`
+  // and `enrolled` are counts, so the memo compares equal between
+  // renders. `canWrite` and `open` come from contexts that memoise
+  // their value — the memo is worthless if a dependency is rebuilt
+  // every render, which is the trap when copying this pattern.
+  ], [canWrite, enrolled, live.length, open, widths.actions, widths.alive,
+      widths.country, widths.ip, widths.kind])
 
   return (
     <>

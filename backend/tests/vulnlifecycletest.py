@@ -62,6 +62,7 @@ call("/api/targets?project=LIFE", "POST",
 
 from sqlalchemy import select  # noqa: E402
 
+from app import pocwork  # noqa: E402
 from app.db import SessionLocal  # noqa: E402
 from app.lifecycle import verdict_for  # noqa: E402
 from app.models import FindingSweep, Project, Target, Vuln  # noqa: E402
@@ -204,6 +205,60 @@ check("no sortable column is one the server would refuse",
       f"the grid offers {missing} which SORTABLE does not have — either "
       f"add it to SORTABLE in routers/findings.py or mark the column "
       f"`sortable: false`" if missing else f"{len(offered)} columns")
+
+print("\n--- a column is SORTED by a rank and FILTERED by its value ---")
+# Reported as:
+#
+#   filter on 'poc_state' needs a number, got 'Available, Confirmed'
+#
+# `FILTERABLE` is built from `SORTABLE`, and `severity` and
+# `poc_state` are sorted by an integer CASE — alphabetical would put
+# `critical` before `high` by luck. Filtering inherited the rank and
+# then compared it against the label the UI sends.
+from app.routers.findings import FILTERABLE, SORTABLE  # noqa: E402
+
+
+def sql(expr):
+    """The expression WITH its literals.
+
+    Plain `str()` renders them as `:param_1`, which makes a CASE
+    returning 0/1/2 and a CASE returning three labels look identical
+    — the first version of this test compared those strings and
+    passed against the bug.
+    """
+    return str(expr.compile(compile_kwargs={"literal_binds": True}))
+
+
+for col in ("severity", "poc_state"):
+    check(f"{col} sorts by a rank and filters by a value — not the same",
+          sql(SORTABLE[col]) != sql(FILTERABLE[col]),
+          "sort and filter share one expression")
+
+# The ranks really are numeric, which is what the filter was
+# comparing a label against.
+# The rank is numeric — which is exactly what the filter was
+# comparing a label against. `else_` renders as ELSE, not THEN.
+_r = sql(SORTABLE["poc_state"])
+check("the poc_state SORT is a numeric rank",
+      "THEN 2" in _r and "THEN 0" in _r and "ELSE 1" in _r, _r[:60])
+check("and carries none of the labels",
+      pocwork.CONFIRMED not in _r, _r[:60])
+
+# And the filter really does produce the strings the UI sends.
+_f = sql(FILTERABLE["poc_state"])
+for label in (pocwork.NOT_AVAILABLE, pocwork.CONFIRMED, pocwork.UNCONFIRMED):
+    check(f"the poc_state filter can match {label!r}", label in _f, _f[:70])
+check("the severity filter is the column, not a CASE",
+      "CASE" not in sql(FILTERABLE["severity"]).upper(),
+      sql(FILTERABLE["severity"]))
+
+st, r = call("/api/vulns?project=LIFE&limit=5&filters="
+             + __import__("urllib.parse").parse.quote(
+                 json.dumps([{"field": "poc_state", "op": "is",
+                              "value": pocwork.CONFIRMED}])),
+             token=admin)
+check("and the server accepts that filter instead of 422-ing",
+      st == 200, f"status={st} {str(r)[:120]}")
 
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

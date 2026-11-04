@@ -35,6 +35,19 @@ export function ProjectsView({ onOpen, onConfigure }: {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['projects'] }),
   })
 
+  // NOT memoised, deliberately.
+  //
+  // The other grids wrap this in `useMemo`, because a fresh array
+  // every render makes every memo in TableGrid recompute. Here it
+  // would never hit: the columns close over `onOpen` and
+  // `onConfigure`, which App passes as inline arrows rebuilt on
+  // every one of its renders, so the dependency array changes every
+  // time too.
+  //
+  // Fixing it properly means `useCallback` in App for the sake of
+  // the projects list — a handful of rows, and the least
+  // performance-sensitive grid here. A memo that cannot hit is worse
+  // than none: it reads as solved.
   const columns: ColumnDef<Project>[] = [
     {
       // One identity column, not two. An engagement has a client code

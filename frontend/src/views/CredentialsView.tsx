@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Box, Chip, IconButton, Tooltip, alpha } from '@mui/material'
 import VisibilityIcon from '@mui/icons-material/VisibilityOutlined'
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOffOutlined'
@@ -25,7 +25,10 @@ export function CredentialsView({ project }: { project: string | null }) {
     queryFn: () => api.credentials(project ?? undefined),
   })
 
-  const columns: ColumnDef<Credential>[] = [
+  // Memoised: a fresh array every render makes every memo in
+  // TableGrid keyed on `columns` recompute, and TanStack rebuild
+  // its column model from them.
+  const columns: ColumnDef<Credential>[] = useMemo(() => [
     {
       field: 'host', headerName: 'Host', flex: 1.4, minWidth: 190,
       valueGetter: (v) => v ?? '',
@@ -100,7 +103,7 @@ export function CredentialsView({ project }: { project: string | null }) {
       renderCell: (p) => (
         <Box sx={{ color: neon.purple, fontSize: 11.5, letterSpacing: '0.06em' }}>{p.value}</Box>
       ) },
-  ]
+  ], [open, shown])
 
   return (
     <DataTable

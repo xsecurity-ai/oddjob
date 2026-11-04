@@ -264,6 +264,15 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      # The application used to ship as ONE 1,581 KB file — every
+      # view, the terminal emulator and every dialog, downloaded
+      # before the sign-in page could render. One stray eager import
+      # of a view puts it back, and nothing else would say so.
+      # Runs after the build because it reads dist/.
+      - name: Bundle stays split
+        working-directory: frontend
+        run: node test/bundle.check.mjs
+
   ghost:
     name: ghost builds for every target
     runs-on: ubuntu-latest

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Box, Chip, MenuItem, Select, Stack, Tab, Tabs, TextField, alpha } from '@mui/material'
 import type { ColumnDef } from '../lib/columns'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -26,7 +26,8 @@ import { neon, glow, TAB_SX } from '../theme'
 
 /** Module-level so the stored-choice hook gets a stable reference,
  *  and so the validated set and the rendered tabs cannot drift. */
-const VULN_TABS = ['all', 'by-target', 'by-vuln', 'secrets'] as const
+const VULN_TABS = ['all', 'by-target', 'by-vuln', 'secrets',
+                   'secrets-by-type'] as const
 
 
 export function VulnsView({ project }: { project: string | null }) {
@@ -107,7 +108,37 @@ export function VulnsView({ project }: { project: string | null }) {
   // old one means nothing.
   useEffect(() => { setPage(0) }, [setPage, project])
 
-  const columns: ColumnDef<Vuln>[] = [
+    // Bulk triage. The selection can span projects when no project is
+  // chosen, so the server checks permission per finding and names
+  // back anything it refused -- a bulk action that silently skipped
+  // rows would look like it had worked.
+  const mark = useMutation({
+    mutationFn: ({ ids, triage }: { ids: number[]; triage: string }) =>
+      ids.length === 1
+        ? api.setTriage(ids[0], triage)
+        : api.setTriageBulk(ids, triage),
+    onSuccess: (r) => {
+      setRefused(r.refused?.length ?? 0)
+      void qc.invalidateQueries({ queryKey: ['vulns'] })
+    },
+  })
+
+  // Memoised, and the dependencies are deliberately VALUES.
+  //
+  // A fresh array every render means every memo inside TableGrid that
+  // is keyed on `columns` recomputes, and TanStack rebuilds its
+  // column model from them — on every keystroke in the search box and
+  // every unrelated state change in this view.
+  //
+  // `mark` itself is not a dependency: React Query returns a new
+  // result object each render, so depending on it would rebuild the
+  // array every time and buy nothing. `mutate` is stable and
+  // `isPending` is a boolean, which is what the cells actually read.
+  // `open` and `canWrite` come from contexts that memoise their
+  // value, so they are stable too — the memo is worthless if they
+  // are not, which is worth checking before copying this elsewhere.
+  const { mutate: markMutate, isPending: marking } = mark
+  const columns: ColumnDef<Vuln>[] = useMemo(() => [
     {
       field: 'severity', headerName: 'Severity', width: 112,
       type: 'singleSelect',
@@ -236,9 +267,9 @@ export function VulnsView({ project }: { project: string | null }) {
       renderCell: (p) => (
         <Select size="small" variant="standard" disableUnderline
           value={String(p.value ?? 'needs_investigating')}
-          disabled={!canWrite(project) || mark.isPending}
+          disabled={!canWrite(project) || marking}
           onClick={(e) => e.stopPropagation()}
-          onChange={(e) => mark.mutate({
+          onChange={(e) => markMutate({
             ids: [Number((p.row as { id: number }).id)],
             triage: e.target.value,
           })}
@@ -268,22 +299,7 @@ export function VulnsView({ project }: { project: string | null }) {
       renderCell: (p) => (
         <Box sx={{ color: neon.purple, fontSize: 11.5, letterSpacing: '0.06em' }}>{p.value}</Box>
       ) },
-  ]
-
-  // Bulk triage. The selection can span projects when no project is
-  // chosen, so the server checks permission per finding and names
-  // back anything it refused -- a bulk action that silently skipped
-  // rows would look like it had worked.
-  const mark = useMutation({
-    mutationFn: ({ ids, triage }: { ids: number[]; triage: string }) =>
-      ids.length === 1
-        ? api.setTriage(ids[0], triage)
-        : api.setTriageBulk(ids, triage),
-    onSuccess: (r) => {
-      setRefused(r.refused?.length ?? 0)
-      void qc.invalidateQueries({ queryKey: ['vulns'] })
-    },
-  })
+  ], [canWrite, open, project, markMutate, marking])
 
   /* Two readings of the same findings. Secrets are not a severity
      or a filter on the grid above: the question there is "what is
@@ -302,7 +318,15 @@ export function VulnsView({ project }: { project: string | null }) {
           dataset -- Secrets is the one that is a different question. */}
       <Tab value="by-target" label="By Target" sx={TAB_SX} />
       <Tab value="by-vuln" label="By Vuln" sx={TAB_SX} />
-      <Tab value="secrets" label="Secrets" sx={TAB_SX} />
+      {/* The same credentials asked two ways. By target answers
+          "what is exposed on this host"; by type answers "what kinds
+          of key does this estate leak", which is the one that finds
+          the single AWS key sitting under four hundred base64
+          strings. Named explicitly rather than leaving one as
+          "Secrets": a bare label beside a qualified one reads as the
+          general case, and neither of these is. */}
+      <Tab value="secrets" label="Secrets by Target" sx={TAB_SX} />
+      <Tab value="secrets-by-type" label="Secrets by Type" sx={TAB_SX} />
     </Tabs>
   )
 
@@ -329,11 +353,12 @@ export function VulnsView({ project }: { project: string | null }) {
     )
   }
 
-  if (tab === 'secrets') {
+  if (tab === 'secrets' || tab === 'secrets-by-type') {
     return (
       <>
       {strip}
-      <SecretsPanel project={project} onFinding={setDetail} />
+      <SecretsPanel project={project} onFinding={setDetail}
+        groupBy={tab === 'secrets-by-type' ? 'type' : 'target'} />
       <VulnModal id={detail} onClose={() => setDetail(null)}
         onHost={(proj, h) => { setDetail(null); open(proj, h) }} />
       </>

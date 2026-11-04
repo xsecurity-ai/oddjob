@@ -135,7 +135,15 @@ export function GhostTasksTable({ project }: { project: string }) {
     },
   })
 
-  const columns: ColumnDef<GhostTaskRow>[] = [
+  // Destructured, not depended on whole: React Query rebuilds
+  // the result object every render, so a memo that depends on it
+  // is rebuilt every render too and buys nothing.
+  const { mutate: retryTask, isPending: retrying } = retry
+
+  // Memoised: a fresh array every render makes every memo in
+  // TableGrid keyed on `columns` recompute, and TanStack rebuild
+  // its column model from them.
+  const columns: ColumnDef<GhostTaskRow>[] = useMemo(() => [
     {
       field: 'id', headerName: 'Task', width: 86, type: 'number',
       renderCell: (p) => (
@@ -235,8 +243,8 @@ export function GhostTasksTable({ project }: { project: string }) {
         return (
           <Tooltip title={`Put #${p.row.id} back in the queue. The attempt count resets.`}>
             <span>
-              <IconButton size="small" disabled={retry.isPending}
-                onClick={() => retry.mutate(p.row.id)}
+              <IconButton size="small" disabled={retrying}
+                onClick={() => retryTask(p.row.id)}
                 sx={{ color: neon.muted, '&:hover': { color: neon.green } }}>
                 <ReplayIcon fontSize="small" />
               </IconButton>
@@ -245,7 +253,7 @@ export function GhostTasksTable({ project }: { project: string }) {
         )
       },
     },
-  ]
+  ], [canWrite, now, project, retryTask, retrying])
 
   return (
     <DataTable

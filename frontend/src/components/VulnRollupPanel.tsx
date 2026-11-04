@@ -228,7 +228,10 @@ export function VulnsByTarget({ project, onFinding }: {
     enabled: !!open && !!project,
   })
 
-  const columns: ColumnDef<VulnsByTargetRow>[] = [
+  // Memoised: a fresh array every render makes every memo in
+  // TableGrid keyed on `columns` recompute, and TanStack rebuild
+  // its column model from them.
+  const columns: ColumnDef<VulnsByTargetRow>[] = useMemo(() => [
     { field: 'host', headerName: 'Host', flex: 2, minWidth: 220,
       renderCell: (p) => (
         <Box sx={{ fontFamily: `'Share Tech Mono', monospace`,
@@ -259,7 +262,7 @@ export function VulnsByTarget({ project, onFinding }: {
             group: { host: r.host }, total: r.total }) : undefined} />
       },
     },
-  ]
+  ], [canWrite, project])
 
   return (
     <>
