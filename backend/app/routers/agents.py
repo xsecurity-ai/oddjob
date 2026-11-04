@@ -103,6 +103,26 @@ log = logging.getLogger("oddjob.agents")
 #: moment should not light up the console.
 OFFLINE_AFTER = timedelta(seconds=90)
 
+#: How stale `last_seen` may get before a heartbeat writes it.
+#:
+#: A Ghost beats every 15 seconds and the beat is usually a no-op: no
+#: work to hand out, no listeners to reconcile, nothing to say. The
+#: only thing that changed was the timestamp, so the row was rewritten
+#: every 15 seconds per agent for ever -- 673,510 UPDATEs and 1.75
+#: hours of database time over three weeks on the reference instance,
+#: to record a fact nothing reads at that resolution.
+#:
+#: SQLAlchemy emits only columns whose value actually changed, so
+#: leaving `last_seen` alone on a quiet beat means NO UPDATE AT ALL
+#: rather than a smaller one.
+#:
+#: **Derived from `OFFLINE_AFTER` rather than chosen separately**,
+#: because the two are one decision: an agent can now look alive for
+#: up to this long after it dies, so "offline after 90s" becomes
+#: "offline after 90 to 120s". A fraction, so moving the offline
+#: window moves this with it instead of quietly widening the gap.
+HEARTBEAT_WRITE_EVERY = OFFLINE_AFTER / 3
+
 #: Silent this long and the agent is called `lost` rather than offline.
 #:
 #: Offline is "we have not heard from it lately", which is a thing that
@@ -3222,9 +3242,26 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
     back in the queue rather than sitting in `claimed` for the rest of
     the engagement with nothing left to complete it.
     """
-    a.last_seen = datetime.now(UTC)
-    a.last_ip = request.client.host if request.client else None
+    now = datetime.now(UTC)
+    ip = request.client.host if request.client else None
+    # Only once it has gone stale. See HEARTBEAT_WRITE_EVERY: a quiet
+    # beat that touches nothing else then writes nothing at all, which
+    # is the point -- this row was being rewritten every 15 seconds
+    # per agent to carry a timestamp read at 90-second resolution.
+    seen = _aware(a.last_seen)
+    if seen is None or (now - seen) >= HEARTBEAT_WRITE_EVERY:
+        a.last_seen = now
+    # An address CHANGE is always written: it is a fact about where
+    # the Ghost is calling from, and the first thing an operator looks
+    # at when one moves. Re-assigning the same address costs nothing —
+    # SQLAlchemy compares against the loaded value and emits no column.
+    if ip != a.last_ip:
+        a.last_ip = ip
+        a.last_seen = now
     if a.status == "disabled":
+        # When it stopped is worth knowing exactly, so the throttle
+        # does not apply to the beat that finds it killed.
+        a.last_seen = now
         # Killed. Answer the heartbeat rather than refusing it, so the
         # agent is told to stop instead of retrying forever against a
         # 403 it cannot interpret. Recorded first: this is the last
