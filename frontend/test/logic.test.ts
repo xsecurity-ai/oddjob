@@ -23,6 +23,7 @@ import { byWorstFirst, collapse } from '../src/components/VulnRollupPanel'
 import { maybeSorted, sortedStrings, isRanked } from '../src/lib/sortOptions'
 import { THEMES } from '../src/palettes'
 import { readChoice } from '../src/lib/useStoredChoice'
+import { coalesceDelay } from '../src/lib/useLive'
 import { parse as parseRoute, build as buildRoute,
          SCOPED_VIEWS, GLOBAL_VIEWS } from '../src/lib/route'
 import { classifyScopeEntry, entryLabel } from '../src/lib/scopeEntry'
@@ -1320,6 +1321,48 @@ console.log('\n== a rollup expansion shows each thing once ==')
           buildRoute(parseRoute(path, '')).split('?')[0] === path,
           buildRoute(parseRoute(path, '')))
   }
+}
+
+// ---------------------------------------------------------------------
+// useLive's coalescing window.
+//
+// The hook debounced by resetting its timer on every event, which means a
+// stream arriving faster than the window never reaches the end of it: the
+// grid stops updating for exactly as long as the server keeps talking.
+// Nothing else would have rescued it either — `refetchOnWindowFocus` is
+// off, so the SSE stream is the only thing that refreshes anything.
+// ---------------------------------------------------------------------
+{
+  check('an idle stream waits the short window',
+        coalesceDelay(1_000, 0) === 250, String(coalesceDelay(1_000, 0)))
+  check('inside the burst it keeps coalescing',
+        coalesceDelay(1_200, 1_000) === 250, String(coalesceDelay(1_200, 1_000)))
+  check('the last wait is clipped to the ceiling rather than overshooting it',
+        coalesceDelay(2_900, 1_000) === 100, String(coalesceDelay(2_900, 1_000)))
+  check('at the ceiling it refreshes instead of waiting again',
+        coalesceDelay(3_000, 1_000) === 0, String(coalesceDelay(3_000, 1_000)))
+  check('and past it, too',
+        coalesceDelay(9_999, 1_000) === 0, String(coalesceDelay(9_999, 1_000)))
+
+  // The real shape of the bug: a steady stream for ten seconds, each
+  // event individually looking like a perfectly ordinary coalesce.
+  //
+  // 130ms, not a round number: at 100ms the burst lands EXACTLY on the
+  // ceiling, where `Math.min(250, 2000 - 2000)` is 0 by arithmetic
+  // rather than by the rule. This test passed against the bug until the
+  // interval stopped dividing into the ceiling.
+  let burst = 0
+  let fired = 0
+  let last = 0
+  for (let t = 0; t <= 10_000; t += 130) {
+    const d = coalesceDelay(t, burst)
+    if (!burst) burst = t
+    if (d === 0) { fired++; last = t; burst = 0 }
+  }
+  check('a sustained stream still refreshes rather than starving',
+        fired >= 3, `fired ${fired} times in 10s`)
+  check('...and never goes more than the ceiling without one',
+        10_000 - last <= 2_000, `last refresh at ${last}ms`)
 }
 
 console.log(`\n${'='.repeat(56)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(56)}`)

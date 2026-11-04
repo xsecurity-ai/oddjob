@@ -356,6 +356,7 @@ print("\n--- an origin served by two targets keeps both ---")
 # the second target on a shared origin was never asked about.
 import asyncio as _aio  # noqa: E402
 
+from sqlalchemy import select  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     async_sessionmaker,
     create_async_engine,
@@ -403,6 +404,61 @@ async def shared_origin():
         # Deterministic: the same call twice gives the same answer.
         again = await discoverable(s, 1)
         check("the answer is stable between calls", got == again)
+
+        # And the consumer the comment above names. `discoverable` now
+        # hands back {origin: [host, ...]}; `suspected_cves` read that
+        # value as a single host and used it as a dict key, which
+        # raises TypeError for a list -- even against an empty dict,
+        # so there is no input that reaches the loop and survives.
+        #
+        # It is only called when a project sets auto_nuclei to confirm,
+        # which is why nothing noticed: the exception comes out of
+        # `snapshot()`, which `run_once` does not wrap, so ONE project
+        # in confirm mode stops the standing-orders cycle for every
+        # project, every time round, for ever.
+        from app import vulnfeed as _vf
+        try:
+            cves = await _vf.suspected_cves(s, 1, got)
+            check("suspected_cves survives an origin with several hosts",
+                  isinstance(cves, dict), cves)
+        except TypeError as e:
+            check("suspected_cves survives an origin with several hosts",
+                  False, f"TypeError: {e}")
+
+        # Not crashing is the floor. The substance is that a CVE known
+        # only on the SECOND host serving the origin is still asked
+        # about -- picking one host was the original bug, and a fix
+        # that merely stopped raising would reinstate it quietly.
+        from app.models import Service
+        for host, prod in (("alpha.acme.example", "nginx"),
+                           ("beta.acme.example", "openssh")):
+            t = (await s.execute(
+                select(Target).where(Target.host == host))).scalar_one()
+            s.add(Service(target_id=t.id, port=443, protocol="tcp",
+                          state="open", name="http",
+                          product=prod, version="1.0"))
+        await s.commit()
+
+        # Stubbed: the real lookup needs the CVE corpus, and what is
+        # under test is which hosts get consulted, not the corpus.
+        _real = _vf.leads_for_service
+
+        async def _fake(session, product, version, name, limit=40):
+            return {"cves": [{"cve": f"CVE-0000-{product}",
+                              "version_match": "exact"}]}
+
+        _vf.leads_for_service = _fake
+        try:
+            cves = await _vf.suspected_cves(s, 1, got)
+        finally:
+            _vf.leads_for_service = _real
+
+        _for_origin = cves.get(shared.rsplit("/", 1)[0]) or []
+        if not _for_origin:                      # origin key is the prefix
+            _for_origin = next(iter(cves.values()), [])
+        check("a CVE on the SECOND host of a shared origin is still asked about",
+              set(_for_origin) == {"CVE-0000-nginx", "CVE-0000-openssh"},
+              f"{cves}")
     await eng.dispose()
 
 

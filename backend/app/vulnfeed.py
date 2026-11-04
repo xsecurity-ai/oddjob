@@ -1115,10 +1115,25 @@ async def suspected_cves(session: AsyncSession, project_id: int,
             per_host.setdefault(host, set()).update(by_pair[key])
 
     out: dict[str, list[str]] = {}
-    for origin, host in origins.items():
-        got = per_host.get(host)
+    for origin, served_by in origins.items():
+        # The UNION over every host serving the origin, not one of
+        # them. This read `origins` as {origin: host} and used the
+        # value as a dict key -- which raises TypeError now that the
+        # value is a list, for every input that reaches this loop.
+        #
+        # The union is also the right answer on the merits, which is
+        # why the fix is not to pick one host back out. A confirmation
+        # run is nuclei against the ORIGIN; whichever host answers on
+        # the day could be the vulnerable one, so the CVEs worth
+        # asking about are the ones suspected on any of them. Choosing
+        # a single host is what the old code did by accident, and a
+        # CVE present only on the second target was never confirmed.
+        got: set[str] = set()
+        for host in served_by:
+            got |= per_host.get(host) or set()
         if got:
             # Sorted so the same estate produces the same command line
-            # twice, which is what makes two runs comparable.
+            # twice, which is what makes two runs comparable. Still
+            # capped at `limit`: a union is wider than one host's list.
             out[origin] = sorted(got)[:limit]
     return out
