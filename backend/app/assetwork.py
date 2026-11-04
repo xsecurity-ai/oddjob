@@ -1537,7 +1537,11 @@ async def library_leads(session: AsyncSession, project_id: int,
                         limit: int = LIBRARY_BATCH) -> dict[str, int]:
     """Raise a finding per (library version, CVE). -> counts."""
     from .models import Vuln
-    from .vulnfeed import leads_for_service, triage_order
+    from .vulnfeed import leads_for_service, reset_lead_cache, triage_order
+
+    # One sweep, one set of answers. Without this the same library at
+    # the same version is asked about once per asset that ships it.
+    reset_lead_cache()
 
     rows = (await session.execute(
         select(WebAsset.name, WebAsset.version)
@@ -1835,7 +1839,12 @@ async def lockfile_leads(session: AsyncSession, project_id: int,
     way round.
     """
     from .models import Vuln
-    from .vulnfeed import leads_for_service, triage_order
+    from .vulnfeed import leads_for_service, reset_lead_cache, triage_order
+
+    # The worst of the repeats was here: one lookup per PACKAGE per
+    # LOCKFILE, and an estate's lockfiles pin the same packages over
+    # and over.
+    reset_lead_cache()
 
     rows = (await session.execute(
         select(WebAssetFile.id, WebAssetFile.path, WebAssetFile.body,

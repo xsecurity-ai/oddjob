@@ -12,11 +12,15 @@ narrower list of URLs than the dialog did.
 from __future__ import annotations
 
 import json
+import logging
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import AgentTask
+
+log = logging.getLogger("oddjob.tasking")
 
 #: Statuses that mean no agent ever took the task, so nothing was sent.
 #:
@@ -123,3 +127,73 @@ async def outstanding_subjects(
         for sub in (a.get("targets") or []):
             out.add((kind, str(sub).lower()))
     return out
+
+# ----------------------------------------------------- output retention
+#
+# A finished task keeps the scanner's raw stdout. That is the right
+# default while the task is recent -- it is what an operator reads
+# when an import looks wrong, and what a re-import runs against -- and
+# it is the wrong default for ever.
+#
+# Measured on the production mirror: 13 GB of `output` across 74,023
+# done tasks, one row holding 94 MB, the oldest four weeks old. It is
+# the largest thing in the database by a wide margin, and it is the
+# reason a query that selected whole `AgentTask` rows OOM-killed the
+# application container.
+#
+# The TASK is not deleted. What a Ghost was asked to do and what it
+# reported is engagement history; the megabytes of XML behind it stop
+# being evidence once they have been imported, which happens the
+# moment the result arrives.
+
+#: How long a finished task keeps its raw output.
+#:
+#: Fourteen days rather than the audit table's seven: the question
+#: this answers is "why did that scan import badly", which is asked
+#: days later, against a scan somebody has just noticed.
+DEFAULT_OUTPUT_RETAIN_DAYS = 14
+
+
+async def prune_task_output(session, days: int | None = None) -> tuple[int, int]:
+    """Drop the raw output of long-finished tasks. -> (rows, bytes).
+
+    Only `done` and `cancelled` tasks, and only past the window.
+
+    **`failed` is deliberately exempt.** A failed task's output is the
+    only account of HOW it failed, there is no imported result standing
+    in for it, and the whole set is 21 kB -- the rounding error on a
+    13 GB table. Sweeping it would save nothing and lose the one thing
+    worth keeping.
+    """
+    try:
+        d = DEFAULT_OUTPUT_RETAIN_DAYS if days is None else int(days)
+    except (TypeError, ValueError):
+        d = DEFAULT_OUTPUT_RETAIN_DAYS
+    # As in `audit.prune`: "keep nothing" is a configuration mistake
+    # rather than an instruction, and it would throw away the output
+    # of a scan that finished this morning.
+    if d <= 0:
+        d = DEFAULT_OUTPUT_RETAIN_DAYS
+    cutoff = datetime.now(UTC) - timedelta(days=d)
+    stale = (AgentTask.status.in_(("done", "cancelled")),
+             AgentTask.created_at < cutoff,
+             AgentTask.output.is_not(None))
+    try:
+        freed = int((await session.execute(
+            select(func.coalesce(func.sum(func.length(AgentTask.output)), 0))
+            .where(*stale))).scalar() or 0)
+        res = await session.execute(
+            update(AgentTask).where(*stale)
+            .values(output=None,
+                    # Said in the row itself. An operator opening a
+                    # task to read its output needs to know the
+                    # difference between "it produced none" and "it
+                    # produced plenty and we no longer keep it".
+                    summary=func.coalesce(AgentTask.summary, "")
+                    + " [raw output dropped by retention]"))
+        await session.commit()
+        return int(res.rowcount or 0), freed
+    except Exception:                            # noqa: BLE001
+        log.exception("task output retention sweep failed")
+        await session.rollback()
+        return 0, 0
