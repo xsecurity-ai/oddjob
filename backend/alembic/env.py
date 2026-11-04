@@ -45,6 +45,34 @@ target_metadata = Base.metadata
 IS_SQLITE = DATABASE_URL.startswith("sqlite")
 
 
+#: Indexes that exist in the DATABASE but cannot exist in the model.
+#:
+#: `gin_trgm_ops` is a Postgres operator class. SQLAlchemy can express
+#: it -- `postgresql_using="gin"`, `postgresql_ops=...` -- but an
+#: `Index` in the metadata is emitted against every engine, and SQLite
+#: has no GIN and no pg_trgm. Declaring them would break the test
+#: suites; not declaring them makes autogenerate want to DROP them on
+#: Postgres, which is how this was discovered: `alembic check` passed
+#: on SQLite, where they do not exist, and failed on Postgres, where
+#: they do.
+#:
+#: So they are owned by migration `e7a3f92c81d4` alone and excluded
+#: from comparison here. The cost of that is real and worth stating:
+#: nothing will tell you if one is dropped by hand. The alternative
+#: was a model that cannot be created on the engine the tests run on.
+_MIGRATION_ONLY_INDEXES = {
+    "ix_cve_records_products_trgm",
+    "ix_cve_records_cpes_trgm",
+    "ix_exploits_cves_trgm",
+    "ix_exploits_title_trgm",
+}
+
+
+def _include_object(obj, name, type_, reflected, compare_to):
+    """Keep dialect-only objects out of autogenerate's comparison."""
+    return not (type_ == "index" and name in _MIGRATION_ONLY_INDEXES)
+
+
 def _configure(connection: Connection) -> None:
     context.configure(
         connection=connection,
@@ -54,6 +82,7 @@ def _configure(connection: Connection) -> None:
         render_as_batch=IS_SQLITE,
         compare_type=True,
         compare_server_default=_same_default,
+        include_object=_include_object,
     )
 
 
