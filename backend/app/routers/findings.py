@@ -172,8 +172,37 @@ SORTABLE = {
 #: not "whatever the model has", for the reason `web.py` gives: a
 #: filter is a query the caller composes, so the columns it can reach
 #: are part of this endpoint's contract.
+#: The same three words the column shows, as a SQL expression.
+#:
+#: `_POC_RANK` next to it answers "which comes first"; this answers
+#: "which one is it". They cannot be the same expression — one is an
+#: integer and the other is the label — and conflating them is the
+#: bug this exists to fix.
+_POC_LABEL = case(
+    (Poc.id.is_(None), pocwork.NOT_AVAILABLE),
+    (func.coalesce(func.trim(Poc.template), "") == "",
+     pocwork.NOT_AVAILABLE),
+    (and_(Poc.validated_at.is_not(None), Poc.exit_code == 0),
+     pocwork.CONFIRMED),
+    else_=pocwork.UNCONFIRMED)
+
+#: What a chained column filter may reference.
+#:
+#: **Starts from `SORTABLE` and then overrides two of them**, which is
+#: the whole point rather than an oddity. Sorting and filtering want
+#: different expressions for the same column: `severity` and
+#: `poc_state` are ORDERED by a rank, because alphabetical would put
+#: `critical` before `high` by luck and `info` before `low` by
+#: accident — and are FILTERED by the value the column displays,
+#: because that is what the operator picked from the list.
+#:
+#: Inheriting the ranks silently gave `filter on 'poc_state' needs a
+#: number, got 'Available, Confirmed'`: the filter compared a label
+#: the UI sent against a CASE returning 0, 1 or 2.
 FILTERABLE = {
     **SORTABLE,
+    "severity": Vuln.severity,
+    "poc_state": _POC_LABEL,
     "description": Vuln.description,
     "severity_name": Vuln.severity,
 }

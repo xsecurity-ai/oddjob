@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { Box, Button, MenuItem, Select, Stack, Tooltip, alpha } from '@mui/material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ColumnDef } from '../lib/columns'
@@ -111,7 +112,15 @@ export function TakeoversPanel({ project }: { project: string | null }) {
     return a
   }, {})
 
-  const columns: ColumnDef<Takeover>[] = [
+  // Destructured, not depended on whole: React Query rebuilds
+  // the result object every render, so a memo that depends on it
+  // is rebuilt every render too and buys nothing.
+  const { mutate: setState } = triage
+
+  // Memoised: a fresh array every render makes every memo in
+  // TableGrid keyed on `columns` recompute, and TanStack rebuild
+  // its column model from them.
+  const columns: ColumnDef<Takeover>[] = useMemo(() => [
     {
       field: 'hostname', headerName: 'Hostname', flex: 2, minWidth: 220,
       renderCell: (p) => (
@@ -279,7 +288,7 @@ export function TakeoversPanel({ project }: { project: string | null }) {
             size="small" variant="standard" disableUnderline
             value={row.state}
             onClick={(e) => e.stopPropagation()}
-            onChange={(e) => triage.mutate({ id: row.id, state: e.target.value })}
+            onChange={(e) => setState({ id: row.id, state: e.target.value })}
             sx={{
               fontSize: 11, color: TRIAGE_COLOUR[row.state] ?? neon.muted,
               '& .MuiSelect-select': { py: 0.25 },
@@ -294,7 +303,7 @@ export function TakeoversPanel({ project }: { project: string | null }) {
         )
       },
     },
-  ]
+  ], [setState])
 
   return (
     <Stack sx={{ height: '100%', minHeight: 0 }}>

@@ -26,7 +26,8 @@ import { neon, glow, TAB_SX } from '../theme'
 
 /** Module-level so the stored-choice hook gets a stable reference,
  *  and so the validated set and the rendered tabs cannot drift. */
-const VULN_TABS = ['all', 'by-target', 'by-vuln', 'secrets'] as const
+const VULN_TABS = ['all', 'by-target', 'by-vuln', 'secrets',
+                   'secrets-by-type'] as const
 
 
 export function VulnsView({ project }: { project: string | null }) {
@@ -317,7 +318,15 @@ export function VulnsView({ project }: { project: string | null }) {
           dataset -- Secrets is the one that is a different question. */}
       <Tab value="by-target" label="By Target" sx={TAB_SX} />
       <Tab value="by-vuln" label="By Vuln" sx={TAB_SX} />
-      <Tab value="secrets" label="Secrets" sx={TAB_SX} />
+      {/* The same credentials asked two ways. By target answers
+          "what is exposed on this host"; by type answers "what kinds
+          of key does this estate leak", which is the one that finds
+          the single AWS key sitting under four hundred base64
+          strings. Named explicitly rather than leaving one as
+          "Secrets": a bare label beside a qualified one reads as the
+          general case, and neither of these is. */}
+      <Tab value="secrets" label="Secrets by Target" sx={TAB_SX} />
+      <Tab value="secrets-by-type" label="Secrets by Type" sx={TAB_SX} />
     </Tabs>
   )
 
@@ -344,11 +353,12 @@ export function VulnsView({ project }: { project: string | null }) {
     )
   }
 
-  if (tab === 'secrets') {
+  if (tab === 'secrets' || tab === 'secrets-by-type') {
     return (
       <>
       {strip}
-      <SecretsPanel project={project} onFinding={setDetail} />
+      <SecretsPanel project={project} onFinding={setDetail}
+        groupBy={tab === 'secrets-by-type' ? 'type' : 'target'} />
       <VulnModal id={detail} onClose={() => setDetail(null)}
         onHost={(proj, h) => { setDetail(null); open(proj, h) }} />
       </>
