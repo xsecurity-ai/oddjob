@@ -132,6 +132,22 @@ def _address_like(needle):
             .exists())
 
 
+def _first_country():
+    """The country to sort on: the one belonging to the first address.
+
+    Mirrors `_first_address` exactly, and for the same reason -- the
+    column shows the country of the address it shows, so sorting it
+    has to use that address and not whichever of four the database
+    reached first.
+    """
+    return (select(TargetAddress.geo_country)
+            .join(target_address_links,
+                  target_address_links.c.address_id == TargetAddress.id)
+            .where(target_address_links.c.target_id == Target.id)
+            .order_by(target_address_links.c.id).limit(1)
+            .correlate(Target).scalar_subquery())
+
+
 def _first_address():
     """The address to sort on: the first one observed.
 
@@ -164,6 +180,10 @@ async def list_targets(
     q: str | None = Query(None, description="full search across host, ip, os, notes, tags"),
     hacked: bool | None = Query(None),
     alive: bool | None = Query(None),
+    cloud: bool | None = Query(
+        None, description="true for cloud-named rows only, false to exclude "
+                          "them; omit for both. The Targets page shows the "
+                          "two as separate tabs."),
     sort: str | None = Query("host"),
     order: str = Query("asc", pattern="^(asc|desc)$"),
     limit: int = Query(5000, ge=0),
@@ -184,12 +204,21 @@ async def list_targets(
         stmt = stmt.where(Target.hacked == hacked)
     if alive is not None:
         stmt = stmt.where(Target.alive == alive)
+    if cloud is not None:
+        stmt = stmt.where(Target.id.in_(
+            await _cloud_ids(session, pr.id if project else None, vis, cloud)))
     stmt = apply_search(stmt, q, [Target.host, Target.os,
                                   Target.notes, Target.tags, Project.code],
                         extra=_address_like)
     stmt = apply_sort(stmt, sort, order, {
         "host": Target.host, "ip_address": _first_address(),
         "ip_addresses": _first_address(), "alive": Target.alive,
+        # Both of these are columns the grid offers and the server
+        # used to refuse. That mismatch is a 422 the moment somebody
+        # clicks the header, and it is the bug `lifecycle` shipped as
+        # on the findings table — `targetsorttest` now compares the
+        # two lists so the next column added cannot repeat it.
+        "kind": Target.kind, "geo_country": _first_country(),
         "hacked": Target.hacked, "os": Target.os, "updated_at": Target.updated_at,
         "project_code": Project.code,
         "total_vulns": func.coalesce(v.c.total_vulns, 0),
@@ -314,6 +343,131 @@ async def target_origins(
         TargetOrigin.target_id == Target.id).exists()).limit(limit)
     ids = [i for (i,) in (await session.execute(stmt)).all()]
     return await _origins_for(session, ids)
+
+
+async def _cloud_ids(session: AsyncSession, project_id: int | None,
+                    vis, want_cloud: bool) -> list[int]:
+    """Target ids that are (or are not) cloud-named.
+
+    **Classified in Python, by the same `cloudnames.classify` the API
+    exposes as `cloud_family`.** The families are regexes, and the
+    obvious alternative -- generating `host ~ pattern` from them --
+    would be a different filter on SQLite, which has no regex and is
+    what the suites run on. One rule that behaves identically
+    everywhere beats two that agree most of the time.
+
+    It costs a scan of one column: 4 ms over 10,338 hosts, measured.
+    That is cheaper than the thing it replaces, which was sending all
+    10,338 rows and 8.2 MB to the browser so it could do the same
+    filter there.
+    """
+    from .. import cloudnames
+
+    q = select(Target.id, Target.host, Target.kind)
+    if vis is not None:
+        q = q.where(Target.project_id.in_(vis))
+    if project_id is not None:
+        q = q.where(Target.project_id == project_id)
+    out: list[int] = []
+    async for tid, host, kind in await session.stream(q):
+        # `kind == 'cloud'` as well as the name: a cloud resource
+        # filed by ARN has no hostname to classify, and the Cloud tab
+        # has always shown it. Same two conditions as the browser's.
+        is_cloud = kind == "cloud" or cloudnames.classify(host or "")[0] is not None
+        if is_cloud == want_cloud:
+            out.append(tid)
+    return out
+
+
+@router.get("/gaps", response_model=dict)
+async def gaps(subjects: str | None = Query(
+                   None, pattern="^(name|address)$",
+                   description="Also return the subjects themselves: "
+                               "`name` for the addresses to look up, "
+                               "`address` for the names to resolve. "
+                               "Omitted, only the counts come back."),
+               pr: Project = Depends(require_project("readonly")),
+               _: User = Depends(get_current_user),
+               session: AsyncSession = Depends(get_session)):
+    """How many targets are missing a name, and how many an address.
+
+    The two numbers the Enumerate menu is built on: "N have an address
+    and no name" is what the FQDN actions are for, and its mirror is
+    what the address actions are for.
+
+    **The browser used to work these out**, which meant fetching every
+    target in the project to count two things -- 10,338 rows and
+    8.2 MB on this engagement, to render two integers beside a menu.
+
+    Not SQL either, and that is the point of doing it here rather than
+    as two `count(*)`s. Whether a host is an ADDRESS or a NAME is the
+    question both answers turn on, and the authoritative answer is
+    `ipaddress.ip_address` -- which understands IPv6 zones, rejects
+    the malformed, and has no faithful regex. A CASE expression
+    approximating it would be a second opinion on a rule that already
+    decides what gets scanned, and the two would drift.
+
+    So: four narrow columns, streamed, and the real predicate. The
+    payload is the two integers.
+    """
+    import ipaddress
+
+    def is_address(value: str | None) -> bool:
+        v = (value or "").strip()
+        if not v:
+            return False
+        try:
+            ipaddress.ip_address(v.split("%", 1)[0])
+        except ValueError:
+            return False
+        return True
+
+    from .. import cloudnames
+
+    needs_name = needs_address = 0
+    # Collected only when asked for. The counts are read on every
+    # visit to the page; the LISTS are read when somebody actually
+    # chooses "all", and they are what a sweep gets queued from.
+    name_subjects: list[str] = []
+    address_subjects: list[str] = []
+    # Three columns, not whole rows. `cloud_ephemeral` is not one of
+    # them because it is not stored -- it is `cloudnames.classify`
+    # over the host, same as the computed field the API exposes, so
+    # it is derived here from the same function rather than guessed.
+    cols = (select(Target.host, Target.kind, _first_address().label("ip"))
+            .where(Target.project_id == pr.id))
+    # `stream`, not `all`: this is the whole target table, and loading
+    # it into a list to count two things is the shape being removed.
+    result = await session.stream(cols)
+    async for host, kind, ip in result:
+        if kind == "mobile":
+            continue
+        named = not is_address(host)
+        if not named:
+            # An address on record and nothing but the address to call
+            # it. A host whose name IS its address has both halves of
+            # `addressOf` satisfied by the same string.
+            needs_name += 1
+            if subjects == "name":
+                # The ADDRESS is the subject of a reverse lookup, and
+                # for these rows the host IS the address.
+                name_subjects.append(host)
+            continue
+        # A name and no address behind it. Cloud is excluded because an
+        # ARN is not a hostname, and a provider-assigned name because
+        # the provider derived it FROM the address -- see `needsAddress`
+        # in TargetsView, which this replaces, and `dns_subject`.
+        ephemeral = cloudnames.classify(host or "")[2]
+        if kind != "cloud" and not ephemeral and not (ip or "").strip():
+            needs_address += 1
+            if subjects == "address":
+                address_subjects.append(host)
+    out: dict = {"needs_name": needs_name, "needs_address": needs_address}
+    if subjects == "name":
+        out["subjects"] = name_subjects
+    elif subjects == "address":
+        out["subjects"] = address_subjects
+    return out
 
 
 @router.get("/unscanned", response_model=dict)

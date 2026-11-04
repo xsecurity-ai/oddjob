@@ -513,7 +513,24 @@ export interface VulnsByTargetRow {
 /** A rollup, and whether it is all of it. A bare list cannot say
  *  "there was more", and on FALCON the by-title rollup is 5,013 rows
  *  — a limit that cut it silently would look complete. */
-export interface Rollup<T> { items: T[]; truncated: boolean }
+export interface Rollup<T> {
+  items: T[]
+  truncated: boolean
+  /** How many rows the rollup has in total, so a paged view can say
+   *  "100 of 10,860". Null when the caller took the whole thing. */
+  total: number | null
+}
+
+/** A page of a rollup. Same shape as the findings query, minus the
+ *  column filters — a rollup is a GROUP BY and its columns are
+ *  aggregates, so there is nothing to filter on but the search. */
+export interface RollupQuery {
+  q?: string
+  sort?: string
+  order?: 'asc' | 'desc'
+  limit?: number
+  offset?: number
+}
 
 /** One finding AT one severity.
  *
@@ -1439,7 +1456,37 @@ export const api = {
     req<ScopeEntry[]>(`/api/projects/${encodeURIComponent(project)}/scope`),
   projectContacts: (project: string) =>
     req<Contact[]>(`/api/projects/${encodeURIComponent(project)}/contacts`),
+  /** EVERY target in the project, in one response.
+   *
+   *  Kept for the two callers that genuinely need a lookup table of
+   *  the whole estate rather than a page — matching a C2 peer to a
+   *  host, and reconciling an import. The Targets grid does NOT use
+   *  it any more: it was 10,338 rows and 8.2 MB to show a screenful.
+   *  Reach for `targetPage` unless you really do need all of them. */
   targets: (project?: string) => req<Page<Target>>('/api/targets' + qs({ project, limit: 100000 })),
+  /** One page of targets, ordered and filtered in the database. */
+  targetPage: (o: {
+    project?: string; q?: string; sort?: string; order?: 'asc' | 'desc'
+    /** true for cloud-named rows, false to exclude them, omitted for
+     *  both. The two tabs on the Targets page. */
+    cloud?: boolean
+    limit?: number; offset?: number
+  } = {}) => req<Page<Target>>('/api/targets' + qs({ limit: 100, ...o })),
+  /** How many targets have an address and no name, and vice versa.
+   *
+   *  Two integers the Enumerate menu is built on. The browser used to
+   *  work them out from every row in the project. */
+  targetGaps: (project: string) =>
+    req<{ needs_name: number; needs_address: number }>(
+      '/api/targets/gaps' + qs({ project })),
+  /** The gap SUBJECTS themselves, for the "all" sweeps.
+   *
+   *  Separate from the counts because the counts are read on every
+   *  visit to the page and this is read when somebody chooses to act
+   *  — a list of several thousand names, against two integers. */
+  targetGapSubjects: (project: string, kind: 'name' | 'address') =>
+    req<{ needs_name: number; needs_address: number; subjects: string[] }>(
+      '/api/targets/gaps' + qs({ project, subjects: kind })),
 
   /** A handful of targets matching what someone has typed.
    *
@@ -1474,10 +1521,11 @@ export const api = {
    *  a project with 23,000 findings cannot be grouped in the browser,
    *  and the rows a tab shows are a few hundred either way. The
    *  findings behind a row are fetched only when it is expanded. */
-  vulnsByTarget: (project: string, q?: string) =>
-    req<Rollup<VulnsByTargetRow>>('/api/vulns/by-target' + qs({ project, q })),
-  vulnsByTitle: (project: string, q?: string) =>
-    req<Rollup<VulnsByTitleRow>>('/api/vulns/by-title' + qs({ project, q })),
+  vulnsByTarget: (project: string, o: RollupQuery = {}) =>
+    req<Rollup<VulnsByTargetRow>>('/api/vulns/by-target'
+      + qs({ project, ...o })),
+  vulnsByTitle: (project: string, o: RollupQuery = {}) =>
+    req<Rollup<VulnsByTitleRow>>('/api/vulns/by-title' + qs({ project, ...o })),
   /** The findings behind one rollup row, fetched when it is expanded.
    *  `title` is an EXACT match, not the substring `q` does: a title
    *  that merely contains this one is a different finding. */

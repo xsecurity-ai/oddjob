@@ -392,6 +392,57 @@ class Rollup(BaseModel):
     """
     items: list
     truncated: bool = False
+    #: How many rows the rollup has in total, so a paged client can
+    #: say "100 of 10,860" rather than "100". None when the caller did
+    #: not ask for a page and the list IS the total.
+    total: int | None = None
+
+
+#: What the rollups may be ordered by, and the only names they accept.
+#: Same contract as SORTABLE above and for the same reason: an ORDER
+#: BY the caller composes is part of this endpoint's surface.
+#: One alias, built once, so the sort maps below and the SELECT that uses them
+#: name the same thing. Two aliases of the same subquery are two
+#: joins, and the ORDER BY would reference one the SELECT never made.
+_PROVED_ALIAS = (select(Poc.vuln_id).where(Poc.vuln_id.is_not(None))
+                 .distinct().subquery())
+
+
+BY_TITLE_SORT = {
+    "severity": _SEV_RANK, "title": Vuln.title,
+    "hosts": func.count(func.distinct(Target.host)),
+    "total": func.count(Vuln.id),
+    # The COVERAGE, not the count: "40 of 40" and "40 of 4,000" are
+    # the same number and opposite answers. Matches what the column
+    # renders and what the grid used to sort in the browser.
+    "proofs": (func.count(_PROVED_ALIAS.c.vuln_id)
+               * 1.0 / func.nullif(func.count(Vuln.id), 0)),
+}
+
+BY_TARGET_SORT = {
+    "host": Target.host, "project_code": Project.code,
+    "total": func.count(Vuln.id),
+    "critical": func.count(case((Vuln.severity == "critical", 1))),
+    "high": func.count(case((Vuln.severity == "high", 1))),
+    "medium": func.count(case((Vuln.severity == "medium", 1))),
+    "low": func.count(case((Vuln.severity == "low", 1))),
+    "info": func.count(case((Vuln.severity == "info", 1))),
+    "proofs": (func.count(_PROVED_ALIAS.c.vuln_id)
+               * 1.0 / func.nullif(func.count(Vuln.id), 0)),
+}
+
+
+async def _rollup_total(session: AsyncSession, grouped) -> int:
+    """How many GROUPS the rollup has, before a page is cut from it.
+
+    `count(*) over the grouped statement`, not `count(distinct ...)`:
+    the grouping is already described by the statement, and spelling
+    it a second time is the version that goes stale when a GROUP BY
+    changes.
+    """
+    sub = grouped.order_by(None).subquery()
+    return int((await session.execute(
+        select(func.count()).select_from(sub))).scalar() or 0)
 
 
 def _proved_subquery():
@@ -404,8 +455,7 @@ def _proved_subquery():
     rollup would then disagree with the findings list about how many
     findings there are, which is the one thing a summary must not do.
     """
-    return (select(Poc.vuln_id).where(Poc.vuln_id.is_not(None))
-            .distinct().subquery())
+    return _PROVED_ALIAS
 
 
 def _proof_counts(proved):
@@ -463,7 +513,10 @@ class VulnsByTitleRow(BaseModel):
 async def vulns_by_target(
     project: str | None = Query(None),
     q: str | None = Query(None),
+    sort: str | None = Query(None),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(20000, ge=1, le=100000),
+    offset: int = Query(0, ge=0),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
@@ -490,11 +543,19 @@ async def vulns_by_target(
             raise HTTPException(404, f"no project {project!r}")
         stmt = stmt.where(Target.project_id == pr.id)
     stmt = apply_search(stmt, q, [Target.host, Vuln.title, Vuln.severity])
-    stmt = (stmt.group_by(Target.host, Project.code)
-            .order_by(func.count(Vuln.id).desc(), Target.host)
-            .limit(limit + 1))
+    stmt = stmt.group_by(Target.host, Project.code)
+    # The whole rollup's size, before the page is cut out of it. A
+    # client showing "100 of 1,603" cannot work that out from a page,
+    # and counting the groups is one cheap query against an aggregate
+    # that has already been described.
+    total = await _rollup_total(session, stmt)
+    col = BY_TARGET_SORT.get(sort or "", func.count(Vuln.id))
+    stmt = (stmt.order_by(col.asc() if order == "asc" else col.desc(),
+                          Target.host)
+            .limit(limit + 1).offset(offset))
     rows = (await session.execute(stmt)).all()
     return Rollup(
+        total=total,
         items=[VulnsByTargetRow(
             host=r.host, project_code=r.code, total=r.total,
             proofs=r.proofs, requested=r.requested,
@@ -507,7 +568,10 @@ async def vulns_by_target(
 async def vulns_by_title(
     project: str | None = Query(None),
     q: str | None = Query(None),
+    sort: str | None = Query(None),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(20000, ge=1, le=100000),
+    offset: int = Query(0, ge=0),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
@@ -535,12 +599,15 @@ async def vulns_by_title(
             raise HTTPException(404, f"no project {project!r}")
         stmt = stmt.where(Target.project_id == pr.id)
     stmt = apply_search(stmt, q, [Vuln.title, Target.host, Vuln.severity])
-    stmt = (stmt.group_by(Vuln.title, Vuln.severity)
-            .order_by(func.count(func.distinct(Target.host)).desc(),
-                      Vuln.title)
-            .limit(limit + 1))
+    stmt = stmt.group_by(Vuln.title, Vuln.severity)
+    total = await _rollup_total(session, stmt)
+    col = BY_TITLE_SORT.get(sort or "", func.count(func.distinct(Target.host)))
+    stmt = (stmt.order_by(col.asc() if order == "asc" else col.desc(),
+                          Vuln.title)
+            .limit(limit + 1).offset(offset))
     rows = (await session.execute(stmt)).all()
     return Rollup(
+        total=total,
         items=[VulnsByTitleRow(title=r.title, severity=r.severity,
                                hosts=r.hosts, total=r.total,
                                proofs=r.proofs, requested=r.requested)
