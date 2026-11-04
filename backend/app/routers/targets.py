@@ -395,8 +395,17 @@ async def host_names(pr: Project = Depends(require_project("readonly")),
     addresses, timestamps, cloud classifications and vulnerability
     counts -- to build a list of 10,340 strings.
 
-    One column, sorted in the database, so the caller gets the order
-    it was going to sort into anyway.
+    One column, ordered so the response is stable between calls.
+
+    **That order is the DATABASE's collation, not JavaScript's**, and
+    the two are not the same: Postgres under a UTF-8 locale compares
+    letters first and punctuation second, so `a-b.example` and
+    `ab.example` land either side of each other depending on which
+    engine sorted them. Both callers therefore still sort what they
+    get. Saying "sorted" and leaving it there would have reshuffled
+    two autocompletes by a rule nobody chose -- which is what the
+    first version of this did, caught by a test asserting the reply
+    came back in Python's order and finding it did not.
     """
     rows = (await session.execute(
         select(Target.host)
