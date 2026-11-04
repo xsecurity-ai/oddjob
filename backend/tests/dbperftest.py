@@ -252,5 +252,102 @@ async def retention():
 
 asyncio.run(retention())
 
+print("\n--- the heartbeat stops rewriting a row nothing reads ---")
+# A Ghost beats every 15s and the beat is usually a no-op, so the only
+# thing changing was the timestamp: 673,510 UPDATEs over three weeks.
+# Throttling it is acceptable only while the staleness it introduces
+# stays inside the window that decides an agent is offline.
+from app.routers.agents import HEARTBEAT_WRITE_EVERY, OFFLINE_AFTER  # noqa: E402
+
+check("the throttle is derived from the offline window, not chosen",
+      HEARTBEAT_WRITE_EVERY == OFFLINE_AFTER / 3,
+      f"{HEARTBEAT_WRITE_EVERY} vs {OFFLINE_AFTER}")
+check("it is longer than one 15s beat, so it actually skips writes",
+      timedelta(seconds=15) < HEARTBEAT_WRITE_EVERY, HEARTBEAT_WRITE_EVERY)
+check("and shorter than the offline window, so death is still noticed",
+      HEARTBEAT_WRITE_EVERY < OFFLINE_AFTER, HEARTBEAT_WRITE_EVERY)
+worst = OFFLINE_AFTER + HEARTBEAT_WRITE_EVERY
+check("worst-case offline detection is still under two minutes",
+      worst <= timedelta(seconds=120), worst)
+
+
+def heartbeat_writes(age_s, ip_changed=False, disabled=False):
+    """Replays the decision in `heartbeat`. -> did last_seen change?"""
+    now = datetime.now(UTC)
+    seen = None if age_s is None else now - timedelta(seconds=age_s)
+    return bool(seen is None or (now - seen) >= HEARTBEAT_WRITE_EVERY
+                or ip_changed or disabled)
+
+
+check("a beat 5s after the last write skips it", not heartbeat_writes(5))
+check("a beat 15s after — one interval — still skips it",
+      not heartbeat_writes(15))
+check("a beat past the window writes",
+      heartbeat_writes(int(HEARTBEAT_WRITE_EVERY.total_seconds()) + 1))
+check("an agent never seen before always writes", heartbeat_writes(None))
+check("a moved address always writes, however recent the beat",
+      heartbeat_writes(1, ip_changed=True))
+check("and the beat that finds it killed always writes",
+      heartbeat_writes(1, disabled=True))
+
+print("\n--- collapsing origins in SQL cannot change which origin wins ---")
+# `discoverable` pulled every URL in the project (203,161, to reach
+# 2,552 origins) and collapsed them in Python. SQL collapses on
+# `scheme://authority` first.
+#
+# Safe ONLY because that prefix is COARSER than `origin_of`, never
+# finer: `origin_of` normalises a default port away, so two prefixes
+# can map to one origin but never the reverse. Coarser hands Python
+# extra candidates it then collapses; finer silently drops one.
+import re as _re  # noqa: E402
+
+from app.webtargets import discoverable as _disc  # noqa: E402,F401
+from app.webtargets import origin_of  # noqa: E402
+
+#: Read out of the source, so the test follows the query rather than
+#: a copy of it that can drift.
+_SRC = (_pathlib.Path(__file__).resolve().parents[1]
+        / "app" / "webtargets.py").read_text()
+_m = _re.search(r'func\.substring\(WebAddress\.url,\s*"([^"]+)"\)', _SRC)
+check("the query's prefix pattern is found in the source", _m is not None)
+PATTERN = _m.group(1) if _m else "^[^/]*//[^/]*"
+
+
+def _prefix(url):
+    m = _re.match(PATTERN, url)
+    return m.group(0) if m else None
+
+
+URLS = [
+    "https://app.acme.example/a/b?c=1",
+    "https://app.acme.example:443/other",
+    "https://app.acme.example/",
+    "http://app.acme.example/a",
+    "http://app.acme.example:80/b",
+    "https://app.acme.example:8443/x",
+    "https://other.acme.example/a",
+]
+
+for u in URLS:
+    pfx = _prefix(u)
+    check(f"prefix of {u[:40]} gives the same origin",
+          pfx is not None and origin_of(pfx) == origin_of(u),
+          f"{origin_of(pfx) if pfx else None} vs {origin_of(u)}")
+
+check("the set of origins is identical either way",
+      {origin_of(u) for u in URLS} == {origin_of(_prefix(u)) for u in URLS})
+
+# The direction that matters, stated as a property rather than a
+# sample: two URLs that share an origin must never get prefixes that
+# `origin_of` then resolves differently — and a prefix that kept the
+# PATH would do exactly that, which is the mistake this guards.
+same_origin = [("https://app.acme.example/one", "https://app.acme.example/two"),
+               ("https://app.acme.example:443/x", "https://app.acme.example/y"),
+               ("http://app.acme.example:80/a", "http://app.acme.example/b")]
+for a, b in same_origin:
+    check(f"{a[:34]} and {b[:30]} stay one origin",
+          origin_of(_prefix(a)) == origin_of(_prefix(b)) == origin_of(a),
+          f"{origin_of(_prefix(a))} vs {origin_of(_prefix(b))}")
+
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
