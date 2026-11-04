@@ -68,6 +68,41 @@ services:
       - "work_mem=${POSTGRES_WORK_MEM:-16MB}"
       - "-c"
       - "maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-256MB}"
+      # Postgres' default of 4 assumes a spinning disk, where a random
+      # read costs four seeks' worth of a sequential one. On SSD or
+      # NVMe that ratio is roughly 1, and leaving it at 4 tells the
+      # planner an index scan is four times dearer than it is -- so it
+      # picks sequential scans over indexes that exist and would win.
+      # Measured on the reference box (NVMe): a filtered count went
+      # 14.0ms -> 2.9ms and an ordered page 1.12ms -> 0.11ms.
+      # Raise it back towards 4 if you really are on spinning rust.
+      - "-c"
+      - "random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}"
+      # 75% of the reference database is TOAST -- scanner output and
+      # captured HTTP bodies -- so the compression codec is not a
+      # detail. lz4 is substantially faster to compress AND
+      # decompress than the default pglz at a similar ratio. It
+      # applies to newly written data; existing pglz values stay
+      # readable, the two coexist, and nothing needs rewriting.
+      - "-c"
+      - "default_toast_compression=${POSTGRES_TOAST_COMPRESSION:-lz4}"
+      # A bulk import or a CVE sync writes hundreds of thousands of
+      # rows. At the 1 GB default these force a checkpoint every few
+      # seconds, and every checkpoint makes the next write of each
+      # page a FULL PAGE write into the WAL.
+      - "-c"
+      - "max_wal_size=${POSTGRES_MAX_WAL_SIZE:-4GB}"
+      - "-c"
+      - "wal_compression=${POSTGRES_WAL_COMPRESSION:-lz4}"
+      # The defaults wait for 20% of a table to be dead before
+      # vacuuming it. On a 200,000-row table that is 40,000 dead rows
+      # -- and the reference box sat at 12-16% dead across its
+      # largest tables, which is exactly what 20% looks like in
+      # practice.
+      - "-c"
+      - "autovacuum_vacuum_scale_factor=${POSTGRES_AUTOVACUUM_SCALE:-0.05}"
+      - "-c"
+      - "autovacuum_analyze_scale_factor=${POSTGRES_AUTOANALYZE_SCALE:-0.02}"
     volumes:
       - pgdata:/var/lib/postgresql/data
     # Bound to loopback, not published to the network. This database

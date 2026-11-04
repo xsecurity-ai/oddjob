@@ -142,6 +142,12 @@ variables if the host has room:
 | `POSTGRES_WORK_MEM` | `16MB` | Per sort **node** per connection — not per query. A big value times a deep plan times the pool is a real number. |
 | `POSTGRES_MAINTENANCE_WORK_MEM` | `256MB` | Index builds and `VACUUM`. Only a few run at once. |
 | `POSTGRES_SHM` | `1gb` | Not tuning. Docker gives a container 64 MB of `/dev/shm`, and a parallel sequential scan fails with "could not resize shared memory segment" when it needs more. |
+| `POSTGRES_RANDOM_PAGE_COST` | `1.1` | Postgres defaults to `4`, which assumes a **spinning disk**. On SSD/NVMe that tells the planner an index scan is four times dearer than it is, so it picks sequential scans over indexes that would win. Raise it towards 4 only if you really are on rust. |
+| `POSTGRES_TOAST_COMPRESSION` | `lz4` | 75% of the reference database is TOAST — scanner output and captured HTTP bodies. lz4 is much faster to compress and decompress than the default `pglz` at a similar ratio. Applies to newly written data; existing values stay readable. |
+| `POSTGRES_MAX_WAL_SIZE` | `4GB` | At the 1 GB default a bulk import checkpoints every few seconds, and each checkpoint makes the next write of every page a full-page write into the WAL. |
+| `POSTGRES_WAL_COMPRESSION` | `lz4` | Compresses those full-page writes. |
+| `POSTGRES_AUTOVACUUM_SCALE` | `0.05` | The default `0.2` waits for a fifth of a table to be dead. On 200,000 rows that is 40,000 dead rows, and the reference box sat at 12–16% dead across its largest tables. |
+| `POSTGRES_AUTOANALYZE_SCALE` | `0.02` | The same, for statistics. |
 
 ```bash
 # in .env, for a 32 GB host
