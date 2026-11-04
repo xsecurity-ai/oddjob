@@ -32,6 +32,42 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-oddjob}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-oddjob}
+    # Postgres ships defaults sized for a machine that might have
+    # 256 MB of RAM, and leaves them there for ever. On the reference
+    # deployment that meant `shared_buffers=128MB` against an 8.9 GB
+    # database: a 20.8% cache hit ratio, 678 TB read from disk, and a
+    # container holding 250 MB of the 30 GB available to it.
+    #
+    # Overridable per deployment, because the right numbers depend on
+    # the box. The ratios are the usual ones: about a quarter of the
+    # RAM you are willing to give Postgres in `shared_buffers`, and
+    # roughly three quarters of it in `effective_cache_size` -- which
+    # is a HINT about the OS page cache, not an allocation.
+    #
+    # `work_mem` is per sort NODE per connection, not per query, so a
+    # big value times a deep plan times the pool is a real number.
+    #
+    # `shm_size` is not tuning, it is a bug fix: Docker gives a
+    # container 64 MB of /dev/shm, and a parallel sequential scan --
+    # which this schema uses, see the CVE queries -- fails with
+    # "could not resize shared memory segment" when it needs more.
+    #
+    # **An override file that sets `command:` REPLACES this list, it
+    # does not merge with it.** Compose replaces sequences wholesale,
+    # so a `docker-compose.override.yaml` adding
+    # `shared_preload_libraries=pg_stat_statements` has to repeat
+    # every line below or it silently un-tunes the database -- which
+    # is how the reference deployment ended up back on the defaults.
+    shm_size: ${POSTGRES_SHM:-1gb}
+    command:
+      - "-c"
+      - "shared_buffers=${POSTGRES_SHARED_BUFFERS:-1GB}"
+      - "-c"
+      - "effective_cache_size=${POSTGRES_EFFECTIVE_CACHE:-3GB}"
+      - "-c"
+      - "work_mem=${POSTGRES_WORK_MEM:-16MB}"
+      - "-c"
+      - "maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-256MB}"
     volumes:
       - pgdata:/var/lib/postgresql/data
     # Bound to loopback, not published to the network. This database

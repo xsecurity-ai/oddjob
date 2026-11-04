@@ -2138,8 +2138,11 @@ class DomainCandidate(Base, TimestampMixin):
     #: How many separate generation runs proposed it. A name three different
     #: patterns agree on is a better bet than one only a sequence produced.
     times_seen: Mapped[int] = mapped_column(Integer, default=1)
+        # Indexed because it is a foreign key we may delete through:
+        # CLAUDE.md records a delete through an unindexed FK scanning
+        # the whole child table per row. See `e7a3f92c81d4`.
     decided_by: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"))
+        ForeignKey("users.id", ondelete="SET NULL"), index=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -3157,8 +3160,11 @@ class AgentTask(Base, TimestampMixin):
         ForeignKey("agents.id", ondelete="SET NULL"), index=True)
     project_id: Mapped[int] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+        # Indexed because it is a foreign key we may delete through:
+        # CLAUDE.md records a delete through an unindexed FK scanning
+        # the whole child table per row. See `e7a3f92c81d4`.
     requested_by: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"))
+        ForeignKey("users.id", ondelete="SET NULL"), index=True)
 
     #: For `geo` routing: which region this work must run from. Set by
     #: the operator, because the alternative is resolving the target's
@@ -3267,8 +3273,11 @@ class AuditEvent(Base):
     #: Dotted rather than prose so it can be filtered on.
     action: Mapped[str] = mapped_column(String(64), index=True)
     username: Mapped[str | None] = mapped_column(String(128), index=True)
+        # Indexed because it is a foreign key we may delete through:
+        # CLAUDE.md records a delete through an unindexed FK scanning
+        # the whole child table per row. See `e7a3f92c81d4`.
     user_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"))
+        ForeignKey("users.id", ondelete="SET NULL"), index=True)
     ip: Mapped[str | None] = mapped_column(String(64))
     method: Mapped[str | None] = mapped_column(String(8))
     #: Scrubbed before it arrives. Never the query string.
@@ -3334,13 +3343,22 @@ class Exploit(Base):
 class CveRecord(Base):
     """One CVE, enough of it to decide whether to care."""
     __tablename__ = "cve_records"
-    __table_args__ = (
-        Index("ix_cve_severity_score", "severity", "cvss_score"),
-        # The ordering a findings list actually wants: what is being
-        # exploited, then what is likely to be, then how bad it would
-        # be. See `vulnfeed.triage_order`.
-        Index("ix_cve_triage", "kev", "epss", "cvss_score"),
-    )
+    # No __table_args__, and that is a measured decision rather than
+    # an omission. This table carried five btree indexes that took
+    # ZERO scans in three weeks of production traffic -- the planner
+    # never chose one, because every query that reaches this table is
+    # a `LIKE '%x%'` over `products` or `cpes`, which a btree cannot
+    # serve at all. They cost 308 MB and were re-maintained on every
+    # row of the EPSS sweep, which rewrites all 418,608 rows.
+    #
+    # The trigram indexes that DO serve those queries are created in
+    # migration `e7a3f92c81d4` and are deliberately not declared here:
+    # `gin_trgm_ops` is Postgres-only, SQLAlchemy would emit it
+    # against SQLite as well, and the test suites run on SQLite.
+    #
+    # If a query here ever needs ordering by score or triage again,
+    # measure first: `pg_stat_user_indexes.idx_scan` is what says
+    # whether an index on this table is doing anything.
 
     #: CVE-2021-41773. The natural key, for the same reason as above.
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -3348,7 +3366,7 @@ class CveRecord(Base):
     modified: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True)
     summary: Mapped[str | None] = mapped_column(Text)
-    cvss_score: Mapped[float | None] = mapped_column(Float, index=True)
+    cvss_score: Mapped[float | None] = mapped_column(Float)
     cvss_vector: Mapped[str | None] = mapped_column(String(128))
     severity: Mapped[str | None] = mapped_column(String(16), index=True)
     #: JSON list of CPE match strings. What makes version matching
@@ -3359,7 +3377,10 @@ class CveRecord(Base):
     #: cheap first pass before the expensive one. A LIKE over this is
     #: what keeps matching a 4,000-host project from being a join
     #: against 290,000 rows per service.
-    products: Mapped[str | None] = mapped_column(Text, index=True)
+    #: Not btree-indexed: every read of it is `LIKE '%term%'`, which a
+    #: btree cannot answer. The trigram index that can is in
+    #: `e7a3f92c81d4`.
+    products: Mapped[str | None] = mapped_column(Text)
     #: On CISA's Known Exploited Vulnerabilities list: somebody has
     #: been seen using this, in the wild, against somebody.
     #:
@@ -3387,7 +3408,10 @@ class CveRecord(Base):
     #: exploited in the next 30 days. Answers the question CVSS
     #: cannot -- "a 9.8 nobody has ever used" and "a 7.5 being
     #: exploited this week" sort identically by severity alone.
-    epss: Mapped[float | None] = mapped_column(Float, index=True)
+    #: Not indexed, for the same reason as `cvss_score`: nothing has
+    #: ever ordered or filtered on it in SQL, and the index was being
+    #: rewritten 418,608 times per EPSS sweep to serve no query.
+    epss: Mapped[float | None] = mapped_column(Float)
     #: Percentile among all scored CVEs. Carried because the raw
     #: probability is small and hard to read: 0.00042 means little,
     #: "higher than 11% of all CVEs" means something.

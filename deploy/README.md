@@ -120,6 +120,51 @@ scan, and throttling that drops findings from work that has already run
 against someone's estate. They authenticate with a signed agent key
 rather than a password, so they are not the brute-force surface.
 
+## Tuning the database for the box it is on
+
+`docker-compose.yml` sets four Postgres memory parameters, because
+Postgres itself does not: its defaults assume a machine that might
+have 256 MB of RAM, and nothing ever revisits them.
+
+On the reference deployment, left at the defaults, that meant
+`shared_buffers=128MB` against an 8.9 GB database — a **20.8% cache
+hit ratio** and **678 TB read from disk**, while the container used
+250 MB of the 30 GB available to it. A healthy instance sits above
+99%.
+
+The shipped values suit a small VPS. Raise them with environment
+variables if the host has room:
+
+| variable | default | what it is |
+|---|---|---|
+| `POSTGRES_SHARED_BUFFERS` | `1GB` | Postgres' own cache. About a quarter of the RAM you will give it. |
+| `POSTGRES_EFFECTIVE_CACHE` | `3GB` | A **hint** about the OS page cache, not an allocation. Roughly three quarters. |
+| `POSTGRES_WORK_MEM` | `16MB` | Per sort **node** per connection — not per query. A big value times a deep plan times the pool is a real number. |
+| `POSTGRES_MAINTENANCE_WORK_MEM` | `256MB` | Index builds and `VACUUM`. Only a few run at once. |
+| `POSTGRES_SHM` | `1gb` | Not tuning. Docker gives a container 64 MB of `/dev/shm`, and a parallel sequential scan fails with "could not resize shared memory segment" when it needs more. |
+
+```bash
+# in .env, for a 32 GB host
+POSTGRES_SHARED_BUFFERS=2GB
+POSTGRES_EFFECTIVE_CACHE=6GB
+POSTGRES_MAINTENANCE_WORK_MEM=512MB
+```
+
+**If you keep a `docker-compose.override.yaml` that sets `command:`
+on the db service, it replaces the tuning rather than adding to it.**
+Compose replaces sequences wholesale. An override that loads
+`pg_stat_statements` must repeat every `-c` line from
+`docker-compose.yml`, or the database quietly goes back to the
+defaults — which is exactly how the reference deployment did.
+
+Whether any of this is working is one query:
+
+```sql
+select round(100.0*sum(heap_blks_hit)
+             /nullif(sum(heap_blks_hit)+sum(heap_blks_read),0), 2) as cache_hit_pct
+from pg_statio_user_tables;
+```
+
 ## Upgrading an existing install to PostgreSQL 18
 
 **Do this before pulling, or the database will not start.** The `db`
