@@ -521,7 +521,15 @@ _TR2 = (_pathlib.Path(__file__).resolve().parents[1]
 _h = _TR2[_TR2.index("async def host_names("):_TR2.index("@router.get(\"/gaps\"")]
 check("the endpoint selects only the host column",
       "select(Target.host)" in _h and "select(Target)" not in _h)
-check("and sorts in the database", "order_by(Target.host)" in _h)
+check("and orders in the database, for a stable reply",
+      "order_by(Target.host)" in _h)
+# The order is the DATABASE's collation, which is not JavaScript's.
+# Both callers must still sort what they get, or the lists quietly
+# reshuffle — this is the thing the live check caught.
+for f in (_C2, _UH):
+    check(f"{f.name} still sorts the names it is given",
+          "sortedStrings(" in f.read_text(),
+          "takes the server's order, which is a different collation")
 
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)

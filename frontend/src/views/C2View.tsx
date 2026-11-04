@@ -22,6 +22,7 @@ import AddIcon from '@mui/icons-material/Add'
 import DeleteIcon from '@mui/icons-material/DeleteOutlined'
 import EditIcon from '@mui/icons-material/EditOutlined'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { sortedStrings } from '../lib/sortOptions'
 import {
   api, type C2Exchange, type C2Listener, type C2Session, type GhostAgent,
 } from '../lib/api'
@@ -936,14 +937,21 @@ function EditSessionDialog({ project, row, onDone }: {
   const [host, setHost] = useState<string>(row.host ?? '')
   const [err, setErr] = useState<string | null>(null)
 
-  // Names only, and sorted by the database. This asked for every
-  // target row in the project — 8.3 MB on a real engagement — to
-  // build a list of strings for one autocomplete.
+  // Names only. This asked for every target row in the project —
+  // 8.3 MB on a real engagement — to build a list of strings for one
+  // autocomplete.
+  //
+  // Still sorted here. The server orders by the DATABASE's collation,
+  // which is not the order JavaScript puts strings in: Postgres under
+  // a UTF-8 locale compares letters first and punctuation second, so
+  // `a-b.example` and `ab.example` land in a different place. Taking
+  // the server's order would have quietly reshuffled this list.
   const targets = useQuery({
     queryKey: ['target-hosts', project],
     queryFn: () => api.targetHosts(project),
   })
-  const hosts = useMemo(() => targets.data?.hosts ?? [], [targets.data])
+  const hosts = useMemo(
+    () => sortedStrings(targets.data?.hosts ?? []), [targets.data])
 
   const save = useMutation({
     mutationFn: async () => {
