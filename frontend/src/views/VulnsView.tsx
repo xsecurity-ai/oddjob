@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Box, Chip, MenuItem, Select, Stack, Tab, Tabs, TextField, alpha } from '@mui/material'
 import type { ColumnDef } from '../lib/columns'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -107,7 +107,37 @@ export function VulnsView({ project }: { project: string | null }) {
   // old one means nothing.
   useEffect(() => { setPage(0) }, [setPage, project])
 
-  const columns: ColumnDef<Vuln>[] = [
+    // Bulk triage. The selection can span projects when no project is
+  // chosen, so the server checks permission per finding and names
+  // back anything it refused -- a bulk action that silently skipped
+  // rows would look like it had worked.
+  const mark = useMutation({
+    mutationFn: ({ ids, triage }: { ids: number[]; triage: string }) =>
+      ids.length === 1
+        ? api.setTriage(ids[0], triage)
+        : api.setTriageBulk(ids, triage),
+    onSuccess: (r) => {
+      setRefused(r.refused?.length ?? 0)
+      void qc.invalidateQueries({ queryKey: ['vulns'] })
+    },
+  })
+
+  // Memoised, and the dependencies are deliberately VALUES.
+  //
+  // A fresh array every render means every memo inside TableGrid that
+  // is keyed on `columns` recomputes, and TanStack rebuilds its
+  // column model from them — on every keystroke in the search box and
+  // every unrelated state change in this view.
+  //
+  // `mark` itself is not a dependency: React Query returns a new
+  // result object each render, so depending on it would rebuild the
+  // array every time and buy nothing. `mutate` is stable and
+  // `isPending` is a boolean, which is what the cells actually read.
+  // `open` and `canWrite` come from contexts that memoise their
+  // value, so they are stable too — the memo is worthless if they
+  // are not, which is worth checking before copying this elsewhere.
+  const { mutate: markMutate, isPending: marking } = mark
+  const columns: ColumnDef<Vuln>[] = useMemo(() => [
     {
       field: 'severity', headerName: 'Severity', width: 112,
       type: 'singleSelect',
@@ -236,9 +266,9 @@ export function VulnsView({ project }: { project: string | null }) {
       renderCell: (p) => (
         <Select size="small" variant="standard" disableUnderline
           value={String(p.value ?? 'needs_investigating')}
-          disabled={!canWrite(project) || mark.isPending}
+          disabled={!canWrite(project) || marking}
           onClick={(e) => e.stopPropagation()}
-          onChange={(e) => mark.mutate({
+          onChange={(e) => markMutate({
             ids: [Number((p.row as { id: number }).id)],
             triage: e.target.value,
           })}
@@ -268,22 +298,7 @@ export function VulnsView({ project }: { project: string | null }) {
       renderCell: (p) => (
         <Box sx={{ color: neon.purple, fontSize: 11.5, letterSpacing: '0.06em' }}>{p.value}</Box>
       ) },
-  ]
-
-  // Bulk triage. The selection can span projects when no project is
-  // chosen, so the server checks permission per finding and names
-  // back anything it refused -- a bulk action that silently skipped
-  // rows would look like it had worked.
-  const mark = useMutation({
-    mutationFn: ({ ids, triage }: { ids: number[]; triage: string }) =>
-      ids.length === 1
-        ? api.setTriage(ids[0], triage)
-        : api.setTriageBulk(ids, triage),
-    onSuccess: (r) => {
-      setRefused(r.refused?.length ?? 0)
-      void qc.invalidateQueries({ queryKey: ['vulns'] })
-    },
-  })
+  ], [canWrite, open, project, markMutate, marking])
 
   /* Two readings of the same findings. Secrets are not a severity
      or a filter on the grid above: the question there is "what is

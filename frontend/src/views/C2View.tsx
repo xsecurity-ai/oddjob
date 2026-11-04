@@ -11,7 +11,7 @@
  * target. That is the whole reason to run a shell through here rather
  * than through netcat on a laptop.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions,
   Autocomplete, DialogContent, DialogTitle, IconButton, Menu, MenuItem,
@@ -32,7 +32,12 @@ import { PortPicker } from '../components/PortPicker'
 import type { ColumnDef } from '../lib/columns'
 import { neon, glow, blink, TAB_SX } from '../theme'
 import { render } from '../lib/terminal'
-import { LiveTerminal } from '../components/LiveTerminal'
+// The terminal emulator is 288 KB of the bundle and is needed only
+// once a shell is actually attached. This page's job is mostly the
+// session LIST; opening one is a deliberate second step, and the
+// chunk arrives then.
+const LiveTerminal = lazy(() => import('../components/LiveTerminal')
+  .then((m) => ({ default: m.LiveTerminal })))
 import { key, readingSession, useUnseenSessions } from '../lib/c2unseen'
 
 /** How often an open session re-reads its tail. A shell is
@@ -830,7 +835,14 @@ function Terminal({ project, session, onEdit, onChanged }: {
       </Stack>
 
       {pane === 'terminal' ? (
-        <LiveTerminal project={project} session={session} />
+        <Suspense fallback={
+          <Box sx={{ flex: 1, display: 'flex', alignItems: 'center',
+                     justifyContent: 'center', p: 3 }}>
+            <CircularProgress size={20} sx={{ color: neon.cyan }} />
+          </Box>
+        }>
+          <LiveTerminal project={project} session={session} />
+        </Suspense>
       ) : (<>
       <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', px: 2, py: 1.5,
                  bgcolor: alpha('#000', 0.35),
