@@ -20,10 +20,44 @@ export type LiveState = 'connecting' | 'live' | 'offline'
  */
 const COALESCE_MS = 250
 
+/**
+ * ...but the coalescing timer is reset by every event, so a stream of them
+ * arriving closer together than COALESCE_MS never reaches the end of it. A
+ * long import publishing steadily would hold the refresh off for the whole
+ * import — the grid stops updating exactly while the most is happening, and
+ * `refetchOnWindowFocus` is off, so nothing else comes along to fix it.
+ *
+ * This is the ceiling on that wait: however busy the stream, the grid
+ * refreshes at least this often.
+ */
+const MAX_WAIT_MS = 2_000
+
+/**
+ * How long the next refresh should wait, given when the current burst
+ * started. 0 means "the ceiling is reached, refresh now".
+ *
+ * Pulled out of the hook so the starvation case can be tested without a
+ * browser: the bug it exists for is invisible in any single call, and only
+ * shows up as a sequence of events that each look perfectly reasonable.
+ */
+export function coalesceDelay(now: number, burstAt: number): number {
+  if (!burstAt) return COALESCE_MS
+  const waited = now - burstAt
+  if (waited >= MAX_WAIT_MS) return 0
+  // Never schedule past the ceiling, or the cap is only advisory.
+  return Math.min(COALESCE_MS, MAX_WAIT_MS - waited)
+}
+
 export function useLive(enabled: boolean): LiveState {
   const qc = useQueryClient()
   const [state, setState] = useState<LiveState>('connecting')
   const timer = useRef<number | undefined>(undefined)
+  //: When the current burst began, so the wait can be capped. 0 = no burst.
+  const burstAt = useRef(0)
+  //: A refresh that was due while the tab was hidden. Refetching into a
+  //: document nobody is looking at buys nothing and costs a round trip per
+  //: query per event; this remembers that one is owed instead.
+  const owed = useRef(false)
 
   useEffect(() => {
     // Only connect once authenticated. /api/events is behind auth, and an
@@ -37,15 +71,47 @@ export function useLive(enabled: boolean): LiveState {
     }
     const es = new EventSource('/api/events')
 
-    const refresh = () => {
+    const fire = () => {
       window.clearTimeout(timer.current)
-      timer.current = window.setTimeout(() => {
-        // Everything derives from the same tables — a new service changes a
-        // target's open-port count — so refresh the lot rather than trying to
-        // be clever about which grid is affected.
-        void qc.invalidateQueries()
-      }, COALESCE_MS)
+      timer.current = undefined
+      burstAt.current = 0
+      if (document.visibilityState === 'hidden') {
+        owed.current = true
+        return
+      }
+      owed.current = false
+      // Everything derives from the same tables — a new service changes a
+      // target's open-port count — so refresh the lot rather than trying to
+      // be clever about which grid is affected. Narrowing this by the
+      // event's `kind` is the obvious next step and it is the wrong one:
+      // the kinds do not partition the grids, so a scoped invalidation
+      // leaves a count stale somewhere and looks like a server bug.
+      void qc.invalidateQueries()
     }
+
+    const refresh = () => {
+      const now = Date.now()
+      const delay = coalesceDelay(now, burstAt.current)
+      if (!burstAt.current) burstAt.current = now
+      if (delay === 0) {
+        fire()                      // the burst has had its grace; refresh now
+        return
+      }
+      window.clearTimeout(timer.current)
+      timer.current = window.setTimeout(fire, delay)
+    }
+
+    // Coming back to the tab settles whatever was skipped while it was
+    // hidden. Without this the skip above would be a correctness bug
+    // rather than an optimisation: `refetchOnWindowFocus` is off, so
+    // nothing else would ever refetch.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && owed.current) {
+        owed.current = false
+        void qc.invalidateQueries()
+      }
+    }
+    document.addEventListener('visibilitychange', onVisible)
 
     // A shell speaking is the one change that has to be noticed
     // rather than merely refetched: the row it belongs to may be on a
@@ -76,6 +142,7 @@ export function useLive(enabled: boolean): LiveState {
     }
 
     return () => {
+      document.removeEventListener('visibilitychange', onVisible)
       window.clearTimeout(timer.current)
       es.close()
     }
