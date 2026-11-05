@@ -63,6 +63,14 @@ NVD_PAGE = 2000
 #: being rate-limited mid-sync costs the whole run, and the difference
 #: between 6 and 7 seconds is nothing against a feed that is allowed to
 #: take an hour.
+#: How many times one NVD request is retried before the run gives up.
+#: NVD answers in well under a second when it is healthy and goes quiet
+#: for minutes when it is not. A single read timeout used to end the
+#: whole invocation -- survivable for a daily top-up, but a first
+#: backfill is many windows long, so on a bad afternoon it never
+#: finishes. Three attempts, spaced by the pacing delay.
+NVD_ATTEMPTS = 3
+
 NVD_DELAY_NO_KEY = 7.0
 NVD_DELAY_KEY = 1.0
 
@@ -173,7 +181,7 @@ async def sync_exploitdb(session: AsyncSession) -> dict:
         await session.rollback()
         st = await _state(session, "exploitdb")
         st.running = False
-        st.error = f"{type(e).__name__}: {e}"[:500]
+        st.error = _why(e)
         await session.commit()
         log.warning("exploitdb sync failed: %s", e)
         return {"source": "exploitdb", "ok": False, "error": st.error}
@@ -333,7 +341,7 @@ async def sync_kev(session: AsyncSession) -> dict:
         await session.rollback()
         st = await _state(session, "kev")
         st.running = False
-        st.error = f"{type(e).__name__}: {e}"[:500]
+        st.error = _why(e)
         await session.commit()
         log.warning("kev sync failed: %s", e)
         return {"source": "kev", "ok": False, "error": st.error}
@@ -410,7 +418,7 @@ async def sync_epss(session: AsyncSession) -> dict:
         await session.rollback()
         st = await _state(session, "epss")
         st.running = False
-        st.error = f"{type(e).__name__}: {e}"[:500]
+        st.error = _why(e)
         await session.commit()
         log.warning("epss sync failed: %s", e)
         return {"source": "epss", "ok": False, "error": st.error}
@@ -482,6 +490,21 @@ def parse_cve(item: dict) -> dict | None:
     }
 
 
+def _why(e: Exception) -> str:
+    """`Type: message`, and just `Type` when there is no message.
+
+    httpx's timeout and transport exceptions carry an EMPTY str(), so
+    `f"{type(e).__name__}: {e}"` wrote "ReadTimeout: " into the feed's
+    error column -- a trailing colon introducing nothing, which tells an
+    operator that something failed and refuses to say what. A bare
+    "ReadTimeout" is no more informative but it is at least not
+    pretending to explain itself; callers that know more should say so
+    themselves, as the NVD fetch below does.
+    """
+    msg = str(e).strip()
+    return (f"{type(e).__name__}: {msg}" if msg else type(e).__name__)[:500]
+
+
 def _nvd_windows(start: datetime,
                  end: datetime) -> list[tuple[datetime, datetime]]:
     """Split a span into ranges NVD will accept.
@@ -497,6 +520,39 @@ def _nvd_windows(start: datetime,
         out.append((cur, nxt))
         cur = nxt
     return out or [(start, end)]
+
+
+async def _nvd_get(c: httpx.AsyncClient, params: dict,
+                   delay: float) -> httpx.Response:
+    """One NVD page, retried through a transient stall.
+
+    Only TRANSPORT failures are retried -- a timeout, a dropped
+    connection, a DNS blip. An HTTP status is an answer and is handled
+    by the caller: retrying a 403 would spend the rate limit that
+    caused it, and retrying a 404 would be asking the same wrong
+    question louder.
+
+    The error raised on exhaustion says what the httpx exception will
+    not: NVD's timeout exceptions have an empty message, so the feed
+    recorded "ReadTimeout: " and the operator had no way to tell a slow
+    afternoon at NIST from a broken deployment.
+    """
+    last: Exception | None = None
+    for attempt in range(1, NVD_ATTEMPTS + 1):
+        try:
+            return await c.get(NVD_API, params=params)
+        except (httpx.TimeoutException, httpx.TransportError) as e:
+            last = e
+            if attempt < NVD_ATTEMPTS:
+                # Spaced by the pacing delay, widening: a stall NVD is
+                # working through is not helped by asking again at once.
+                await asyncio.sleep(delay * attempt)
+    raise TimeoutError(
+        f"NVD did not answer after {NVD_ATTEMPTS} attempts "
+        f"({type(last).__name__}, read timeout {_TIMEOUT.read:.0f}s) for "
+        f"{params.get('lastModStartDate', '?')[:10]}.."
+        f"{params.get('lastModEndDate', '?')[:10]} "
+        f"at offset {params.get('startIndex')}") from last
 
 
 async def sync_nvd(session: AsyncSession, api_key: str = "",
@@ -577,7 +633,7 @@ async def sync_nvd(session: AsyncSession, api_key: str = "",
                     # back during a backfill and earn a 403.
                     if requests:
                         await asyncio.sleep(delay)
-                    r = await c.get(NVD_API, params=params)
+                    r = await _nvd_get(c, params, delay)
                     pages += 1
                     requests += 1
                     if r.status_code == 403:
@@ -621,7 +677,7 @@ async def sync_nvd(session: AsyncSession, api_key: str = "",
         await session.rollback()
         st = await _state(session, "nvd")
         st.running = False
-        st.error = f"{type(e).__name__}: {e}"[:500]
+        st.error = _why(e)
         # Keep the ground already covered. The rows committed before the
         # failure are in the table whatever happens here; parking the
         # cursor is what stops the next run fetching them all again, and
