@@ -1011,4 +1011,50 @@ if DB and _pathlib.Path(DB).exists():
                - datetime.fromisoformat(_at[0]).replace(tzinfo=UTC)
                ).total_seconds()) < 60, _at)
 
+# ---------------------------------------------------------------------
+# The mailer's cleanup must not eat the real error.
+#
+# `quit()` on a connection the server already dropped raises
+# SMTPServerDisconnected("please run connect() first"). In a `finally`
+# that REPLACES the genuine failure, so an operator whose password was
+# rejected is told about the socket close instead -- which describes
+# nothing they can act on, and is not even true of the send.
+# ---------------------------------------------------------------------
+import smtplib as _smtplib  # noqa: E402
+
+from app import mailer as _mailer  # noqa: E402
+
+
+class _DeadSMTP:
+    """A server that drops the connection, as a real one does on error."""
+
+    def __init__(self, *a, **k): pass
+    def starttls(self, *a, **k): pass
+    def login(self, *a, **k):
+        raise _smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted")
+    def send_message(self, *a, **k): pass
+    def quit(self):
+        raise _smtplib.SMTPServerDisconnected("please run connect() first")
+
+
+_real_smtp = _mailer.smtplib.SMTP
+_mailer.smtplib.SMTP = _DeadSMTP
+try:
+    _cfg = {"smtp.host": "smtp.invalid", "smtp.port": 587,
+            "smtp.security": "starttls", "smtp.username": "u",
+            "smtp.password": "p", "smtp.from_address": "a@acme.example"}
+    try:
+        _mailer._send_sync(_cfg, "b@acme.example", "s", "body")
+        _raised = None
+    except Exception as e:                       # noqa: BLE001
+        _raised = e
+finally:
+    _mailer.smtplib.SMTP = _real_smtp
+
+check("a failed login surfaces as the auth error, not the socket close",
+      isinstance(_raised, _smtplib.SMTPAuthenticationError), type(_raised).__name__)
+check("...and the message still names the real reason",
+      "not accepted" in str(_raised), str(_raised)[:90])
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

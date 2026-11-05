@@ -1976,4 +1976,69 @@ except Exception as e:                                       # noqa: BLE001
           "no usable image" in str(e), str(e)[:80])
 
 
+# =============================================== silence is not proof
+# CVE-2019-5544's third step matches `len(data) == 0`: it decides the
+# OpenSLP service crashed because it stopped answering. Silence is also
+# what a port that never ran OpenSLP returns.
+#
+# Nuclei network templates take the port from the INPUT when the input
+# carries one, overriding the template's own `port: 427`. So pointed at
+# `host:443` it sends SLP payloads to 443, nothing replies, and it
+# reports a critical heap overflow. In this installation it fired on
+# 446 targets across ports 21, 80, 110, 143, 443, 993, 995 and 3306 --
+# none of which had 427 open, and one of which is MySQL.
+print("\n== nuclei: a probe on the wrong port measured nothing ==")
+
+from app.importers import nuclei as _nuc  # noqa: E402
+
+
+def _slp(host, port):
+    return json.dumps({
+        "template-id": "CVE-2019-5544",
+        "host": host, "port": str(port), "scheme": "https",
+        "matched-at": f"{host}:{port}",
+        "info": {"name": "VMware ESXi SLP - Heap Overflow DoS",
+                 "severity": "critical",
+                 "tags": ["cve", "vmware", "esxi", "dos", "kev"]},
+    })
+
+_wrong = _nuc.parse("\n".join([
+    _slp("a.acme.example", 443), _slp("b.acme.example", 3306),
+    _slp("c.acme.example", 21)]))
+check("an SLP verdict from a non-SLP port is refused",
+      len(_wrong.vulns) == 0, [v.title for v in _wrong.vulns])
+check("...and the refusal is reported, not silent",
+      len(_wrong.errors) == 1 and "CVE-2019-5544" in _wrong.errors[0],
+      _wrong.errors)
+check("...counted, rather than one line per host",
+      "refused 3 " in _wrong.errors[0], _wrong.errors[0] if _wrong.errors else "")
+check("...and it names the port the template is actually about",
+      "427" in _wrong.errors[0], _wrong.errors[0] if _wrong.errors else "")
+
+# On 427 it IS the service the template is about, so the verdict stands.
+# A rule that suppressed this one would be hiding the real thing.
+_right = _nuc.parse(_slp("d.acme.example", 427))
+check("the same template on 427 is kept", len(_right.vulns) == 1,
+      [v.title for v in _right.vulns])
+check("...and nothing is reported as refused", not _right.errors, _right.errors)
+
+# An unknown port is "could not determine", not "absent".
+_unknown = json.dumps({
+    "template-id": "CVE-2019-5544", "host": "e.acme.example",
+    "matched-at": "e.acme.example",
+    "info": {"name": "VMware ESXi SLP - Heap Overflow DoS",
+             "severity": "critical"}})
+check("an unknown port keeps the finding rather than guessing",
+      len(_nuc.parse(_unknown).vulns) == 1)
+
+# And nothing else is touched.
+_other = json.dumps({
+    "template-id": "CVE-2021-44228", "host": "f.acme.example", "port": "443",
+    "matched-at": "f.acme.example:443",
+    "info": {"name": "Apache Log4j RCE", "severity": "critical"}})
+check("an unrelated critical on 443 is untouched",
+      len(_nuc.parse(_other).vulns) == 1,
+      [v.title for v in _nuc.parse(_other).vulns])
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

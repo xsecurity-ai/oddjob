@@ -65,6 +65,7 @@ from .. import (
     scopegate,
     shellhub,
     shellwork,
+    slack,
 )
 from ..db import get_session
 from ..events import broker
@@ -792,6 +793,29 @@ def _stale(a: Agent, in_flight: int = 0) -> str:
     return "offline"
 
 
+#: Statuses that mean the ghost is answering. `busy` is one of them:
+#: it is "connected and working", not a degraded state.
+_HEALTHY = ("online", "busy")
+#: ...and the ones that mean it has stopped.
+_DOWN = ("offline", "lost")
+
+
+def announces_offline(was: str, now: str) -> bool:
+    """Whether a status change is a ghost dying, worth saying once.
+
+    Only on the way DOWN from a healthy state. `online -> offline ->
+    lost` is one ghost dying, not two events: the second transition
+    starts from `offline`, which is not healthy, so it says nothing.
+
+    A ghost enrolled and never started is `offline` from birth and was
+    never healthy, so it never announces -- otherwise every token an
+    operator generated and did not use would report a death. The same
+    rule keeps `disabled` quiet: somebody chose that, and a deliberate
+    kill is announced by the retirement line instead.
+    """
+    return was in _HEALTHY and now in _DOWN
+
+
 async def reap_lost(session: AsyncSession, project_id: int,
                     except_agent: int | None = None) -> int:
     """Record what each agent now is, and put back the work of the dead.
@@ -850,6 +874,10 @@ async def reap_lost(session: AsyncSession, project_id: int,
         held.setdefault(t.agent_id, []).append(t)
 
     freed = 0
+    #: Collected rather than announced inline: posting to Slack inside
+    #: the loop would put a network round trip per agent in the middle
+    #: of a heartbeat, and this runs on every beat of every agent.
+    going_down: list[Agent] = []
     for a in agents:
         if a.id == except_agent:
             continue
@@ -863,6 +891,15 @@ async def reap_lost(session: AsyncSession, project_id: int,
         # one row nothing would change: a host six hours dead still
         # read `online` to anything reading the database directly.
         if a.status != state:
+            # Announced only on the way DOWN from a healthy state, and
+            # only once. `online -> offline -> lost` is one ghost dying,
+            # not two events: the second transition starts from
+            # `offline`, which is not healthy, so it says nothing. An
+            # agent enrolled and never started has no `last_seen` and
+            # never was healthy, so it does not announce either --
+            # otherwise every unused token would report a death.
+            if announces_offline(a.status, state):
+                going_down.append(a)
             a.status = state
         if state != "lost":
             continue
@@ -882,6 +919,20 @@ async def reap_lost(session: AsyncSession, project_id: int,
     if freed:
         log.warning("requeued %d task(s) from lost agent(s) in project %d",
                     freed, project_id)
+    # After the loop, and the Project is loaded only when there is
+    # something to say -- this runs on every heartbeat of every agent,
+    # and a row fetched per beat to usually announce nothing is a cost
+    # paid for no reason.
+    if going_down:
+        pr = await session.get(Project, project_id)
+        if pr is not None:
+            now_ = datetime.now(UTC)
+            for a in going_down:
+                seen = _aware(a.last_seen)
+                quiet = int((now_ - seen).total_seconds() // 60) if seen else None
+                await slack.announce_ghost(
+                    session, pr, slack.ghost_offline,
+                    name=a.name, ip=a.outbound_ip, quiet_for=quiet or None)
     return freed
 
 
@@ -1793,6 +1844,13 @@ async def enroll(body: EnrollIn, project: str = Query(...),
     await session.commit()
     await session.refresh(a)
     await broker.publish("agents", action="enroll", project=pr.code)
+    # After the commit: the ghost exists whether or not Slack hears
+    # about it, and a channel that is down must not fail the enrolment
+    # an operator is waiting on. No address yet -- it has not connected
+    # -- and the line says so rather than leaving a blank where a
+    # location goes.
+    await slack.announce_ghost(session, pr, slack.ghost_created,
+                               name=a.name, ip=None)
     return AgentEnrolled(agent=_agent_out(a, pr.code, ceiling=_project_ceiling(pr)),
                          callback_key=cb_raw, call_in_key=ci_raw,
                          enroll_token=tok_raw, enroll_expires_at=expires,
@@ -3215,6 +3273,12 @@ async def retired(body: RetiredIn,
     await session.commit()
     await broker.publish("agents", action="retired",
                          project=pr.code if pr else None)
+    # Deliberate, so it reads differently from going offline: a ghost
+    # that said goodbye and one that stopped answering are the same
+    # row and completely different news.
+    if pr is not None:
+        await slack.announce_ghost(session, pr, slack.ghost_retired,
+                                   name=a.name, ip=a.outbound_ip)
     return {"ok": True, "recorded": True}
 
 

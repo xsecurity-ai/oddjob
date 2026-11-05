@@ -1269,4 +1269,54 @@ check("and it does start, and cancels cleanly, when it is switched on",
       _loop.run_until_complete(_cycle()))
 _loop.close()
 
+# ---------------------------------------------------------------------
+# Ghost lifecycle lines: name, country, address.
+#
+# The three facts an operator needs to tell WHICH of their scanners
+# just appeared or vanished. The interesting part is what happens when
+# one of them is missing, because "has not connected yet" and "is here
+# and MaxMind does not place it" look identical if you collapse them.
+# ---------------------------------------------------------------------
+from app.routers.agents import announces_offline as _ann  # noqa: E402
+
+check("created names the ghost and where it is",
+      slack.ghost_created("azure-japaneast", "JP", "20.222.74.8")
+      == ":new: Ghost `azure-japaneast` enrolled — JP · `20.222.74.8`.",
+      slack.ghost_created("azure-japaneast", "JP", "20.222.74.8"))
+
+check("offline says how long it has been quiet",
+      "went offline after 4m quiet" in
+      slack.ghost_offline("gcp-tokyo-2", "JP", "34.84.12.19", quiet_for=4),
+      slack.ghost_offline("gcp-tokyo-2", "JP", "34.84.12.19", quiet_for=4))
+
+check("...and drops the duration rather than printing a bare 0",
+      "quiet" not in slack.ghost_offline("g", "JP", "1.2.3.4"),
+      slack.ghost_offline("g", "JP", "1.2.3.4"))
+
+check("terminated reads differently from offline",
+      ":wave:" in slack.ghost_retired("do-singapore", "SG", "206.189.149.178")
+      and ":red_circle:" not in slack.ghost_retired("do", "SG", "1.2.3.4"))
+
+# A ghost that never connected has NO address. One that connected but
+# could not be geolocated has one. Saying "no address yet" about the
+# second would report a live scanner as one that never started.
+check("no address at all reads as not yet arrived",
+      slack._ghost_where(None, None) == "no address yet",
+      slack._ghost_where(None, None))
+check("an address that would not geolocate still shows the address",
+      slack._ghost_where(None, "20.222.74.8") == "country unknown · `20.222.74.8`",
+      slack._ghost_where(None, "20.222.74.8"))
+
+# One ghost dying is one message.
+check("a healthy ghost going quiet announces", _ann("online", "offline"))
+check("...and from busy too, which is also healthy", _ann("busy", "lost"))
+check("offline sliding to lost is the SAME death, not a second one",
+      not _ann("offline", "lost"))
+check("a ghost enrolled and never started never announces",
+      not _ann("offline", "offline"))
+check("a deliberate kill is not an outage",
+      not _ann("disabled", "offline"))
+check("and getting busy is not dying", not _ann("online", "busy"))
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

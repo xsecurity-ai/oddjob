@@ -419,5 +419,86 @@ check("an unsynced KEV/EPSS does not make the corpus unusable",
       "kev" not in ("exploitdb", "nvd") and "epss" not in ("exploitdb", "nvd"))
 
 
+# ---------------------------------------------------------------------
+# NVD: a transient stall must not end the run, and the error must say
+# something.
+#
+# NVD answers in well under a second when healthy and goes quiet for
+# minutes when it is not. One read timeout used to end the whole
+# invocation, and record it as the string "ReadTimeout: " -- a trailing
+# colon introducing nothing.
+# ---------------------------------------------------------------------
+import asyncio as _aio2  # noqa: E402
+
+import httpx as _httpx  # noqa: E402
+
+from app import vulnfeed as _vf2  # noqa: E402
+
+check("an exception with no message does not get a dangling colon",
+      _vf2._why(_httpx.ReadTimeout("")) == "ReadTimeout",
+      _vf2._why(_httpx.ReadTimeout("")))
+check("...and one with a message still carries it",
+      _vf2._why(ValueError("bad window")) == "ValueError: bad window",
+      _vf2._why(ValueError("bad window")))
+
+
+class _Flaky:
+    """Times out, then answers -- NVD on an ordinary bad afternoon."""
+
+    def __init__(self, fail_times):
+        self.fail_times = fail_times
+        self.calls = 0
+
+    async def get(self, url, params=None):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise _httpx.ReadTimeout("")
+        return "RESPONSE"
+
+
+_P = {"lastModStartDate": "2026-01-01T00:00:00.000",
+      "lastModEndDate": "2026-04-20T00:00:00.000", "startIndex": 4000}
+
+# Delay 0 so the test does not actually sleep through the backoff.
+# Caught rather than left to propagate: without the retry this raises,
+# and an unhandled exception here would kill the suite and take the
+# tally with it -- the failure would be real but unreadable.
+_c = _Flaky(2)
+try:
+    _got = _aio2.run(_vf2._nvd_get(_c, _P, 0))
+except Exception as e:                           # noqa: BLE001
+    _got = f"raised {type(e).__name__}"
+check("a stall that clears is retried rather than ending the run",
+      _got == "RESPONSE" and _c.calls == 3, f"{_got!r} after {_c.calls} calls")
+
+_c2 = _Flaky(99)
+try:
+    _aio2.run(_vf2._nvd_get(_c2, _P, 0))
+    _err = None
+except Exception as e:                           # noqa: BLE001
+    _err = e
+check("a stall that does not clear gives up after the bounded attempts",
+      _c2.calls == _vf2.NVD_ATTEMPTS, f"{_c2.calls} calls")
+check("...and the error names the window and offset, not just the type",
+      _err is not None and "2026-01-01..2026-04-20" in str(_err)
+      and "4000" in str(_err), str(_err)[:120])
+check("...and still says which transport error it was",
+      _err is not None and "ReadTimeout" in str(_err), str(_err)[:120])
+
+# An HTTP status is an ANSWER. Retrying a 403 spends the rate limit that
+# caused it; the caller turns it into the "set an API key" message.
+class _Forbidden:
+    def __init__(self): self.calls = 0
+    async def get(self, url, params=None):
+        self.calls += 1
+        return "403-RESPONSE"
+
+
+_c3 = _Forbidden()
+_r3 = _aio2.run(_vf2._nvd_get(_c3, _P, 0))
+check("an HTTP status is returned once, not retried",
+      _r3 == "403-RESPONSE" and _c3.calls == 1, f"{_c3.calls} calls")
+
+
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")
 _sys.exit(1 if fail else 0)

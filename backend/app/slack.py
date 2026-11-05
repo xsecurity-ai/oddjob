@@ -1135,6 +1135,65 @@ class Digest:
 digest = Digest()
 
 
+# ------------------------------------------------- ghost lifecycle
+def _ghost_where(country: str | None, ip: str | None) -> str:
+    """`JP · 20.222.74.8`, and what is honestly known when it is not.
+
+    A ghost that has never connected has no address at all, which is
+    NOT the same as an address that failed to geolocate. The first is
+    "it has not arrived yet"; the second is "it is here and MaxMind
+    does not place it". Collapsing them would make a ghost that is up
+    but unlocatable read as one that never started -- and the whole
+    point of these lines is to tell an operator which of their
+    scanners just appeared or vanished, and from where.
+    """
+    if not ip:
+        return "no address yet"
+    return f"{country or 'country unknown'} · `{ip}`"
+
+
+def ghost_created(name: str, country: str | None, ip: str | None) -> str:
+    """A ghost has been enrolled. It has usually not connected yet."""
+    return f":new: Ghost `{name}` enrolled — {_ghost_where(country, ip)}."
+
+
+def ghost_offline(name: str, country: str | None, ip: str | None,
+                  quiet_for: int | None = None) -> str:
+    """It stopped answering. Nobody chose this, which is why it matters."""
+    how_long = f" after {quiet_for}m quiet" if quiet_for else ""
+    return (f":red_circle: Ghost `{name}` went offline{how_long} — "
+            f"{_ghost_where(country, ip)}.")
+
+
+def ghost_retired(name: str, country: str | None, ip: str | None) -> str:
+    """It said goodbye. Distinct from offline: this one was deliberate."""
+    return f":wave: Ghost `{name}` terminated — {_ghost_where(country, ip)}."
+
+
+async def announce_ghost(session, project, line_for, *, name: str,
+                         ip: str | None, **kw) -> list[Posted]:
+    """One lifecycle line, with the country resolved from the address.
+
+    Never raises and never blocks the thing that triggered it: a ghost
+    dying is already bad news and a Slack outage must not turn it into
+    a failed request as well. The geolocation is best-effort for the
+    same reason -- an unresolvable address still produces a line that
+    names the ghost and its IP, which is most of the value.
+    """
+    country = None
+    if ip:
+        try:
+            from . import geoip
+            country = (await geoip.locate(ip)).country
+        except Exception as e:                   # noqa: BLE001
+            log.debug("ghost geolocation failed for %s: %s", name, e)
+    try:
+        return await announce(session, project, line_for(name, country, ip, **kw))
+    except Exception as e:                       # noqa: BLE001
+        log.warning("could not announce ghost %s: %s", name, e)
+        return []
+
+
 async def announce_finding(session, project, *, severity: str, host: str,
                            title: str, port=None, protocol=None,
                            detail=None, url=None) -> list[Posted]:

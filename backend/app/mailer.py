@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -45,7 +46,19 @@ def _send_sync(cfg: dict, to: str, subject: str, body: str) -> None:
             srv.login(str(user), str(pwd))
         srv.send_message(msg)
     finally:
-        srv.quit()
+        # `quit()` on a connection the server has already dropped raises
+        # SMTPServerDisconnected("please run connect() first") -- and from
+        # a `finally`, that REPLACES whatever actually went wrong. The
+        # operator is then told the cleanup failed and never learns that
+        # the password was rejected, or the relay refused the sender, or
+        # TLS would not negotiate.
+        #
+        # It was worth a real hour: a magic link that never arrived
+        # reported only "please run connect() first", which describes
+        # nothing an operator can act on and is not even true of the send.
+        # Closing is best-effort; the send's own outcome is the fact.
+        with contextlib.suppress(Exception):
+            srv.quit()
 
 
 async def send_mail(cfg: dict, to: str, subject: str, body: str) -> None:
