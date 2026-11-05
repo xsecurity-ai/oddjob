@@ -1165,6 +1165,22 @@ def ghost_offline(name: str, country: str | None, ip: str | None,
             f"{_ghost_where(country, ip)}.")
 
 
+def ghost_online(name: str, country: str | None, ip: str | None,
+                 first_time: bool = False) -> str:
+    """It is answering again.
+
+    `first_time` is not a nicety. A ghost enrolled an hour ago and
+    starting for the first time has not "come back" from anywhere, and
+    saying so would have an operator hunting an outage that never
+    happened. It is also the first moment its address is known at all --
+    the enrolment line could only say "no address yet" -- so this is
+    where the country and IP first appear for a new scanner.
+    """
+    what = "came online" if first_time else "is back online"
+    return (f":large_green_circle: Ghost `{name}` {what} — "
+            f"{_ghost_where(country, ip)}.")
+
+
 def ghost_retired(name: str, country: str | None, ip: str | None) -> str:
     """It said goodbye. Distinct from offline: this one was deliberate."""
     return f":wave: Ghost `{name}` terminated — {_ghost_where(country, ip)}."
