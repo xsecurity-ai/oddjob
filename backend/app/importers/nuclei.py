@@ -74,6 +74,50 @@ def iter_json(text: str):
 _TECH_TAGS = frozenset({"tech", "detect", "detection"})
 
 
+#: Templates whose verdict is the ABSENCE of a reply, mapped to the port
+#: the service they are about actually listens on.
+#:
+#: `CVE-2019-5544` is the reason this exists. Its third step re-queries
+#: OpenSLP and matches `len(data) == 0` -- it concludes "vulnerable"
+#: from SILENCE, on the theory that a crashed service stops answering.
+#: True as far as it goes, and silence is also what you get from a port
+#: where nothing was listening in the first place.
+#:
+#: Nuclei network templates take the port from the INPUT when the input
+#: carries one, overriding the template's own `port:`. So pointing it
+#: at `host:443` sends SLP payloads to 443, nothing there speaks SLP,
+#: nothing replies, and the template reports a critical heap overflow.
+#: It fired on 446 targets in this installation, on ports 21, 80, 110,
+#: 143, 443, 993, 995 and 3306 -- not one of which had 427 open, and
+#: one of which is MySQL.
+#:
+#: The rule is therefore NOT "this CVE is noisy". It is that a probe
+#: sent to the wrong port measured nothing, so its silence is not
+#: evidence of anything. A finding from one of these templates on the
+#: port it genuinely probes is kept.
+_SILENCE_IS_NOT_PROOF = {
+    "CVE-2019-5544": 427,    # OpenSLP in ESXi and Horizon DaaS
+    "CVE-2021-21974": 427,   # same service, same crash-and-recheck shape
+}
+
+
+def unproven_port(tid: str, port: int | None) -> int | None:
+    """The port this template is about, when the probe went elsewhere.
+
+    -> that port if the finding cannot be evidence, or None to keep it.
+
+    `port is None` deliberately KEEPS the finding. Not knowing where a
+    probe went is not the same as knowing it went somewhere useless,
+    and collapsing "could not determine" into "absent" is how a real
+    finding disappears. Only a port we positively know is the wrong one
+    suppresses anything.
+    """
+    want = _SILENCE_IS_NOT_PROOF.get((tid or "").strip().upper())
+    if want is None or port is None:
+        return None
+    return want if port != want else None
+
+
 def _is_tech(info: dict) -> bool:
     tags = info.get("tags") or []
     if isinstance(tags, str):
@@ -127,6 +171,10 @@ def _version(extracted) -> str | None:
 def parse(text: str) -> ParsedScan:
     scan = ParsedScan(tool="nuclei")
     seen = False
+    #: template-id -> how many findings were refused, and the port the
+    #: template is actually about. Summarised into `errors` below.
+    refused: dict[str, int] = {}
+    refused_port: dict[str, int] = {}
     for o in iter_json(text):
         info = o.get("info") or {}
         if "template-id" not in o and "template_id" not in o and not info:
@@ -213,6 +261,16 @@ def parse(text: str) -> ParsedScan:
                 response=(str(o["response"])[:2000000]
                           if o.get("response") else None),
                 notes=f"matched by nuclei template {tid}"))
+        # A probe sent to a port the template is not about measured
+        # nothing, and a template that concludes from silence reports
+        # that nothing as a finding. Counted rather than appended one
+        # line each: this fires once per host per scan, and 446 lines
+        # saying the same thing is how the real refusals get missed.
+        if (wrong := unproven_port(tid, port)) is not None:
+            refused[tid] = refused.get(tid, 0) + 1
+            refused_port[tid] = wrong
+            continue
+
         refs = info.get("reference") or []
         if isinstance(refs, str):
             refs = [refs]
@@ -234,6 +292,12 @@ def parse(text: str) -> ParsedScan:
             port=port,
             protocol="tcp",
         ))
+    for tid_, n in sorted(refused.items()):
+        scan.errors.append(
+            f"refused {n} {tid_} finding{'' if n == 1 else 's'}: the template "
+            f"decides by whether port {refused_port[tid_]} answers, and these "
+            f"were probed on another port — silence from a port that does not "
+            f"run the service is not evidence that it crashed")
     if not seen:
         raise ImportError_("no nuclei results in this file "
                            "(expected objects with a `template-id`)")
