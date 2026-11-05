@@ -816,6 +816,22 @@ def announces_offline(was: str, now: str) -> bool:
     return was in _HEALTHY and now in _DOWN
 
 
+def announces_online(was: str, now: str) -> bool:
+    """Whether a status change is a ghost answering again.
+
+    The mirror of `announces_offline`, and it has to be a transition
+    for the same reason: `a.status` is set to "online" on EVERY
+    heartbeat, so anything keyed on the new value alone would post a
+    line every thirty seconds for every healthy ghost in the fleet.
+
+    `disabled` is not a down state here. A ghost that was killed and
+    comes back is told to shut down, not welcomed back -- see the
+    `register` handler, which answers it with `shutdown: True` before
+    status is touched at all.
+    """
+    return was in _DOWN and now in _HEALTHY
+
+
 async def reap_lost(session: AsyncSession, project_id: int,
                     except_agent: int | None = None) -> int:
     """Record what each agent now is, and put back the work of the dead.
@@ -3116,6 +3132,11 @@ async def register(body: RegisterIn, request: Request,
                    a: Agent = Depends(agent_even_if_killed),
                    session: AsyncSession = Depends(get_session)):
     """Ghost announcing itself. Idempotent: it runs on every reconnect."""
+    # Captured before any of it is overwritten. `last_seen` is set
+    # further down, so NULL here is the honest test for "this agent has
+    # never been heard from" -- which is a first start, not a return.
+    was_status = a.status
+    first_contact = a.last_seen is None
     a.platform, a.arch = body.platform, body.arch
     a.version, a.hostname = body.version, body.hostname
     a.privileged = bool(body.privileged)
@@ -3157,6 +3178,12 @@ async def register(body: RegisterIn, request: Request,
     await session.commit()
     code = await _project_code(session, a.project_id)
     await broker.publish("agents", action="register", project=code)
+    if announces_online(was_status, "online"):
+        pr_ = await session.get(Project, a.project_id)
+        if pr_ is not None:
+            await slack.announce_ghost(session, pr_, slack.ghost_online,
+                                       name=a.name, ip=a.outbound_ip,
+                                       first_time=first_contact)
     return {"ok": True, "agent_id": a.id, "project": code,
             "installable": list(INSTALLABLE),
             "task_kinds": sorted(TASK_KINDS),
@@ -3334,7 +3361,22 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
         await session.commit()
         return {"ok": True, "task": None, "shutdown": True,
                 "reason": "this agent was killed from Oddjob"}
+    # Captured immediately before the write: nothing between the top of
+    # this handler and here touches `status`, and the beat is the only
+    # thing that brings a partitioned ghost back WITHOUT a re-register
+    # -- a container restart re-registers, a network blip does not.
+    was_status = a.status
     a.status = "online"
+    if announces_online(was_status, "online"):
+        pr_ = await session.get(Project, a.project_id)
+        if pr_ is not None:
+            await slack.announce_ghost(
+                session, pr_, slack.ghost_online, name=a.name,
+                ip=a.outbound_ip,
+                # `platform` is only ever set by `register`, so NULL
+                # means this one has never registered -- a first start
+                # rather than a return.
+                first_time=a.platform is None)
 
     # What this agent should be holding, and what it says it managed.
     # Both happen before any of the early returns below: a Ghost at
