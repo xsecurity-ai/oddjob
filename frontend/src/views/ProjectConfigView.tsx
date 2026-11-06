@@ -339,7 +339,7 @@ export function ProjectConfigView({ project }: { project: string | null }) {
           a typed-but-unsaved scope line survives switching away to
           check something else -- which is the whole reason this is
           display:none and not a conditional render. */}
-      <ConfigSections id="project" sections={[
+      <ConfigSections sections={[
         { key: 'details', label: 'Details and standing orders', node: (<>
       {/* ---------------------------------------------------- details */}
       <Paper variant="outlined" sx={{ p: 2, mb: 2.5,

@@ -392,6 +392,28 @@ check('both can be named at once without one eating the other',
       buildRoute({ view: 'web', project: 'ACME', packet: 1, replay: 2 })
       === '/projects/ACME/web?packet=1&replay=2')
 
+// `?orders=` is a bare flag: presence means open, any value counts.
+check('a standing-orders flag parses from the query string',
+      parseRoute('/projects/ACME/targets', '?orders=1').orders === true)
+check('and rebuilds to itself',
+      buildRoute({ view: 'targets', project: 'ACME', orders: true })
+      === '/projects/ACME/targets?orders=1')
+check('a hand-edited value still opens the dialog',
+      parseRoute('/projects/ACME/targets', '?orders=whatever').orders === true)
+check('absence means closed',
+      parseRoute('/projects/ACME/targets').orders === undefined)
+
+// `?section=` names which settings section is showing. A pasted link
+// lands on the section it names; a stale value falls back in the view,
+// not here — parse only rejects the empty string.
+check('a section key parses from the query string',
+      parseRoute('/projects/ACME/settings', '?section=scope').section === 'scope')
+check('and rebuilds to itself',
+      buildRoute({ view: 'settings', project: 'ACME', section: 'scope' })
+      === '/projects/ACME/settings?section=scope')
+check('an empty section name means none',
+      parseRoute('/projects/ACME/settings', '?section=').section === undefined)
+
 console.log('\n== country codes typed by a person ==')
 // The picker is freeSolo, because a country MaxMind returns that is
 // missing from the list must still be settable -- a picker that
