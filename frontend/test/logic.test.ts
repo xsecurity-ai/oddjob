@@ -1312,6 +1312,30 @@ console.log('\n== a rollup expansion shows each thing once ==')
         both.host === 'web01.acme.example' && both.finding === 7,
         JSON.stringify(both))
 
+  // Tabs and expansions ride in the query like a finding: presence is
+  // the signal, and their values are validated by the view that owns
+  // them, not here. All `parse`/`build` owe is to carry them through
+  // unchanged.
+  const t = parseRoute('/projects/ACME/vulns', '?tab=by-vuln&expand=web01.acme.example')
+  check('a tab and an expansion in the query are read',
+        t.tab === 'by-vuln' && t.expand === 'web01.acme.example', JSON.stringify(t))
+
+  // `build` is the inverse: a URL with both set comes back with both,
+  // and one without them gains none.
+  for (const q of ['?tab=by-vuln&expand=web01.acme.example', '?tab=assets', '',
+                   '?finding=7&expand=42']) {
+    const rt = buildRoute(parseRoute('/projects/ACME/vulns', q))
+    check(`round trip: /projects/ACME/vulns${q}`,
+          rt === '/projects/ACME/vulns' + q, rt)
+  }
+
+  // A tab and a finding together: the rollups open on a named host with
+  // a finding selected in it.
+  const tf = parseRoute('/projects/ACME/vulns', '?tab=by-target&expand=web01.acme.example&finding=7')
+  check('tab, expansion and finding can all be open',
+        tf.tab === 'by-target' && tf.expand === 'web01.acme.example'
+        && tf.finding === 7, JSON.stringify(tf))
+
   // `build` is the inverse and lives next to `parse` so the two cannot
   // drift -- the round trip is what says so.
   for (const path of ['/projects/ACME/vulns',

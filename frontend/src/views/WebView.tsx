@@ -24,6 +24,7 @@ import { PacketModal } from '../components/PacketModal'
 import { ReplayModal } from '../components/ReplayModal'
 import { queue } from '../components/ghostTasking'
 import { neon, glow, TAB_SX } from '../theme'
+import { useExpandMany, useRouteParam, useTab } from '../lib/route'
 
 /**
  * Every URL found on an http(s) service.
@@ -80,9 +81,12 @@ export function WebView({ project }: { project: string | null }) {
   // with 200/401/403/500, and folding them into one control would
   // make that combination unaskable.
   const [foundBy, setFoundBy] = useState<'any' | 'crawl' | 'discovery'>('any')
-  const [tab, setTab] = useState<'urls' | 'assets' | 'takeovers'>('urls')
+  const [tab, setTab] = useTab(['urls', 'assets', 'takeovers'], 'urls',
+                                useRouteParam('tab'))
   // Which URLs are open, and what their exchanges are once fetched.
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  // The open groups ride in `?expand=` comma-joined: a pasted link
+  // lands with the same groups open it left behind.
+  const [expanded, setExpanded] = useExpandMany(useRouteParam('expand'))
   const [children, setChildren] = useState<Record<string, WebAddress[]>>({})
   const [loadingKey, setLoadingKey] = useState<string | null>(null)
   const [replay, setReplay] = useState<number | null>(null)
@@ -121,11 +125,12 @@ export function WebView({ project }: { project: string | null }) {
   // every render, and the memo would never hit.
   const toggle = useCallback(async (g: WebGroup) => {
     const key = rowKey(g)
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key); else next.add(key)
-      return next
-    })
+    // Value form, not an updater: the setter writes the URL, and this
+    // handler is the only writer of `expanded`, so reading the current
+    // value from the closure is safe.
+    const next = new Set(expanded)
+    if (next.has(key)) next.delete(key); else next.add(key)
+    setExpanded(next)
     if (!children[key]) {
       setLoadingKey(key)
       try {
@@ -134,12 +139,14 @@ export function WebView({ project }: { project: string | null }) {
       } catch {
         // Leave it unexpanded rather than showing an empty group that
         // claims the URL has no exchanges.
-        setExpanded((prev) => { const n = new Set(prev); n.delete(key); return n })
+        setExpanded(new Set(expanded).has(key)
+          ? (() => { const n = new Set(expanded); n.delete(key); return n })()
+          : expanded)
       } finally {
         setLoadingKey(null)
       }
     }
-  }, [children])
+  }, [children, expanded, setExpanded])
 
   // Paged, sorted and searched in the database. One engagement holds
   // 211,012 addresses; the previous version asked for 5,000 and showed

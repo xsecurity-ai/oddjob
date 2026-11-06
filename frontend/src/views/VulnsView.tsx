@@ -10,14 +10,14 @@ import { VulnModal } from '../components/VulnModal'
 import { PocModal } from '../components/PocModal'
 import { SEVERITY_COLOUR as SEV_COLOUR } from '../lib/severity'
 import { TRIAGE, TRIAGE_COLOUR } from '../lib/triage'
-import { parse, push, useRouteFinding } from '../lib/route'
+import { parse, push, useExpand, useRouteFinding, useRouteParam,
+         useTab } from '../lib/route'
 import { useServerTable } from '../lib/useServerTable'
 import {
   LIFECYCLE, LIFECYCLE_COLOUR, LIFECYCLE_LABEL, LIFECYCLE_RANK,
   POC_COLOUR, POC_LABEL, POC_STATES,
 } from '../lib/lifecycle'
 import { useAuth } from '../lib/auth'
-import { useStoredChoice } from '../lib/useStoredChoice'
 import { AutoPocButton } from '../components/AutoPocButton'
 import { SecretsPanel } from '../components/SecretsPanel'
 import { VulnsByTarget, VulnsByTitle } from '../components/VulnRollupPanel'
@@ -35,7 +35,11 @@ export function VulnsView({ project }: { project: string | null }) {
   // Which tab you were on survives a reload. Refreshing on Secrets
   // and landing back on All means re-finding your place every time
   // the page reloads, which on a long triage is most of the session.
-  const [tab, setTab] = useStoredChoice('vulns.tab', VULN_TABS, 'all')
+  // The tab lives in the URL rather than localStorage: a pasted link
+  // has to land on the reading it names, and localStorage cannot say
+  // that. A hand-edited or stale value naming a tab that no longer
+  // exists falls back to `all` -- never an empty pane.
+  const [tab, setTab] = useTab(VULN_TABS, 'all', useRouteParam('tab'))
   // The finding being read lives in the URL, not in this component.
   //
   // `?finding=1234` on top of whatever path is showing, so a finding
@@ -43,8 +47,12 @@ export function VulnsView({ project }: { project: string | null }) {
   // one from the grid and opening one from a pasted link are the same
   // operation rather than two that have to be kept in step.
   const detail = useRouteFinding()
+  // The row expanded in a rollup, on top of the tab. Same presence-is-
+  // -the-signal shape as `?finding=`: closing it drops the key rather
+  // than leaving an empty value behind.
+  const [expand, setExpand] = useExpand(useRouteParam('expand'))
   const setDetail = (id: number | null) => {
-    const r = parse(window.location.pathname)
+    const r = parse(window.location.pathname, window.location.search)
     if (id) r.finding = id
     else delete r.finding
     push(r)
@@ -345,8 +353,10 @@ export function VulnsView({ project }: { project: string | null }) {
       <>
       {strip}
       {tab === 'by-target'
-        ? <VulnsByTarget project={project} onFinding={setDetail} />
-        : <VulnsByTitle project={project} onFinding={setDetail} />}
+        ? <VulnsByTarget project={project} onFinding={setDetail}
+            expand={expand} onExpand={setExpand} />
+        : <VulnsByTitle project={project} onFinding={setDetail}
+            expand={expand} onExpand={setExpand} />}
       <VulnModal id={detail} onClose={() => setDetail(null)}
         onHost={(proj, h) => { setDetail(null); open(proj, h) }} />
       </>

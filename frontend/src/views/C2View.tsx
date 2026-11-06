@@ -39,6 +39,10 @@ import { render } from '../lib/terminal'
 const LiveTerminal = lazy(() => import('../components/LiveTerminal')
   .then((m) => ({ default: m.LiveTerminal })))
 import { key, readingSession, useUnseenSessions } from '../lib/c2unseen'
+import { useExpand, useRouteParam, useTab } from '../lib/route'
+
+/** The tabs this view renders. */
+const C2_TABS = ['live', 'ended', 'listeners'] as const
 
 /** How often an open session re-reads its tail. A shell is
  *  interactive and SSE carries the nudge, but a poll is what makes it
@@ -76,12 +80,17 @@ export function C2View({ project }: { project: string | null }) {
   // Three: what can be typed at now, what is kept for the record,
   // and the listeners. The first question on opening this page is
   // almost always the first one, so it leads.
-  const [tab, setTab] = useState<'live' | 'ended' | 'listeners'>('live')
+  // Tabs and the open session both live in the URL: a pasted link
+  // names its tab, and `?expand=<id>` names the session to read. The
+  // id is validated against the rows below -- an id that no longer
+  // exists means "nothing chosen", which is what the effect already
+  // does for a fresh load.
+  const [tab, setTab] = useTab(C2_TABS, 'live', useRouteParam('tab'))
+  const [expand, setExpand] = useExpand(useRouteParam('expand'))
   // Scanners hidden by default. A listener open to the internet
   // catches them faster than it catches payloads, and each one
   // files a session.
   const [showScans, setShowScans] = useState(false)
-  const [open, setOpen] = useState<number | null>(null)
   const [setup, setSetup] = useState(false)
   // Held here rather than in the session list: the list opens it
   // from a context menu and the terminal from a button, and a
@@ -99,13 +108,13 @@ export function C2View({ project }: { project: string | null }) {
   const rows = useMemo(() => sessions.data ?? [], [sessions.data])
 
   // Keep the selection on a session that still exists, and land on
-  // the newest when nothing is chosen.
-  useEffect(() => {
-    if (!rows.length) { setOpen(null); return }
-    setOpen((cur) => (cur !== null && rows.some((r) => r.id === cur)
-                      ? cur : rows[0].id))
-  }, [rows])
-  useEffect(() => { setOpen(null) }, [project])
+  // the newest when nothing is chosen. The URL names it as a string;
+  // an id no row carries means "nothing chosen", which is what a
+  // pasted link to a session since closed should do rather than hold
+  // a number the table does not have.
+  const open = expand !== null && rows.some((r) => String(r.id) === expand)
+    ? Number(expand) : null
+  const setOpen = (id: number | null) => setExpand(id === null ? null : String(id))
 
   // Having a session on screen is reading it, so it stops
   // blinking; leaving the page means whatever it says next is
