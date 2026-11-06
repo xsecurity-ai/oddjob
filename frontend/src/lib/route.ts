@@ -72,6 +72,15 @@ export interface Route {
    *  at once (opening one closes the other), and a single key would make
    *  "which is open" a question the URL could not answer. */
   replay?: number
+  /** The standing-orders dialog is open. A bare flag rather than an id
+   *  because the dialog has no object to name — it IS the thing that is
+   *  open, and presence is the whole signal. */
+  orders?: boolean
+  /** Which section a settings screen has selected. The value is the
+   *  section's key; the screen validates it against its own list, so a
+   *  stale or hand-typed value lands on the first section rather than
+   *  an empty pane. */
+  section?: string
 }
 
 /**
@@ -166,6 +175,12 @@ export function parse(pathname: string, search?: string): Route {
   if (Number.isInteger(packet) && packet > 0) r.packet = packet
   const replay = Number(q.get('replay'))
   if (Number.isInteger(replay) && replay > 0) r.replay = replay
+  // `orders` is a bare flag: presence means open, absence means closed.
+  // Any value counts — a hand-edited `?orders=whatever` still opens it,
+  // which is the least surprising behaviour for a yes/no dialog.
+  if (q.get('orders') != null) r.orders = true
+  const section = q.get('section')
+  if (section) r.section = section
   return r
 }
 
@@ -253,6 +268,10 @@ function query(r: Route): string {
   else q.delete('packet')
   if (r.replay) q.set('replay', String(r.replay))
   else q.delete('replay')
+  if (r.orders) q.set('orders', '1')
+  else q.delete('orders')
+  if (r.section) q.set('section', r.section)
+  else q.delete('section')
   const out = q.toString()
   return out ? `?${out}` : ''
 }
@@ -428,7 +447,7 @@ export function useRouteFinding(): number | null {
  *  and wire the result into their own controls, so opening something
  *  by hand-editing the URL opens it exactly as clicking would. */
 export function useRouteParam(
-  key: 'tab' | 'expand' | 'packet' | 'replay',
+  key: 'tab' | 'expand' | 'packet' | 'replay' | 'section',
 ): string | null {
   const read = useCallback(() => {
     const v = parse(window.location.pathname, window.location.search)[key]
@@ -449,6 +468,35 @@ export function useRouteParam(
     return () => { window.removeEventListener('popstate', sync); off() }
   }, [read])
   return value
+}
+
+/** A yes/no dialog whose open state lives in the URL.
+ *
+ *  `?orders=` — presence is the whole signal, so a pasted link opens
+ *  the dialog and closing it drops the key. The same shape as
+ *  `?finding=` and `?packet=`, but without an id: the dialog has no
+ *  object to name, it IS the thing that is open.
+ *
+ *  Opening is a `push` so Back closes the dialog; closing is a
+ *  `replace` so Back does not walk through every click on a dialog. */
+export function useOrdersDialog(): [boolean, (v: boolean) => void] {
+  const read = useCallback(() =>
+    parse(window.location.pathname, window.location.search).orders ?? false, [])
+  const [open, setOpen] = useState<boolean>(read)
+  useEffect(() => {
+    const sync = () => setOpen(read())
+    window.addEventListener('popstate', sync)
+    const off = onNavigate(sync)
+    sync()
+    return () => { window.removeEventListener('popstate', sync); off() }
+  }, [read])
+  const set = useCallback((v: boolean) => {
+    const r = parse(window.location.pathname, window.location.search)
+    if (v) r.orders = true
+    else delete r.orders
+    v ? push(r) : replace(r)
+  }, [])
+  return [open, set]
 }
 
 /** A tab whose selection lives in the URL.
