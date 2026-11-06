@@ -380,18 +380,69 @@ check("an override above the agent's own assessment is honoured",
 check("the engagement ceiling still applies on top",
       (r or {}).get("max_parallel") == 4, str(r)[:160])
 
+# The override is a cap, not a floor: the agent's own assessment may
+# run higher than it. This is what an overridden fleet looks like in
+# production -- the agent adopts the pushed-down number as its stored
+# capacity, so "the host measured six" and "an operator said six" are
+# the same row, and a box that could carry more would never be offered
+# more. The setting exists to talk a fleet DOWN for a fragile estate,
+# not to freeze every host at whatever it first reported.
+st, hb = call("/api/ghosts/heartbeat", "POST",
+              {"ready": True, "running_tasks": [], "slots_free": 4,
+               "capacity": 4, "capacity_reason": "4 cores"}, key=OKEY)
+check("an override does not hold the agent below its own assessment",
+      (hb or {}).get("max_parallel") == 4, str(hb)[:160])
+# ...and it still caps: four of eight queued go out, not eight.
+check("the cap is honoured as a ceiling",
+      len((hb or {}).get("tasks", [])) == 4,
+      f'{len((hb or {}).get("tasks", []))} task(s)')
+# Finish the work so the agent is idle again: tasks it still holds count
+# against every later heartbeat in this suite.
+for _t in (hb or {}).get("tasks", []):
+    call(f"/api/ghosts/tasks/{_t['id']}/result", "POST",
+         {"status": "done", "output": "[]", "summary": "done",
+          "exit_code": 0}, key=OKEY)
+
 # The part that makes it take effect at all. The agent computes
-# `slots_free` from its OWN capacity, so honouring that while an
-# override is set clamps the override back to what the agent already
-# believed: the setting moves in the database and nothing happens.
+# `slots_free` from its OWN capacity, so an assessment reported in the
+# same heartbeat as the override is set would clamp the override back
+# to what the agent already believed: the setting would move in the
+# database and change nothing. It must not be honoured until the agent
+# has SEEN the number it was sent down -- which is exactly when its own
+# count stops mattering, because by then it computed `slots_free` from
+# the override itself. (The assessment is still adopted into `capacity`,
+# as ever; only the override branch of dispatch skips it.)
 st, hb = call("/api/ghosts/heartbeat", "POST",
               {"ready": True, "running_tasks": [], "slots_free": 1,
                "capacity": 1, "capacity_reason": "1 core"}, key=OKEY)
-check("a stale slots_free does not clamp the override",
+# The cap governs dispatch: four of the eight queued go out, not one.
+check("an assessment reported before the override was seen is not honoured",
       len((hb or {}).get("tasks", [])) == 4,
       f'{len((hb or {}).get("tasks", []))} task(s)')
 check("and the effective number goes down so the agent agrees next time",
       (hb or {}).get("max_parallel") == 4, str(hb)[:160])
+# One round trip later the agent's own count IS computed from the
+# override, and that is when it governs again -- the cap can only ever
+# hold an agent at or below its real assessment.
+st, hb = call("/api/ghosts/heartbeat", "POST",
+              {"ready": True, "running_tasks": [], "slots_free": 4,
+               "capacity": 4, "capacity_reason": "4 cores"}, key=OKEY)
+# All eight are claimed or done by now: four finished after beat one,
+# four claimed by beat two. Nothing left to hand out, so the check is
+# that the agent's own count (4) still governs the number it was sent
+# down -- not that it gets work it has already been given.
+check("once the agent has seen the number, its own count governs",
+      (hb or {}).get("max_parallel") == 4, str(hb)[:160])
+for _t in (hb or {}).get("tasks", []):
+    call(f"/api/ghosts/tasks/{_t['id']}/result", "POST",
+         {"status": "done", "output": "[]", "summary": "done",
+          "exit_code": 0}, key=OKEY)
+
+# The agent's latest assessment is what governs once the override is
+# gone, so report one before clearing it.
+st, hb = call("/api/ghosts/heartbeat", "POST",
+              {"ready": True, "running_tasks": [], "slots_free": 1,
+               "capacity": 1, "capacity_reason": "1 core"}, key=OKEY)
 
 st, r = call(f"/api/ghosts/{OID}?project=OVR", "PATCH",
              {"parallel_override": 0}, token=admin)
@@ -2785,6 +2836,55 @@ call("/api/ghosts/heartbeat", "POST", {"ready": False}, key=WITK)
 _after = _aio.run(_task_state(_corpse_task))
 check("another agent's heartbeat is enough to free it",
       _after == ("queued", None), str(_after))
+
+
+# The third shape of the same hole: a claim with no holder at all. Both
+# release paths run on a heartbeat -- this one on another agent's, the
+# abandonment one in the handler on the HOLDER's -- so a claim whose
+# holder is gone before it can beat again (a crash between claiming and
+# starting, a worker killed mid-request) is held for good. One
+# engagement sat on exactly this row for nineteen hours with four
+# agents beating every thirty seconds around it.
+async def _plant_orphan_claim():
+    async with _Session() as db:
+        pid = (await db.execute(
+            _sel(_Pr.id).where(_Pr.code == "AGENT"))).scalar_one()
+        now = _dt.datetime.now(_dt.UTC)
+        t = _Tk(project_id=pid, agent_id=None, kind="katana",
+                status="claimed", claimed_at=now - _dt.timedelta(minutes=40))
+        db.add(t)
+        await db.commit()
+        return t.id
+
+
+_orphan_task = _aio.run(_plant_orphan_claim())
+check("the planted orphan starts out held with no holder",
+      _aio.run(_task_state(_orphan_task)) == ("claimed", None))
+call("/api/ghosts/heartbeat", "POST", {"ready": False}, key=WITK)
+_after = _aio.run(_task_state(_orphan_task))
+check("a claim with no holder goes back in the queue after the grace window",
+      _after[0] == "queued" and _after[1] is None, str(_after))
+
+
+async def _orphan_grace():
+    async with _Session() as db:
+        pid = (await db.execute(
+            _sel(_Pr.id).where(_Pr.code == "AGENT"))).scalar_one()
+        now = _dt.datetime.now(_dt.UTC)
+        t = _Tk(project_id=pid, agent_id=None, kind="katana",
+                status="claimed", claimed_at=now - _dt.timedelta(minutes=1))
+        db.add(t)
+        await db.commit()
+        tid = t.id
+        freed = await reap_lost(db, pid)
+        await db.commit()
+        t2 = (await db.execute(_sel(_Tk).where(_Tk.id == tid))).scalar_one()
+        return freed, t2.status
+
+
+_freed, _status = _aio.run(_orphan_grace())
+check("...and a fresh claim is left alone inside the grace window",
+      _status == "claimed" and _freed == 0, f"{_freed} {_status}")
 
 
 async def _starvation_drill():
