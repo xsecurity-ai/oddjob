@@ -28,6 +28,7 @@ import { ScanRangesDialog } from '../components/ScanRangesDialog'
 import { WebDiscoveryDialog } from '../components/WebDiscoveryDialog'
 import { ProbeDialog } from '../components/ProbeDialog'
 import { neon, glow, TAB_SX } from '../theme'
+import { useRouteParam, useTab } from '../lib/route'
 
 /** Zero is muted so the eye lands on the non-zero numbers. */
 function Count({ n, color }: { n: number; color?: string }) {
@@ -131,7 +132,8 @@ export function TargetsView({ project }: { project: string | null }) {
   const { canWrite } = useAuth()
   const { open } = useHostModal()
   const writable = canWrite(project)
-  const [tab, setTab] = useState<'scope' | 'cloud'>('scope')
+  const [tab, setTab] = useTab(['scope', 'cloud'], 'scope',
+                                useRouteParam('tab'))
   const [importing, setImporting] = useState(false)
   // The target that would be absorbed and removed.
   const [merging, setMerging] = useState<Target | null>(null)

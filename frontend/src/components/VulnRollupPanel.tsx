@@ -191,12 +191,19 @@ function Detail({ rows, loading, onFinding, show, sameAs }: {
 }
 
 // ---------------------------------------------------------- by target
-export function VulnsByTarget({ project, onFinding }: {
+export function VulnsByTarget({ project, onFinding, expand, onExpand }: {
   project: string | null
   onFinding: (id: number) => void
+  /** The row the URL says is expanded, or null. */
+  expand?: string | null
+  /** Tell the URL which row is open. */
+  onExpand?: (id: string | null) => void
 }) {
   const { canWrite } = useAuth()
-  const [open, setOpen] = useState<string | null>(null)
+  // Controlled by the URL when the view passes it down: a pasted link
+  // naming a host expands that host, and collapsing one drops `?expand=`.
+  const open = expand ?? null
+  const setOpen = onExpand ?? (() => {})
   // What a click on the proof column is asking for, held until the
   // dialog confirms it. The row, not just the host: the dialog names
   // the finding count and that lives on the row.
@@ -316,12 +323,19 @@ export function VulnsByTarget({ project, onFinding }: {
 }
 
 // ------------------------------------------------------------ by vuln
-export function VulnsByTitle({ project, onFinding }: {
+export function VulnsByTitle({ project, onFinding, expand, onExpand }: {
   project: string | null
   onFinding: (id: number) => void
+  /** The row the URL says is expanded, or null. */
+  expand?: string | null
+  /** Tell the URL which row is open. */
+  onExpand?: (id: string | null) => void
 }) {
   const { canWrite } = useAuth()
-  const [open, setOpen] = useState<string | null>(null)
+  // Controlled by the URL when the view passes it down: a pasted link
+  // naming a title expands that row, and collapsing one drops `?expand=`.
+  const open = expand ?? null
+  const setOpen = onExpand ?? (() => {})
   const [prove, setProve] = useState<
     { group: Group; total: number } | null>(null)
   // The bigger of the two: 10,860 rows and 2.0 MB fetched to show a

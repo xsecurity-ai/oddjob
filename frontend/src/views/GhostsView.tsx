@@ -27,6 +27,12 @@ import { neon, glow, TAB_SX } from '../theme'
 import { ProxySetupDialog } from '../components/ProxySetupDialog'
 import { GhostDebugView } from './GhostDebugView'
 import { CountryPicker } from '../components/CountryPicker'
+import { useRouteParam, useTab } from '../lib/route'
+
+/** The tabs this view renders. Module-level for the same reason as
+ *  every other tab list: the validated set and the rendered tabs are
+ *  one list, so they cannot drift. */
+const GHOST_TABS = ['fleet', 'tasks', 'debug'] as const
 
 const STATUS_COLOUR: Record<string, string> = {
   // `busy` is its own colour because it is not a degraded state: the
@@ -802,7 +808,11 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
    *  on a page that no longer exists. */
   tab?: 'fleet' | 'tasks' | 'debug'
 }) {
-  const [tab, setTab] = useState<'fleet' | 'tasks' | 'debug'>(initialTab)
+  // The tab lives in the URL. `?tab=debug` is what `/ghost-debug` used
+  // to mean, so a bookmark of the old route lands where it always did;
+  // clicking a tab writes the same parameter, and Back walks pages,
+  // not tabs -- which is why this is a replace, not a push.
+  const [tab, setTab] = useTab(GHOST_TABS, initialTab, useRouteParam('tab'))
   const qc = useQueryClient()
   const { canWrite, roleOn } = useAuth()
   const [wizard, setWizard] = useState(false)

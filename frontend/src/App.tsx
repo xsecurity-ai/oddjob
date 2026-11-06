@@ -107,7 +107,10 @@ export default function App() {
   // Initialised FROM the URL, so a theme switch — which remounts the
   // tree to recompute alpha() colours — lands back where you were
   // instead of resetting to Targets.
-  const [route, setRoute] = useState<Route>(() => parse(window.location.pathname))
+  // The search half too: `?tab=` and `?expand=` ride on the same bar
+  // as the path, and dropping them here would mean a reload lands on
+  // the default tab of the page it named.
+  const [route, setRoute] = useState<Route>(() => parse(window.location.pathname, window.location.search))
   const view = route.view
   const setView = useCallback((v: View) => {
     setRoute((r) => {
@@ -157,7 +160,7 @@ export default function App() {
     // how a modal opening reaches the route this component renders
     // from -- without it the bar said one thing and the app believed
     // another, and Back had nothing to undo.
-    const onPop = () => setRoute(parse(window.location.pathname))
+    const onPop = () => setRoute(parse(window.location.pathname, window.location.search))
     window.addEventListener('popstate', onPop)
     const off = onNavigate(onPop)
     return () => { window.removeEventListener('popstate', onPop); off() }
