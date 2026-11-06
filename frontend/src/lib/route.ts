@@ -62,6 +62,16 @@ export interface Route {
    *  id in C2. The view that rendered the row knows what it means; this
    *  only carries it. */
   expand?: string
+  /** A web exchange opened for reading, by its id. The same shape as
+   *  `finding` — presence is the whole signal — and the same reason: an
+   *  exchange is something open ON TOP of the web view, not an asset the
+   *  path names. */
+  packet?: number
+  /** A web exchange handed to the editor, by its id. Kept separate from
+   *  `packet` rather than shared with it: the two dialogs are never up
+   *  at once (opening one closes the other), and a single key would make
+   *  "which is open" a question the URL could not answer. */
+  replay?: number
 }
 
 /**
@@ -149,6 +159,13 @@ export function parse(pathname: string, search?: string): Route {
   if (tab) r.tab = tab
   const expand = q.get('expand')
   if (expand) r.expand = expand
+  // The exchange ids are numbers, so they get the same guard as `finding`
+  // rather than a bare presence check: `?packet=` and `?packet=nonsense`
+  // both mean nothing is open.
+  const packet = Number(q.get('packet'))
+  if (Number.isInteger(packet) && packet > 0) r.packet = packet
+  const replay = Number(q.get('replay'))
+  if (Number.isInteger(replay) && replay > 0) r.replay = replay
   return r
 }
 
@@ -232,6 +249,10 @@ function query(r: Route): string {
   else q.delete('tab')
   if (r.expand) q.set('expand', r.expand)
   else q.delete('expand')
+  if (r.packet) q.set('packet', String(r.packet))
+  else q.delete('packet')
+  if (r.replay) q.set('replay', String(r.replay))
+  else q.delete('replay')
   const out = q.toString()
   return out ? `?${out}` : ''
 }
@@ -406,9 +427,16 @@ export function useRouteFinding(): number | null {
  *  -- which is how state stops meaning anything. Views call this once
  *  and wire the result into their own controls, so opening something
  *  by hand-editing the URL opens it exactly as clicking would. */
-export function useRouteParam(key: 'tab' | 'expand'): string | null {
-  const read = useCallback(() =>
-    parse(window.location.pathname, window.location.search)[key] ?? null, [key])
+export function useRouteParam(
+  key: 'tab' | 'expand' | 'packet' | 'replay',
+): string | null {
+  const read = useCallback(() => {
+    const v = parse(window.location.pathname, window.location.search)[key]
+    // `packet` and `replay` are numbers on the Route; stringify them so
+    // every key this hook returns is a string, which is what the views
+    // compare and pass on.
+    return v == null ? null : String(v)
+  }, [key])
   const [value, setValue] = useState<string | null>(read)
   useEffect(() => {
     const sync = () => setValue(read())

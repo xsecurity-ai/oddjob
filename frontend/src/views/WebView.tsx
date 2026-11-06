@@ -24,7 +24,7 @@ import { PacketModal } from '../components/PacketModal'
 import { ReplayModal } from '../components/ReplayModal'
 import { queue } from '../components/ghostTasking'
 import { neon, glow, TAB_SX } from '../theme'
-import { useExpandMany, useRouteParam, useTab } from '../lib/route'
+import { parse, push, replace, useExpandMany, useRouteParam, useTab } from '../lib/route'
 
 /**
  * Every URL found on an http(s) service.
@@ -71,7 +71,25 @@ export function WebView({ project }: { project: string | null }) {
   // is the origin. Coordinates cannot go stale.
   const [menu, setMenu] = useState<
     { x: number; y: number; row: WebAddress } | null>(null)
-  const [packet, setPacket] = useState<number | null>(null)
+  // The exchange being read and the one being edited ride in the url as
+  // `?packet=` / `?replay=`, on the same shape as `?finding=` elsewhere:
+  // presence is the whole signal, so a pasted link opens the exact
+  // exchange it names, and closing drops the key rather than leaving a
+  // value behind.
+  const packet = useRouteParam('packet')
+  const replay = useRouteParam('replay')
+  const setPacket = (id: number | null) => {
+    const r = parse(window.location.pathname, window.location.search)
+    if (id) r.packet = id
+    else delete r.packet
+    push(r)
+  }
+  const setReplay = (id: number | null) => {
+    const r = parse(window.location.pathname, window.location.search)
+    if (id) r.replay = id
+    else delete r.replay
+    replace(r)
+  }
   // Reaching a URL is the thing a reader most often wants and the thing
   // the table cannot do for them, so it is a link rather than a cell.
   const [filter, setFilter] = useState<'all' | 'crawled' | 'interesting'>('all')
@@ -89,7 +107,6 @@ export function WebView({ project }: { project: string | null }) {
   const [expanded, setExpanded] = useExpandMany(useRouteParam('expand'))
   const [children, setChildren] = useState<Record<string, WebAddress[]>>({})
   const [loadingKey, setLoadingKey] = useState<string | null>(null)
-  const [replay, setReplay] = useState<number | null>(null)
   // What the last queue attempt did. A task queued from a context
   // menu is otherwise entirely silent: the work goes to an agent
   // somewhere else and nothing on this page changes for minutes.
@@ -464,8 +481,8 @@ export function WebView({ project }: { project: string | null }) {
           editor opens, so the two are never stacked: they show the same
           exchange, and two dialogs of one exchange is a guess about
           which is live. */}
-      {packet !== null && (
-        <PacketModal id={packet} onClose={() => setPacket(null)}
+      {packet != null && (
+        <PacketModal id={Number(packet)} onClose={() => setPacket(null)}
           onReplay={(pid) => { setPacket(null); setReplay(pid) }} />
       )}
       <Menu open={!!menu} onClose={() => setMenu(null)}
@@ -529,7 +546,7 @@ export function WebView({ project }: { project: string | null }) {
       </Snackbar>
 
       <ReplayModal
-        id={replay} onClose={() => setReplay(null)}
+        id={replay != null ? Number(replay) : null} onClose={() => setReplay(null)}
         onCreated={() => {
           // The new exchange belongs under the same URL, so drop the
           // cached children: leaving them would show a group whose hit

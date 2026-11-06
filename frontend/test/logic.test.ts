@@ -366,6 +366,32 @@ check('switching view drops the host from the path',
 check('no project builds a bare view path',
       buildRoute({ view: 'targets', project: null }) === '/targets')
 
+// The exchange modals ride in the query string, like `finding` does. A
+// link naming one must round-trip: parse it back to the same number, and
+// build it back into the bar. `parse` takes pathname and search as two
+// arguments — the way App calls it with window.location — so the tests
+// do the same rather than smuggling the query into the path.
+const wp = parseRoute('/projects/ACME/web', '?tab=urls&packet=42')
+check('a packet id parses from the query string',
+      wp.packet === 42 && wp.tab === 'urls' && wp.view === 'web',
+      JSON.stringify(wp))
+check('and rebuilds to itself',
+      buildRoute(wp) === '/projects/ACME/web?tab=urls&packet=42',
+      buildRoute(wp))
+const wr = parseRoute('/projects/ACME/web', '?replay=7')
+check('a replay id parses from the query string', wr.replay === 7, JSON.stringify(wr))
+check('and rebuilds to itself', buildRoute(wr) === '/projects/ACME/web?replay=7',
+      buildRoute(wr))
+// A hand-edited or stale value that is not a positive integer means
+// nothing is open — the same guard `finding` gets, not an empty dialog.
+check('an empty packet id opens nothing',
+      parseRoute('/projects/ACME/web', '?packet=').packet === undefined)
+check('a non-numeric packet id opens nothing',
+      parseRoute('/projects/ACME/web', '?packet=nonsense').packet === undefined)
+check('both can be named at once without one eating the other',
+      buildRoute({ view: 'web', project: 'ACME', packet: 1, replay: 2 })
+      === '/projects/ACME/web?packet=1&replay=2')
+
 console.log('\n== country codes typed by a person ==')
 // The picker is freeSolo, because a country MaxMind returns that is
 // missing from the list must still be settable -- a picker that
