@@ -231,15 +231,26 @@ def effective_parallel(a, ceiling: int) -> int:
       the project ceiling                 what this ENGAGEMENT should
                                           do to the client
 
-    The override replaces the agent's assessment -- an operator who
-    says 8 and gets 2 with no explanation concludes the control is
-    broken -- but the project ceiling still applies on top, because it
-    is a statement about the client's estate rather than about the
-    box, and no per-ghost number should be able to talk its way past
-    it.
+    The override is a CAP, not a floor: it may hold an agent at or
+    below its own assessment, never above it. An operator who sets 8
+    and sees 2 with no explanation concludes the control is broken --
+    so the number goes up to the higher of the two. It used to replace
+    the assessment outright, and that was how one engagement came to
+    sit with seven ghosts, all of them overridden, most of them idle:
+    the agent adopts the pushed-down `max_parallel` as its own
+    capacity (see `adoptServerParallel` on the Go side), so after one
+    round trip the stored `capacity` IS the override, and from then on
+    "the host measured six" and "an operator said six" are the same
+    number. A box that could carry more would never be offered more --
+    the setting was meant to talk a fleet DOWN for a fragile estate,
+    not to freeze every host at whatever it happened to say the first
+    time somebody touched the control. The project ceiling still
+    applies on top of both, because it is a statement about the client's
+    estate rather than about the box, and no per-ghost number should be
+    able to talk its way past it.
     """
-    want = a.parallel_override or a.capacity or 1
-    return max(1, min(ceiling, int(want)))
+    want = max(int(a.capacity or 1), int(a.parallel_override or 0))
+    return max(1, min(ceiling, want))
 
 
 #: Task kinds the agent knows how to run, and the importer that reads
@@ -874,6 +885,7 @@ async def reap_lost(session: AsyncSession, project_id: int,
     is never read as lost in the first place.
     """
     now = datetime.now(UTC)
+    freed = 0
     # Walked from the agents, not from the held tasks. Going the other
     # way only ever reaches agents that happen to be holding something,
     # and `status` is exactly as wrong on a lost agent that is holding
@@ -881,15 +893,40 @@ async def reap_lost(session: AsyncSession, project_id: int,
     # work in flight to hint otherwise.
     agents = (await session.execute(
         select(Agent).where(Agent.project_id == project_id))).scalars().all()
-    held: dict[int, list[AgentTask]] = {}
+    held: dict[int | None, list[AgentTask]] = {}
     for t in (await session.execute(
             select(AgentTask).where(
                 AgentTask.project_id == project_id,
-                AgentTask.status.in_(("claimed", "running")),
-                AgentTask.agent_id.is_not(None)))).scalars():
+                AgentTask.status.in_(("claimed", "running"))))).scalars():
         held.setdefault(t.agent_id, []).append(t)
 
-    freed = 0
+    # A claim with no holder at all. The two release paths are both
+    # driven by a heartbeat -- this one by another agent's, the
+    # abandonment one in the handler by the HOLDER's -- so a claim
+    # whose holder is gone before it can beat again (a crash between
+    # claiming and starting, or a worker killed mid-request) is held
+    # for good: no heartbeat ever comes to release it. One engagement
+    # sat on exactly this shape for nineteen hours with four agents
+    # beating every thirty seconds around it, because the query above
+    # used to skip `agent_id IS NULL` and neither path could see it.
+    #
+    # Held here rather than in the loop below: there is no agent row
+    # to walk out to, so "lost" does not apply -- the clock alone is
+    # enough, with the same ABANDON_AFTER grace that keeps an in-flight
+    # result POST from being raced into a duplicate run.
+    for t in held.get(None, []):
+        since = _aware(t.claimed_at or t.started_at)
+        if since is None or (now - since) < ABANDON_AFTER:
+            continue
+        quiet = int((now - since).total_seconds() // 60)
+        t.status = "queued"
+        t.agent_id = None
+        t.claimed_at = t.started_at = None
+        t.error = (f"requeued after {quiet} minutes with no holder: the "
+                   "claim was made but no agent is on record for it, so "
+                   "nothing could finish it or release it")
+        freed += 1
+
     #: Collected rather than announced inline: posting to Slack inside
     #: the loop would put a network round trip per agent in the middle
     #: of a heartbeat, and this runs on every beat of every agent.

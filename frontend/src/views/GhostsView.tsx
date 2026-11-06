@@ -518,7 +518,9 @@ function ParallelCell({ eff, own, reason, over, admin, busy, onPick }: {
     : `${own} by its own assessment (${reason || 'no reason given'}).`
   const title = (over
     ? `Set to ${over} for this ghost. ${why} `
-      + `The engagement ceiling still applies on top, so the effective number is ${eff}.`
+      + `The number holds the ghost DOWN to at most ${over}; if its own `
+      + `assessment is higher, that runs instead. The engagement ceiling `
+      + `still applies on top, so the effective number is ${eff}.`
     : `${why} The project's ceiling and that are combined, and the lower runs.`)
     + ' Changing this is pushed to the ghost on its next heartbeat.'
 
