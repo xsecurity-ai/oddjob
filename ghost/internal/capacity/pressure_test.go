@@ -19,9 +19,11 @@ func TestAssess(t *testing.T) {
 		reasonMention string
 	}{
 		{"plenty of both", 0.80, 0.90, false, ""},
-		{"exactly at the line is fine", 0.20, 0.20, false, ""},
+		{"exactly at the memory line is fine", 0.20, 0.20, false, ""},
+		{"cpu above its lower line is fine", 0.90, 0.10, false, ""},
 		{"a hair under on memory blocks", 0.19, 0.90, true, "memory"},
-		{"a hair under on cpu blocks", 0.90, 0.19, true, "CPU"},
+		{"a hair under on cpu blocks", 0.90, 0.09, true, "CPU"},
+		{"cpu between the two lines does not block", 0.90, 0.15, false, ""},
 		{"nothing left at all", 0.00, 0.00, true, "memory"},
 		{"both short reports memory first", 0.05, 0.05, true, "memory"},
 

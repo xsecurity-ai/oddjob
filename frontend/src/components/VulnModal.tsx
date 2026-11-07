@@ -58,6 +58,11 @@ function SecretField({ vulnId }: { vulnId: number }) {
   const [shown, setShown] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [storing, setStoring] = useState(false)
+  const [storeVal, setStoreVal] = useState('')
+  const [storeDetector, setStoreDetector] = useState('')
+  const [storeErr, setStoreErr] = useState<string | null>(null)
+  const [storeBusy, setStoreBusy] = useState(false)
 
   const reveal = async () => {
     setBusy(true); setErr(null)
@@ -72,6 +77,25 @@ function SecretField({ vulnId }: { vulnId: number }) {
         : String(e))
     } finally {
       setBusy(false)
+    }
+  }
+
+  const store = async () => {
+    if (!storeVal.trim()) return
+    setStoreBusy(true); setStoreErr(null)
+    try {
+      await api.storeSecret(vulnId, {
+        secret: storeVal.trim(),
+        detector: storeDetector.trim() || null,
+      })
+      setShown(storeVal.trim())
+      setStoring(false)
+      setStoreVal('')
+      setStoreDetector('')
+    } catch (e) {
+      setStoreErr(String(e))
+    } finally {
+      setStoreBusy(false)
     }
   }
 
@@ -113,7 +137,41 @@ function SecretField({ vulnId }: { vulnId: number }) {
             Hide
           </Button>
         )}
+        <Button size="small" variant="outlined"
+          onClick={() => setStoring(!storing)}
+          sx={{ color: neon.cyan, borderColor: alpha(neon.cyan, 0.4),
+                fontSize: 11.5 }}>
+          Store secret
+        </Button>
       </Stack>
+      {storing && (
+        <Box sx={{ mt: 1 }}>
+          <TextField
+            fullWidth size="small" multiline minRows={2}
+            placeholder="Paste the credential value…"
+            value={storeVal}
+            onChange={(e) => setStoreVal(e.target.value)}
+            slotProps={{ input: { style: { fontFamily: `'Share Tech Mono', monospace`, fontSize: 12 } } }}
+          />
+          <TextField
+            fullWidth size="small"
+            placeholder="Detector (optional, e.g. AWS Access Key)"
+            value={storeDetector}
+            onChange={(e) => setStoreDetector(e.target.value)}
+            sx={{ mt: 0.5 }}
+          />
+          {storeErr && (
+            <Typography sx={{ fontSize: 11, color: neon.red, mt: 0.5 }}>
+              {storeErr}
+            </Typography>
+          )}
+          <Button size="small" variant="contained" disabled={storeBusy || !storeVal.trim()}
+            onClick={store}
+            sx={{ mt: 0.75, color: '#000', bgcolor: neon.cyan, fontSize: 11.5 }}>
+            {storeBusy ? 'Storing…' : 'Save credential'}
+          </Button>
+        </Box>
+      )}
       <Typography sx={{ fontSize: 11, color: neon.muted, mt: 0.5 }}>
         {err ?? (shown
           ? 'Revealed. This was written to the audit log with your name.'

@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Box, Chip, IconButton, Tooltip, alpha } from '@mui/material'
+import { Box, Chip, IconButton, Menu, MenuItem, Tooltip, alpha } from '@mui/material'
 import ReplayIcon from '@mui/icons-material/ReplayOutlined'
+import MoreVertIcon from '@mui/icons-material/MoreVertOutlined'
+import ArrowUpwardIcon from '@mui/icons-material/ArrowUpwardOutlined'
+import ArrowDownwardIcon from '@mui/icons-material/ArrowDownwardOutlined'
+import VerticalAlignTopIcon from '@mui/icons-material/VerticalAlignTopOutlined'
+import VerticalAlignBottomIcon from '@mui/icons-material/VerticalAlignBottomOutlined'
+import PlayArrowIcon from '@mui/icons-material/PlayArrowOutlined'
 import type { ColumnDef } from '../lib/columns'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type GhostTaskRow } from '../lib/api'
@@ -100,8 +106,78 @@ function Stamp({ value }: { value: unknown }) {
   )
 }
 
-export function GhostTasksTable({ project }: { project: string }) {
+/** Per-row queue actions: reorder within the queue, or launch now. */
+function TaskActions({ id, failed, queued, project }: {
+  id: number; failed: boolean; queued: boolean; project: string
+}) {
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null)
   const qc = useQueryClient()
+
+  const invalidate = () => qc.invalidateQueries({ queryKey: ['ghost-tasks', project] })
+
+  const reorder = useMutation({
+    mutationFn: (dir: string) => api.reorderGhostTask(project, id, dir),
+    onSuccess: invalidate,
+  })
+  const launch = useMutation({
+    mutationFn: () => api.launchGhostTask(project, id),
+    onSuccess: invalidate,
+  })
+  const retry = useMutation({
+    mutationFn: () => api.retryGhostTask(project, id),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['ghost-tasks', project] })
+      await qc.invalidateQueries({ queryKey: ['ghost-routing', project] })
+      await qc.invalidateQueries({ queryKey: ['ghost-agents', project] })
+      await qc.invalidateQueries({ queryKey: ['agents', project] })
+    },
+  })
+
+  const busy = reorder.isPending || launch.isPending || retry.isPending
+  const close = () => setAnchor(null)
+  const act = (fn: () => void) => { fn(); close() }
+
+  return (
+    <>
+      <Tooltip title={queued ? 'Queue actions' : 'Retry'}>
+        <span>
+          <IconButton size="small" disabled={busy} onClick={(e) => setAnchor(e.currentTarget)}
+            sx={{ color: neon.muted, '&:hover': { color: neon.green } }}>
+            <MoreVertIcon fontSize="small" />
+          </IconButton>
+        </span>
+      </Tooltip>
+      <Menu anchorEl={anchor} open={!!anchor} onClose={close}>
+        {queued && (
+          <>
+            <MenuItem onClick={() => act(() => reorder.mutate('top'))}>
+              <VerticalAlignTopIcon fontSize="small" sx={{ mr: 1 }} />Send to top
+            </MenuItem>
+            <MenuItem onClick={() => act(() => reorder.mutate('bottom'))}>
+              <VerticalAlignBottomIcon fontSize="small" sx={{ mr: 1 }} />Send to bottom
+            </MenuItem>
+            <MenuItem onClick={() => act(() => reorder.mutate('up'))}>
+              <ArrowUpwardIcon fontSize="small" sx={{ mr: 1 }} />Move up one
+            </MenuItem>
+            <MenuItem onClick={() => act(() => reorder.mutate('down'))}>
+              <ArrowDownwardIcon fontSize="small" sx={{ mr: 1 }} />Move down one
+            </MenuItem>
+            <MenuItem onClick={() => act(() => launch.mutate())}>
+              <PlayArrowIcon fontSize="small" sx={{ mr: 1 }} />Launch now
+            </MenuItem>
+          </>
+        )}
+        {failed && (
+          <MenuItem onClick={() => act(() => retry.mutate())}>
+            <ReplayIcon fontSize="small" sx={{ mr: 1 }} />Retry
+          </MenuItem>
+        )}
+      </Menu>
+    </>
+  )
+}
+
+export function GhostTasksTable({ project }: { project: string }) {
   const { canWrite } = useAuth()
 
   const q = useQuery({
@@ -120,25 +196,6 @@ export function GhostTasksTable({ project }: { project: string }) {
     () => (q.data ?? []).some((t) => t.state === 'in progress'),
     [q.data])
   const now = useNow(anyRunning)
-
-  const retry = useMutation({
-    mutationFn: (id: number) => api.retryGhostTask(project, id),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ['ghost-tasks', project] })
-      await qc.invalidateQueries({ queryKey: ['ghost-routing', project] })
-      // Both keys. The fleet table above this one is `ghost-agents` and
-      // was missing from here, so the Ghost that picked a retry up went
-      // on showing idle; `agents` is Targets' own list of who is live
-      // and still needs the nudge.
-      await qc.invalidateQueries({ queryKey: ['ghost-agents', project] })
-      await qc.invalidateQueries({ queryKey: ['agents', project] })
-    },
-  })
-
-  // Destructured, not depended on whole: React Query rebuilds
-  // the result object every render, so a memo that depends on it
-  // is rebuilt every render too and buys nothing.
-  const { mutate: retryTask, isPending: retrying } = retry
 
   // Memoised: a fresh array every render makes every memo in
   // TableGrid keyed on `columns` recompute, and TanStack rebuild
@@ -237,23 +294,17 @@ export function GhostTasksTable({ project }: { project: string }) {
       field: 'actions', headerName: '', width: 52, sortable: false,
       filterable: false, align: 'center', headerAlign: 'center',
       renderCell: (p) => {
-        // Only a failed one. A queued task is already going to run and
-        // one in flight would then exist twice.
-        if (p.row.state !== 'failed' || !canWrite(project)) return null
+        if (!canWrite(project)) return null
+        const isFailed = p.row.state === 'failed'
+        const isQueued = p.row.state === 'awaiting'
+        // A running or complete task has nothing to act on.
+        if (!isFailed && !isQueued) return null
         return (
-          <Tooltip title={`Put #${p.row.id} back in the queue. The attempt count resets.`}>
-            <span>
-              <IconButton size="small" disabled={retrying}
-                onClick={() => retryTask(p.row.id)}
-                sx={{ color: neon.muted, '&:hover': { color: neon.green } }}>
-                <ReplayIcon fontSize="small" />
-              </IconButton>
-            </span>
-          </Tooltip>
+          <TaskActions id={p.row.id} failed={isFailed} queued={isQueued} project={project} />
         )
       },
     },
-  ], [canWrite, now, project, retryTask, retrying])
+  ], [canWrite, now, project])
 
   return (
     <DataTable
