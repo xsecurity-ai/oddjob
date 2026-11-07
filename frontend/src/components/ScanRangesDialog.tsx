@@ -121,7 +121,7 @@ export function ScanRangesDialog({ project, selected = [], onClose,
    *  "has anything ever run here" but "has THIS run, on these ports".
    *  A host swept with -sS still owes a -sT, because the two learn
    *  different things. */
-  const [technique, setTechnique] = useState<'' | 'syn' | 'connect' | 'version'>('')
+  const [technique, setTechnique] = useState<'' | 'syn' | 'connect' | 'version' | 'udp'>('')
   const [picked, setPicked] = useState<Set<string>>(new Set())
   // Pre-checked: the selection is a statement of intent already made,
   // and making it again in here would be asking twice.
@@ -240,6 +240,7 @@ export function ScanRangesDialog({ project, selected = [], onClose,
       + (technique === 'syn' ? ' -sS'
          : technique === 'connect' ? ' -sT'
          : technique === 'version' ? ' -sV'
+         : technique === 'udp' ? ' -sU --top-ports 20 -sV'
          // No technique named: what the agent does on its own, which
          // depends on whether it has raw sockets.
          : ' -sV' + (priv === true ? ' -sS' : priv === null
@@ -516,27 +517,32 @@ export function ScanRangesDialog({ project, selected = [], onClose,
               <option value="masscan">masscan — fast sweep</option>
               <option value="nmap">nmap — slower, identifies services</option>
             </TextField>
+            {tool === 'nmap' && (
+              <TextField select size="small" label="Scan type" value={technique}
+                sx={{ minWidth: 200 }}
+                slotProps={{ select: { native: true } }}
+                onChange={(e) => setTechnique(
+                  e.target.value as '' | 'syn' | 'connect' | 'version' | 'udp')}
+                helperText={technique === 'udp'
+                  ? 'UDP top-20 ports with -sV on responders.'
+                  : technique
+                    ? 'Hosts already covered by this or a stronger scan are left out.'
+                    : 'Let the agent decide: -sV, plus -sS where it has raw sockets.'}>
+                <option value="">agent decides</option>
+                <option value="syn">-sS half-open — needs raw sockets</option>
+                <option value="connect">-sT full handshake</option>
+                <option value="version">-sV identify the service</option>
+                <option value="udp">-sU UDP — top ports</option>
+              </TextField>
+            )}
             <TextField size="small" label="Ports" value={ports} sx={{ flex: 1 }}
               onChange={(e) => setPorts(e.target.value)}
               helperText={tool === 'masscan'
                 ? 'masscan needs ports; the agent defaults to 80,443,8080,8443.'
-                : 'Empty lets the agent choose. Naming ports also stops it adding -F.'} />
+                : technique === 'udp'
+                  ? 'Leave empty for the top-20 UDP ports, or name specific ones.'
+                  : 'Empty lets the agent choose. Naming ports also stops it adding -F.'} />
           </Stack>
-
-          {tool === 'nmap' && (
-            <TextField select size="small" label="Scan type" value={technique}
-              slotProps={{ select: { native: true } }}
-              onChange={(e) => setTechnique(
-                e.target.value as '' | 'syn' | 'connect' | 'version')}
-              helperText={technique
-                ? 'Hosts already covered by this or a stronger scan are left out.'
-                : 'Let the agent decide: -sV, plus -sS where it has raw sockets.'}>
-              <option value="">agent decides</option>
-              <option value="syn">-sS half-open — needs raw sockets</option>
-              <option value="connect">-sT full handshake</option>
-              <option value="version">-sV identify the service</option>
-            </TextField>
-          )}
 
           {synImpossible && (
             <Alert severity="error" variant="outlined" sx={{ fontSize: 11.5 }}>

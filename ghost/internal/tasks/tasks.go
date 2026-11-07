@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -764,6 +765,48 @@ func runNmap(ctx context.Context, args map[string]any, workDir string) Result {
 }
 
 // ------------------------------------------------------------ masscan
+
+// resolveMasscanTargets turns a list of subjects into the IP addresses and
+// CIDR ranges that masscan actually accepts. Masscan has its own TCP/IP
+// stack and does no DNS: a hostname on its command line is an "unknown
+// command-line parameter", which is how every masscan task queued from a
+// name in the SCAN NEW RANGES dialog used to die. IPs and CIDRs pass
+// through untouched; names are resolved here, on the agent, where the
+// resolver the engagement trusts is running. A name that resolves to
+// nothing is reported rather than dropped: silently scanning one fewer
+// target than was asked for is a coverage gap that reads as "no ports".
+func resolveMasscanTargets(ctx context.Context, tg []string) ([]string, []string) {
+	resolved := make([]string, 0, len(tg))
+	unresolved := make([]string, 0)
+	seen := map[string]struct{}{}
+	for _, t := range tg {
+		// Already an IP literal or a CIDR: masscan takes it as-is.
+		if net.ParseIP(t) != nil || strings.Contains(t, "/") {
+			if _, ok := seen[t]; !ok {
+				seen[t] = struct{}{}
+				resolved = append(resolved, t)
+			}
+			continue
+		}
+		// A hostname: resolve it. Both A and AAAA, because masscan is
+		// happy to scan IPv6 ranges and a name with only an AAAA record
+		// is still a target.
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, t)
+		if err != nil || len(ips) == 0 {
+			unresolved = append(unresolved, t)
+			continue
+		}
+		for _, ip := range ips {
+			lit := ip.String()
+			if _, ok := seen[lit]; !ok {
+				seen[lit] = struct{}{}
+				resolved = append(resolved, lit)
+			}
+		}
+	}
+	return resolved, unresolved
+}
+
 func runMasscan(ctx context.Context, args map[string]any, workDir string) Result {
 	tg := targets(args)
 	if len(tg) == 0 {
@@ -791,9 +834,23 @@ func runMasscan(ctx context.Context, args map[string]any, workDir string) Result
 	if rate == "" {
 		rate = "1000"
 	}
+
+	// Masscan takes IPs and CIDRs only. Names are resolved here; the
+	// ones that do not resolve are said in the result rather than
+	// silently dropped.
+	ipTargets, unresolved := resolveMasscanTargets(ctx, tg)
+	if len(ipTargets) == 0 {
+		return failed("masscan: no targets resolved to an address (%s)",
+			strings.Join(tg, ", "))
+	}
+	note := ""
+	if len(unresolved) > 0 {
+		note = fmt.Sprintf(" (unresolved: %s)", strings.Join(unresolved, ", "))
+	}
+
 	argv := []string{"-oX", path, "-p", ports, "--rate", rate}
 	argv = append(argv, extraArgs(args)...)
-	argv = append(argv, tg...)
+	argv = append(argv, ipTargets...)
 
 	r := runCmd(ctx, timeout(args, 4*time.Hour), "masscan", argv...)
 	xml := readOut(path)
@@ -809,8 +866,8 @@ func runMasscan(ctx context.Context, args map[string]any, workDir string) Result
 			Error:    fmt.Sprintf("masscan did not complete: %s", detail)}
 	}
 	return Result{Status: "done", Output: xml, Stderr: tail(r.stderr, 4000),
-		Summary: fmt.Sprintf("masscan %s at %s/s over %d range(s)",
-			ports, rate, len(tg)), ExitCode: r.code}
+		Summary: fmt.Sprintf("masscan %s at %s/s over %d address(es)%s",
+			ports, rate, len(ipTargets), note), ExitCode: r.code}
 }
 
 // -------------------------------------------------------------- amass

@@ -157,8 +157,12 @@ ERROR_SLEEP = 60
 #: Named explicitly rather than taken via `-sC`, which would turn on
 #: the whole `default` category: dozens of scripts, several of which
 #: write to the target. This asks for one read-only script by name.
-NMAP_PROFILES: dict[str, dict] = {
-    "top100": {"profile": "quick"},
+#: One profile is a LIST of arg sets: each becomes its own nmap task,
+#: because a single nmap invocation cannot be both a full TCP sweep
+#: and a UDP top-ports pass at once without doubling the time on the
+#: wire. "top100" is one task; "full" is two (TCP all ports + UDP 20).
+NMAP_PROFILES: dict[str, list[dict]] = {
+    "top100": [{"profile": "quick"}],
     # No `extra`. It used to carry `--script ssl-cert`, and that is
     # now actively harmful: the ghost adds `--script` itself with
     # every -sV, and nmap honours only the LAST --script on the line,
@@ -166,7 +170,7 @@ NMAP_PROFILES: dict[str, dict] = {
     # the profile FALCON runs, so the scripts added in #115 reached
     # nothing at all until this line went. ssl-cert is still run --
     # it is named in the ghost's own set.
-    "full": {"ports": "1-65535"},
+    "full": [{"ports": "1-65535"}, {"technique": "udp"}],
 }
 
 assert set(WEB_CHOICES) == {"off", *WEB_KINDS}
@@ -792,10 +796,13 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
                         for u in allow(kind, want)[:cap]]
 
     if s.auto_nmap in NMAP_PROFILES:
-        args = NMAP_PROFILES[s.auto_nmap]
+        # The cap is on HOSTS, not tasks: a profile with two arg sets
+        # (TCP full + UDP) queues both for each host it reaches, and
+        # the limit says how many hosts this cycle touches.
         want = sorted(h for h, _ in s.targets if ("nmap", h) not in s.tasked)
-        out += [Candidate("nmap", h, dict(args), "auto_nmap")
-                for h in allow("nmap", want)[:limit]]
+        for h in allow("nmap", want)[:limit]:
+            out += [Candidate("nmap", h, dict(a), "auto_nmap")
+                    for a in NMAP_PROFILES[s.auto_nmap]]
 
     return out
 
