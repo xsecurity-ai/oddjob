@@ -1499,12 +1499,9 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
   }
 
   return (
-    // This view is the only one with content BELOW its table, so it
-    // scrolls as a page rather than letting the table fill the
-    // viewport the way every other view does.
-    //
-    // That is why the height below is explicit. `DataTable` is built
-    // to be a flex child of the app shell -- `flex: 1; min-height: 0;
+    // A flex column so each tab's table fills the remaining viewport
+    // height and scrolls internally rather than making the page scroll.
+    // `DataTable` is built to be a flex child -- `flex: 1; min-height: 0;
     // overflow: hidden` -- and in a plain block those do nothing:
     // `flex` is ignored outside a flex container, `overflow: hidden`
     // then clips, and the grid inside asks for `height: 100%` of a
@@ -1513,7 +1510,7 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
     // what this is fixing. It only became visible when #38 moved the
     // tables off MUI's DataGrid, which did its own scrolling and did
     // not care what its parent was.
-    <Box sx={{ p: 2, flex: 1, minHeight: 0, overflowY: 'auto' }}>
+    <Box sx={{ p: 2, flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       {/* One page, three views of the same fleet: what I have, what it
           is doing, and what it is saying. Debug was a second sidebar
           entry behind a dropdown, which cost a click to reach a view
@@ -1525,26 +1522,30 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
           because hiding Fleet/Tasks from a reader hid the navigation
           itself. */}
       <Tabs value={tab} onChange={(_, v) => setTab(v)}
-        sx={{ minHeight: 34, mb: 1,
+        sx={{ minHeight: 34, mb: 1, flexShrink: 0,
               borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
         <Tab value="fleet" label="Fleet" sx={TAB_SX} />
         <Tab value="tasks" label="Tasks" sx={TAB_SX} />
         {admin && <Tab value="debug" label="Debug" sx={TAB_SX} />}
       </Tabs>
-      {admin && tab === 'debug' && <GhostDebugView project={project} />}
+      {admin && tab === 'debug' && (
+        <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+          <GhostDebugView project={project} />
+        </Box>
+      )}
       {tab === 'tasks' && (
         // The routing row comes too, because the queue depth and the
         // rate live on it -- reading a task list without them is the
         // position without the direction.
-        <>
+        <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <Routing project={project} routing={routing} />
           <GhostTasksTable project={project} />
-        </>
+        </Box>
       )}
       {tab !== 'fleet' ? null : (
       <>
       <Routing project={project} routing={routing} />
-      <Box sx={{ height: '60vh', minHeight: 320,
+      <Box sx={{ flex: 1, minHeight: 320,
                  display: 'flex', flexDirection: 'column' }}>
       <DataTable
         rows={rows}
