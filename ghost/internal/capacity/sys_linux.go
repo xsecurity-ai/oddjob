@@ -5,6 +5,7 @@ package capacity
 import (
 	"context"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -104,4 +105,30 @@ func freeBytes(limit, used uint64) uint64 {
 		return 0
 	}
 	return limit - used
+}
+
+// diskFreeFraction is the share of the filesystem holding the workdir
+// that is still available.
+//
+// Read from /proc/mounts to find the device backing the workdir, then
+// statfs'd for free/total. The workdir is what fills up: spool files,
+// scanner output staged before upload, and the occasional multi-GB
+// amass graph. A full disk kills every task with "no space left on
+// device" and the operator needs to see it coming.
+func diskFreeFraction(workDir string) float64 {
+	// statfs the workdir directly; the kernel resolves the mount point.
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(workDir, &st); err != nil {
+		return Unknown
+	}
+	if st.Bsize <= 0 {
+		return Unknown
+	}
+	bsize := uint64(st.Bsize) // #nosec G115 — Bsize is a block size from statfs; the kernel never reports a negative one, and the guard above makes the conversion safe.
+	total := st.Blocks * bsize
+	free := st.Bavail * bsize // available to unprivileged users
+	if total == 0 {
+		return Unknown
+	}
+	return fractionU(free, total)
 }

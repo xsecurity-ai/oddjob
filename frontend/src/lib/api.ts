@@ -952,6 +952,12 @@ export interface GhostAgent {
    *  until it has reported. */
   capacity: number | null
   capacity_reason: string | null
+  /** Live pressure fractions in [0,1]. -1 means unmeasurable. */
+  cpu_idle: number | null
+  mem_free: number | null
+  disk_free: number | null
+  /** Recent readings for charts: newest last, max 60 entries. */
+  pressure_history: Array<{ t: string; cpu: number; mem: number; disk: number }>
   /** The effective limit: the operator's per-ghost override if set,
    *  otherwise the agent's own assessment, with the project ceiling
    *  on top of either. What the dispatcher honours. */

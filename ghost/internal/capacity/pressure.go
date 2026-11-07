@@ -93,9 +93,10 @@ type Pressure struct {
 	// ticks and reports a state change that never happened. The
 	// state is this.
 	Key string
-	// MemFree and CPUIdle are fractions in [0,1], or Unknown.
-	MemFree float64
-	CPUIdle float64
+	// MemFree, CPUIdle and DiskFree are fractions in [0,1], or Unknown.
+	MemFree  float64
+	CPUIdle  float64
+	DiskFree float64
 }
 
 // assess is the whole decision, taking the two fractions rather than
@@ -158,8 +159,14 @@ func pct(f float64) string {
 // the two thresholds mean anything -- see resumeFraction. The caller
 // holds it: this package deliberately keeps no state of its own, so
 // that every case can still be tested by passing figures in.
-func Check(ctx context.Context, blocked bool) Pressure {
-	p := Pressure{MemFree: memFreeFraction(), CPUIdle: cpuIdleFraction(ctx)}
+// `workDir` is the filesystem to measure for disk; empty means
+// unknown and DiskFree is left Unknown.
+func Check(ctx context.Context, blocked bool, workDir string) Pressure {
+	p := Pressure{
+		MemFree:  memFreeFraction(),
+		CPUIdle:  cpuIdleFraction(ctx),
+		DiskFree: diskFreeFraction(workDir),
+	}
 	p.Blocked, p.Reason, p.Key = assess(p.MemFree, p.CPUIdle, blocked)
 	return p
 }
