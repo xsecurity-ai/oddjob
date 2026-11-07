@@ -2180,6 +2180,16 @@ export const api = {
     req<{ secret: string; detector: string | null }>(
       `/api/vulns/${vulnId}/secret`),
 
+  /** Store or replace the credential on a finding by hand. */
+  storeSecret: (vulnId: number, body: {
+    secret: string
+    detector?: string | null
+    asset_url?: string | null
+    path?: string | null
+    line?: number | null
+  }) => req<{ secret: string; detector: string | null }>(
+    `/api/vulns/${vulnId}/secret`, { method: 'POST', body: JSON.stringify(body) }),
+
   /** Every stored credential, in clear, with where it came from.
    *
    *  Bulk and unmasked, which `revealSecret` deliberately is not.

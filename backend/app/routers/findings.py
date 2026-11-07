@@ -953,6 +953,62 @@ async def reveal_secret(vuln_id: int,
     return SecretOut(secret=sec.secret, detector=sec.detector)
 
 
+class SecretIn(BaseModel):
+    """A credential stored by hand against a finding."""
+    secret: str = Field(min_length=1, max_length=8000)
+    detector: str | None = Field(default=None, max_length=128)
+    asset_url: str | None = Field(default=None, max_length=2000)
+    path: str | None = Field(default=None, max_length=2000)
+    line: int | None = None
+
+
+@router.post("/vulns/{vuln_id}/secret", response_model=SecretOut, status_code=201)
+async def store_secret(vuln_id: int, body: SecretIn,
+                       user: User = Depends(get_current_user),
+                       session: AsyncSession = Depends(get_session)):
+    """Store or replace the credential on a finding by hand.
+
+    The scanner path writes this row when its detector reports a value;
+    this is the same row written by a person who found the key in a
+    config file, an environment dump, or a client-side bundle and wants
+    it kept beside the finding so the proof worker can use it.
+
+    Upsert: one credential per finding. Re-storing replaces the value
+    and origin rather than accumulating copies, which is what a re-scan
+    does and what a person correcting a typo needs.
+    """
+    row = (await session.execute(
+        select(Vuln).where(Vuln.id == vuln_id))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, "no such vulnerability")
+    target = await session.get(Target, row.target_id)
+    if target is None:
+        raise HTTPException(404, "no such vulnerability")
+    vis = await visible_project_ids(session, user)
+    if vis is not None and target.project_id not in vis:
+        raise HTTPException(404, "no such vulnerability")
+    await assert_role_for_target(session, user, target.id, "user")
+
+    sec = (await session.execute(select(FindingSecret).where(
+        FindingSecret.vuln_id == vuln_id))).scalar_one_or_none()
+    if sec is None:
+        sec = FindingSecret(vuln_id=vuln_id)
+        session.add(sec)
+    sec.secret = body.secret[:8000]
+    sec.detector = body.detector[:128] if body.detector else "manual"
+    sec.asset_url = body.asset_url[:2000] if body.asset_url else None
+    sec.path = body.path[:2000] if body.path else None
+    sec.line = body.line
+
+    await session.commit()
+    await audit.record(
+        session, "ui", "finding.secret.store", user=user, commit=True,
+        project_code=None,
+        detail=(f"stored a credential on finding {vuln_id} "
+                f"({sec.detector}) on {target.host or target.id}"))
+    return SecretOut(secret=sec.secret, detector=sec.detector)
+
+
 #: How much of a file the modal is given at once.
 #:
 #: A recovered original is a few hundred lines; a `raw` bundle is
