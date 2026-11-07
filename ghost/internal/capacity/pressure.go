@@ -33,7 +33,23 @@ import (
 // carries it as `ready: false`, which the server honours whether or
 // not an override is set — the `slots_free` path is skipped when
 // there is an override, and `ready` is not.
+// CPU and memory share the constant for now, but they could diverge:
+// running out of memory gets the agent killed mid-scan by something
+// that does not explain itself; running out of CPU makes everything
+// slow, which is unpleasant but recoverable. A queue of thousands of
+// waiting tasks argues for "slow" over "idle", so the CPU line sits a
+// little lower than the memory line.
 const reserveFraction = 0.20
+
+// cpuReserveFraction is the CPU-idle floor below which the host stops
+// starting new work. Lower than the memory reserve because CPU
+// pressure degrades gracefully (everything slows) whereas memory
+// pressure ends in the OOM killer. On a fleet with deep queues, an
+// agent that holds off at 20% idle while eight tasks still have room
+// in their slots reads as "idle ghosts" to the operator. Ten percent
+// leaves real headroom for the host's own processes without idling
+// the queue.
+const cpuReserveFraction = 0.10
 
 // resumeFraction is where it starts again, and it is deliberately
 // NOT reserveFraction.
@@ -51,6 +67,11 @@ const reserveFraction = 0.20
 // again within a beat or two rather than being held off until it is
 // nearly idle.
 const resumeFraction = 0.25
+
+// cpuResumeFraction is the CPU-idle level at which a held-off host
+// starts taking work again. Five points above cpuReserveFraction, the
+// same gap the memory thresholds keep, so the host does not flap.
+const cpuResumeFraction = 0.15
 
 // Unknown is what an unmeasurable figure reports. Negative rather
 // than zero, because zero free is the most alarming reading there is
@@ -89,19 +110,21 @@ func assess(memFree, cpuIdle float64, blocked bool) (bool, string, string) {
 	// Which line has to be crossed depends on which way we are
 	// going. Already holding off: climb above resumeFraction to
 	// start again. Working: fall below reserveFraction to stop.
-	limit := reserveFraction
+	memLimit := reserveFraction
+	cpuLimit := cpuReserveFraction
 	if blocked {
-		limit = resumeFraction
+		memLimit = resumeFraction
+		cpuLimit = cpuResumeFraction
 	}
 	switch {
-	case memFree != Unknown && memFree < limit:
+	case memFree != Unknown && memFree < memLimit:
 		return true, fmt.Sprintf(
 			"holding off: %s memory free, under the %s this host keeps spare",
-			pct(memFree), pct(limit)), "memory"
-	case cpuIdle != Unknown && cpuIdle < limit:
+			pct(memFree), pct(memLimit)), "memory"
+	case cpuIdle != Unknown && cpuIdle < cpuLimit:
 		return true, fmt.Sprintf(
 			"holding off: %s CPU idle, under the %s this host keeps spare",
-			pct(cpuIdle), pct(limit)), "cpu"
+			pct(cpuIdle), pct(cpuLimit)), "cpu"
 	}
 	return false, "", ""
 }

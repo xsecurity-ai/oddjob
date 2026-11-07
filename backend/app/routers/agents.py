@@ -2975,6 +2975,143 @@ async def retry_task(task_id: int,
         created_at=t.created_at, notes=t.error)
 
 
+@router.post("/tasks/{task_id}/order")
+async def reorder_task(task_id: int, direction: str,
+                       pr: Project = Depends(require_project("user")),
+                       user: User = Depends(get_current_user),
+                       session: AsyncSession = Depends(get_session)):
+    """Move a queued task within the queue.
+
+    `direction` is one of: top, bottom, up, down. The queue is ordered
+    by (priority DESC, id ASC) within each kind, so "top" means the
+    highest priority and lowest id among queued tasks of this kind;
+    "bottom" is the reverse. "up" and "down" swap with the adjacent
+    task in that ordering.
+
+    Only queued tasks can be reordered: a task an agent has claimed is
+    already running, and moving it would change nothing.
+    """
+    if direction not in ("top", "bottom", "up", "down"):
+        raise HTTPException(422, "direction must be top, bottom, up or down")
+    t = await session.get(AgentTask, task_id)
+    if t is None or t.project_id != pr.id:
+        raise HTTPException(404, "no such task")
+    if t.status != "queued":
+        raise HTTPException(
+            409, f"task {task_id} is {t.status}, not queued. "
+                 f"Only a waiting task can be reordered.")
+
+    # All queued tasks of the same kind and project, in dispatch order.
+    siblings = (await session.execute(
+        select(AgentTask).where(
+            AgentTask.project_id == pr.id,
+            AgentTask.kind == t.kind,
+            AgentTask.status == "queued",
+        ).order_by(AgentTask.priority.desc(), AgentTask.id)
+    )).scalars().all()
+
+    if direction == "top":
+        first = siblings[0]
+        # Give it a priority above everything else in the queue.
+        t.priority = (first.priority + 1) if first.id != t.id else max(1, t.priority + 1)
+        # And the lowest id among top-priority tasks: since ids are
+        # immutable, we simply set its priority high enough that it
+        # sorts first. If it is already first, no-op.
+        if first.id == t.id:
+            pass
+        else:
+            t.priority = max(s.priority for s in siblings) + 1
+    elif direction == "bottom":
+        last = siblings[-1]
+        if last.id == t.id:
+            pass
+        else:
+            # Priority below everything, so it sorts last.
+            t.priority = min(s.priority for s in siblings) - 1
+    elif direction == "up":
+        idx = next((i for i, s in enumerate(siblings) if s.id == t.id), None)
+        if idx is None or idx == 0:
+            return {"ok": True, "moved": False}
+        swap_with = siblings[idx - 1]
+        # Swap priorities; if equal, the id order decides, so we
+        # nudge: give this task the other's priority and vice versa.
+        t.priority, swap_with.priority = swap_with.priority, t.priority
+    elif direction == "down":
+        idx = next((i for i, s in enumerate(siblings) if s.id == t.id), None)
+        if idx is None or idx == len(siblings) - 1:
+            return {"ok": True, "moved": False}
+        swap_with = siblings[idx + 1]
+        t.priority, swap_with.priority = swap_with.priority, t.priority
+
+    await session.commit()
+    await audit.record(session, "ui", "ghost.task.reorder", user=user,
+                       project_code=pr.code,
+                       detail=f"moved {t.kind} task {t.id} {direction}",
+                       commit=True)
+    await broker.publish("agents", action="task", project=pr.code)
+    return {"ok": True, "moved": True}
+
+
+@router.post("/tasks/{task_id}/launch")
+async def launch_task_now(task_id: int,
+                          pr: Project = Depends(require_project("user")),
+                          user: User = Depends(get_current_user),
+                          session: AsyncSession = Depends(get_session)):
+    """Give a queued task to an online agent immediately, bypassing the
+    normal capacity model.
+
+    This is for "I want this scan running NOW" — the operator overrides
+    the agent's own judgement about how much it can carry. The task is
+    claimed by the least-loaded eligible agent and set to running; the
+    agent picks it up on its next heartbeat (within ~15 s).
+
+    Only one task per call: a batch override would be a different
+    feature with different failure modes.
+    """
+    t = await session.get(AgentTask, task_id)
+    if t is None or t.project_id != pr.id:
+        raise HTTPException(404, "no such task")
+    if t.status != "queued":
+        raise HTTPException(
+            409, f"task {task_id} is {t.status}, not queued. "
+                 f"Launch now only works on a task that is still waiting.")
+
+    # Find the least-loaded online agent for this project.
+    agents = (await session.execute(
+        select(Agent).where(
+            Agent.project_id == pr.id,
+            Agent.retired_at.is_(None),
+            Agent.status == "online",
+        ))).scalars().all()
+    if not agents:
+        raise HTTPException(409, "no online agents to launch this against")
+
+    # Count what each already holds.
+    load = {a.id: 0 for a in agents}
+    held = (await session.execute(
+        select(AgentTask.agent_id, func.count()).where(
+            AgentTask.project_id == pr.id,
+            AgentTask.status.in_(("claimed", "running")),
+            AgentTask.agent_id.in_([a.id for a in agents]),
+        ).group_by(AgentTask.agent_id))).all()
+    for row in held:
+        if row[0] in load:
+            load[row[0]] = row[1]
+
+    target = min(agents, key=lambda a: (load[a.id], a.id))
+    t.agent_id = target.id
+    t.status = "claimed"
+    t.claimed_at = datetime.now(UTC)
+    t.priority = max((s.priority for s in [t]), default=0)  # keep
+    await session.commit()
+    await audit.record(session, "ui", "ghost.task.launch", user=user,
+                       project_code=pr.code,
+                       detail=f"launched {t.kind} task {t.id} on {target.name}",
+                       commit=True)
+    await broker.publish("agents", action="task", project=pr.code)
+    return {"ok": True, "agent": target.name, "agent_id": target.id}
+
+
 @router.delete("/tasks/{task_id}", status_code=204)
 async def cancel_task(task_id: int,
                       pr: Project = Depends(require_project("user")),

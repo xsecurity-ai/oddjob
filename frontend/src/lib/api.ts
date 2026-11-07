@@ -1895,6 +1895,18 @@ export const api = {
     req<void>(`/api/ghosts/tasks/${id}` + qs({ project }),
               { method: 'DELETE' }),
 
+  /** Move a queued task within the queue. direction: top|bottom|up|down */
+  reorderGhostTask: (project: string, id: number, direction: string) =>
+    req<{ ok: boolean; moved: boolean }>(
+      `/api/ghosts/tasks/${id}/order?direction=${direction}` + qs({ project }),
+      { method: 'POST' }),
+
+  /** Give a queued task to the least-loaded online agent immediately. */
+  launchGhostTask: (project: string, id: number) =>
+    req<{ ok: boolean; agent: string; agent_id: number }>(
+      `/api/ghosts/tasks/${id}/launch` + qs({ project }),
+      { method: 'POST' }),
+
   agentStatus: (project: string) =>
     req<AgentStatus>('/api/agent/status' + qs({ project })),
   /** Ask in one thread. `thread` omitted means the newest open one,
