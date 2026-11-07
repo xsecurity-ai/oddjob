@@ -410,6 +410,31 @@ export function TargetsView({ project }: { project: string | null }) {
   // search box and every unrelated state change in this view.
   const columns: ColumnDef<Target>[] = useMemo(() => [
     {
+      field: 'status_icons', headerName: '', width: 60, minWidth: 60,
+      renderCell: (p) => {
+        const r = p.row as Target & { total_ports?: number; web_count?: number; total_criticals?: number }
+        return (
+          <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
+            {(r.total_ports ?? 0) > 0 && (
+              <Tooltip title="Has been port-scanned">
+                <span style={{ fontSize: 12, opacity: 0.9 }}>🔍</span>
+              </Tooltip>
+            )}
+            {(r.web_count ?? 0) > 0 && (
+              <Tooltip title="Has been web-enumerated">
+                <span style={{ fontSize: 12, opacity: 0.9 }}>🌐</span>
+              </Tooltip>
+            )}
+            {(r.total_criticals ?? 0) > 0 && (
+              <Tooltip title="Has critical findings">
+                <span style={{ fontSize: 12, opacity: 0.9 }}>🔴</span>
+              </Tooltip>
+            )}
+          </Box>
+        )
+      },
+    },
+    {
       field: 'host', headerName: 'Host', flex: 2, minWidth: 230,
       renderCell: (p) => (
         <Box
@@ -423,10 +448,11 @@ export function TargetsView({ project }: { project: string | null }) {
     },
     {
       field: 'kind', headerName: 'Type', width: widths.kind,
-      type: 'singleSelect', valueOptions: ['host', 'mobile', 'cloud'],
+      type: 'singleSelect', valueOptions: ['host', 'mobile', 'cloud', 'repo'],
       renderCell: (p) => {
         const c = p.value === 'mobile' ? neon.purple
-          : p.value === 'cloud' ? neon.cyan : neon.muted
+          : p.value === 'cloud' ? neon.cyan
+          : p.value === 'repo' ? '#a78bfa' : neon.muted
         // The provider is the useful half of "cloud" — knowing it is a
         // bucket somewhere is less use than knowing whose.
         const label = p.value === 'cloud' && p.row.provider

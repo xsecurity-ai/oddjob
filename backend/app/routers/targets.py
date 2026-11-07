@@ -21,6 +21,7 @@ from ..models import (
     TargetOrigin,
     User,
     Vuln,
+    WebAddress,
     WebAssetRef,
     target_address_links,
 )
@@ -65,17 +66,21 @@ def _counts_query():
          .group_by(Poc.target_id).subquery())
     s = (select(Service.target_id.label("tid"), func.count().label("total_ports"))
          .where(Service.state == "open").group_by(Service.target_id).subquery())
+    w = (select(WebAddress.target_id.label("tid"), func.count().label("web_count"))
+         .group_by(WebAddress.target_id).subquery())
     stmt = (select(Target, Project.code,
                    func.coalesce(v.c.total_vulns, 0).label("total_vulns"),
                    func.coalesce(v.c.total_criticals, 0).label("total_criticals"),
                    func.coalesce(v.c.total_highs, 0).label("total_highs"),
                    func.coalesce(p.c.total_pocs, 0).label("total_pocs"),
-                   func.coalesce(s.c.total_ports, 0).label("total_ports"))
+                   func.coalesce(s.c.total_ports, 0).label("total_ports"),
+                   func.coalesce(w.c.web_count, 0).label("web_count"))
             .join(Project, Project.id == Target.project_id)
             .outerjoin(v, v.c.tid == Target.id)
             .outerjoin(p, p.c.tid == Target.id)
-            .outerjoin(s, s.c.tid == Target.id))
-    return stmt, v, p, s
+            .outerjoin(s, s.c.tid == Target.id)
+            .outerjoin(w, w.c.tid == Target.id))
+    return stmt, v, p, s, w
 
 
 # Derived from the schema rather than written out, so a column added to the
@@ -86,7 +91,7 @@ def _keys(model, *computed) -> tuple[str, ...]:
 
 
 _TARGET_KEYS = _keys(TargetOut, "project_code", "total_vulns", "total_criticals",
-                     "total_highs", "total_pocs", "total_ports")
+                     "total_highs", "total_pocs", "total_ports", "web_count")
 _SERVICE_KEYS = _keys(ServiceOut, "host", "project_code")
 # The lifecycle three are DERIVED -- worked out from the sweep table
 # per request, not columns on the row -- so they are excluded here
@@ -170,7 +175,7 @@ def _out(row) -> TargetOut:
         **{k: getattr(t, k) for k in _TARGET_KEYS},
         project_code=row[1],
         total_vulns=row[2], total_criticals=row[3], total_highs=row[4],
-        total_pocs=row[5], total_ports=row[6],
+        total_pocs=row[5], total_ports=row[6], web_count=row[7],
     )
 
 
@@ -191,7 +196,7 @@ async def list_targets(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    stmt, v, p, s = _counts_query()
+    stmt, *_ = _counts_query()
     vis = await visible_project_ids(session, user)
     if vis is not None:
         stmt = stmt.where(Target.project_id.in_(vis))

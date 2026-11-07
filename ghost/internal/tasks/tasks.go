@@ -88,6 +88,11 @@ var Runners = map[string]Runner{
 	"replay":     runReplay,
 	"nslookup":   runNSLookup,
 	"reverse_ip": runReverseIP,
+	// Source code analysis: clone a repo, run the tool, ship the
+	// native output home. The backend has an importer for each.
+	"semgrep":    runSemgrep,
+	"trufflehog": runTrufflehog,
+	"osv":        runOSV,
 	"install":    runInstall,
 }
 
@@ -1253,6 +1258,163 @@ func Decode(raw json.RawMessage) map[string]any {
 		_ = json.Unmarshal(raw, &m)
 	}
 	return m
+}
+
+// ---------------------------------------------------------- code analysis
+// Source code scanners: clone a repo (or scan a path), run the tool,
+// ship the native output home. The backend has an importer for each
+// format (SARIF for semgrep/osv, native JSON for trufflehog).
+
+// strOr reads a string arg with a default.
+func strOr(args map[string]any, key, def string) string {
+	if v, ok := args[key].(string); ok && v != "" {
+		return v
+	}
+	return def
+}
+
+// cloneRepo clones a git repository into workDir and returns the local path.
+// Shallow by default (depth 1); full history when depth is 0.
+func cloneRepo(ctx context.Context, url, branch, workDir string, depth int) (string, error) {
+	dir := filepath.Join(workDir, "repo")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir: %w", err)
+	}
+	var argv []string
+	if depth > 0 {
+		argv = append(argv, "--depth", strconv.Itoa(depth))
+	}
+	if branch != "" && branch != "main" && branch != "master" {
+		argv = append(argv, "--branch", branch)
+	}
+	argv = append(argv, "--single-branch", url, ".")
+	cmd := exec.CommandContext(ctx, "git", argv...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git clone: %w: %s", err, tail(string(out), 400))
+	}
+	return dir, nil
+}
+
+func runSemgrep(ctx context.Context, args map[string]any, workDir string) Result {
+	repoURL := strOr(args, "repo_url", "")
+	if repoURL == "" {
+		tg := subjects(args, "target")
+		if len(tg) > 0 {
+			repoURL = tg[0]
+		}
+	}
+	if repoURL == "" {
+		return failed("semgrep needs `repo_url` or `target`")
+	}
+	if tools.Path("semgrep") == "" {
+		return failed("semgrep is not installed on this agent")
+	}
+	branch := strOr(args, "branch", "")
+	config := strOr(args, "config", "auto")
+	depth := intOr(args, "depth", 1)
+
+	dir, err := cloneRepo(ctx, repoURL, branch, workDir, depth)
+	if err != nil {
+		return failed("clone: %v", err)
+	}
+
+	outPath := filepath.Join(workDir, "semgrep.sarif")
+	argv := []string{"scan", "--sarif", "--output", outPath, "--config", config, dir}
+	r := runCmd(ctx, timeout(args, 2*time.Hour), "semgrep", argv...)
+	out := readOut(outPath)
+	if r.code != 0 && out == "" {
+		return failed("semgrep did not run (exit %d): %s", r.code, tail(r.stderr, 400))
+	}
+	n := countLines(out)
+	return Result{Status: "done", Output: out, Stderr: tail(r.stderr, 4000),
+		Summary:  fmt.Sprintf("semgrep on %s: %d line(s) of SARIF", repoURL, n),
+		ExitCode: r.code}
+}
+
+func runTrufflehog(ctx context.Context, args map[string]any, workDir string) Result {
+	repoURL := strOr(args, "repo_url", "")
+	if repoURL == "" {
+		tg := subjects(args, "target")
+		if len(tg) > 0 {
+			repoURL = tg[0]
+		}
+	}
+	if repoURL == "" {
+		return failed("trufflehog needs `repo_url` or `target`")
+	}
+	if tools.Path("trufflehog") == "" {
+		return failed("trufflehog is not installed on this agent")
+	}
+	branch := strOr(args, "branch", "")
+	fullHistory := boolOr(args, "full_history", false)
+	depth := intOr(args, "depth", 1)
+	if fullHistory {
+		depth = 0
+	}
+
+	dir, err := cloneRepo(ctx, repoURL, branch, workDir, depth)
+	if err != nil {
+		return failed("clone: %v", err)
+	}
+
+	outPath := filepath.Join(workDir, "trufflehog.json")
+	// Scan the local directory with full git history when requested.
+	var argv []string
+	if fullHistory {
+		argv = append(argv, "git", "--json", "--fail", "--no-update", "--only-verified", dir)
+	} else {
+		argv = append(argv, "filesystem", "--json", "--fail", "--no-update", dir)
+	}
+	r := runCmd(ctx, timeout(args, 2*time.Hour), "trufflehog", argv...)
+	out := readOut(outPath)
+	if out == "" {
+		// Trufflehog writes to stdout when no output file is set.
+		out = r.stdout
+	}
+	if r.code != 0 && out == "" {
+		return failed("trufflehog did not run (exit %d): %s", r.code, tail(r.stderr, 400))
+	}
+	n := countLines(out)
+	return Result{Status: "done", Output: out, Stderr: tail(r.stderr, 4000),
+		Summary:  fmt.Sprintf("trufflehog on %s: %d line(s)", repoURL, n),
+		ExitCode: r.code}
+}
+
+func runOSV(ctx context.Context, args map[string]any, workDir string) Result {
+	repoURL := strOr(args, "repo_url", "")
+	if repoURL == "" {
+		tg := subjects(args, "target")
+		if len(tg) > 0 {
+			repoURL = tg[0]
+		}
+	}
+	if repoURL == "" {
+		return failed("osv needs `repo_url` or `target`")
+	}
+	if tools.Path("osv-scanner") == "" {
+		return failed("osv-scanner is not installed on this agent")
+	}
+	branch := strOr(args, "branch", "")
+	depth := intOr(args, "depth", 1)
+
+	dir, err := cloneRepo(ctx, repoURL, branch, workDir, depth)
+	if err != nil {
+		return failed("clone: %v", err)
+	}
+
+	outPath := filepath.Join(workDir, "osv.sarif")
+	argv := []string{"scan", "--format", "sarif", "--output", outPath, dir}
+	r := runCmd(ctx, timeout(args, 2*time.Hour), "osv-scanner", argv...)
+	out := readOut(outPath)
+	if r.code != 0 && out == "" {
+		return failed("osv-scanner did not run (exit %d): %s", r.code, tail(r.stderr, 400))
+	}
+	n := countLines(out)
+	return Result{Status: "done", Output: out, Stderr: tail(r.stderr, 4000),
+		Summary:  fmt.Sprintf("osv-scanner on %s: %d line(s) of SARIF", repoURL, n),
+		ExitCode: r.code}
 }
 
 var _ = filepath.Join

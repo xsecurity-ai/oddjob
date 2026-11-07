@@ -166,6 +166,14 @@ IMPACT: dict[str, str] = {
     #: the thing that triggers it, which is the same act.
     "nuclei_confirm": "state_changing",
 
+    #: Source code analysis: reads source files, writes nothing to the
+    #: target. The repo is cloned locally and analysed in-process; no
+    #: network traffic reaches the client's estate (except the initial
+    #: git fetch, which is a GET).
+    "semgrep": "read_only",
+    "trufflehog": "read_only",
+    "osv": "read_only",
+
     # ---- not pointed at the client at all ------------------------
     #: Installs a tool on the ghost's own host. Nothing leaves it.
     "install": "internal",

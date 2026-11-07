@@ -321,6 +321,12 @@ TASK_KINDS: dict[str, str | None] = {
     #: and the discovery run never happened.
     "nuclei_confirm": "nuclei",
     "httpx": "httpx",
+    #: Source code analysis: SAST (semgrep), secret scanning (trufflehog),
+    #: and SCA (osv-scanner). All output SARIF or native JSON that the
+    #: corresponding importers parse into findings with file:line.
+    "semgrep": "sarif",
+    "trufflehog": "trufflehog",
+    "osv": "sarif",
     "nslookup": None,
     "reverse_ip": None,
     #: One edited HTTP request, sent verbatim from inside the client's
@@ -1100,6 +1106,12 @@ KIND_TOOL: dict[str, str] = {
     "nuclei_tech": "nuclei",
     "nuclei_confirm": "nuclei",
     "httpx": "httpx",
+    # Source code analysis tools. Each requires its own binary on the
+    # ghost; they are installable (see ghost/internal/tools/tools.go)
+    # but not in the baseline because not every engagement needs them.
+    "semgrep": "semgrep",
+    "trufflehog": "trufflehog",
+    "osv": "osv-scanner",
 }
 
 #: Everything an agent is expected to have. Returned by the API so the
@@ -3210,7 +3222,8 @@ async def import_task_result(agent_id: int, task_id: int,
     res = await _run(session, pr, t.output, t.import_as,
                      f"ghost:{a.name if a else agent_id}",
                      mode=body.mode,
-                     decisions=dict(body.decisions))
+                     decisions=dict(body.decisions),
+                     target_host=t.subject)
     t.import_result = res.model_dump_json()
     await session.commit()
     await broker.publish("agents", action="result", project=pr.code)
@@ -4514,7 +4527,8 @@ async def submit_result(task_id: int, body: ResultIn,
         from .scans import _run
         try:
             res = await _run(session, pr, t.output, t.import_as,
-                             f"ghost:{a.name}", mode="strict", decisions={})
+                             f"ghost:{a.name}", mode="strict", decisions={},
+                             target_host=t.subject)
             imported = json.loads(res.model_dump_json())
             # Said in the log as well as carried in the result. This
             # is the unattended path -- a nuclei template release

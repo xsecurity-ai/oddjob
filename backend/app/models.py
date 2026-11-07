@@ -74,7 +74,8 @@ SEVERITIES = ("critical", "high", "medium", "low", "info")
 #: What a person concluded about a finding. See `Vuln.triage`.
 #: `needs_investigating` is the default and the only one a scanner
 #: can produce; the other two are somebody's judgement.
-TRIAGE_STATES = ("needs_investigating", "true_positive", "false_positive")
+TRIAGE_STATES = ("needs_investigating", "true_positive", "false_positive",
+                 "verified_benign")
 PROJECT_STATUSES = ("active", "paused", "complete", "archived")
 
 #: What `Project.auto_web` may be.
@@ -479,13 +480,17 @@ class Target(Base, TimestampMixin):
     #:   cloud   a managed resource — a bucket, a function, a tenant,
     #:           an account — named by whatever identifies it with the
     #:           provider
+    #:   repo    a source code repository, named by its clone URL or
+    #:           org/slug. No IP, no liveness; findings carry file:line.
     #:
     #: The distinction is not cosmetic. A mobile app has no address to
     #: scan, so an empty `ip_addresses` on one is a fact, not a gap in
     #: coverage, and liveness means nothing for it. A cloud resource is
     #: different again: it often DOES resolve, so its addresses are
     #: kept, but "no open ports" on a storage bucket is not the finding
-    #: that the same result on a server would be.
+    #: that the same result on a server would be. A repo is like mobile
+    #: in having no address; findings on it carry file_path and
+    #: line_number rather than port and protocol.
     kind: Mapped[str] = mapped_column(
         String(16), default="host", server_default="host", index=True)
     #: Which cloud, for `kind="cloud"`. Free text rather than an enum
@@ -928,6 +933,11 @@ class Vuln(Base, TimestampMixin):
     #: The manifest of the run that last REPORTED it, so a later
     #: sweep can be checked for being able to find the same thing.
     found_by_manifest: Mapped[str | None] = mapped_column(String(32))
+    #: Source location for code findings (SAST, SCA). NULL for network
+    #: findings. The file path is relative to the repo root; combined with
+    #: the target's host (the repo slug) it identifies the exact position.
+    file_path: Mapped[str | None] = mapped_column(String(1024))
+    line_number: Mapped[int | None] = mapped_column(Integer)
 
     target: Mapped[Target] = relationship(back_populates="vulns")
 

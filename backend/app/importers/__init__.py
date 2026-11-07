@@ -22,7 +22,9 @@ from . import (
     nessus,
     nmap,
     nuclei,
+    sarif,
     screenshot,
+    trufflehog,
     vhost,
 )
 from .model import (
@@ -83,6 +85,11 @@ REGISTRY = {
     #: first. Both tools write `found`, `wordlist` and `hits`.
     "vhost":       ("Ghost virtual-host discovery JSON", vhost.parse),
     "gobuster":    ("Ghost content discovery JSON", gobuster.parse),
+    #: SARIF before trufflehog: both are JSON, but SARIF's top-level
+    #: `"version"` + `"runs"` keys are unambiguous and a trufflehog
+    #: document would never match them.
+    "sarif":       ("SARIF 2.1 (semgrep, CodeQL, grype, osv)", sarif.parse),
+    "trufflehog":  ("Trufflehog JSON (secret scanning)", trufflehog.parse),
     "cobaltstrike": ("Cobalt Strike beacons", c2.parse_cobaltstrike),
     "mythic":      ("Mythic callbacks", c2.parse_mythic),
     "merlin":      ("Merlin agents", c2.parse_merlin),
@@ -126,6 +133,8 @@ _DETECTORS = {
     # would import as content discovery -- hostnames filed as paths.
     "vhost": vhost.looks_like,
     "gobuster": gobuster.looks_like,
+    "sarif": sarif.looks_like,
+    "trufflehog": trufflehog.looks_like,
     "cobaltstrike": c2.looks_like_cobaltstrike,
     "mythic": c2.looks_like_mythic,
     "merlin": c2.looks_like_merlin,
@@ -134,8 +143,13 @@ _DETECTORS = {
 }
 
 
-def parse(text: str, fmt: str = "auto") -> tuple[str, ParsedScan]:
-    """-> (format name, ParsedScan). Raises ImportError_ on a bad document."""
+def parse(text: str, fmt: str = "auto", *, target_host: str | None = None) -> tuple[str, ParsedScan]:
+    """-> (format name, ParsedScan). Raises ImportError_ on a bad document.
+
+    `target_host` is passed through to importers that need it (SARIF,
+    trufflehog) to attribute findings to a specific repo target. Importers
+    that don't use it simply ignore the keyword.
+    """
     if fmt in ("", "auto", None):
         found = detect(text)
         if not found:
@@ -143,7 +157,12 @@ def parse(text: str, fmt: str = "auto") -> tuple[str, ParsedScan]:
         fmt = found
     if fmt not in REGISTRY:
         raise ImportError_(f"unknown format {fmt!r}. Supported: {', '.join(REGISTRY)}")
-    return fmt, REGISTRY[fmt][1](text)
+    parser = REGISTRY[fmt][1]
+    try:
+        return fmt, parser(text, target_host=target_host)
+    except TypeError:
+        # Importers that don't accept target_host (all the network ones).
+        return fmt, parser(text)
 
 
 #: Formats that can be read from a file a chunk at a time instead of

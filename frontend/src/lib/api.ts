@@ -116,8 +116,9 @@ export interface Target {
   id: number; host: string; project_id: number; project_code: string
   /** host: a machine at an address. mobile: an application named by
    *  its bundle/package id, with no IP and no meaningful liveness.
-   *  cloud: a managed resource, named as its provider names it. */
-  kind: 'host' | 'mobile' | 'cloud'
+   *  cloud: a managed resource, named as its provider names it.
+   *  repo: a source code repository, named by its clone URL or org/slug. */
+  kind: 'host' | 'mobile' | 'cloud' | 'repo'
   /** Which cloud, for kind=cloud. */
   provider: string | null
   /** The first address observed, or null. A host legitimately has
@@ -166,6 +167,8 @@ export interface Target {
   geo_pending: number
   total_vulns: number; total_criticals: number; total_highs: number
   total_pocs: number; total_ports: number
+  /** Number of web addresses recorded for this target. */
+  web_count: number
   created_at: string; updated_at: string
 }
 
@@ -214,6 +217,8 @@ export interface Vuln {
    *  a scanner has not decided anything. */
   triage: string
   port: number | null; protocol: string | null
+  /** Source location for code findings (SAST/SCA). null for network. */
+  file_path: string | null; line_number: number | null
   description: string | null; remediation: string | null
   external_id: string | null
   created_at: string; updated_at: string

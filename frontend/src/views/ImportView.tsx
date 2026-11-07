@@ -68,6 +68,8 @@ const BLURB: Record<string, string> = {
   burp: 'Burp → Scanner → Report issues → XML',
   nuclei: 'nuclei -jsonl',
   httpx: 'httpx -json (also reads naabu)',
+  sarif: 'semgrep --sarif, CodeQL --sarif, grype --output sarif, osv-scanner --format=sarif',
+  trufflehog: 'trufflehog file system / git --json',
   cobaltstrike: 'Beacon metadata as JSON',
   mythic: 'Mythic callbacks as JSON',
   merlin: 'Merlin agents as JSON',

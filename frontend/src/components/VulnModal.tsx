@@ -282,6 +282,9 @@ export function VulnModal({ id, onClose, onHost }: {
                 ['status', data.status],
                 ['first seen on', data.host],
                 ['port', data.port ? `${data.port}/${data.protocol ?? 'tcp'}` : '—'],
+                ...(data.file_path
+                  ? [['location', `${data.file_path}${data.line_number ? `:${data.line_number}` : ''}`]]
+                  : []),
                 ['identifier', data.external_id ?? '—'],
                 ['engagement', data.project_code],
               ] as const).map(([k, v]) => (
