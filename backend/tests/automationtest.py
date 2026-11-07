@@ -231,8 +231,12 @@ for _s in (Snapshot(auto_nmap="full", targets=BOTH, scope=SCOPED),
            Snapshot(auto_resolve_ips=True, targets=BOTH, scope=SCOPED)):
     _queued = len([c for c in plan(_s)
                    if _au.cleared(_s.scope, c.kind, c.subject)])
+    # A multi-task profile (TCP + UDP) queues len(profile) candidates
+    # per host; the gap counts hosts. Single-task policies are 1:1.
+    _n = len(NMAP_PROFILES.get(_s.auto_nmap, [{}])) \
+        if _s.auto_nmap != "off" else 1
     check("the gap report and the gated plan agree on the total",
-          sum(x.outstanding for x in _au.gaps(_s)) == _queued,
+          sum(x.outstanding for x in _au.gaps(_s)) * _n == _queued,
           f"gaps={[(x.policy, x.outstanding) for x in _au.gaps(_s)]} "
           f"plan={_queued}")
 
@@ -268,14 +272,14 @@ MANY.append(("zzz.acme.example", True))
 
 p1 = plan(Snapshot(auto_nmap="full", targets=MANY, scope=STARVE), limit=1)
 check("a capped cycle reaches the in-scope host past the refused ones",
-      [c.subject for c in p1] == ["zzz.acme.example"],
+      [c.subject for c in p1] == ["zzz.acme.example"] * len(NMAP_PROFILES["full"]),
       [c.subject for c in p1])
 
-# ...and with no cap it is still the only candidate, so the filter is
+# ...and with no cap it is still the only host, so the filter is
 # the gate and not an artefact of the slice.
 pall = plan(Snapshot(auto_nmap="full", targets=MANY, scope=STARVE))
-check("...and it is the only candidate at all",
-      [c.subject for c in pall] == ["zzz.acme.example"],
+check("...and it is the only host at all",
+      [c.subject for c in pall] == ["zzz.acme.example"] * len(NMAP_PROFILES["full"]),
       [c.subject for c in pall])
 
 # The same shape for a web policy, which is capped by WEB_PER_CYCLE
@@ -292,13 +296,17 @@ check("a web policy is not starved by its per-cycle cap either",
 # which is what every Snapshot built by hand in this file relies on.
 pn = plan(Snapshot(auto_nmap="full", targets=MANY), limit=1)
 check("with no gate the cap alone decides, as it always did",
-      len(pn) == 1 and pn[0].subject == "aaa000.acme.example",
+      len(pn) == len(NMAP_PROFILES["full"])
+      and all(c.subject == "aaa000.acme.example" for c in pn),
       [c.subject for c in pn])
 
 # The report and the planner still agree once the gate is in play.
+# A profile with N arg sets queues N candidates per host, so the plan
+# is hosts × N while the gap counts hosts.
 _st = Snapshot(auto_nmap="full", targets=MANY, scope=STARVE)
 check("the gap report agrees with what the planner can reach",
-      sum(x.outstanding for x in _au.gaps(_st)) == len(plan(_st)),
+      sum(x.outstanding for x in _au.gaps(_st)) * len(NMAP_PROFILES["full"])
+      == len(plan(_st)),
       [(x.policy, x.outstanding) for x in _au.gaps(_st)])
 
 
@@ -358,6 +366,9 @@ check("...top100 is nmap's own -F, not a port list of ours",
 p = plan(Snapshot(auto_nmap="full", targets=ESTATE))
 check("...and full names the range, because -p- and -F are exclusive",
       p[0].args.get("ports") == "1-65535", p[0].args)
+check("...and full also queues a UDP top-ports pass per host",
+      len(p) == 8 and any(c.args.get("technique") == "udp" for c in p),
+      [(c.subject, c.args) for c in p])
 # No profile names its own scripts any more, and this is the
 # assertion that keeps it that way. The ghost adds `--script` with
 # every -sV, nmap honours only the LAST --script on the line, and a
