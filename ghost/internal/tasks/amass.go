@@ -150,9 +150,31 @@ func runAmassLib(ctx context.Context, args map[string]any, _ string) Result {
 	}
 
 	seen := map[string]struct{}{}
+	recordTypes := map[string][]string{} // name -> sorted list of record type labels
 	for _, a := range assets {
-		if f, ok := a.Asset.(domain.FQDN); ok {
-			seen[strings.ToLower(strings.TrimSuffix(f.Name, "."))] = struct{}{}
+		f, ok := a.Asset.(domain.FQDN)
+		if !ok {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSuffix(f.Name, "."))
+		seen[name] = struct{}{}
+		// Query the graph for this FQDN's outgoing relations to learn
+		// which DNS record types it has. The relation labels are the
+		// lowercase rtype strings netmap uses on its edges.
+		if rels, err := graph.DB.OutgoingRelations(a, cfg.CollectionStartTime,
+			"a_record", "aaaa_record", "cname_record", "mx_record",
+			"ns_record", "srv_record", "ptr_record"); err == nil {
+			set := map[string]struct{}{}
+			for _, r := range rels {
+				if r.Type != "" {
+					set[r.Type] = struct{}{}
+				}
+			}
+			for rt := range set {
+				// Strip the "_record" suffix for a clean label.
+				label := strings.TrimSuffix(rt, "_record")
+				recordTypes[name] = append(recordTypes[name], label)
+			}
 		}
 	}
 	names := make([]string, 0, len(seen))
@@ -176,12 +198,17 @@ func runAmassLib(ctx context.Context, args map[string]any, _ string) Result {
 	if !cfg.Passive {
 		mode = "active"
 	}
+	// Sort each name's record types for deterministic output.
+	for n := range recordTypes {
+		sort.Strings(recordTypes[n])
+	}
 	return Result{
 		Status: "done",
 		Output: recon.JSON(map[string]any{
 			"domain": dom, "names": names, "mode": mode,
-			"complete": runErr == nil,
-			"seconds":  int(time.Since(started).Seconds()),
+			"complete":     runErr == nil,
+			"seconds":      int(time.Since(started).Seconds()),
+			"record_types": recordTypes,
 		}),
 		Stderr: strings.TrimSpace(note),
 		Summary: fmt.Sprintf("amass found %d name(s) under %s in %ds%s",
