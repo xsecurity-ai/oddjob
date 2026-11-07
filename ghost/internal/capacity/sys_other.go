@@ -22,3 +22,5 @@ import "context"
 func memFreeFraction() float64 { return Unknown }
 
 func cpuIdleFraction(_ context.Context) float64 { return Unknown }
+
+func diskFreeFraction(_ string) float64 { return Unknown }

@@ -84,11 +84,11 @@ func TestFractionGuards(t *testing.T) {
 // either real figures in range, or Unknown. What it must never do is
 // invent a reading, because a wrong one here stops a fleet.
 func TestCheckIsSaneOnThisHost(t *testing.T) {
-	p := Check(context.Background(), false)
+	p := Check(context.Background(), false, t.TempDir())
 	for _, f := range []struct {
 		name string
 		v    float64
-	}{{"MemFree", p.MemFree}, {"CPUIdle", p.CPUIdle}} {
+	}{{"MemFree", p.MemFree}, {"CPUIdle", p.CPUIdle}, {"DiskFree", p.DiskFree}} {
 		if f.v == Unknown {
 			continue
 		}

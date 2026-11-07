@@ -2886,6 +2886,16 @@ class Agent(Base, TimestampMixin):
     capacity: Mapped[int | None] = mapped_column(Integer)
     capacity_reason: Mapped[str | None] = mapped_column(String(300))
 
+    #: Live pressure fractions in [0,1], reported by the agent on each
+    #: heartbeat. NULL means the agent has not sent them (older version)
+    #: or could not measure. -1 means "measured but unknown" (non-Linux).
+    cpu_idle: Mapped[float | None] = mapped_column(Float)
+    mem_free: Mapped[float | None] = mapped_column(Float)
+    disk_free: Mapped[float | None] = mapped_column(Float)
+    #: JSON array of recent readings for the charts, newest last.
+    #: Each entry: {"t": "2026-11-07T15:56:48Z", "cpu": 0.3, "mem": 0.7, "disk": 0.85}
+    pressure_history: Mapped[str | None] = mapped_column(Text)
+
     #: What an OPERATOR says this one ghost may run at once, overriding
     #: the agent's own assessment. NULL means "let the agent decide",
     #: which is the default and right almost always.

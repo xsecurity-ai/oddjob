@@ -435,6 +435,12 @@ type HeartbeatReq struct {
 	// state and not a red cross against a port that is very likely
 	// fine.
 	Listeners []shell.Status `json:"listeners,omitempty"`
+	// Pressure fractions in [0,1], for the fleet table's tooltip.
+	// -1 means unmeasurable. Sent every beat so the operator hovering
+	// a row sees the live figure without opening the agent's logs.
+	CPUIdle  float64 `json:"cpu_idle,omitempty"`
+	MemFree  float64 `json:"mem_free,omitempty"`
+	DiskFree float64 `json:"disk_free,omitempty"`
 }
 
 func (c *Client) Heartbeat(ctx context.Context, req HeartbeatReq) (*HeartbeatResp, error) {

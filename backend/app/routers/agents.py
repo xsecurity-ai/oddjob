@@ -418,6 +418,12 @@ class AgentOut(BaseModel):
     #: {removed, kept, failed}. `failed` is cleanup still owed by hand.
     retired_cleanup: dict | None = None
     capacity_reason: str | None = None
+    #: Live pressure fractions in [0,1]. -1 means unmeasurable.
+    cpu_idle: float | None = None
+    mem_free: float | None = None
+    disk_free: float | None = None
+    #: Recent readings for charts: [{"t":..., "cpu":..., "mem":..., "disk":...}]
+    pressure_history: list[dict] = []
     #: {tool: why} for everything this agent tried to install and could
     #: not. Work needing one of these is not sent here.
     missing_tools: dict[str, str] = {}
@@ -725,6 +731,9 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         queued_tasks=queued, running_tasks=running,
         completed_tasks=completed, failed_tasks=failed,
         capacity=a.capacity, capacity_reason=a.capacity_reason,
+        cpu_idle=a.cpu_idle, mem_free=a.mem_free, disk_free=a.disk_free,
+        pressure_history=(json.loads(a.pressure_history)
+                          if a.pressure_history else []),
         missing_tools=_jdict(a.missing_tools),
         cannot_run=sorted(k for k, tool in KIND_TOOL.items()
                           if not _has_tool(a, k)),
@@ -3432,6 +3441,10 @@ class HeartbeatIn(BaseModel):
     #: right now, and one name for two different answers is how a
     #: fleet table ends up lying about why a host is idle.
     unaffordable: list[str] = []
+    #: Live pressure fractions in [0,1]. -1 means unmeasurable.
+    cpu_idle: float | None = None
+    mem_free: float | None = None
+    disk_free: float | None = None
 
 
 class RetiredIn(BaseModel):
@@ -3702,6 +3715,30 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
         a.capacity = max(1, int(body.capacity))
     if body is not None and body.capacity_reason:
         a.capacity_reason = body.capacity_reason[:300]
+    # Live pressure fractions for the fleet table tooltip and charts.
+    # -1 means the agent measured but could not determine (non-Linux).
+    if body is not None:
+        if body.cpu_idle is not None:
+            a.cpu_idle = body.cpu_idle
+        if body.mem_free is not None:
+            a.mem_free = body.mem_free
+        if body.disk_free is not None:
+            a.disk_free = body.disk_free
+        # Append to the history ring buffer (max 60 entries ≈ 15 min).
+        if body.cpu_idle is not None or body.mem_free is not None:
+            hist = []
+            if a.pressure_history:
+                try:
+                    hist = json.loads(a.pressure_history)
+                except (ValueError, TypeError):
+                    hist = []
+            hist.append({
+                "t": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "cpu": body.cpu_idle if body.cpu_idle is not None else -1,
+                "mem": body.mem_free if body.mem_free is not None else -1,
+                "disk": body.disk_free if body.disk_free is not None else -1,
+            })
+            a.pressure_history = json.dumps(hist[-60:])
     # Sent back on every heartbeat as `max_parallel`. It used to be the
     # project ceiling, which the agent ignored and which told it
     # nothing about itself; it is the effective per-agent number now,

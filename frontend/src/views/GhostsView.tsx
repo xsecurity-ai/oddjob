@@ -78,6 +78,128 @@ function ago(iso: string | null): string {
   return `${Math.floor(s / 86400)}d ago`
 }
 
+/** Format a [0,1] fraction as a percentage for the tooltip. */
+function pct(f: number | null | undefined): string {
+  if (f == null || f < 0) return '—'
+  return `${Math.round((1 - f) * 100)}%`
+}
+
+/** The tooltip text for a ghost row's pressure. */
+function pressureTooltip(row: GhostAgent): string {
+  const cpu = pct(row.cpu_idle)
+  const mem = pct(row.mem_free)
+  const disk = pct(row.disk_free)
+  return `CPU load ${cpu} · Mem used ${mem} · Disk used ${disk}`
+}
+
+/** A minimal inline SVG sparkline. Values are fractions in [0,1]; -1 = unknown. */
+function Sparkline({ values, colour, label }: {
+  values: number[]; colour: string; label: string
+}) {
+  const W = 120, H = 36, PAD = 2
+  const valid = values.filter(v => v >= 0)
+  if (valid.length < 2) {
+    return (
+      <Box sx={{ width: W, height: H + 14 }}>
+        <Typography sx={{ fontSize: 9, color: neon.muted, lineHeight: 1 }}>{label}</Typography>
+        <Typography sx={{ fontSize: 10, color: neon.muted }}>—</Typography>
+      </Box>
+    )
+  }
+  const n = values.length
+  const pts = values.map((v, i) => {
+    if (v < 0) return null
+    const x = PAD + (i / (n - 1)) * (W - 2 * PAD)
+    const y = PAD + (1 - v) * (H - 2 * PAD)
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }).filter(Boolean).join(' ')
+  const last = valid[valid.length - 1]
+  return (
+    <Box sx={{ width: W, height: H + 14 }}>
+      <Typography sx={{ fontSize: 9, color: neon.muted, lineHeight: 1 }}>{label}</Typography>
+      <svg width={W} height={H} style={{ display: 'block' }}>
+        <polyline points={pts} fill="none" stroke={colour} strokeWidth={1.5} />
+      </svg>
+      <Typography sx={{ fontSize: 10, color: colour, fontFamily: "'Share Tech Mono', monospace" }}>
+        {Math.round((1 - last) * 100)}%
+      </Typography>
+    </Box>
+  )
+}
+
+/** Detail panel shown when a ghost name is clicked. */
+function GhostDetailPanel({ agent, onClose }: {
+  agent: GhostAgent; onClose: () => void
+}) {
+  const hist = agent.pressure_history ?? []
+  const cpuVals = hist.map(h => h.cpu)
+  const memVals = hist.map(h => h.mem)
+  const diskVals = hist.map(h => h.disk)
+  // Running task count over time: derive from history timestamps + current.
+  const runningNow = agent.running_tasks ?? 0
+
+  return (
+    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <Box sx={{ width: 8, height: 8, borderRadius: '50%',
+          bgcolor: STATUS_COLOUR[agent.status] ?? neon.muted,
+          boxShadow: glow(STATUS_COLOUR[agent.status] ?? neon.muted, 0.8) }} />
+        <Typography variant="subtitle2" sx={{ color: neon.pink }}>
+          {agent.name}
+        </Typography>
+        <Chip label={agent.status} size="small" sx={{ fontSize: 10 }} />
+      </DialogTitle>
+      <DialogContent>
+        {/* Pressure charts in a single row */}
+        <Stack direction="row" spacing={2} sx={{ mb: 2 }}>
+          <Sparkline values={cpuVals} colour={neon.cyan} label="CPU load" />
+          <Sparkline values={memVals} colour={neon.pink} label="Memory used" />
+          <Sparkline values={diskVals} colour={neon.green} label="Disk used" />
+          <Box sx={{ width: 120, height: 50 }}>
+            <Typography sx={{ fontSize: 9, color: neon.muted, lineHeight: 1 }}>Tools running</Typography>
+            <Typography sx={{ fontSize: 22, fontWeight: 700, color: neon.cyan,
+              fontFamily: "'Share Tech Mono', monospace" }}>
+              {runningNow}
+            </Typography>
+            <Typography sx={{ fontSize: 9, color: neon.muted }}>
+              / {agent.max_parallel ?? '?'} max
+            </Typography>
+          </Box>
+        </Stack>
+
+        <Divider sx={{ borderColor: alpha(neon.muted, 0.2), mb: 1.5 }} />
+
+        {/* Current state */}
+        <Stack spacing={0.75}>
+          <Typography sx={{ fontSize: 11, color: neon.muted }}>
+            Host: {agent.hostname ?? '—'} · {agent.platform ?? ''} {agent.arch ?? ''}
+          </Typography>
+          <Typography sx={{ fontSize: 11, color: neon.muted }}>
+            Version: {agent.version ?? '—'} · Last seen: {ago(agent.last_seen)}
+          </Typography>
+          <Typography sx={{ fontSize: 11, color: neon.muted }}>
+            Capacity: {agent.capacity ?? '?'} ({agent.capacity_reason || 'auto'})
+            {' · '}Override: {agent.parallel_override != null ? agent.parallel_override : 'none'}
+          </Typography>
+          {agent.running.length > 0 && (
+            <Box sx={{ mt: 0.5 }}>
+              <Typography sx={{ fontSize: 10, color: neon.muted, mb: 0.25 }}>
+                Currently running:
+              </Typography>
+              {agent.running.map(r => (
+                <Typography key={r.id} sx={{ fontSize: 10.5, color: neon.cyan,
+                  fontFamily: "'Share Tech Mono', monospace" }}>
+                  · {r.kind} — {r.subject}
+                </Typography>
+              ))}
+            </Box>
+          )}
+        </Stack>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function Mono({ children }: { children: React.ReactNode }) {
   return (
     <Box component="pre" sx={{
@@ -819,6 +941,7 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
   const [confirmKill, setConfirmKill] = useState<GhostAgent | null>(null)
   const [proxyFor, setProxyFor] = useState<GhostAgent | null>(null)
   const [editing, setEditing] = useState<GhostAgent | null>(null)
+  const [detailFor, setDetailFor] = useState<GhostAgent | null>(null)
   // A killed agent leaves the table, because the table answers "what
   // is deployed" and it no longer is. The record stays — it holds the
   // output of scans that ran — so it is hidden rather than deleted,
@@ -945,16 +1068,22 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
       },
     },    {
       field: 'name', headerName: 'Ghost', flex: 1.1, minWidth: 150,
-      renderCell: (p) => (
-        <Stack direction="row" spacing={0.9} sx={{
-          alignItems: "center"
-        }}>
-          <Box sx={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-            bgcolor: STATUS_COLOUR[p.row.status] ?? neon.muted,
-            boxShadow: glow(STATUS_COLOUR[p.row.status] ?? neon.muted, 0.8) }} />
-          <Box sx={{ color: neon.pink, fontWeight: 600 }}>{p.value}</Box>
-        </Stack>
-      ),
+      renderCell: (p) => {
+        const row = p.row as GhostAgent
+        const tip = pressureTooltip(row)
+        return (
+          <Tooltip title={tip} arrow>
+            <Stack direction="row" spacing={0.9} sx={{
+              alignItems: "center", cursor: 'pointer',
+            }} onClick={() => setDetailFor(row)}>
+              <Box sx={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+                bgcolor: STATUS_COLOUR[p.row.status] ?? neon.muted,
+                boxShadow: glow(STATUS_COLOUR[p.row.status] ?? neon.muted, 0.8) }} />
+              <Box sx={{ color: neon.pink, fontWeight: 600 }}>{p.value}</Box>
+            </Stack>
+          </Tooltip>
+        )
+      },
     },
     {
       field: 'hostname', headerName: 'Deployed to', flex: 1.2, minWidth: 160,
@@ -1469,6 +1598,10 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
           mode={routing?.mode}
           geoipAvailable={!!routing?.geoip_available}
           onClose={() => setEditing(null)} />
+      )}
+
+      {detailFor && (
+        <GhostDetailPanel agent={detailFor} onClose={() => setDetailFor(null)} />
       )}
 
       <Dialog open={!!confirmKill} onClose={() => setConfirmKill(null)}>
