@@ -438,9 +438,12 @@ type HeartbeatReq struct {
 	// Pressure fractions in [0,1], for the fleet table's tooltip.
 	// -1 means unmeasurable. Sent every beat so the operator hovering
 	// a row sees the live figure without opening the agent's logs.
-	CPUIdle  float64 `json:"cpu_idle,omitempty"`
-	MemFree  float64 `json:"mem_free,omitempty"`
-	DiskFree float64 `json:"disk_free,omitempty"`
+	// No omitempty: a value of 0 is meaningful (100 % used) and must
+	// reach the server. An absent field means "this agent predates the
+	// measurement", which the backend reads as NULL.
+	CPUIdle  float64 `json:"cpu_idle"`
+	MemFree  float64 `json:"mem_free"`
+	DiskFree float64 `json:"disk_free"`
 }
 
 func (c *Client) Heartbeat(ctx context.Context, req HeartbeatReq) (*HeartbeatResp, error) {
