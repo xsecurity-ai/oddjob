@@ -506,6 +506,10 @@ class Target(Base, TimestampMixin):
     mac_address: Mapped[str | None] = mapped_column(String(32))
     mac_vendor: Mapped[str | None] = mapped_column(String(128))
     hostnames: Mapped[str | None] = mapped_column(Text)      # JSON list
+    #: DNS record types observed for this name, as a JSON list of
+    #: lowercase labels (e.g. ["a", "cname"]). Populated by the amass
+    #: importer; NULL means no record-type information was recorded.
+    dns_record_types: Mapped[str | None] = mapped_column(Text)  # JSON list
     # Everything a scanner reported that has no column of its own: OS class
     # rows, uptime, TCP sequence analysis, traceroute, host-level NSE output.
     # Kept whole because discarding it to fit a schema is how you find out

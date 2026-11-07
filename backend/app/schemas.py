@@ -534,6 +534,10 @@ class TargetOut(_TargetFields):
     mac_address: str | None = None
     mac_vendor: str | None = None
     hostnames: list[str] = []
+    dns_record_types: list[str] = Field(
+        default_factory=list,
+        description="DNS record types observed for this name, e.g. "
+                    "[\"a\", \"cname\"]. Empty when unknown.")
     extra: dict = {}
 
     # Read-only roll-ups of the geolocation held on each address; see
@@ -589,6 +593,11 @@ class TargetOut(_TargetFields):
     @field_validator("hostnames", mode="before")
     @classmethod
     def _hostnames(cls, v):
+        return _as(v, list)
+
+    @field_validator("dns_record_types", mode="before")
+    @classmethod
+    def _dns_record_types(cls, v):
         return _as(v, list)
 
     @field_validator("extra", mode="before")

@@ -1319,6 +1319,10 @@ async def _import_names(session: AsyncSession, pr: Project, t: AgentTask,
     names = [str(n).strip().rstrip(".").lower()
              for n in (payload.get("names") or []) if str(n).strip()]
     domain = str(payload.get("domain") or "").strip().lower()
+    # Optional map of name -> list of DNS record type labels, e.g.
+    # {"cdn.example.com": ["a", "cname"]}. Populated by the amass agent
+    # when it can read them from the graph; absent on older payloads.
+    record_types: dict[str, list[str]] = payload.get("record_types") or {}
 
     idx = await index_for(session, pr.id)
     created: list[str] = []
@@ -1346,7 +1350,10 @@ async def _import_names(session: AsyncSession, pr: Project, t: AgentTask,
         if not ruling.allowed:
             refused[name] = ruling.reason
             continue
-        tgt = Target(project_id=pr.id, host=name, alive=None)
+        rts = record_types.get(name)
+        dns_rt = json.dumps(sorted(rts)) if rts else None
+        tgt = Target(project_id=pr.id, host=name, alive=None,
+                     dns_record_types=dns_rt)
         session.add(tgt)
         await session.flush()
         await record(session, tgt.id, "discovered",
