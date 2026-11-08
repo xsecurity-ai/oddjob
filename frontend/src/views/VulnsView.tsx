@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Box, Chip, MenuItem, Select, Stack, Tab, Tabs, TextField, alpha } from '@mui/material'
+import { Box, Button, Chip, CircularProgress, MenuItem, Select, Stack, Tab, Tabs, Tooltip, TextField, alpha } from '@mui/material'
+import ScienceIcon from '@mui/icons-material/Science'
+import VisibilityIcon from '@mui/icons-material/Visibility'
 import type { ColumnDef } from '../lib/columns'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Vuln } from '../lib/api'
@@ -15,7 +17,7 @@ import { parse, push, useExpand, useRouteFinding, useRouteParam,
 import { useServerTable } from '../lib/useServerTable'
 import {
   LIFECYCLE, LIFECYCLE_COLOUR, LIFECYCLE_LABEL, LIFECYCLE_RANK,
-  POC_COLOUR, POC_LABEL, POC_STATES,
+  POC_COLOUR, POC_STATES,
 } from '../lib/lifecycle'
 import { useAuth } from '../lib/auth'
 import { AutoPocButton } from '../components/AutoPocButton'
@@ -145,6 +147,19 @@ export function VulnsView({ project }: { project: string | null }) {
   // `open` and `canWrite` come from contexts that memoise their
   // value, so they are stable too — the memo is worthless if they
   // are not, which is worth checking before copying this elsewhere.
+  // "Prove" on a row with no proof yet: the server writes the template
+  // AND queues it for validation in one call. The button shows a
+  // spinner while the model is writing, and when the response comes
+  // back the table re-fetches so the chip becomes "Reveal Proof".
+  const [proving, setProving] = useState<number | null>(null)
+  const proveMut = useMutation({
+    mutationFn: (vulnId: number) => api.buildPoc(project!, vulnId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['vulns'] })
+    },
+    onSettled: () => setProving(null),
+  })
+
   const { mutate: markMutate, isPending: marking } = mark
   const columns: ColumnDef<Vuln>[] = useMemo(() => [
     {
@@ -234,6 +249,10 @@ export function VulnsView({ project }: { project: string | null }) {
       // that needs a credential nobody has, or a person to click a
       // link, is real work that cannot be run from here -- neither
       // "no proof" nor "proven".
+      //
+      // The cell is an ACTION, not just a label: no proof yet means
+      // "Prove" (write and queue one); a proof exists means "Reveal
+      // Proof" (open the two-pane modal with template + output).
       field: 'poc_state', headerName: 'PoC', width: 168,
       type: 'singleSelect',
       valueOptions: [...POC_STATES],
@@ -241,23 +260,48 @@ export function VulnsView({ project }: { project: string | null }) {
       renderCell: (p) => {
         const c = POC_COLOUR[p.value] ?? neon.muted
         const has = p.row.poc_id !== null && p.row.poc_id !== undefined
+        const isProving = proving === p.row.id
+        if (!has) {
+          // No proof yet: offer to write and queue one.
+          return (
+            <Tooltip title={canWrite(project)
+              ? 'Write a nuclei template for this finding and queue it for validation'
+              : 'No proof has been written'}>
+              <span onClick={(e) => {
+                e.stopPropagation()
+                if (canWrite(project)) {
+                  setProving(p.row.id)
+                  proveMut.mutate(p.row.id)
+                }
+              }}>
+                <Button size="small" disabled={!canWrite(project) || isProving}
+                  startIcon={isProving
+                    ? <CircularProgress size={12} color="inherit" />
+                    : <ScienceIcon sx={{ fontSize: 13 }} />}
+                  sx={{ minWidth: 0, px: 0.6, py: 0, textTransform: 'none',
+                        fontSize: 10.5, height: 22,
+                        color: canWrite(project) ? neon.yellow : neon.muted }}>
+                  {isProving ? 'Writing…' : 'Prove'}
+                </Button>
+              </span>
+            </Tooltip>
+          )
+        }
+        // A proof exists: open the two-pane modal.
         return (
-          <Chip size="small" label={POC_LABEL[p.value] ?? p.value}
-            onClick={has ? (e) => {
-              // The row's own click opens the finding; this opens
-              // the proof. Without this the modal would open behind
-              // the finding drawer.
+          <Chip size="small" label="Reveal Proof"
+            onClick={(e) => {
               e.stopPropagation()
               setPoc({ id: p.row.poc_id as number, title: p.row.title })
-            } : undefined}
-            title={p.row.poc_detail
-              ?? (has ? 'Open the script' : 'No proof has been written')}
+            }}
+            icon={<VisibilityIcon sx={{ fontSize: 12 }} />}
+            title={p.row.poc_detail ?? 'Open the proof'}
             sx={{
               height: 20, fontSize: 10, letterSpacing: '0.06em',
               bgcolor: alpha(c, 0.14), color: c,
               border: `1px solid ${alpha(c, 0.55)}`,
-              cursor: has ? 'pointer' : 'help',
-              '&:hover': has ? { bgcolor: alpha(c, 0.26) } : undefined,
+              cursor: 'pointer',
+              '&:hover': { bgcolor: alpha(c, 0.26) },
             }} />
         )
       },
@@ -307,7 +351,7 @@ export function VulnsView({ project }: { project: string | null }) {
       renderCell: (p) => (
         <Box sx={{ color: neon.purple, fontSize: 11.5, letterSpacing: '0.06em' }}>{p.value}</Box>
       ) },
-  ], [canWrite, open, project, markMutate, marking])
+  ], [canWrite, open, project, markMutate, marking, proving, proveMut])
 
   /* Two readings of the same findings. Secrets are not a severity
      or a filter on the grid above: the question there is "what is

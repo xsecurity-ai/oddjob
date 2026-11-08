@@ -538,10 +538,34 @@ class VulnsByTitleRow(BaseModel):
     requested: int = 0
 
 
+#: What a chained column filter may reach on the by-target rollup.
+#:
+#: The row is one per HOST, so the columns it shows are `host` and the
+#: aggregate counts beside it. Filtering here means "only hosts whose
+#: findings match" -- applied to the findings BEFORE the GROUP BY, so
+#: the counts that come back describe the filtered set rather than the
+#: whole estate. That is what "hide the false positives" needs: a host
+#: that has only false-positive findings drops out of the rollup
+#: entirely, and one that has some keeps a count of what is left.
+_BY_TARGET_FILTERABLE = {
+    "host": Target.host,
+    "title": Vuln.title,
+    "severity": Vuln.severity,
+    "status": Vuln.status,
+    "triage": Vuln.triage,
+    "port": Vuln.port,
+}
+
+
 @router.get("/vulns/by-target", response_model=Rollup)
 async def vulns_by_target(
     project: str | None = Query(None),
     q: str | None = Query(None),
+    filters: str | None = Query(
+        None,
+        description='chained column filters, as JSON: '
+                    '[{"field":"triage","op":"=","value":"false_positive"}]'),
+    logic: str = Query("and", pattern="^(and|or)$"),
     sort: str | None = Query(None),
     order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(20000, ge=1, le=100000),
@@ -555,6 +579,11 @@ async def vulns_by_target(
     which a flat list of 23,000 rows cannot. Aggregated in SQL; the
     findings themselves are fetched per host when a row is expanded,
     so opening one costs one query and opening none costs nothing.
+
+    `filters` narrows WHICH findings feed each host's counts -- see
+    `_BY_TARGET_FILTERABLE`. It is applied before the GROUP BY, so a
+    host with no matching findings disappears from the rollup rather
+    than arriving with a zero beside it.
     """
     proved = _proved_subquery()
     stmt = (select(Target.host, Project.code,
@@ -572,6 +601,9 @@ async def vulns_by_target(
             raise HTTPException(404, f"no project {project!r}")
         stmt = stmt.where(Target.project_id == pr.id)
     stmt = apply_search(stmt, q, [Target.host, Vuln.title, Vuln.severity])
+    # Before the GROUP BY: a filter on triage or severity changes which
+    # findings count toward each host, and therefore which hosts appear.
+    stmt = apply_filters(stmt, filters, _BY_TARGET_FILTERABLE, logic)
     stmt = stmt.group_by(Target.host, Project.code)
     # The whole rollup's size, before the page is cut out of it. A
     # client showing "100 of 1,603" cannot work that out from a page,
@@ -593,10 +625,32 @@ async def vulns_by_target(
         truncated=len(rows) > limit)
 
 
+#: What a chained column filter may reach on the by-title rollup.
+#:
+#: The row is one per (title, severity), so `host` and `port` are part
+#: of the set being grouped -- filtering on them answers "which hosts
+#: carry this", which narrows the host count rather than dropping the
+#: finding. Applied before the GROUP BY for the same reason as the
+#: by-target rollup: the counts describe the filtered set.
+_BY_TITLE_FILTERABLE = {
+    "title": Vuln.title,
+    "severity": Vuln.severity,
+    "host": Target.host,
+    "status": Vuln.status,
+    "triage": Vuln.triage,
+    "port": Vuln.port,
+}
+
+
 @router.get("/vulns/by-title", response_model=Rollup)
 async def vulns_by_title(
     project: str | None = Query(None),
     q: str | None = Query(None),
+    filters: str | None = Query(
+        None,
+        description='chained column filters, as JSON: '
+                    '[{"field":"triage","op":"=","value":"false_positive"}]'),
+    logic: str = Query("and", pattern="^(and|or)$"),
     sort: str | None = Query(None),
     order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(20000, ge=1, le=100000),
@@ -610,6 +664,11 @@ async def vulns_by_title(
     "This one thing is wrong on 400 hosts" and "this host has 400
     things wrong" are different questions and neither answers the
     other.
+
+    `filters` narrows WHICH findings feed each row's counts -- see
+    `_BY_TITLE_FILTERABLE`. Applied before the GROUP BY, so a finding
+    whose matching findings all fall out of the filter disappears from
+    the rollup rather than arriving with a zero beside it.
     """
     proved = _proved_subquery()
     stmt = (select(Vuln.title, Vuln.severity,
@@ -628,6 +687,10 @@ async def vulns_by_title(
             raise HTTPException(404, f"no project {project!r}")
         stmt = stmt.where(Target.project_id == pr.id)
     stmt = apply_search(stmt, q, [Vuln.title, Target.host, Vuln.severity])
+    # Before the GROUP BY: a filter on triage changes which findings
+    # count toward each (title, severity) row, and therefore which
+    # rows appear at all.
+    stmt = apply_filters(stmt, filters, _BY_TITLE_FILTERABLE, logic)
     stmt = stmt.group_by(Vuln.title, Vuln.severity)
     total = await _rollup_total(session, stmt)
     col = BY_TITLE_SORT.get(sort or "", func.count(func.distinct(Target.host)))
@@ -1386,8 +1449,35 @@ class SecretRow(BaseModel):
     poc_requested: bool = False
 
 
+#: What a chained column filter may reach on the secrets list.
+#:
+#: The credential itself is deliberately NOT here: `secret` is what the
+#: endpoint exists to hand over, and filtering on it would be a way to
+#: search for a fragment of a key by typing that fragment -- exactly
+#: the discovery-by-accident the value was kept out of the findings
+#: list to avoid. The origin, the detector, the severity and the
+#: triage verdict are all fair game; those are how an operator tells a
+#: real credential from a false positive.
+_SECRETS_FILTERABLE = {
+    "detector": FindingSecret.detector,
+    "asset_url": FindingSecret.asset_url,
+    "path": FindingSecret.path,
+    "host": Target.host,
+    "project_code": Project.code,
+    "severity": Vuln.severity,
+    "triage": Vuln.triage,
+    "title": Vuln.title,
+}
+
+
 @router.get("/secrets", response_model=list[SecretRow])
 async def list_secrets(project: str | None = Query(None),
+                       filters: str | None = Query(
+                           None,
+                           description='chained column filters, as JSON: '
+                                       '[{"field":"triage","op":"=",'
+                                       '"value":"false_positive"}]'),
+                       logic: str = Query("and", pattern="^(and|or)$"),
                        limit: int = Query(5000, ge=1, le=50000),
                        offset: int = Query(0, ge=0),
                        user: User = Depends(get_current_user),
@@ -1436,6 +1526,12 @@ async def list_secrets(project: str | None = Query(None),
         if vis is not None and pr.id not in vis:
             raise HTTPException(404, f"no project {project!r}")
         stmt = stmt.where(Target.project_id == pr.id)
+    # The triage verdict lives on the finding, not the secret -- a
+    # credential is a finding, and "is this a false positive" is a
+    # question about the finding. Applied here, before the role filter
+    # below, so a readonly account that cannot see the value still gets
+    # the same row set as one that can.
+    stmt = apply_filters(stmt, filters, _SECRETS_FILTERABLE, logic)
     # Newest first: the reason to open this list is almost always a
     # sweep that just finished.
     stmt = stmt.order_by(FindingSecret.id.desc()).limit(limit).offset(offset)

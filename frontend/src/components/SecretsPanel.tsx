@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
-import { Box, Stack, Tooltip, alpha } from '@mui/material'
+import { Box, Stack, Tooltip, alpha, Chip } from '@mui/material'
+import { RestartAlt as RestartAltIcon } from '@mui/icons-material'
 import { useQuery } from '@tanstack/react-query'
 import type { ColumnDef } from '../lib/columns'
 import { api, type SecretRow } from '../lib/api'
@@ -173,9 +174,17 @@ export function SecretsPanel({ project, onFinding, groupBy = 'target' }: {
   const [prove, setProve] = useState<
     { group: Group; total: number } | null>(null)
 
+  // Server-side filter conditions, as the wire JSON the backend
+  // expects. The secrets list is not server-paged (it is grouped in
+  // the browser), so there is no `useServerTable` here — but the
+  // same `filters` param works: the database narrows the set before
+  // it ships, and "hide the false positives" works on this list the
+  // same way it does on the findings table.
+  const [secretFilters, setSecretFilters] = useState<{ filters?: string; logic?: 'and' | 'or' }>({})
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ['secrets', project],
-    queryFn: () => api.secrets(project ?? undefined),
+    queryKey: ['secrets', project, secretFilters],
+    queryFn: () => api.secrets(project ?? undefined, secretFilters),
     // Credentials, so they do not sit in the cache behind the
     // user's back after they navigate away.
     gcTime: 0,
@@ -456,24 +465,45 @@ export function SecretsPanel({ project, onFinding, groupBy = 'target' }: {
       note={`${data?.length ?? 0} stored in clear across ${grouped.size} `
             + `host(s) — reading this list is written to the audit log`}
       extraActions={
-        <Box
-          onClick={() => {
-            // Open everything, or shut everything. Two states and
-            // no third: a control that half-opens is one nobody can
-            // predict.
-            if (openHosts.size) { setOpenHosts(new Set()); setOpenFiles(new Set()) }
-            else {
-              setOpenHosts(new Set(grouped.keys()))
-              const files = new Set<string>()
-              for (const [h, fs] of grouped) {
-                for (const f of fs.keys()) files.add(`${h}|${f}`)
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+          {/* Quick triage filter: hide false positives. The most
+              common "I can't see what I want" on a secrets list is
+              the same one as on the findings table. */}
+          {secretFilters.filters ? (
+            <Chip size="small" clickable onDelete={() => setSecretFilters({})}
+              deleteIcon={<RestartAltIcon sx={{ fontSize: 13 }} />}
+              label={`filtered · ${data?.length ?? 0} shown`}
+              sx={{ height: 21, fontSize: 10, letterSpacing: '0.06em',
+                    bgcolor: alpha(neon.yellow, 0.16), color: neon.yellow,
+                    border: `1px solid ${alpha(neon.yellow, 0.5)}` }} />
+          ) : (
+            <Box onClick={() => setSecretFilters({
+              filters: JSON.stringify([{ field: 'triage', op: 'doesNotEqual', value: 'false_positive' }]),
+              logic: 'and' })}
+              sx={{ cursor: 'pointer', fontSize: 11.5, color: neon.yellow,
+                    '&:hover': { textShadow: glow(neon.yellow, 0.6) } }}>
+              Hide false positives
+            </Box>
+          )}
+          <Box
+            onClick={() => {
+              // Open everything, or shut everything. Two states and
+              // no third: a control that half-opens is one nobody can
+              // predict.
+              if (openHosts.size) { setOpenHosts(new Set()); setOpenFiles(new Set()) }
+              else {
+                setOpenHosts(new Set(grouped.keys()))
+                const files = new Set<string>()
+                for (const [h, fs] of grouped) {
+                  for (const f of fs.keys()) files.add(`${h}|${f}`)
+                }
+                setOpenFiles(files)
               }
-              setOpenFiles(files)
-            }
-          }}
-          sx={{ cursor: 'pointer', fontSize: 11.5, color: neon.cyan,
-                '&:hover': { textShadow: glow(neon.cyan, 0.6) } }}>
-          {openHosts.size ? 'Collapse all' : 'Expand all'}
+            }}
+            sx={{ cursor: 'pointer', fontSize: 11.5, color: neon.cyan,
+                  '&:hover': { textShadow: glow(neon.cyan, 0.6) } }}>
+            {openHosts.size ? 'Collapse all' : 'Expand all'}
+          </Box>
         </Box>
       }
     />

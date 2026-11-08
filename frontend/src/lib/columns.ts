@@ -270,6 +270,27 @@ export function quickTerms(model: FilterModel | undefined): string[] {
   return (model?.quickFilterValues ?? []).filter(Boolean).map(String)
 }
 
+/** Ids only have to be unique within one model; they never travel. */
+let nextItemId = 1
+
+/**
+ * The model with ONE condition for `field` in place: the existing entry is
+ * patched rather than duplicated, a new one is appended when there is none.
+ *
+ * This is what a right-click on a column header does — "filter THIS column"
+ * must edit the condition it already has instead of stacking a second one
+ * under it, which would read as the table doubling up on an instruction.
+ */
+export function withFieldCondition(
+  model: FilterModel, field: string, operator: string, value?: unknown,
+): FilterModel {
+  const items = [...(model.items ?? [])]
+  const i = items.findIndex((it) => it.field === field)
+  if (i >= 0) items[i] = { ...items[i], operator, value }
+  else items.push({ id: nextItemId++, field, operator, value })
+  return { ...model, items }
+}
+
 /** Is anything about this model hiding rows? */
 export function filtersActive(model: FilterModel | undefined): boolean {
   return armedItems(model).length > 0 || quickTerms(model).length > 0

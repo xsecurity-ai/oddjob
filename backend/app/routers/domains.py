@@ -584,6 +584,13 @@ async def _promote_rows(session: AsyncSession, pr: Project, user: User,
             # lie in the audit trail.
             refused[c.name] = ruling.reason
             continue
+        if clouds.is_cloud_domain(c.name):
+            # A cloud provider's own zone is infrastructure, not a client
+            # asset: enumerating `azure.com` finds 750+ Microsoft-owned
+            # names that belong to no engagement. Dropped here rather than
+            # created and deleted later.
+            refused[c.name] = "cloud provider domain"
+            continue
         t = Target(project_id=pr.id, host=c.name, alive=None)
         session.add(t)
         await session.flush()

@@ -215,6 +215,7 @@ export function VulnsByTarget({ project, onFinding, expand, onExpand }: {
   // ordering a statement about the rows it happened to hold.
   const table = useServerTable('vulns-by-target', {
     sort: 'total', order: 'desc', pageSize: 100,
+    filterable: ['host', 'severity', 'triage'],
   })
   const q = useQuery({
     queryKey: ['vulns-by-target', project, table.query],
@@ -222,6 +223,8 @@ export function VulnsByTarget({ project, onFinding, expand, onExpand }: {
       sort: table.query.sort, order: table.query.order,
       limit: table.query.pageSize,
       offset: table.query.page * table.query.pageSize,
+      q: table.query.q || undefined,
+      filters: table.query.filters || undefined, logic: table.query.logic,
     }),
     enabled: !!project,
     placeholderData: (prev) => prev,
@@ -342,6 +345,7 @@ export function VulnsByTitle({ project, onFinding, expand, onExpand }: {
   // screenful. Paged and ordered in the database now.
   const table = useServerTable('vulns-by-title', {
     sort: 'hosts', order: 'desc', pageSize: 100,
+    filterable: ['title', 'severity', 'triage'],
   })
   const q = useQuery({
     queryKey: ['vulns-by-title', project, table.query],
@@ -349,6 +353,8 @@ export function VulnsByTitle({ project, onFinding, expand, onExpand }: {
       sort: table.query.sort, order: table.query.order,
       limit: table.query.pageSize,
       offset: table.query.page * table.query.pageSize,
+      q: table.query.q || undefined,
+      filters: table.query.filters || undefined, logic: table.query.logic,
     }),
     enabled: !!project,
     placeholderData: (prev) => prev,

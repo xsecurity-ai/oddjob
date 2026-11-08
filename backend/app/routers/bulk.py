@@ -29,7 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import addresses
+from .. import addresses, clouds
 from ..db import get_session
 from ..events import broker
 from ..hosts import InvalidHost, validate_host
@@ -215,6 +215,12 @@ async def bulk_import(payload: BulkPayload,
         if host in seen:
             dupes += 1
         seen.add(host)
+        if clouds.is_cloud_domain(host):
+            # A bulk export routinely sweeps up provider-owned names (a
+            # CNAME to azurewebsites.net, a CDN edge). They are not client
+            # assets and should not be created in bulk.
+            skipped["targets"] += 1
+            continue
         cur = existing.get(host)
         fresh = {k: v for k, v in data.items() if k in TARGET_FIELDS}
         if cur is None:
@@ -246,6 +252,11 @@ async def bulk_import(payload: BulkPayload,
     if orphans:
         if payload.autocreate_targets:
             for host in sorted(orphans):
+                if clouds.is_cloud_domain(host):
+                    # Same rule as the declared-targets loop above: a child
+                    # row (service, vuln) pointing at a provider zone is not
+                    # a client asset to create.
+                    continue
                 t = Target(project_id=pr.id, host=host)
                 session.add(t)
                 existing[host] = t

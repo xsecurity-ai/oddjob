@@ -509,7 +509,7 @@ export function ScanRangesDialog({ project, selected = [], onClose,
             </Alert>
           )}
 
-          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5 }}>
             <TextField select size="small" label="Tool" value={tool}
               sx={{ minWidth: 200 }}
               slotProps={{ select: { native: true } }}
@@ -535,14 +535,15 @@ export function ScanRangesDialog({ project, selected = [], onClose,
                 <option value="udp">-sU UDP — top ports</option>
               </TextField>
             )}
-            <TextField size="small" label="Ports" value={ports} sx={{ flex: 1 }}
+            <TextField size="small" label="Ports" value={ports}
+              sx={{ flex: 1, minWidth: 200 }}
               onChange={(e) => setPorts(e.target.value)}
               helperText={tool === 'masscan'
                 ? 'masscan needs ports; the agent defaults to 80,443,8080,8443.'
                 : technique === 'udp'
                   ? 'Leave empty for the top-20 UDP ports, or name specific ones.'
                   : 'Empty lets the agent choose. Naming ports also stops it adding -F.'} />
-          </Stack>
+          </Box>
 
           {synImpossible && (
             <Alert severity="error" variant="outlined" sx={{ fontSize: 11.5 }}>

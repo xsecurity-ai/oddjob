@@ -526,15 +526,20 @@ export interface Rollup<T> {
   total: number | null
 }
 
-/** A page of a rollup. Same shape as the findings query, minus the
- *  column filters — a rollup is a GROUP BY and its columns are
- *  aggregates, so there is nothing to filter on but the search. */
+/** A page of a rollup. The same shape as the findings query: the
+ *  database filters, sorts and pages it. `filters` narrows WHICH
+ *  findings feed each row's counts — applied before the GROUP BY, so
+ *  a host or title whose findings all fall out disappears from the
+ *  rollup rather than arriving with a zero beside it. */
 export interface RollupQuery {
   q?: string
   sort?: string
   order?: 'asc' | 'desc'
   limit?: number
   offset?: number
+  /** Chained column filters, as JSON (see `filtering.py`). */
+  filters?: string
+  logic?: 'and' | 'or'
 }
 
 /** One finding AT one severity.
@@ -2206,9 +2211,13 @@ export const api = {
    *  Bulk and unmasked, which `revealSecret` deliberately is not.
    *  The job it serves is triaging several hundred of these at
    *  once; the guards that survive at that size are the `user`
-   *  role per project and one audit entry per read. */
-  secrets: (project?: string) =>
-    req<SecretRow[]>('/api/secrets' + qs({ project })),
+   *  role per project and one audit entry per read.
+   *
+   *  `filters` narrows the set server-side (triage, severity,
+   *  detector, host, …) so "hide the false positives" works on
+   *  this list the same way it does on the findings table. */
+  secrets: (project?: string, o: { filters?: string; logic?: 'and' | 'or' } = {}) =>
+    req<SecretRow[]>('/api/secrets' + qs({ project, ...o })),
 
   /** The source around a credential. Same guards as `revealSecret`:
    *  it returns a file that CONTAINS the value, so it discloses

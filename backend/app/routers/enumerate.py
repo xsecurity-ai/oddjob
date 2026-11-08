@@ -48,7 +48,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import addresses as addr_mod
-from .. import audit, geoip, lookups
+from .. import audit, clouds, geoip, lookups
 from .. import merge as merge_mod
 from ..db import get_session
 from ..domains import registrable
@@ -453,6 +453,13 @@ async def _decide_others(session: AsyncSession, pr: Project, user: User,
         ruling = idx.check(n)
         if not ruling.allowed:
             refused[n] = ruling.reason
+            continue
+        if clouds.is_cloud_domain(n):
+            # A reverse lookup on a shared cloud IP (load balancers,
+            # CDN edges) answers with dozens of provider-owned names.
+            # None of them is a client asset; creating them pollutes the
+            # inventory and feeds the automation loops.
+            refused[n] = "cloud provider domain"
             continue
         t = Target(project_id=pr.id, host=n, alive=None)
         session.add(t)
@@ -1172,6 +1179,10 @@ async def _add_leads(session: AsyncSession, pr: Project, user: User | None,
             select(Target).where(Target.project_id == pr.id,
                                  Target.host == n))).scalar_one_or_none()
         if dup is not None:
+            continue
+        if clouds.is_cloud_domain(n):
+            # Same rule as the other reverse-IP path: a shared cloud IP
+            # answers with provider-owned names that are not client assets.
             continue
         t = Target(project_id=pr.id, host=n, alive=None)
         session.add(t)

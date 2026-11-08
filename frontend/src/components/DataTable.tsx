@@ -406,6 +406,9 @@ export function DataTable({
           renderDetail={renderDetail}
           expanded={expanded}
           onExpand={onExpand}
+          filterableFields={new Set(shownColumns.filter((c) => c.filterable !== false).map((c) => c.field))}
+          filterModel={filterModel}
+          onFilterChange={setFilterModel}
           empty={filtering
             ? (
               <Stack spacing={1} sx={{
