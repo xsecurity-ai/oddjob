@@ -2830,6 +2830,19 @@ def _subject(kind: str, args: dict) -> str:
     return "—"
 
 
+def _task_subject(t: AgentTask) -> str | None:
+    """The host a task's findings belong to, for importers that need one.
+
+    `AgentTask` has no `subject` column -- the subject lives in `args`
+    and `_subject` is how every other path reads it. v0.3.26 passed
+    `t.subject` here, which raised AttributeError and made every Ghost
+    result upload with importable output a 500. `None` when the task
+    names nothing usable, which the importers already handle.
+    """
+    s = _subject(t.kind, json.loads(t.args) if t.args else {})
+    return None if s in ("", "—") else s
+
+
 @router.get("/tools", response_model=dict)
 async def required_tools(_: User = Depends(get_current_user)):
     """What a Ghost is expected to have, and what each one is for.
@@ -3223,7 +3236,7 @@ async def import_task_result(agent_id: int, task_id: int,
                      f"ghost:{a.name if a else agent_id}",
                      mode=body.mode,
                      decisions=dict(body.decisions),
-                     target_host=t.subject)
+                     target_host=_task_subject(t))
     t.import_result = res.model_dump_json()
     await session.commit()
     await broker.publish("agents", action="result", project=pr.code)
@@ -4528,7 +4541,7 @@ async def submit_result(task_id: int, body: ResultIn,
         try:
             res = await _run(session, pr, t.output, t.import_as,
                              f"ghost:{a.name}", mode="strict", decisions={},
-                             target_host=t.subject)
+                             target_host=_task_subject(t))
             imported = json.loads(res.model_dump_json())
             # Said in the log as well as carried in the result. This
             # is the unattended path -- a nuclei template release

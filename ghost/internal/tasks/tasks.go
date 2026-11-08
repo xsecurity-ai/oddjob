@@ -1276,8 +1276,15 @@ func strOr(args map[string]any, key, def string) string {
 // cloneRepo clones a git repository into workDir and returns the local path.
 // Shallow by default (depth 1); full history when depth is 0.
 func cloneRepo(ctx context.Context, url, branch, workDir string, depth int) (string, error) {
+	// A URL beginning with "-" would be read by git as an OPTION, and
+	// `--upload-pack=<cmd>` / `-u <cmd>` run a program of the caller's
+	// choosing. The `--` below already ends option parsing; refusing
+	// it here as well says why instead of failing inside git.
+	if strings.HasPrefix(url, "-") || strings.HasPrefix(branch, "-") {
+		return "", fmt.Errorf("refusing repo url/branch that starts with '-'")
+	}
 	dir := filepath.Join(workDir, "repo")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", fmt.Errorf("mkdir: %w", err)
 	}
 	var argv []string
@@ -1287,8 +1294,11 @@ func cloneRepo(ctx context.Context, url, branch, workDir string, depth int) (str
 	if branch != "" && branch != "main" && branch != "master" {
 		argv = append(argv, "--branch", branch)
 	}
-	argv = append(argv, "--single-branch", url, ".")
-	cmd := exec.CommandContext(ctx, "git", argv...)
+	argv = append(argv, "--single-branch", "--", url, ".")
+	// "git" is a literal and there is no shell; the url and branch are
+	// task arguments, kept out of option position by the check above
+	// and the `--`. Same trust model as runCmd -- see the note there.
+	cmd := exec.CommandContext(ctx, "git", argv...) //nolint:gosec // G204: see above
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {

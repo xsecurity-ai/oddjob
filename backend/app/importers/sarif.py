@@ -93,12 +93,11 @@ def parse(text: str, *, target_host: str | None = None) -> ParsedScan:
         raise ImportError_("SARIF document must be a JSON object")
 
     version = doc.get("version", "")
-    if not version.startswith("2.1"):
-        # Accept 2.0 and 2.0.x too — the structure is close enough for
-        # our purposes (runs[].results[]).
-        if not version.startswith("2.0"):
-            raise ImportError_(
-                f"unsupported SARIF version {version!r}; expected 2.1.x")
+    # Accept 2.0 and 2.0.x too — the structure is close enough for
+    # our purposes (runs[].results[]).
+    if not version.startswith(("2.1", "2.0")):
+        raise ImportError_(
+            f"unsupported SARIF version {version!r}; expected 2.1.x")
 
     runs = doc.get("runs")
     if not isinstance(runs, list):
