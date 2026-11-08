@@ -199,22 +199,38 @@ def _project_ceiling(pr) -> int:
 #: rather than forked, so several at once share one process and one
 #: memory limit. An agent sized at six slots that was handed six amass
 #: tasks is the arithmetic that put a 1 GB box into the OOM killer.
+#:
+#: The cap exists to protect small hosts, not to throttle throughput
+#: on ones with room. `heavy_allowance` below scales with the agent's
+#: effective parallelism, so a six-slot host gets two and a thirty-slot
+#: host gets ten -- the arithmetic that keeps a 1 GB box out of the OOM
+#: killer without making a 4 GB box crawl through a backlog one at a time.
 HEAVY_KINDS = frozenset({"amass"})
 
 
 def heavy_allowance(allowed: int) -> int:
     """How many heavy tasks one agent may hold at once.
 
-    A third of its slots, never fewer than one. Proportional rather
-    than fixed because `allowed` is already derived from the host's
-    memory: a box that can carry six light tasks can carry two amass,
-    and one that can carry thirty can carry ten. A flat number would
-    be wrong at both ends.
+    Half of its slots, never fewer than one, never more than the slots
+    themselves. Proportional rather than fixed because `allowed` is
+    already derived from the host's memory: a box that can carry six
+    light tasks can carry three amass, and one that can carry thirty
+    can carry fifteen. A flat number would be wrong at both ends.
+
+    The old rule was a third, which on a typical six-slot droplet meant
+    two concurrent enumerations. With passive amass taking five to
+    fifteen minutes per zone, a twelve-thousand-task backlog drained in
+    fourteen hours and the fleet looked idle because every agent was
+    stuck behind its own heavy cap with slots still free. Halving the
+    divisor doubles throughput on every host while still leaving half
+    the slots for light work -- the OOM arithmetic that motivated the
+    cap (six amass on a 1 GB box) is unchanged at four, well under the
+    six that killed it.
 
     Never zero. An agent that may run tasks but never a heavy one
     would leave amass work queued for ever with nothing to say why.
     """
-    return max(1, allowed // 3)
+    return max(1, min(allowed // 2, allowed))
 
 
 def effective_parallel(a, ceiling: int) -> int:
