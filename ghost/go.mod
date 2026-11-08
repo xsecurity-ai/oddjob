@@ -5,8 +5,8 @@ go 1.26.0
 require (
 	github.com/OJ/gobuster/v3 v3.8.2
 	github.com/PuerkitoBio/goquery v1.13.0
-	github.com/chromedp/cdproto v0.158.5
-	github.com/chromedp/chromedp v0.21.0
+	github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc
+	github.com/chromedp/chromedp v0.15.1
 	github.com/coder/websocket v1.8.15
 	github.com/owasp-amass/amass/v4 v4.2.0
 	github.com/owasp-amass/config v0.1.5
@@ -56,6 +56,7 @@ require (
 	github.com/caffix/service v0.3.0 // indirect
 	github.com/caffix/stringset v0.1.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
+	github.com/chromedp/sysutil v1.1.0 // indirect
 	github.com/cjoudrey/gluaurl v0.0.0-20161028222611-31cbb9bef199 // indirect
 	github.com/cloudflare/ahocorasick v0.0.0-20240916140611-054963ec9396 // indirect
 	github.com/cnf/structhash v0.0.0-20250313080605-df4c6cc74a9a // indirect
@@ -81,6 +82,9 @@ require (
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/go-rod/rod v0.116.2 // indirect
 	github.com/go-sql-driver/mysql v1.7.1 // indirect
+	github.com/gobwas/httphead v0.1.0 // indirect
+	github.com/gobwas/pool v0.2.1 // indirect
+	github.com/gobwas/ws v1.4.0 // indirect
 	github.com/golang/glog v1.2.4 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/golang/snappy v0.0.4 // indirect

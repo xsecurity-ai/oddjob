@@ -40,6 +40,7 @@ package tasks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -283,11 +284,11 @@ func domainResolves(ctx context.Context, dom string) bool {
 	ips, err := net.DefaultResolver.LookupIPAddr(ctx, dom)
 	if err != nil {
 		// NXDOMAIN is definitive; other errors are not.
+		// errors.As, not a type assertion: the resolver may wrap it.
 		var dnsErr *net.DNSError
-		if e, ok := err.(*net.DNSError); ok && e.IsNotFound {
+		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
 			return false
 		}
-		_ = dnsErr
 		return true
 	}
 	return len(ips) > 0

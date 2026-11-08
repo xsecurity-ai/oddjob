@@ -139,5 +139,6 @@ def parse(text: str, *, target_host: str | None = None) -> ParsedScan:
                 validated="works" if verified else "none",
             ))
 
-    scan.summary = f"{len(scan.vulns)} secrets ({sum(1 for v in scan.vulns if v.severity == 'high')} verified)"
+    verified = sum(1 for v in scan.vulns if v.severity == "high")
+    scan.summary = f"{len(scan.vulns)} secrets ({verified} verified)"
     return scan

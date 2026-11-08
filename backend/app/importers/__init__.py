@@ -143,7 +143,8 @@ _DETECTORS = {
 }
 
 
-def parse(text: str, fmt: str = "auto", *, target_host: str | None = None) -> tuple[str, ParsedScan]:
+def parse(text: str, fmt: str = "auto", *,
+          target_host: str | None = None) -> tuple[str, ParsedScan]:
     """-> (format name, ParsedScan). Raises ImportError_ on a bad document.
 
     `target_host` is passed through to importers that need it (SARIF,

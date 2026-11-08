@@ -196,7 +196,11 @@ async def list_targets(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    stmt, *_ = _counts_query()
+    # The subqueries are named because the sort map below orders by
+    # their columns. Discarding them with `*_` (as v0.3.26 did when it
+    # added `w`) left `v`, `p` and `s` undefined, and every call to
+    # this route -- the Targets page itself -- became a 500.
+    stmt, v, p, s, _w = _counts_query()
     vis = await visible_project_ids(session, user)
     if vis is not None:
         stmt = stmt.where(Target.project_id.in_(vis))

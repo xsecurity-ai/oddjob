@@ -134,6 +134,16 @@ updates:
       # everything else in this group — which is exactly how a
       # build-breaking change arrived labelled as a routine bump.
       - dependency-name: "github.com/owasp-amass/*"
+      # chromedp is ours AND amass's: amass v4.2.0 pulls in geziyor,
+      # which is written against the pre-generic chromedp API. #164
+      # moved chromedp 0.15.1 -> 0.21.0 and cdproto to v0.158.x as a
+      # "minor" group bump, and geziyor stopped compiling -- every
+      # ghost build, lint and the images workflow went red, and the
+      # backend image that carried an unrelated fix never shipped.
+      # Same rule as above: these move when amass/geziyor move.
+      - dependency-name: "github.com/chromedp/chromedp"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "github.com/chromedp/cdproto"
     labels: [dependencies, ghost]
     commit-message:
       prefix: "deps(ghost)"

@@ -295,7 +295,8 @@ func TestShutdownClosesLiveStreams(t *testing.T) {
 
 	tun.hangUp()
 	select {
-	case <-done:
+	case err := <-done:
+		_ = err // returning at all is what this test asserts, not how
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run did not return when the tunnel ended")
 	}

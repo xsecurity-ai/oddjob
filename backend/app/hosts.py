@@ -224,7 +224,8 @@ def is_valid_host(raw: str) -> bool:
 # as `robots.txt.checkpoints-in.files.openai.com` (which passes DNS label
 # validation because each dot-separated chunk is a legal label, but is
 # clearly a filename concatenated with a domain).
-_RFC3986_HOST = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
+_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_RFC3986_HOST = re.compile(rf"^{_LABEL}(?:\.{_LABEL})*$")
 
 
 def valid_reg_name(name: str) -> bool:

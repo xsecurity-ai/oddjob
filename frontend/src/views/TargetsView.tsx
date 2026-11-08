@@ -410,7 +410,7 @@ export function TargetsView({ project }: { project: string | null }) {
   // search box and every unrelated state change in this view.
   const columns: ColumnDef<Target>[] = useMemo(() => [
     {
-      field: 'status_icons', headerName: '', width: 60, minWidth: 60,
+      field: 'status_icons', headerName: '', width: 60, minWidth: 60, sortable: false,
       renderCell: (p) => {
         const r = p.row as Target & { total_ports?: number; web_count?: number; total_criticals?: number }
         return (
