@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .. import clouds
 from ..scope import BARRED, ScopeIndex
 
 #: strict  only known hosts; unknown ones need a decision
@@ -149,6 +150,14 @@ class Policy:
             return None
         if h in self.known:
             return h
+        if clouds.is_cloud_domain(h):
+            # A provider's own zone is infrastructure, not a client asset.
+            # An nmap or Burp file that names `foo.azurewebsites.net` is
+            # describing the CDN edge, not the engagement. Refused here so
+            # it is reported alongside scope refusals rather than silently
+            # created in open mode.
+            self._refuse(h, "cloud provider domain")
+            return None
         if not self.scope_allows_new(h, ip):
             return None
         if self.mode == "open":
@@ -201,6 +210,11 @@ def survey(scan, known: set[str], policy: Policy | None = None) -> list[UnknownH
             return None
         h = name.strip().rstrip(".").lower()
         if not h or h in known:
+            return None
+        if clouds.is_cloud_domain(h):
+            # Not offered as a question: a provider zone is infrastructure,
+            # and "add this host?" about `*.azure.com` has only one right
+            # answer.
             return None
         if policy is not None and not policy.scope_allows_new(h):
             return None

@@ -53,6 +53,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import (
     agentcrypto,
     audit,
+    clouds,
     countrygate,
     geoip,
     heap,
@@ -1386,6 +1387,13 @@ async def _import_names(session: AsyncSession, pr: Project, t: AgentTask,
         ruling = idx.check(name)
         if not ruling.allowed:
             refused[name] = ruling.reason
+            continue
+        if clouds.is_cloud_domain(name):
+            # Amass on a client zone can find CNAMEs that point into the
+            # provider's own infrastructure (azure.com, amazonaws.com).
+            # Those are the provider's assets, not the client's: creating
+            # them pollutes the inventory and feeds the automation loops.
+            refused[name] = "cloud provider domain"
             continue
         rts = record_types.get(name)
         dns_rt = json.dumps(sorted(rts)) if rts else None

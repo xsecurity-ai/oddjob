@@ -11,6 +11,11 @@
  * when there are unsaved changes. Running the version on the server
  * while the operator is looking at a different one on screen is the
  * kind of wrong that is very hard to notice.
+ *
+ * Layout: two panes. The template editor on the left, the run output
+ * (verdict, exit code, timestamp) on the right. This is the "Reveal
+ * Proof" modal — the operator reads what the last run said while the
+ * script is still editable beside it, and can resend with one click.
  */
 import { useEffect, useRef, useState } from 'react'
 import {
@@ -18,6 +23,7 @@ import {
   DialogContent, DialogTitle, Stack, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import PlayArrowIcon from '@mui/icons-material/PlayArrow'
+import TerminalIcon from '@mui/icons-material/Terminal'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type PocDetail } from '../lib/api'
 import { neon, glow } from '../theme'
@@ -87,7 +93,7 @@ export function PocModal({ project, pocId, title, onClose }: {
       // the stored version while a different one is on screen is
       // the kind of wrong that is very hard to notice.
       if (dirty && draft !== null) await api.savePoc(project, pocId,
-                                                     { template: draft })
+                                                      { template: draft })
       return api.runPoc(project, pocId)
     },
     onSuccess: (r) => {
@@ -104,7 +110,7 @@ export function PocModal({ project, pocId, title, onClose }: {
   const runnable = (draft ?? '').trim().length > 0
 
   return (
-    <Dialog open onClose={onClose} maxWidth="md" fullWidth>
+    <Dialog open onClose={onClose} maxWidth="lg" fullWidth>
       <DialogTitle sx={{ color: neon.cyan, pb: 1 }}>
         <Stack direction="row" spacing={1.2} sx={{ alignItems: 'center' }}>
           <Box sx={{ flex: 1, minWidth: 0, overflow: 'hidden',
@@ -123,69 +129,44 @@ export function PocModal({ project, pocId, title, onClose }: {
         </Stack>
       </DialogTitle>
 
-      <DialogContent>
-        {poc.isLoading && <CircularProgress size={18} sx={{ color: neon.cyan }} />}
+      <DialogContent sx={{ p: 0 }}>
+        {poc.isLoading && (
+          <Box sx={{ p: 3 }}>
+            <CircularProgress size={18} sx={{ color: neon.cyan }} />
+          </Box>
+        )}
         {poc.error && (
-          <Alert severity="error" sx={{ fontSize: 12 }}>
+          <Alert severity="error" sx={{ m: 2, fontSize: 12 }}>
             {(poc.error as Error).message}
           </Alert>
         )}
 
         {d && (
-          <Stack spacing={1.6}>
-            {/* The reason, where there is one. A state word on its
-                own is a word the reader has to take on trust. */}
-            {d.detail && d.state !== 'Available, Confirmed' && (
-              <Alert severity="info" variant="outlined"
-                sx={{ fontSize: 11.5 }}>
-                {d.detail}
-              </Alert>
-            )}
-            {d.verdict && (
-              <Box sx={{ fontSize: 11.5, color: neon.muted,
-                         lineHeight: 1.6 }}>
-                Last run: {d.verdict}
-                {d.validated_at ? ` (${d.validated_at.slice(0, 16)
-                  .replace('T', ' ')})` : ''}
-              </Box>
-            )}
-
-            {d.template === null ? (
-              // The row exists to record that a proof was ATTEMPTED
-              // and could not be written. Saying "no script" without
-              // that is losing the only useful part of the record.
-              <Alert severity="warning" sx={{ fontSize: 12 }}>
-                No script was written for this finding.
-                {d.verdict ? ` ${d.verdict}` : ''} You can write one
-                below and run it.
-              </Alert>
-            ) : null}
-
-            <Box>
-              <Stack direction="row" spacing={1}
-                sx={{ alignItems: 'center', mb: 0.6 }}>
-                <Typography sx={{ fontSize: 11, color: neon.muted }}>
-                  nuclei template
+          <Stack direction="row" sx={{ minHeight: 420 }}>
+            {/* ── Left pane: the template editor ── */}
+            <Box sx={{
+              flex: 1, minWidth: 0, borderRight: `1px solid ${alpha(neon.muted, 0.2)}`,
+              p: 2, display: 'flex', flexDirection: 'column', gap: 1,
+            }}>
+              <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                <Typography variant="caption" sx={{ color: neon.muted, fontSize: 10.5, letterSpacing: '0.08em' }}>
+                  NUCLEI TEMPLATE
                 </Typography>
                 {dirty && (
                   <Chip size="small" label="unsaved" sx={{
-                    height: 17, fontSize: 9.5, color: neon.yellow,
+                    height: 16, fontSize: 9, color: neon.yellow,
                     border: `1px solid ${alpha(neon.yellow, 0.5)}` }} />
                 )}
-                <Box sx={{ flex: 1 }} />
-                {d.target_url && (
-                  <Tooltip title="Where this proof is pointed.">
-                    <Box sx={{ fontSize: 10.5, color: neon.muted,
-                               fontFamily: `'Share Tech Mono', monospace`,
-                               overflow: 'hidden', maxWidth: 280,
-                               textOverflow: 'ellipsis',
-                               whiteSpace: 'nowrap' }}>
-                      {d.target_url}
-                    </Box>
-                  </Tooltip>
-                )}
               </Stack>
-              <TextField fullWidth multiline minRows={14} maxRows={26}
+
+              {d.template === null && (
+                <Alert severity="warning" variant="outlined" sx={{ fontSize: 11 }}>
+                  No script was written for this finding.
+                  {d.verdict ? ` ${d.verdict}` : ''} You can write one below and run it.
+                </Alert>
+              )}
+
+              <TextField fullWidth multiline minRows={18} maxRows={30}
                 value={draft ?? ''}
                 onChange={(e) => { setDraft(e.target.value); setSaid(null) }}
                 onKeyDown={(e) => {
@@ -200,15 +181,97 @@ export function PocModal({ project, pocId, title, onClose }: {
                   spellCheck: false,
                   style: { fontFamily: `'Share Tech Mono', monospace`,
                            fontSize: 12, lineHeight: 1.5 } } }} />
+
+              {d.target_url && (
+                <Tooltip title="Where this proof is pointed.">
+                  <Box sx={{ fontSize: 10.5, color: neon.muted,
+                             fontFamily: `'Share Tech Mono', monospace`,
+                             overflow: 'hidden', textOverflow: 'ellipsis',
+                             whiteSpace: 'nowrap' }}>
+                    → {d.target_url}
+                  </Box>
+                </Tooltip>
+              )}
             </Box>
 
-            {said && (
-              <Alert severity={save.isError || run.isError ? 'error' : 'info'}
-                sx={{ fontSize: 11.5 }} onClose={() => setSaid(null)}>
-                {said}
-              </Alert>
-            )}
+            {/* ── Right pane: run output ── */}
+            <Box sx={{
+              width: 340, minWidth: 280, p: 2, display: 'flex',
+              flexDirection: 'column', gap: 1.5, bgcolor: alpha(neon.muted, 0.04),
+            }}>
+              <Typography variant="caption" sx={{ color: neon.muted, fontSize: 10.5, letterSpacing: '0.08em' }}>
+                RUN OUTPUT
+              </Typography>
+
+              {/* Verdict */}
+              {d.verdict ? (
+                <Box sx={{
+                  p: 1.2, borderRadius: 1,
+                  bgcolor: d.state === 'Available, Confirmed'
+                    ? alpha(neon.green, 0.08) : alpha(neon.yellow, 0.06),
+                  border: `1px solid ${alpha(
+                    d.state === 'Available, Confirmed' ? neon.green : neon.yellow, 0.3)}`,
+                }}>
+                  <Stack direction="row" spacing={0.75} sx={{ alignItems: 'flex-start' }}>
+                    <TerminalIcon sx={{ fontSize: 14, mt: '1px',
+                      color: d.state === 'Available, Confirmed' ? neon.green : neon.yellow }} />
+                    <Box>
+                      <Typography sx={{ fontSize: 12, color: neon.text, lineHeight: 1.5 }}>
+                        {d.verdict}
+                      </Typography>
+                      {d.validated_at && (
+                        <Typography sx={{ fontSize: 10, color: neon.muted, mt: 0.3 }}>
+                          {d.validated_at.slice(0, 16).replace('T', ' ')} UTC
+                        </Typography>
+                      )}
+                    </Box>
+                  </Stack>
+                </Box>
+              ) : (
+                <Box sx={{ p: 1.2, borderRadius: 1,
+                           border: `1px dashed ${alpha(neon.muted, 0.3)}`,
+                           textAlign: 'center' }}>
+                  <Typography sx={{ fontSize: 11, color: neon.muted }}>
+                    {ran ? 'Waiting for a Ghost to run this…' : 'Not yet run.'}
+                  </Typography>
+                </Box>
+              )}
+
+              {/* Exit code */}
+              {d.exit_code !== null && d.exit_code !== undefined && (
+                <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                  <Typography sx={{ fontSize: 10.5, color: neon.muted }}>exit</Typography>
+                  <Chip size="small" label={String(d.exit_code)} sx={{
+                    height: 18, fontSize: 10, fontFamily: `'Share Tech Mono', monospace`,
+                    bgcolor: d.exit_code === 0 ? alpha(neon.green, 0.12) : alpha(neon.red, 0.1),
+                    color: d.exit_code === 0 ? neon.green : neon.red,
+                    border: `1px solid ${alpha(d.exit_code === 0 ? neon.green : neon.red, 0.4)}`,
+                  }} />
+                </Stack>
+              )}
+
+              {/* Detail (why not confirmed) */}
+              {d.detail && d.state !== 'Available, Confirmed' && (
+                <Alert severity="info" variant="outlined" sx={{ fontSize: 11 }}>
+                  {d.detail}
+                </Alert>
+              )}
+
+              {/* Updated timestamp */}
+              {d.updated_at && (
+                <Typography sx={{ fontSize: 10, color: alpha(neon.muted, 0.6), mt: 'auto' }}>
+                  last updated {d.updated_at.slice(0, 16).replace('T', ' ')} UTC
+                </Typography>
+              )}
+            </Box>
           </Stack>
+        )}
+
+        {said && (
+          <Alert severity={save.isError || run.isError ? 'error' : 'info'}
+            sx={{ mx: 2, mb: 1, fontSize: 11.5 }} onClose={() => setSaid(null)}>
+            {said}
+          </Alert>
         )}
       </DialogContent>
 

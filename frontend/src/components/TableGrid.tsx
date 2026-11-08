@@ -29,9 +29,10 @@ import {
   type RowSelectionState, type VisibilityState,
 } from '@tanstack/react-table'
 import { cellValue } from '../lib/tableOps'
-import type { ColumnDef, Density, RowIdGetter, SortModel } from '../lib/columns'
+import { EMPTY_FILTER, type ColumnDef, type Density, type FilterModel, type RowIdGetter, type SortModel } from '../lib/columns'
 import { MAX_WIDTH, MIN_WIDTH } from '../lib/useTableState'
 import { neon, glow } from '../theme'
+import { TableHeaderMenu } from './TableHeaderMenu'
 
 /** Row height per density, and the padding that goes with it. */
 const ROW: Record<Density, { h: number; py: number }> = {
@@ -68,6 +69,7 @@ export function TableGrid({
   rows, columns, columnVisibility, sort, onSort, density, getRowId,
   selectable, rowSelection, onRowSelectionChange, empty,
   widths = {}, onWidth, renderDetail, expanded, onExpand,
+  filterableFields, filterModel, onFilterChange,
 }: {
   /** One page of rows. `any` for the same reason MUI's own row type was
    *  `any`: a row is whatever the view's query returned. */
@@ -103,6 +105,14 @@ export function TableGrid({
    *  things unfolded is a worse way to read the same data. */
   expanded?: string | null
   onExpand?: (id: string | null) => void
+  /** Fields a right-click on the header may offer a filter for. Absent,
+   *  or a field not in it, and the header gives no context menu: a
+   *  column the API cannot filter on must not promise one. */
+  filterableFields?: ReadonlySet<string>
+  /** The conditions in force, so the menu can say which are already on. */
+  filterModel?: FilterModel
+  /** Write them back. The same model the toolbar's panel edits. */
+  onFilterChange?: (next: FilterModel) => void
 }) {
   const byField = useMemo(
     () => new Map(columns.map((c) => [c.field, c])), [columns])
@@ -171,6 +181,11 @@ export function TableGrid({
   // gesture. The committed value goes up once, on release.
   const [live, setLive] = useState<{ field: string; w: number } | null>(null)
   const drag = useRef<{ field: string; startX: number; startW: number } | null>(null)
+
+  // The column a right-click is asking about, and where the menu anchors.
+  // Held here rather than pushed up on every render: the menu is the
+  // grid's own instrument, opened from its own header.
+  const [menuAt, setMenuAt] = useState<{ field: string; el: HTMLElement } | null>(null)
 
   const widthOf = useCallback((field: string) => (
     live && live.field === field ? live.w : widths[field]
@@ -340,10 +355,20 @@ export function TableGrid({
                 <div key={header.id} role="columnheader"
                   className={sortable ? 'sortable' : undefined}
                   onClick={sortable ? (e) => onSort(col.field, e.shiftKey) : undefined}
+                  onContextMenu={(e) => {
+                    // Right-click is a different intent from the sort
+                    // click and must not do both.
+                    e.preventDefault()
+                    if (!filterableFields?.has(col.field)) return
+                    setMenuAt({ field: col.field, el: e.currentTarget })
+                  }}
                   title={sortable
-                    ? 'Click to sort. Shift-click to sort by this as well as '
-                      + 'the column already sorted.'
-                    : undefined}
+                    ? 'Click to sort. Right-click to filter this column. '
+                      + 'Shift-click to sort by this as well as the '
+                      + 'column already sorted.'
+                    : filterableFields?.has(col.field)
+                      ? 'Right-click to filter this column.'
+                      : undefined}
                   style={{ position: 'relative',
                            justifyContent: JUSTIFY[col.headerAlign ?? col.align ?? 'left'] }}>
                   <span className="head-label">
@@ -457,6 +482,14 @@ export function TableGrid({
                    placeItems: 'center', pointerEvents: 'none' }}>
           <Box sx={{ pointerEvents: 'auto', textAlign: 'center', px: 3 }}>{empty}</Box>
         </Box>
+      )}
+
+      {menuAt && (
+        <TableHeaderMenu
+          open anchorEl={menuAt.el} onClose={() => setMenuAt(null)}
+          column={byField.get(menuAt.field) ?? null}
+          model={filterModel ?? EMPTY_FILTER}
+          onFilter={(next) => onFilterChange?.(next)} />
       )}
     </Box>
   )
