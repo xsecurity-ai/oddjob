@@ -600,14 +600,13 @@ async def zones():
             got.setdefault(kind, []).extend(
                 [a["domain"]] if kind == "amass" else (a.get("targets") or []))
 
-        # The apex is enumerable because the wildcard names it, and so
-        # is the host itself: the full walk produces both, and the
-        # scope clears both. Amass on `one.zone.acme.example` finds
-        # subdomains of that name; amass on `zone.acme.example` finds
-        # everything under the apex. Both are legitimate work.
-        check("amass is queued for every zone the walk produces",
-              sorted(got.get("amass") or []) ==
-              ["one.zone.acme.example", "zone.acme.example"],
+        # The scope root `zone.acme.example` is enumerable because the
+        # wildcard names it. The registrable domain `acme.example` is a
+        # parent above the wildcard and is refused by the gate. Amass on
+        # `zone.acme.example` finds everything under that zone; running
+        # it on the deeper name would be redundant.
+        check("amass is queued for the zone the scope names",
+              sorted(got.get("amass") or []) == ["zone.acme.example"],
               got.get("amass"))
         # ...and is still not a host anything may be done to.
         check("nmap is NOT queued for that apex",
@@ -654,16 +653,17 @@ async def walk_gap():
             if kind == "amass":
                 got.append(a["domain"])
 
-        # `api.openai.com` is the zone the wildcard authorises. The
-        # registrable domain `openai.com` is a parent above the
-        # wildcard and is refused. Only the walk finds the authorised
-        # zone; a registrable-domain-only derivation would see only
-        # `openai.com`, refuse it, and queue nothing.
-        check("the intermediate zone the scope names is queued",
+        # `api.openai.com` is the zone the wildcard authorises (it is
+        # a scope root, taken as written). The registrable domain
+        # `openai.com` is a parent above the wildcard and is refused.
+        check("the zone the scope names is queued",
               "api.openai.com" in got, got)
-        # The host itself walks too, and the scope clears it.
-        check("...and the host's own zone is queued as well",
-              "cdn.api.openai.com" in got, got)
+        # The host's full name is NOT a zone anymore: the walk yields
+        # only registrable domains and scope roots, so `cdn.api.openai.com`
+        # collapses to `openai.com` (refused) and the scope root
+        # `api.openai.com` (allowed).
+        check("...and the host's full name is not its own zone",
+              "cdn.api.openai.com" not in got, got)
         # The registrable domain is NOT queued: it is a parent above
         # the wildcard, and the gate refuses it.
         check("the parent above the wildcard is not queued",
