@@ -32,7 +32,23 @@ export type CountryCell =
   /** Looked up; the databases hold no country. A fact about the data,
    *  and ordinary for a private range. */
   | { state: 'unknown' }
+  /** Every address is RFC 1918 or APIPA — the host lives on a private
+   *  network, so "country" is not the right question. */
+  | { state: 'internal'; addresses: string[] }
   | { state: 'known'; code: string; name: string | null; all: string[] }
+
+/** RFC 1918 (10/8, 172.16/12, 192.168/16) and APIPA (169.254/16). */
+function isPrivateIp(ip: string): boolean {
+  // IPv4 only for now; a private IPv6 range check would be a later step.
+  const parts = ip.split('.').map(Number)
+  if (parts.length !== 4 || parts.some((n) => n < 0 || n > 255)) return false
+  const [a, b] = parts
+  if (a === 10) return true                          // 10.0.0.0/8
+  if (a === 172 && b >= 16 && b <= 31) return true  // 172.16.0.0/12
+  if (a === 192 && b === 168) return true           // 192.168.0.0/16
+  if (a === 169 && b === 254) return true           // 169.254.0.0/16 APIPA
+  return false
+}
 
 /** Decide the Country cell. Three kinds of blank, kept apart.
  *
@@ -59,6 +75,15 @@ export function countryCell(t: {
 }): CountryCell {
   if (t.kind === 'mobile') return { state: 'na' }
   if (!(t.ip_addresses?.length)) return { state: 'none' }
+  // RFC 1918 / APIPA: the host lives on a private network. MaxMind will
+  // never give it a country, so "unknown" is misleading — the answer is
+  // "internal", full stop. Check before geo_country so that a stale or
+  // partial geolocation (e.g. one address resolved, another is private)
+  // does not hide the fact that the host is behind a NAT.
+  const addrs = t.ip_addresses!
+  if (addrs.every(isPrivateIp)) {
+    return { state: 'internal', addresses: addrs }
+  }
   if (t.geo_country) {
     const all = t.geo_countries?.length ? t.geo_countries : [t.geo_country]
     return { state: 'known', code: t.geo_country,
