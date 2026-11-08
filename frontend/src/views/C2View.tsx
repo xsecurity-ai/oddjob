@@ -11,7 +11,7 @@
  * target. That is the whole reason to run a shell through here rather
  * than through netcat on a laptop.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions,
   Autocomplete, DialogContent, DialogTitle, IconButton, Menu, MenuItem,
@@ -22,6 +22,7 @@ import AddIcon from '@mui/icons-material/Add'
 import DeleteIcon from '@mui/icons-material/DeleteOutlined'
 import EditIcon from '@mui/icons-material/EditOutlined'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { sortedStrings } from '../lib/sortOptions'
 import {
   api, type C2Exchange, type C2Listener, type C2Session, type GhostAgent,
 } from '../lib/api'
@@ -31,8 +32,17 @@ import { PortPicker } from '../components/PortPicker'
 import type { ColumnDef } from '../lib/columns'
 import { neon, glow, blink, TAB_SX } from '../theme'
 import { render } from '../lib/terminal'
-import { LiveTerminal } from '../components/LiveTerminal'
+// The terminal emulator is 288 KB of the bundle and is needed only
+// once a shell is actually attached. This page's job is mostly the
+// session LIST; opening one is a deliberate second step, and the
+// chunk arrives then.
+const LiveTerminal = lazy(() => import('../components/LiveTerminal')
+  .then((m) => ({ default: m.LiveTerminal })))
 import { key, readingSession, useUnseenSessions } from '../lib/c2unseen'
+import { useExpand, useRouteParam, useTab } from '../lib/route'
+
+/** The tabs this view renders. */
+const C2_TABS = ['live', 'ended', 'listeners'] as const
 
 /** How often an open session re-reads its tail. A shell is
  *  interactive and SSE carries the nudge, but a poll is what makes it
@@ -70,12 +80,17 @@ export function C2View({ project }: { project: string | null }) {
   // Three: what can be typed at now, what is kept for the record,
   // and the listeners. The first question on opening this page is
   // almost always the first one, so it leads.
-  const [tab, setTab] = useState<'live' | 'ended' | 'listeners'>('live')
+  // Tabs and the open session both live in the URL: a pasted link
+  // names its tab, and `?expand=<id>` names the session to read. The
+  // id is validated against the rows below -- an id that no longer
+  // exists means "nothing chosen", which is what the effect already
+  // does for a fresh load.
+  const [tab, setTab] = useTab(C2_TABS, 'live', useRouteParam('tab'))
+  const [expand, setExpand] = useExpand(useRouteParam('expand'))
   // Scanners hidden by default. A listener open to the internet
   // catches them faster than it catches payloads, and each one
   // files a session.
   const [showScans, setShowScans] = useState(false)
-  const [open, setOpen] = useState<number | null>(null)
   const [setup, setSetup] = useState(false)
   // Held here rather than in the session list: the list opens it
   // from a context menu and the terminal from a button, and a
@@ -93,13 +108,13 @@ export function C2View({ project }: { project: string | null }) {
   const rows = useMemo(() => sessions.data ?? [], [sessions.data])
 
   // Keep the selection on a session that still exists, and land on
-  // the newest when nothing is chosen.
-  useEffect(() => {
-    if (!rows.length) { setOpen(null); return }
-    setOpen((cur) => (cur !== null && rows.some((r) => r.id === cur)
-                      ? cur : rows[0].id))
-  }, [rows])
-  useEffect(() => { setOpen(null) }, [project])
+  // the newest when nothing is chosen. The URL names it as a string;
+  // an id no row carries means "nothing chosen", which is what a
+  // pasted link to a session since closed should do rather than hold
+  // a number the table does not have.
+  const open = expand !== null && rows.some((r) => String(r.id) === expand)
+    ? Number(expand) : null
+  const setOpen = (id: number | null) => setExpand(id === null ? null : String(id))
 
   // Having a session on screen is reading it, so it stops
   // blinking; leaving the page means whatever it says next is
@@ -829,7 +844,14 @@ function Terminal({ project, session, onEdit, onChanged }: {
       </Stack>
 
       {pane === 'terminal' ? (
-        <LiveTerminal project={project} session={session} />
+        <Suspense fallback={
+          <Box sx={{ flex: 1, display: 'flex', alignItems: 'center',
+                     justifyContent: 'center', p: 3 }}>
+            <CircularProgress size={20} sx={{ color: neon.cyan }} />
+          </Box>
+        }>
+          <LiveTerminal project={project} session={session} />
+        </Suspense>
       ) : (<>
       <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', px: 2, py: 1.5,
                  bgcolor: alpha('#000', 0.35),
@@ -936,13 +958,21 @@ function EditSessionDialog({ project, row, onDone }: {
   const [host, setHost] = useState<string>(row.host ?? '')
   const [err, setErr] = useState<string | null>(null)
 
+  // Names only. This asked for every target row in the project —
+  // 8.3 MB on a real engagement — to build a list of strings for one
+  // autocomplete.
+  //
+  // Still sorted here. The server orders by the DATABASE's collation,
+  // which is not the order JavaScript puts strings in: Postgres under
+  // a UTF-8 locale compares letters first and punctuation second, so
+  // `a-b.example` and `ab.example` land in a different place. Taking
+  // the server's order would have quietly reshuffled this list.
   const targets = useQuery({
-    queryKey: ['targets', project],
-    queryFn: () => api.targets(project),
+    queryKey: ['target-hosts', project],
+    queryFn: () => api.targetHosts(project),
   })
   const hosts = useMemo(
-    () => (targets.data?.items ?? []).map((t) => t.host).sort(),
-    [targets.data])
+    () => sortedStrings(targets.data?.hosts ?? []), [targets.data])
 
   const save = useMutation({
     mutationFn: async () => {

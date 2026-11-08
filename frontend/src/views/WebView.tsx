@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Alert, Box, Chip, Menu, MenuItem, Snackbar, Stack, Tab, Tabs, ToggleButton,
   ToggleButtonGroup, Tooltip, Typography, alpha,
@@ -24,6 +24,7 @@ import { PacketModal } from '../components/PacketModal'
 import { ReplayModal } from '../components/ReplayModal'
 import { queue } from '../components/ghostTasking'
 import { neon, glow, TAB_SX } from '../theme'
+import { parse, push, replace, useExpandMany, useRouteParam, useTab } from '../lib/route'
 
 /**
  * Every URL found on an http(s) service.
@@ -70,7 +71,25 @@ export function WebView({ project }: { project: string | null }) {
   // is the origin. Coordinates cannot go stale.
   const [menu, setMenu] = useState<
     { x: number; y: number; row: WebAddress } | null>(null)
-  const [packet, setPacket] = useState<number | null>(null)
+  // The exchange being read and the one being edited ride in the url as
+  // `?packet=` / `?replay=`, on the same shape as `?finding=` elsewhere:
+  // presence is the whole signal, so a pasted link opens the exact
+  // exchange it names, and closing drops the key rather than leaving a
+  // value behind.
+  const packet = useRouteParam('packet')
+  const replay = useRouteParam('replay')
+  const setPacket = (id: number | null) => {
+    const r = parse(window.location.pathname, window.location.search)
+    if (id) r.packet = id
+    else delete r.packet
+    push(r)
+  }
+  const setReplay = (id: number | null) => {
+    const r = parse(window.location.pathname, window.location.search)
+    if (id) r.replay = id
+    else delete r.replay
+    replace(r)
+  }
   // Reaching a URL is the thing a reader most often wants and the thing
   // the table cannot do for them, so it is a link rather than a cell.
   const [filter, setFilter] = useState<'all' | 'crawled' | 'interesting'>('all')
@@ -80,12 +99,14 @@ export function WebView({ project }: { project: string | null }) {
   // with 200/401/403/500, and folding them into one control would
   // make that combination unaskable.
   const [foundBy, setFoundBy] = useState<'any' | 'crawl' | 'discovery'>('any')
-  const [tab, setTab] = useState<'urls' | 'assets' | 'takeovers'>('urls')
+  const [tab, setTab] = useTab(['urls', 'assets', 'takeovers'], 'urls',
+                                useRouteParam('tab'))
   // Which URLs are open, and what their exchanges are once fetched.
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  // The open groups ride in `?expand=` comma-joined: a pasted link
+  // lands with the same groups open it left behind.
+  const [expanded, setExpanded] = useExpandMany(useRouteParam('expand'))
   const [children, setChildren] = useState<Record<string, WebAddress[]>>({})
   const [loadingKey, setLoadingKey] = useState<string | null>(null)
-  const [replay, setReplay] = useState<number | null>(null)
   // What the last queue attempt did. A task queued from a context
   // menu is otherwise entirely silent: the work goes to an agent
   // somewhere else and nothing on this page changes for minutes.
@@ -116,13 +137,17 @@ export function WebView({ project }: { project: string | null }) {
     }
   }
 
-  const toggle = async (g: WebGroup) => {
+  // `useCallback` because the columns memo depends on it. A
+  // handler rebuilt every render is a dependency that changes
+  // every render, and the memo would never hit.
+  const toggle = useCallback(async (g: WebGroup) => {
     const key = rowKey(g)
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key); else next.add(key)
-      return next
-    })
+    // Value form, not an updater: the setter writes the URL, and this
+    // handler is the only writer of `expanded`, so reading the current
+    // value from the closure is safe.
+    const next = new Set(expanded)
+    if (next.has(key)) next.delete(key); else next.add(key)
+    setExpanded(next)
     if (!children[key]) {
       setLoadingKey(key)
       try {
@@ -131,12 +156,14 @@ export function WebView({ project }: { project: string | null }) {
       } catch {
         // Leave it unexpanded rather than showing an empty group that
         // claims the URL has no exchanges.
-        setExpanded((prev) => { const n = new Set(prev); n.delete(key); return n })
+        setExpanded(new Set(expanded).has(key)
+          ? (() => { const n = new Set(expanded); n.delete(key); return n })()
+          : expanded)
       } finally {
         setLoadingKey(null)
       }
     }
-  }
+  }, [children, expanded, setExpanded])
 
   // Paged, sorted and searched in the database. One engagement holds
   // 211,012 addresses; the previous version asked for 5,000 and showed
@@ -230,7 +257,10 @@ export function WebView({ project }: { project: string | null }) {
   }, [data?.items, expanded, children,
       table.query.page, table.query.pageSize])
 
-  const columns: ColumnDef<WebAddress>[] = [
+  // Memoised: a fresh array every render makes every memo in
+  // TableGrid keyed on `columns` recompute, and TanStack rebuild
+  // its column model from them.
+  const columns: ColumnDef<WebAddress>[] = useMemo(() => [
     {
       // A handle to refer to a row by. Position in the listing as it
       // is currently sorted and filtered — with the default sort and
@@ -408,7 +438,7 @@ export function WebView({ project }: { project: string | null }) {
     { field: 'notes', headerName: 'Notes', flex: 1, minWidth: 160,
       valueGetter: (v) => v ?? '' },
     { field: 'project_code', headerName: 'Project', width: 120 },
-  ]
+  ], [expanded, loadingKey, open, toggle])
 
   // Both of the non-URL tabs are a whole panel that owns its own
   // fetching, so they share one shell rather than each repeating the
@@ -451,8 +481,8 @@ export function WebView({ project }: { project: string | null }) {
           editor opens, so the two are never stacked: they show the same
           exchange, and two dialogs of one exchange is a guess about
           which is live. */}
-      {packet !== null && (
-        <PacketModal id={packet} onClose={() => setPacket(null)}
+      {packet != null && (
+        <PacketModal id={Number(packet)} onClose={() => setPacket(null)}
           onReplay={(pid) => { setPacket(null); setReplay(pid) }} />
       )}
       <Menu open={!!menu} onClose={() => setMenu(null)}
@@ -516,7 +546,7 @@ export function WebView({ project }: { project: string | null }) {
       </Snackbar>
 
       <ReplayModal
-        id={replay} onClose={() => setReplay(null)}
+        id={replay != null ? Number(replay) : null} onClose={() => setReplay(null)}
         onCreated={() => {
           // The new exchange belongs under the same URL, so drop the
           // cached children: leaving them would show a group whose hit

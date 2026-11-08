@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert, Badge, Box, Button, Chip, Snackbar, Stack, Tab, Tabs, Tooltip, alpha,
 } from '@mui/material'
@@ -9,6 +9,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Target } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { DataTable } from '../components/DataTable'
+import { useServerTable } from '../lib/useServerTable'
 import { CloudTargetsPanel } from '../components/CloudTargetsPanel'
 import { useHostModal } from '../components/HostModal'
 import { ImportScanDialog } from '../components/ImportScanDialog'
@@ -27,6 +28,7 @@ import { ScanRangesDialog } from '../components/ScanRangesDialog'
 import { WebDiscoveryDialog } from '../components/WebDiscoveryDialog'
 import { ProbeDialog } from '../components/ProbeDialog'
 import { neon, glow, TAB_SX } from '../theme'
+import { useRouteParam, useTab } from '../lib/route'
 
 /** Zero is muted so the eye lands on the non-zero numbers. */
 function Count({ n, color }: { n: number; color?: string }) {
@@ -130,7 +132,8 @@ export function TargetsView({ project }: { project: string | null }) {
   const { canWrite } = useAuth()
   const { open } = useHostModal()
   const writable = canWrite(project)
-  const [tab, setTab] = useState<'scope' | 'cloud'>('scope')
+  const [tab, setTab] = useTab(['scope', 'cloud'], 'scope',
+                                useRouteParam('tab'))
   const [importing, setImporting] = useState(false)
   // The target that would be absorbed and removed.
   const [merging, setMerging] = useState<Target | null>(null)
@@ -157,9 +160,52 @@ export function TargetsView({ project }: { project: string | null }) {
     { message: string; severity: 'success' | 'error' | 'info' } | null>(null)
   const [selected, setSelected] = useState<number[]>([])
 
+  // Paged in the database. This fetched every target in the project
+  // -- 10,338 rows and 8.2 MB on this engagement -- to render a
+  // screenful, and half that payload was the JSON key names repeated
+  // once per row. The browser then split it into two tabs and
+  // counted two gaps out of it; both of those are the server's job
+  // now, which is what made paging possible at all.
+  const table = useServerTable('targets', {
+    sort: 'host', order: 'asc', pageSize: 100,
+  })
   const { data, isLoading, error } = useQuery({
-    queryKey: ['targets', project],
-    queryFn: () => api.targets(project ?? undefined),
+    queryKey: ['targets', project, tab, table.query],
+    queryFn: () => api.targetPage({
+      project: project ?? undefined,
+      q: table.query.q || undefined,
+      sort: table.query.sort,
+      order: table.query.order,
+      // The tab IS the filter. `cloud_family` is computed from the
+      // host rather than stored, so this cannot be a plain column
+      // filter -- see `_cloud_ids`, which applies the same
+      // classifier the API exposes.
+      cloud: tab === 'cloud',
+      limit: table.query.pageSize,
+      offset: table.query.page * table.query.pageSize,
+    }),
+    enabled: !!project,
+    placeholderData: (prev) => prev,
+  })
+  const { setTotal, setPage } = table
+  useEffect(() => { setTotal(data?.total ?? 0) }, [setTotal, data?.total])
+  // A different project, or the other tab, is a different result
+  // set: page 7 of the old one means nothing.
+  useEffect(() => { setPage(0) }, [setPage, project, tab])
+
+  // The two tab counts, and the two Enumerate gap counts. Four
+  // integers that used to be derived from every row in the project.
+  const counts = useQuery({
+    queryKey: ['target-counts', project],
+    queryFn: async () => {
+      const [cloud, scope, gaps] = await Promise.all([
+        api.targetPage({ project: project as string, cloud: true, limit: 1 }),
+        api.targetPage({ project: project as string, cloud: false, limit: 1 }),
+        api.targetGaps(project as string),
+      ])
+      return { cloud: cloud.total ?? 0, scope: scope.total ?? 0, ...gaps }
+    },
+    enabled: !!project,
   })
 
   // Lookup results that have come home. The SSE stream invalidates
@@ -228,18 +274,25 @@ export function TargetsView({ project }: { project: string | null }) {
   // enumerate counts and the merge candidates all read it, and a
   // cloud-named host is still a host you can look up or scan. Only
   // what each tab DISPLAYS is split.
-  const scopeRows = useMemo(
-    () => rows.filter((t) => !t.cloud_family && t.kind !== 'cloud'), [rows])
-  const cloudRows = useMemo(
-    () => rows.filter((t) => !!t.cloud_family || t.kind === 'cloud'), [rows])
+  // The server already filtered to this tab, so the page IS the
+  // rows. The split used to happen here because the fetch carried
+  // both kinds.
+  const scopeRows = rows
   const selectedRows = useMemo(() => {
     const want = new Set(selected)
     return rows.filter((t) => want.has(t.id))
   }, [rows, selected])
 
-  const unnamed = useMemo(() => rows.filter(needsName), [rows])
-  const unnamedSelected = useMemo(() => selectedRows.filter(needsName), [selectedRows])
-  const unaddressed = useMemo(() => rows.filter(needsAddress), [rows])
+  // Project-wide, from the server. These drive the Enumerate menu's
+  // "N targets need a name" and the actions behind it, so they have
+  // to describe the ESTATE and not the page -- which is exactly what
+  // they would describe if they were still counted from `rows`.
+  const unnamedCount = counts.data?.needs_name ?? 0
+  const unaddressedCount = counts.data?.needs_address ?? 0
+  // The selected ones stay client-side and are still correct: you
+  // can only select rows you can see.
+  const unnamedSelected = useMemo(
+    () => selectedRows.filter(needsName), [selectedRows])
   const unaddressedSelected = useMemo(
     () => selectedRows.filter(needsAddress), [selectedRows])
 
@@ -283,12 +336,26 @@ export function TargetsView({ project }: { project: string | null }) {
     else if (a === 'template-scan') setProbe('nuclei')
     else if (a === 'ip-all' || a === 'ip-selected') {
       // Forward: a name we hold, resolved to the address it points at.
-      const src = a === 'ip-all' ? unaddressed : unaddressedSelected
-      setLookup({ kind: 'nslookup', subjects: src.map((t) => t.host) })
+      if (a === 'ip-selected') {
+        setLookup({ kind: 'nslookup',
+                    subjects: unaddressedSelected.map((t) => t.host) })
+      } else {
+        // "All" is the whole ESTATE, which the browser no longer
+        // holds. Asked for when the action is taken rather than
+        // carried on every page load — it is thousands of names.
+        void api.targetGapSubjects(project as string, 'address')
+          .then((r) => setLookup({ kind: 'nslookup', subjects: r.subjects }))
+      }
+    } else if (a === 'fqdn-selected') {
+      setLookup({ kind: 'reverse_ip',
+                  subjects: unnamedSelected.map(addressOf) })
     } else {
-      // Reverse: an address we hold, asked what it is called.
-      const src = a === 'fqdn-all' ? unnamed : unnamedSelected
-      setLookup({ kind: 'reverse_ip', subjects: src.map(addressOf) })
+      // Reverse: an address we hold, asked what it is called. The
+      // server returns the addresses themselves, so `addressOf` is
+      // not re-applied — for these rows the host IS the address,
+      // which is the condition that put them in the list.
+      void api.targetGapSubjects(project as string, 'name')
+        .then((r) => setLookup({ kind: 'reverse_ip', subjects: r.subjects }))
     }
   }
 
@@ -337,7 +404,36 @@ export function TargetsView({ project }: { project: string | null }) {
     }
   }, [rows])
 
-  const columns: ColumnDef<Target>[] = [
+  // Memoised. A fresh array every render makes every memo inside
+  // TableGrid that is keyed on `columns` recompute, and TanStack
+  // rebuild its column model from them — on every keystroke in the
+  // search box and every unrelated state change in this view.
+  const columns: ColumnDef<Target>[] = useMemo(() => [
+    {
+      field: 'status_icons', headerName: '', width: 60, minWidth: 60,
+      renderCell: (p) => {
+        const r = p.row as Target & { total_ports?: number; web_count?: number; total_criticals?: number }
+        return (
+          <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
+            {(r.total_ports ?? 0) > 0 && (
+              <Tooltip title="Has been port-scanned">
+                <span style={{ fontSize: 12, opacity: 0.9 }}>🔍</span>
+              </Tooltip>
+            )}
+            {(r.web_count ?? 0) > 0 && (
+              <Tooltip title="Has been web-enumerated">
+                <span style={{ fontSize: 12, opacity: 0.9 }}>🌐</span>
+              </Tooltip>
+            )}
+            {(r.total_criticals ?? 0) > 0 && (
+              <Tooltip title="Has critical findings">
+                <span style={{ fontSize: 12, opacity: 0.9 }}>🔴</span>
+              </Tooltip>
+            )}
+          </Box>
+        )
+      },
+    },
     {
       field: 'host', headerName: 'Host', flex: 2, minWidth: 230,
       renderCell: (p) => (
@@ -352,10 +448,11 @@ export function TargetsView({ project }: { project: string | null }) {
     },
     {
       field: 'kind', headerName: 'Type', width: widths.kind,
-      type: 'singleSelect', valueOptions: ['host', 'mobile', 'cloud'],
+      type: 'singleSelect', valueOptions: ['host', 'mobile', 'cloud', 'repo'],
       renderCell: (p) => {
         const c = p.value === 'mobile' ? neon.purple
-          : p.value === 'cloud' ? neon.cyan : neon.muted
+          : p.value === 'cloud' ? neon.cyan
+          : p.value === 'repo' ? '#a78bfa' : neon.muted
         // The provider is the useful half of "cloud" — knowing it is a
         // bucket somewhere is less use than knowing whose.
         const label = p.value === 'cloud' && p.row.provider
@@ -540,7 +637,13 @@ export function TargetsView({ project }: { project: string | null }) {
           onPick={(a) => onRowAction(p.row, a)} />
       ),
     },
-  ]
+  // Values, not objects: `widths.*` are numbers and `live.length`
+  // and `enrolled` are counts, so the memo compares equal between
+  // renders. `canWrite` and `open` come from contexts that memoise
+  // their value — the memo is worthless if a dependency is rebuilt
+  // every render, which is the trap when copying this pattern.
+  ], [canWrite, enrolled, live.length, open, widths.actions, widths.alive,
+      widths.country, widths.ip, widths.kind])
 
   return (
     <>
@@ -610,15 +713,22 @@ export function TargetsView({ project }: { project: string | null }) {
       <Tabs value={tab} onChange={(_, v) => setTab(v)}
         sx={{ minHeight: 34, px: 2, pt: 0.5,
               borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
+        {/* Counted by the server, so the label describes the project
+            rather than the page. It used to read the length of a
+            browser-side filter over every row in the estate. */}
         <Tab value="scope" sx={TAB_SX}
-          label={`In Scope${scopeRows.length ? ` (${scopeRows.length.toLocaleString()})` : ''}`} />
+          label={`In Scope${counts.data?.scope
+            ? ` (${counts.data.scope.toLocaleString()})` : ''}`} />
         <Tab value="cloud" sx={TAB_SX}
-          label={`Cloud${cloudRows.length ? ` (${cloudRows.length.toLocaleString()})` : ''}`} />
+          label={`Cloud${counts.data?.cloud
+            ? ` (${counts.data.cloud.toLocaleString()})` : ''}`} />
       </Tabs>
       {tab === 'cloud' ? (
         <Box sx={{ flex: 1, minHeight: 0, height: '100%',
                    display: 'flex', flexDirection: 'column' }}>
-          <CloudTargetsPanel rows={cloudRows} project={project}
+          {/* The same paged fetch: `cloud: tab === 'cloud'` above
+              means `rows` already IS the cloud page here. */}
+          <CloudTargetsPanel rows={rows} project={project}
             onOpen={(t) => open(t.project_code, t.host)} />
         </Box>
       ) : (
@@ -627,6 +737,7 @@ export function TargetsView({ project }: { project: string | null }) {
         columns={columns as ColumnDef[]}
         loading={isLoading}
         error={error as Error | null}
+        server={table}
         initialSort={{ field: 'host', sort: 'asc' }}
         hiddenColumns={project ? { project_code: false } : undefined}
         kind="targets"
@@ -640,9 +751,9 @@ export function TargetsView({ project }: { project: string | null }) {
               liveAgents={live.length}
               enrolledAgents={enrolled}
               selectedCount={selected.length}
-              unnamedCount={unnamed.length}
+              unnamedCount={unnamedCount}
               unnamedSelectedCount={unnamedSelected.length}
-              unaddressedCount={unaddressed.length}
+              unaddressedCount={unaddressedCount}
               unaddressedSelectedCount={unaddressedSelected.length}
               geoUsable={geo.data?.usable ?? false}
               geoPending={geo.data?.remaining ?? 0} />

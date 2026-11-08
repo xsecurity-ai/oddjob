@@ -188,8 +188,16 @@ export function UsersView() {
                       <span>
                         <Button size="small"
                           disabled={!u.email || !!u.last_login_at || sendInvite.isPending}
-                          onClick={() => sendInvite.mutate(u.username)}
-                          sx={{ fontSize: 10.5, color: neon.cyan, minWidth: 0 }}>
+                          onClick={() => { if (u.email && !u.last_login_at) sendInvite.mutate(u.username) }}
+                          sx={{
+                            fontSize: 10.5, minWidth: 0,
+                            color: neon.cyan,
+                            '&.Mui-disabled': {
+                              color: alpha(neon.muted, 0.5),
+                              opacity: 0.45,
+                              pointerEvents: 'none',
+                            },
+                          }}>
                           Invite
                         </Button>
                       </span>

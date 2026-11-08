@@ -57,6 +57,10 @@ SUITES = [
     ("tests/enumeratetest.py", TMP / "ms-enum.db"),
     ("tests/scopetest.py",     TMP / "ms-scope.db"),
     ("tests/mergetest.py",     TMP / "ms-merge.db"),
+    ("tests/pocrequesttest.py", TMP / "ms-pocreq.db"),
+    ("tests/vulnlifecycletest.py", TMP / "ms-vlife.db"),
+    # No server: query-shape decisions, asserted directly.
+    ("tests/dbperftest.py",     TMP / "ms-dbperf.db"),
     ("tests/audittest.py",     TMP / "ms-audit.db"),
     ("tests/vulnfeedtest.py",  TMP / "ms-vuln.db"),
     ("tests/nsetest.py",       TMP / "ms-nse.db"),

@@ -9,13 +9,14 @@
  * table column, the row control and the modal — and three copies
  * of a vocabulary is how they stop agreeing.
  */
-export type Triage = 'needs_investigating' | 'true_positive' | 'false_positive'
+export type Triage = 'needs_investigating' | 'true_positive' | 'false_positive' | 'verified_benign'
 
 export const TRIAGE: Array<{ value: Triage; label: string; colour: string }> = [
   // `needs_investigating` first: it is the default, and the one a
-  // scanner produces. The other two are somebody's judgement.
+  // scanner produces. The other three are somebody's judgement.
   { value: 'needs_investigating', label: 'Needs investigating', colour: '#f5c518' },
   { value: 'true_positive', label: 'True positive', colour: '#ff4d6d' },
+  { value: 'verified_benign', label: 'Verified benign', colour: '#4ade80' },
   { value: 'false_positive', label: 'False positive', colour: '#7a8699' },
 ]
 

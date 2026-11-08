@@ -18,13 +18,16 @@
  * hand-rolled lists; that made them the only tables in the app that
  * looked different and did less.
  */
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Box, Chip, CircularProgress, Stack, Tooltip, alpha } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
 import type { ColumnDef } from '../lib/columns'
 import { api, type Vuln, type VulnsByTargetRow, type VulnsByTitleRow } from '../lib/api'
 import { SEVERITY_COLOUR as SEV } from '../lib/severity'
 import { DataTable } from './DataTable'
+import { ProofCell, ProveGroupDialog, type Group } from './ProveGroup'
+import { useAuth } from '../lib/auth'
+import { useServerTable } from '../lib/useServerTable'
 import { neon, glow } from '../theme'
 
 /** Worst first, and the order the server rolls up in. */
@@ -188,23 +191,54 @@ function Detail({ rows, loading, onFinding, show, sameAs }: {
 }
 
 // ---------------------------------------------------------- by target
-export function VulnsByTarget({ project, onFinding }: {
+export function VulnsByTarget({ project, onFinding, expand, onExpand }: {
   project: string | null
   onFinding: (id: number) => void
+  /** The row the URL says is expanded, or null. */
+  expand?: string | null
+  /** Tell the URL which row is open. */
+  onExpand?: (id: string | null) => void
 }) {
-  const [open, setOpen] = useState<string | null>(null)
-  const q = useQuery({
-    queryKey: ['vulns-by-target', project],
-    queryFn: () => api.vulnsByTarget(project as string),
-    enabled: !!project,
+  const { canWrite } = useAuth()
+  // Controlled by the URL when the view passes it down: a pasted link
+  // naming a host expands that host, and collapsing one drops `?expand=`.
+  const open = expand ?? null
+  const setOpen = onExpand ?? (() => {})
+  // What a click on the proof column is asking for, held until the
+  // dialog confirms it. The row, not just the host: the dialog names
+  // the finding count and that lives on the row.
+  const [prove, setProve] = useState<
+    { group: Group; total: number } | null>(null)
+  // Paged in the database, like the findings list. This fetched the
+  // whole rollup -- 1,603 hosts here, and the by-vuln one is 10,860
+  // rows and 2.0 MB -- and let the browser sort it, which made the
+  // ordering a statement about the rows it happened to hold.
+  const table = useServerTable('vulns-by-target', {
+    sort: 'total', order: 'desc', pageSize: 100,
   })
+  const q = useQuery({
+    queryKey: ['vulns-by-target', project, table.query],
+    queryFn: () => api.vulnsByTarget(project as string, {
+      sort: table.query.sort, order: table.query.order,
+      limit: table.query.pageSize,
+      offset: table.query.page * table.query.pageSize,
+    }),
+    enabled: !!project,
+    placeholderData: (prev) => prev,
+  })
+  const { setTotal, setPage } = table
+  useEffect(() => { setTotal(q.data?.total ?? 0) }, [setTotal, q.data?.total])
+  useEffect(() => { setPage(0) }, [setPage, project])
   const detail = useQuery({
     queryKey: ['vulns-of-host', project, open],
     queryFn: () => api.vulnsForHost(project as string, open as string),
     enabled: !!open && !!project,
   })
 
-  const columns: ColumnDef<VulnsByTargetRow>[] = [
+  // Memoised: a fresh array every render makes every memo in
+  // TableGrid keyed on `columns` recompute, and TanStack rebuild
+  // its column model from them.
+  const columns: ColumnDef<VulnsByTargetRow>[] = useMemo(() => [
     { field: 'host', headerName: 'Host', flex: 2, minWidth: 220,
       renderCell: (p) => (
         <Box sx={{ fontFamily: `'Share Tech Mono', monospace`,
@@ -219,15 +253,33 @@ export function VulnsByTarget({ project, onFinding }: {
       type: 'number',
       renderCell: (p) => <Count n={p.value as number} colour={SEV[s]} />,
     })),
-  ]
+    {
+      // Sorted by how much of the host is PROVED, not by the raw
+      // count: "40 of 40" and "40 of 4,000" are the same number and
+      // opposite answers to "is this host evidenced".
+      field: 'proofs', headerName: 'Proof', width: 148, type: 'number',
+      // Ranked by COVERAGE in SQL -- see BY_TARGET_SORT. "40 of 40"
+      // and "40 of 4,000" are the same number and opposite answers,
+      // and a browser-side comparator would only order the page.
+      renderCell: (p) => {
+        const r = p.row as VulnsByTargetRow
+        return <ProofCell proofs={r.proofs} requested={r.requested}
+          total={r.total}
+          onProve={canWrite(project) ? () => setProve({
+            group: { host: r.host }, total: r.total }) : undefined} />
+      },
+    },
+  ], [canWrite, project])
 
   return (
+    <>
     <DataTable
       rows={q.data?.items ?? []}
       columns={columns as ColumnDef[]}
       loading={q.isLoading}
       error={q.error as Error | null}
       tableId="vulns-by-target"
+      server={table}
       // The host IS the identity here; the rollup has one row each.
       getRowId={(r) => (r as VulnsByTargetRow).host}
       initialSort={{ field: 'total', sort: 'desc' }}
@@ -252,26 +304,58 @@ export function VulnsByTarget({ project, onFinding }: {
           )} />
       )}
       note={'One row per host, worst first. Expand a host to see what '
-            + 'was found on it; the findings are fetched only when you do.'
-            + (q.data?.truncated
-               ? ' THIS LIST IS CUT SHORT — there are more hosts than the '
-                 + 'rollup returns, so the totals below are not the whole '
-                 + 'project.' : '')}
+            + 'was found on it; the findings are fetched only when you do. '
+            + 'Proof shows how much of the host is evidenced — press it '
+            + 'to have one written for everything here that has none.'
+            // NOT `truncated`: that means "more rows than the limit",
+            // which is true of every page by definition now. Paging
+            // replaced the condition it warned about — there is no
+            // longer a cut-short list, only a page of a known total.
+            + (q.data?.total
+               ? ` ${q.data.total.toLocaleString()} hosts in all.` : '')}
     />
+    {project && (
+      <ProveGroupDialog project={project} group={prove?.group ?? null}
+        total={prove?.total} onClose={() => setProve(null)} />
+    )}
+    </>
   )
 }
 
 // ------------------------------------------------------------ by vuln
-export function VulnsByTitle({ project, onFinding }: {
+export function VulnsByTitle({ project, onFinding, expand, onExpand }: {
   project: string | null
   onFinding: (id: number) => void
+  /** The row the URL says is expanded, or null. */
+  expand?: string | null
+  /** Tell the URL which row is open. */
+  onExpand?: (id: string | null) => void
 }) {
-  const [open, setOpen] = useState<string | null>(null)
-  const q = useQuery({
-    queryKey: ['vulns-by-title', project],
-    queryFn: () => api.vulnsByTitle(project as string),
-    enabled: !!project,
+  const { canWrite } = useAuth()
+  // Controlled by the URL when the view passes it down: a pasted link
+  // naming a title expands that row, and collapsing one drops `?expand=`.
+  const open = expand ?? null
+  const setOpen = onExpand ?? (() => {})
+  const [prove, setProve] = useState<
+    { group: Group; total: number } | null>(null)
+  // The bigger of the two: 10,860 rows and 2.0 MB fetched to show a
+  // screenful. Paged and ordered in the database now.
+  const table = useServerTable('vulns-by-title', {
+    sort: 'hosts', order: 'desc', pageSize: 100,
   })
+  const q = useQuery({
+    queryKey: ['vulns-by-title', project, table.query],
+    queryFn: () => api.vulnsByTitle(project as string, {
+      sort: table.query.sort, order: table.query.order,
+      limit: table.query.pageSize,
+      offset: table.query.page * table.query.pageSize,
+    }),
+    enabled: !!project,
+    placeholderData: (prev) => prev,
+  })
+  const { setTotal, setPage } = table
+  useEffect(() => { setTotal(q.data?.total ?? 0) }, [setTotal, q.data?.total])
+  useEffect(() => { setPage(0) }, [setPage, project])
   // The row id carries BOTH halves of the key, because the rollup is
   // unique on (title, severity) and the same title at two severities
   // is two rows with two different host lists.
@@ -296,15 +380,32 @@ export function VulnsByTitle({ project, onFinding }: {
       ) },
     { field: 'total', headerName: 'Findings', width: 100, type: 'number',
       renderCell: (p) => <Count n={p.value as number} /> },
+    {
+      field: 'proofs', headerName: 'Proof', width: 148, type: 'number',
+      // Ranked by coverage in SQL — see BY_TITLE_SORT.
+      renderCell: (p) => {
+        const r = p.row as VulnsByTitleRow
+        return <ProofCell proofs={r.proofs} requested={r.requested}
+          total={r.total}
+          // The title AND its severity. The rollup groups on the
+          // pair, so proving "this row" without the severity would
+          // reach the other row that shares the title.
+          onProve={canWrite(project) ? () => setProve({
+            group: { title: r.title, severity: r.severity },
+            total: r.total }) : undefined} />
+      },
+    },
   ]
 
   return (
+    <>
     <DataTable
       rows={q.data?.items ?? []}
       columns={columns as ColumnDef[]}
       loading={q.isLoading}
       error={q.error as Error | null}
       tableId="vulns-by-title"
+      server={table}
       getRowId={(r) => {
         const v = r as VulnsByTitleRow
         // NUL as the separator: a finding title can contain anything
@@ -334,9 +435,13 @@ export function VulnsByTitle({ project, onFinding }: {
       note={'One row per finding AT a severity — two scanners that '
             + 'disagree about the same thing are two rows, each with its '
             + 'own host count. Expand one to see which hosts carry it.'
-            + (q.data?.truncated
-               ? ' THIS LIST IS CUT SHORT — there are more findings than '
-                 + 'the rollup returns.' : '')}
+            + (q.data?.total
+               ? ` ${q.data.total.toLocaleString()} in all.` : '')}
     />
+    {project && (
+      <ProveGroupDialog project={project} group={prove?.group ?? null}
+        total={prove?.total} onClose={() => setProve(null)} />
+    )}
+    </>
   )
 }

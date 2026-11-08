@@ -66,6 +66,13 @@ var kindMemMB = map[string]int{
 	// a capture of a real client-estate page on a real ghost, watched
 	// while it runs.
 	"screenshot": 512,
+	// Source code analysis. Semgrep is a Python process that holds the
+	// rule set and the source in memory; on a large monorepo it can
+	// reach 500 MB. Trufflehog and osv-scanner are lighter (Go binaries)
+	// but still hold dependency graphs or git history in memory.
+	"semgrep":    512,
+	"trufflehog": 256,
+	"osv":        256,
 }
 
 // Unaffordable lists the task kinds this host cannot currently hold.

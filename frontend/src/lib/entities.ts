@@ -29,12 +29,14 @@ export const SPECS: Record<EntityKind, FieldSpec[]> = {
     { name: 'kind', label: 'Type', type: 'select', options: [
       { value: 'host', label: 'Host — a machine at an address' },
       { value: 'mobile', label: 'Mobile — an app, no IP of its own' },
-      { value: 'cloud', label: 'Cloud — a managed resource' }],
+      { value: 'cloud', label: 'Cloud — a managed resource' },
+      { value: 'repo', label: 'Repository — source code to analyse' }],
       help: 'A mobile app is named by its bundle or package id, e.g. '
             + 'com.acme.banking.android — it has no address, so IP and Alive '
             + 'are cleared and shown as N/A. A cloud resource is named '
             + 'however its provider names it: a hostname, an ARN, or a '
-            + 'resource path.' },
+            + 'resource path. A repo is named by its clone URL or org/slug; '
+            + 'findings on it carry file:line rather than port.' },
     { name: 'provider', label: 'Cloud provider', type: 'text',
       help: 'aws, azure, gcp, oracle, cloudflare, … Only kept for a cloud '
             + 'target; ignored for the others.' },

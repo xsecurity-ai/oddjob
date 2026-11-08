@@ -1,10 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { Box, Stack, Tooltip, alpha } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
 import type { ColumnDef } from '../lib/columns'
 import { api, type SecretRow } from '../lib/api'
 import { DataTable } from './DataTable'
 import { SecretSourceModal } from './SecretSourceModal'
+import { ProofCell, ProveGroupDialog, type Group } from './ProveGroup'
+import { useAuth } from '../lib/auth'
 import { SEVERITY_COLOUR as SEV_COLOUR } from '../lib/severity'
 import { neon, glow } from '../theme'
 
@@ -71,11 +73,17 @@ function Unrecorded({ why }: { why: string }) {
  *  one finished page of rows — which is the same arrangement paging,
  *  sorting and filtering already use in this codebase.
  */
+/** `covers` is every credential finding under this row: one id on a
+ *  secret, its file's on a file, the host's on a host. It is what the
+ *  proof column counts and what "prove these" names, so the number in
+ *  the column and the number in the dialog cannot disagree. */
 type Row =
-  | { kind: 'host'; id: string; host: string; files: number
-      secrets: number; worst: string }
+  | { kind: 'host'; id: string; host: string; label: string
+      files: number; secrets: number; worst: string
+      covers: SecretRow[] }
   | { kind: 'file'; id: string; host: string; url: string
-      path: string | null; secrets: number; worst: string }
+      path: string | null; secrets: number; worst: string
+      covers: SecretRow[] }
   | { kind: 'secret'; id: string; depth: 2; row: SecretRow }
 
 const SEV_RANK: Record<string, number> = {
@@ -87,28 +95,49 @@ function worstOf(rows: SecretRow[]): string {
     .sort((a, b) => (SEV_RANK[a] ?? 9) - (SEV_RANK[b] ?? 9))[0] ?? 'info'
 }
 
-/** Group by host, then by the file within it.
+/** Which question the panel is answering.
+ *
+ *  `target` — where are the credentials: host, then the file inside
+ *  it. The original view, and the right one for "what is exposed on
+ *  this machine".
+ *
+ *  `type` — WHAT the credentials are: detector, then the host. On a
+ *  real estate this is the difference between seeing a finding and
+ *  not: 482 of 668 secrets on one engagement are "Base64 High
+ *  Entropy String", and grouped by host the single AWS Access Key
+ *  sits somewhere inside them. Grouped by type it is a row of its
+ *  own with a 1 beside it.
+ */
+export type SecretGrouping = 'target' | 'type'
+
+/** Group twice, by whichever pair the view asked for.
  *
  *  The file key is the URL plus the path inside it: one bundle can
  *  hold several source files and they are different places, which
- *  is the distinction the flat table lost. A secret with no URL
- *  recorded gets its own group rather than being dropped — "we do
- *  not know where this came from" is a thing the page has to be
- *  able to say.
+ *  is the distinction the flat table lost.
+ *
+ *  Nothing is dropped for want of a key. A secret with no URL, no
+ *  host or no detector gets a group saying so — "we do not know
+ *  where this came from" is a thing the page has to be able to say,
+ *  and silently omitting those rows would make the counts disagree
+ *  with the Vulns tab.
  */
-function group(rows: SecretRow[]) {
-  const byHost = new Map<string, Map<string, SecretRow[]>>()
+function group(rows: SecretRow[], by: SecretGrouping) {
+  const out = new Map<string, Map<string, SecretRow[]>>()
   for (const r of rows) {
     const host = r.host || '(host not recorded)'
     const file = r.asset_url
       ? r.asset_url + (r.path ? ` · ${r.path}` : '')
       : '(origin not recorded)'
-    if (!byHost.has(host)) byHost.set(host, new Map())
-    const files = byHost.get(host)!
-    if (!files.has(file)) files.set(file, [])
-    files.get(file)!.push(r)
+    const [outer, inner] = by === 'type'
+      ? [r.detector || '(type not recorded)', host]
+      : [host, file]
+    if (!out.has(outer)) out.set(outer, new Map())
+    const second = out.get(outer)!
+    if (!second.has(inner)) second.set(inner, [])
+    second.get(inner)!.push(r)
   }
-  return byHost
+  return out
 }
 
 /** Every stored credential on the estate, in clear.
@@ -123,14 +152,26 @@ function group(rows: SecretRow[]) {
  *  writes an audit entry before answering, so "who could have seen
  *  this key" stays answerable.
  */
-export function SecretsPanel({ project, onFinding }: {
+export function SecretsPanel({ project, onFinding, groupBy = 'target' }: {
   project: string | null
   onFinding: (vulnId: number) => void
+  /** Which pair to group on. See `SecretGrouping` — the two tabs are
+   *  the same credentials asked a different question, not two
+   *  datasets, so they are one panel with one fetch. */
+  groupBy?: SecretGrouping
 }) {
   // The ROW, not just its id: the modal shows the verdict too, and
   // the row already carries it. Holding the id alone would mean
   // asking the server for something this table just rendered.
   const [sourceFor, setSourceFor] = useState<SecretRow | null>(null)
+  const { canWrite } = useAuth()
+  // What a click on the proof column asks for. Held as finding ids
+  // rather than as a host or a file: "the credentials in this file"
+  // is not a group the server can name, and naming it by host would
+  // reach every OTHER finding on that host too — which is the whole
+  // estate, not the credentials somebody is looking at.
+  const [prove, setProve] = useState<
+    { group: Group; total: number } | null>(null)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['secrets', project],
@@ -158,26 +199,36 @@ export function SecretsPanel({ project, onFinding }: {
   // Memoised on the response, not rebuilt per render: `stat` below
   // keys off it, and a dependency whose identity changes every time
   // is a memo that never hits and reads as though it does.
-  const grouped = useMemo(() => group(data ?? []), [data])
+  const grouped = useMemo(() => group(data ?? [], groupBy), [data, groupBy])
   // One finished list, in the order it is read: host, then its
   // files when the host is open, then their secrets when the file
   // is. Sorted worst-first within each level so the thing worth
   // looking at is nearest the top of its group.
   const rows: Row[] = []
-  for (const [host, files] of [...grouped].sort((a, b) =>
-      a[0].localeCompare(b[0]))) {
+  // Grouped by type, the useful order is BIGGEST FIRST: the point of
+  // that view is which kinds of credential this estate leaks, and a
+  // detector with one hit is not the headline. Grouped by target it
+  // stays alphabetical, because the question there is "find this
+  // host" and hunting for a name in a frequency-ordered list is
+  // worse than reading it in an ordered one.
+  const outer = [...grouped].sort((a, b) => groupBy === 'type'
+    ? [...b[1].values()].flat().length - [...a[1].values()].flat().length
+      || a[0].localeCompare(b[0])
+    : a[0].localeCompare(b[0]))
+  for (const [label, files] of outer) {
     const all = [...files.values()].flat()
-    rows.push({ kind: 'host', id: `h:${host}`, host,
+    rows.push({ kind: 'host', id: `h:${label}`, label,
+                host: all[0]?.host ?? '',
                 files: files.size, secrets: all.length,
-                worst: worstOf(all) })
-    if (!openHosts.has(host)) continue
+                worst: worstOf(all), covers: all })
+    if (!openHosts.has(label)) continue
     for (const [file, secrets] of [...files].sort((a, b) =>
         (SEV_RANK[worstOf(a[1])] ?? 9) - (SEV_RANK[worstOf(b[1])] ?? 9))) {
-      const key = `${host}|${file}`
+      const key = `${label}|${file}`
       const [url, path] = file.split(' · ')
-      rows.push({ kind: 'file', id: `f:${key}`, host, url,
+      rows.push({ kind: 'file', id: `f:${key}`, host: label, url,
                   path: path ?? null, secrets: secrets.length,
-                  worst: worstOf(secrets) })
+                  worst: worstOf(secrets), covers: secrets })
       if (!openFiles.has(key)) continue
       for (const r of [...secrets].sort((a, b) =>
           (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9))) {
@@ -202,7 +253,13 @@ export function SecretsPanel({ project, onFinding }: {
   // those is a field on these rows -- a secret's live under `row.`
   // and the group rows have `worst` and `secrets`. Every comparison
   // was reading undefined.
-  const hostOf = (r: Row) => (r.kind === 'secret' ? r.row.host ?? '' : r.host)
+  // `useCallback`, because the columns memo depends on these. A
+  // helper rebuilt every render is a dependency that changes every
+  // render, and a memo that never hits reads exactly like one that
+  // does.
+  const hostOf = useCallback((r: Row) =>
+    r.kind === 'secret' ? r.row.host ?? ''
+      : r.kind === 'host' ? r.label : r.host, [])
   const stat = useMemo(() => {
     const m = new Map<string, { worst: number; secrets: number }>()
     for (const [host, files] of grouped) {
@@ -211,15 +268,22 @@ export function SecretsPanel({ project, onFinding }: {
     }
     return m
   }, [grouped])
-  const by = (pick: (s: { worst: number; secrets: number }) => number) =>
-    (_raw: unknown, row: Row) => {
-      const h = stat.get(hostOf(row))
-      return h ? pick(h) : Number.MAX_SAFE_INTEGER
-    }
+  const by = useCallback(
+    (pick: (s: { worst: number; secrets: number }) => number) =>
+      (_raw: unknown, row: Row) => {
+        const h = stat.get(hostOf(row))
+        return h ? pick(h) : Number.MAX_SAFE_INTEGER
+      }, [stat, hostOf])
 
-  const columns: ColumnDef<Row>[] = [
+  // Memoised: a fresh array every render makes every memo in
+  // TableGrid keyed on `columns` recompute, and TanStack rebuild
+  // its column model from them.
+  const columns: ColumnDef<Row>[] = useMemo(() => [
     {
-      field: 'label', headerName: 'Host · file · secret', flex: 4,
+      field: 'label',
+      headerName: groupBy === 'type'
+        ? 'Type · host · secret' : 'Host · file · secret',
+      flex: 4,
       minWidth: 360,
       valueGetter: (_v, row) => hostOf(row as Row),
       // One column for all three levels. Indentation is what makes
@@ -229,15 +293,15 @@ export function SecretsPanel({ project, onFinding }: {
         const r = p.row as Row
         if (r.kind === 'host') {
           return (
-            <Box onClick={() => toggle(openHosts, r.host, setOpenHosts)}
+            <Box onClick={() => toggle(openHosts, r.label, setOpenHosts)}
               sx={{ cursor: 'pointer', color: neon.pink, fontWeight: 700,
                     fontSize: 12.5, display: 'flex', gap: 0.8,
                     alignItems: 'center',
                     '&:hover': { textShadow: glow(neon.pink, 0.7) } }}>
               <Box component="span" sx={{ fontSize: 10, width: 10 }}>
-                {openHosts.has(r.host) ? '▾' : '▸'}
+                {openHosts.has(r.label) ? '▾' : '▸'}
               </Box>
-              {r.host}
+              {r.label}
             </Box>
           )
         }
@@ -317,6 +381,27 @@ export function SecretsPanel({ project, onFinding }: {
       },
     },
     {
+      // Validating a credential IS the proof question here: a key in
+      // a file is a finding about a file, and "does it still work"
+      // is a different claim that only a check can settle. Available
+      // at every level, because the job is usually "prove this
+      // file's worth of keys", not one at a time.
+      field: 'poc', headerName: 'Proof', width: 150,
+      sortable: false,
+      renderCell: (p) => {
+        const r = p.row as Row
+        const covers = r.kind === 'secret' ? [r.row] : r.covers
+        const proved = covers.filter((c) => c.poc_id !== null).length
+        const asked = covers.filter(
+          (c) => c.poc_id === null && c.poc_requested).length
+        return <ProofCell proofs={proved} requested={asked}
+          total={covers.length}
+          onProve={canWrite(project) ? () => setProve({
+            group: { vuln_ids: covers.map((c) => c.vuln_id) },
+            total: covers.length }) : undefined} />
+      },
+    },
+    {
       field: 'severity', headerName: 'Sev', width: 86,
       // The rank, not the word: sorted as a string, severity reads
       // critical, high, info, low, medium — "info" third, which is
@@ -349,7 +434,8 @@ export function SecretsPanel({ project, onFinding }: {
         )
       },
     },
-  ]
+  ], [by, canWrite, groupBy, hostOf, onFinding, openFiles, openHosts,
+      project])
 
   return (
     <>
@@ -395,6 +481,16 @@ export function SecretsPanel({ project, onFinding }: {
       vulnId={sourceFor?.vuln_id ?? null}
       triage={sourceFor?.triage ?? null}
       onClose={() => setSourceFor(null)} />
+    {project && (
+      <ProveGroupDialog project={project} group={prove?.group ?? null}
+        total={prove?.total}
+        // Only here. Every row on this panel IS a stored credential,
+        // so "does it still work" is a question that can be asked —
+        // on the rollups it would be offered against open ports and
+        // TLS findings, where it means nothing.
+        credentials
+        onClose={() => setProve(null)} />
+    )}
     </>
   )
 }

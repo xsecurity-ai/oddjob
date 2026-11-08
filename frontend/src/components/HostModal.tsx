@@ -528,12 +528,14 @@ export function HostModalProvider({ children }: { children: ReactNode }) {
   // closing it returns to the host rather than to the page.
   const [vuln, setVuln] = useState<number | null>(null)
   const ctx = useMemo<Ctx>(() => ({
-    open: (project, host) => push({ ...parse(window.location.pathname),
+    // The search half rides along: a finding read from another view's
+    // table stays open when the host window opens on top of it.
+    open: (project, host) => push({ ...parse(window.location.pathname, window.location.search),
                                     project, host }),
     show: (project, host) => setAt({ project, host }),
     hide: () => setAt(null),
     close: () => {
-      const r = parse(window.location.pathname)
+      const r = parse(window.location.pathname, window.location.search)
       // The host AND anything that was open on top of it. Closing the
       // window and leaving `?finding=` behind would reopen the finding
       // on the next render with nothing underneath it.
@@ -541,6 +543,7 @@ export function HostModalProvider({ children }: { children: ReactNode }) {
       delete r.protocol
       delete r.port
       delete r.finding
+      delete r.expand
       push(r)
     },
   }), [])

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -133,6 +134,12 @@ func New(cfg *config.Config) *Agent {
 	// way Parallelism is: a task runner takes (ctx, args, workDir)
 	// and has nowhere to be handed a client.
 	tasks.AssetsHeld = a.cli.HeldAssets
+	// A proof that authenticates carries a placeholder, not the
+	// credential: the value stays on the server until the task runs
+	// and is fetched here, once, over this agent's own identity.
+	// Wired the same way and for the same reason -- and nil is the
+	// safe answer, which `runPoc` reads as "could not test".
+	tasks.TaskSecret = a.cli.TaskSecret
 	return a
 }
 
@@ -482,6 +489,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}()
 
+	// Periodic janitor: removes orphaned temp files older than an hour.
+	go a.janitor(ctx)
+
 	tick := time.NewTicker(a.cfg.Heartbeat)
 	defer tick.Stop()
 
@@ -635,10 +645,11 @@ func (a *Agent) beat(ctx context.Context) (*client.HeartbeatResp, error) {
 	a.mu.Lock()
 	wasBlocked := a.pressureOn
 	a.mu.Unlock()
-	if p := capacity.Check(ctx, wasBlocked); p.Blocked {
+	pres := capacity.Check(ctx, wasBlocked, a.cfg.WorkDir)
+	if pres.Blocked {
 		free = 0
-		why = p.Reason
-		a.notePressure(p.Key, p.Reason)
+		why = pres.Reason
+		a.notePressure(pres.Key, pres.Reason)
 	} else {
 		a.notePressure("", "")
 	}
@@ -662,6 +673,9 @@ func (a *Agent) beat(ctx context.Context) (*client.HeartbeatResp, error) {
 		// row says `pending` until then, and that is the honest
 		// state rather than an optimistic "listening".
 		Listeners: a.listenerReport(),
+		CPUIdle:   pres.CPUIdle,
+		MemFree:   pres.MemFree,
+		DiskFree:  pres.DiskFree,
 	})
 }
 
@@ -1032,7 +1046,13 @@ func (a *Agent) execute(ctx context.Context, t *client.Task) {
 		// asked for an out-of-band callback needs a port bound and
 		// proved reachable BEFORE its payload goes anywhere, and
 		// kept open after the tool exits. See tasks/callback.go.
-		return tasks.Run(ctx, runner, tasks.Decode(t.Args), a.cfg.WorkDir)
+		// The task's own id, stamped AFTER decoding the server's
+		// arguments so a task cannot name a different one by putting
+		// the key in its own args. A runner needs it to ask the
+		// server about the task it is running -- see TaskSecret.
+		targs := tasks.Decode(t.Args)
+		targs[tasks.TaskIDKey] = t.ID
+		return tasks.Run(ctx, runner, targs, a.cfg.WorkDir)
 	}()
 
 	log.Printf("task %d: %s in %s — %s", t.ID, res.Status,
@@ -1052,6 +1072,100 @@ func (a *Agent) execute(ctx context.Context, t *client.Task) {
 		Status: res.Status, Output: res.Output, Stderr: res.Stderr,
 		Summary: res.Summary, ExitCode: res.ExitCode, Error: res.Error,
 	})
+
+	// Per-task cleanup: remove any temp files this task left behind.
+	// The runners normally defer os.Remove on their own output files,
+	// but a crash or context cancel between CreateTemp and the deferred
+	// Remove leaves orphans. Sweep the workdir for the known patterns
+	// that are NOT constant-name (gobuster wordlists) and NOT in spool/.
+	a.cleanupTask()
+}
+
+// cleanupTask removes orphaned scanner output from the workdir.
+//
+// The runners create temp files like "nmap-1234567890.xml" via
+// os.CreateTemp and delete them on return. If a runner panics or is
+// killed before its deferred Remove runs, the file persists. This
+// sweeps everything matching the known tool-output patterns that is
+// not one of the constant-name files (gobuster wordlists) and not in
+// the spool/ subdirectory.
+func (a *Agent) cleanupTask() {
+	dir := a.cfg.WorkDir
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	// Constant-name files that are reused across tasks and must survive.
+	keep := map[string]bool{
+		"gobuster-builtin.txt":  true,
+		"gobuster-wordlist.txt": true,
+		"identity.json":         true,
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if keep[name] {
+			continue
+		}
+		if e.IsDir() && name != "spool" {
+			// Remove orphaned task directories (e.g. poc-*).
+			if strings.HasPrefix(name, "poc-") {
+				_ = os.RemoveAll(filepath.Join(dir, name))
+			}
+			continue
+		}
+		// Tool output temp files: <kind>-<random>.<ext>
+		for _, prefix := range []string{"nmap-", "masscan-", "nuclei-", "httpx-", "katana-", "amass-"} {
+			if strings.HasPrefix(name, prefix) && !strings.HasSuffix(name, ".txt") {
+				_ = os.Remove(filepath.Join(dir, name))
+				break
+			}
+		}
+	}
+}
+
+// janitor periodically sweeps the workdir of orphaned files older than
+// an hour. This catches orphans from tasks that were running when the
+// agent was killed (SIGKILL) and whose deferred cleanup never ran.
+func (a *Agent) janitor(ctx context.Context) {
+	t := time.NewTicker(5 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			dir := a.cfg.WorkDir
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			cutoff := time.Now().Add(-1 * time.Hour)
+			for _, e := range entries {
+				name := e.Name()
+				if e.IsDir() && name == "spool" {
+					continue
+				}
+				info, err := e.Info()
+				if err != nil {
+					continue
+				}
+				if info.ModTime().After(cutoff) {
+					continue
+				}
+				// Constant-name files survive the janitor too.
+				switch name {
+				case "gobuster-builtin.txt", "gobuster-wordlist.txt", "identity.json":
+					continue
+				}
+				p := filepath.Join(dir, name)
+				if e.IsDir() {
+					_ = os.RemoveAll(p)
+				} else {
+					_ = os.Remove(p)
+				}
+			}
+		}
+	}
 }
 
 // undeliverable reports whether the server will NEVER accept this

@@ -231,8 +231,12 @@ for _s in (Snapshot(auto_nmap="full", targets=BOTH, scope=SCOPED),
            Snapshot(auto_resolve_ips=True, targets=BOTH, scope=SCOPED)):
     _queued = len([c for c in plan(_s)
                    if _au.cleared(_s.scope, c.kind, c.subject)])
+    # A multi-task profile (TCP + UDP) queues len(profile) candidates
+    # per host; the gap counts hosts. Single-task policies are 1:1.
+    _n = len(NMAP_PROFILES.get(_s.auto_nmap, [{}])) \
+        if _s.auto_nmap != "off" else 1
     check("the gap report and the gated plan agree on the total",
-          sum(x.outstanding for x in _au.gaps(_s)) == _queued,
+          sum(x.outstanding for x in _au.gaps(_s)) * _n == _queued,
           f"gaps={[(x.policy, x.outstanding) for x in _au.gaps(_s)]} "
           f"plan={_queued}")
 
@@ -268,14 +272,14 @@ MANY.append(("zzz.acme.example", True))
 
 p1 = plan(Snapshot(auto_nmap="full", targets=MANY, scope=STARVE), limit=1)
 check("a capped cycle reaches the in-scope host past the refused ones",
-      [c.subject for c in p1] == ["zzz.acme.example"],
+      [c.subject for c in p1] == ["zzz.acme.example"] * len(NMAP_PROFILES["full"]),
       [c.subject for c in p1])
 
-# ...and with no cap it is still the only candidate, so the filter is
+# ...and with no cap it is still the only host, so the filter is
 # the gate and not an artefact of the slice.
 pall = plan(Snapshot(auto_nmap="full", targets=MANY, scope=STARVE))
-check("...and it is the only candidate at all",
-      [c.subject for c in pall] == ["zzz.acme.example"],
+check("...and it is the only host at all",
+      [c.subject for c in pall] == ["zzz.acme.example"] * len(NMAP_PROFILES["full"]),
       [c.subject for c in pall])
 
 # The same shape for a web policy, which is capped by WEB_PER_CYCLE
@@ -292,13 +296,17 @@ check("a web policy is not starved by its per-cycle cap either",
 # which is what every Snapshot built by hand in this file relies on.
 pn = plan(Snapshot(auto_nmap="full", targets=MANY), limit=1)
 check("with no gate the cap alone decides, as it always did",
-      len(pn) == 1 and pn[0].subject == "aaa000.acme.example",
+      len(pn) == len(NMAP_PROFILES["full"])
+      and all(c.subject == "aaa000.acme.example" for c in pn),
       [c.subject for c in pn])
 
 # The report and the planner still agree once the gate is in play.
+# A profile with N arg sets queues N candidates per host, so the plan
+# is hosts × N while the gap counts hosts.
 _st = Snapshot(auto_nmap="full", targets=MANY, scope=STARVE)
 check("the gap report agrees with what the planner can reach",
-      sum(x.outstanding for x in _au.gaps(_st)) == len(plan(_st)),
+      sum(x.outstanding for x in _au.gaps(_st)) * len(NMAP_PROFILES["full"])
+      == len(plan(_st)),
       [(x.policy, x.outstanding) for x in _au.gaps(_st)])
 
 
@@ -358,6 +366,9 @@ check("...top100 is nmap's own -F, not a port list of ours",
 p = plan(Snapshot(auto_nmap="full", targets=ESTATE))
 check("...and full names the range, because -p- and -F are exclusive",
       p[0].args.get("ports") == "1-65535", p[0].args)
+check("...and full also queues a UDP top-ports pass per host",
+      len(p) == 8 and any(c.args.get("technique") == "udp" for c in p),
+      [(c.subject, c.args) for c in p])
 # No profile names its own scripts any more, and this is the
 # assertion that keeps it that way. The ghost adds `--script` with
 # every -sV, nmap honours only the LAST --script on the line, and a
@@ -589,9 +600,15 @@ async def zones():
             got.setdefault(kind, []).extend(
                 [a["domain"]] if kind == "amass" else (a.get("targets") or []))
 
-        # The apex is enumerable because the wildcard names it.
-        check("amass is queued for the zone the wildcard names",
-              got.get("amass") == ["zone.acme.example"], got.get("amass"))
+        # The apex is enumerable because the wildcard names it, and so
+        # is the host itself: the full walk produces both, and the
+        # scope clears both. Amass on `one.zone.acme.example` finds
+        # subdomains of that name; amass on `zone.acme.example` finds
+        # everything under the apex. Both are legitimate work.
+        check("amass is queued for every zone the walk produces",
+              sorted(got.get("amass") or []) ==
+              ["one.zone.acme.example", "zone.acme.example"],
+              got.get("amass"))
         # ...and is still not a host anything may be done to.
         check("nmap is NOT queued for that apex",
               "zone.acme.example" not in got.get("nmap", []), got.get("nmap"))
@@ -603,6 +620,57 @@ async def zones():
 
 
 asyncio.run(zones())
+
+print("\n--- the walk sees zones a registrable-domain-only derivation misses ---")
+# A project scoped `*.api.openai.com` has a target under that zone.
+# The registrable domain is `openai.com`; the wildcard does NOT cover
+# it (a parent above the wildcard is refused). Only the full walk
+# produces `api.openai.com`, which IS cleared by the scope. Without
+# the walk, the standing order sees only `openai.com`, refuses it,
+# and queues nothing -- for ever. The operator with the toggle on
+# goes through the dialog by hand, which is the complaint this ends.
+call("/api/projects", "POST", {"code": "WALK", "name": "Walk"}, token=admin)
+call("/api/projects/WALK/scope", "POST",
+     {"lines": ["*.api.openai.com"]}, token=admin)
+call("/api/targets?project=WALK", "POST",
+     {"host": "cdn.api.openai.com"}, token=admin)
+
+
+async def walk_gap():
+    async with SessionLocal() as s:
+        pr = (await s.execute(
+            select(Project).where(Project.code == "WALK"))).scalar_one()
+        s.add(Agent(project_id=pr.id, name="walk-ghost", status="online",
+                    callback_key_hash="w" * 64))
+        pr.auto_amass = True
+        await s.commit()
+
+        await run_once(s, pr)
+        got: list[str] = []
+        for kind, raw in (await s.execute(
+                select(AgentTask.kind, AgentTask.args).where(
+                    AgentTask.project_id == pr.id))).all():
+            a = json.loads(raw)
+            if kind == "amass":
+                got.append(a["domain"])
+
+        # `api.openai.com` is the zone the wildcard authorises. The
+        # registrable domain `openai.com` is a parent above the
+        # wildcard and is refused. Only the walk finds the authorised
+        # zone; a registrable-domain-only derivation would see only
+        # `openai.com`, refuse it, and queue nothing.
+        check("the intermediate zone the scope names is queued",
+              "api.openai.com" in got, got)
+        # The host itself walks too, and the scope clears it.
+        check("...and the host's own zone is queued as well",
+              "cdn.api.openai.com" in got, got)
+        # The registrable domain is NOT queued: it is a parent above
+        # the wildcard, and the gate refuses it.
+        check("the parent above the wildcard is not queued",
+              "openai.com" not in got, got)
+
+
+asyncio.run(walk_gap())
 
 # =====================================================================
 # web discovery: crawl, gobuster, or both

@@ -65,6 +65,7 @@ from .. import (
     scopegate,
     shellhub,
     shellwork,
+    slack,
 )
 from ..db import get_session
 from ..events import broker
@@ -74,6 +75,8 @@ from ..models import (
     Agent,
     AgentDebugLog,
     AgentTask,
+    FindingSecret,
+    Poc,
     Project,
     ProxyGrant,
     Setting,
@@ -100,6 +103,26 @@ log = logging.getLogger("oddjob.agents")
 #: Three missed heartbeats rather than one: a single slow network
 #: moment should not light up the console.
 OFFLINE_AFTER = timedelta(seconds=90)
+
+#: How stale `last_seen` may get before a heartbeat writes it.
+#:
+#: A Ghost beats every 15 seconds and the beat is usually a no-op: no
+#: work to hand out, no listeners to reconcile, nothing to say. The
+#: only thing that changed was the timestamp, so the row was rewritten
+#: every 15 seconds per agent for ever -- 673,510 UPDATEs and 1.75
+#: hours of database time over three weeks on the reference instance,
+#: to record a fact nothing reads at that resolution.
+#:
+#: SQLAlchemy emits only columns whose value actually changed, so
+#: leaving `last_seen` alone on a quiet beat means NO UPDATE AT ALL
+#: rather than a smaller one.
+#:
+#: **Derived from `OFFLINE_AFTER` rather than chosen separately**,
+#: because the two are one decision: an agent can now look alive for
+#: up to this long after it dies, so "offline after 90s" becomes
+#: "offline after 90 to 120s". A fraction, so moving the offline
+#: window moves this with it instead of quietly widening the gap.
+HEARTBEAT_WRITE_EVERY = OFFLINE_AFTER / 3
 
 #: Silent this long and the agent is called `lost` rather than offline.
 #:
@@ -208,15 +231,26 @@ def effective_parallel(a, ceiling: int) -> int:
       the project ceiling                 what this ENGAGEMENT should
                                           do to the client
 
-    The override replaces the agent's assessment -- an operator who
-    says 8 and gets 2 with no explanation concludes the control is
-    broken -- but the project ceiling still applies on top, because it
-    is a statement about the client's estate rather than about the
-    box, and no per-ghost number should be able to talk its way past
-    it.
+    The override is a CAP, not a floor: it may hold an agent at or
+    below its own assessment, never above it. An operator who sets 8
+    and sees 2 with no explanation concludes the control is broken --
+    so the number goes up to the higher of the two. It used to replace
+    the assessment outright, and that was how one engagement came to
+    sit with seven ghosts, all of them overridden, most of them idle:
+    the agent adopts the pushed-down `max_parallel` as its own
+    capacity (see `adoptServerParallel` on the Go side), so after one
+    round trip the stored `capacity` IS the override, and from then on
+    "the host measured six" and "an operator said six" are the same
+    number. A box that could carry more would never be offered more --
+    the setting was meant to talk a fleet DOWN for a fragile estate,
+    not to freeze every host at whatever it happened to say the first
+    time somebody touched the control. The project ceiling still
+    applies on top of both, because it is a statement about the client's
+    estate rather than about the box, and no per-ghost number should be
+    able to talk its way past it.
     """
-    want = a.parallel_override or a.capacity or 1
-    return max(1, min(ceiling, int(want)))
+    want = max(int(a.capacity or 1), int(a.parallel_override or 0))
+    return max(1, min(ceiling, want))
 
 
 #: Task kinds the agent knows how to run, and the importer that reads
@@ -287,6 +321,12 @@ TASK_KINDS: dict[str, str | None] = {
     #: and the discovery run never happened.
     "nuclei_confirm": "nuclei",
     "httpx": "httpx",
+    #: Source code analysis: SAST (semgrep), secret scanning (trufflehog),
+    #: and SCA (osv-scanner). All output SARIF or native JSON that the
+    #: corresponding importers parse into findings with file:line.
+    "semgrep": "sarif",
+    "trufflehog": "trufflehog",
+    "osv": "sarif",
     "nslookup": None,
     "reverse_ip": None,
     #: One edited HTTP request, sent verbatim from inside the client's
@@ -384,6 +424,12 @@ class AgentOut(BaseModel):
     #: {removed, kept, failed}. `failed` is cleanup still owed by hand.
     retired_cleanup: dict | None = None
     capacity_reason: str | None = None
+    #: Live pressure fractions in [0,1]. -1 means unmeasurable.
+    cpu_idle: float | None = None
+    mem_free: float | None = None
+    disk_free: float | None = None
+    #: Recent readings for charts: [{"t":..., "cpu":..., "mem":..., "disk":...}]
+    pressure_history: list[dict] = []
     #: {tool: why} for everything this agent tried to install and could
     #: not. Work needing one of these is not sent here.
     missing_tools: dict[str, str] = {}
@@ -691,6 +737,9 @@ def _agent_out(a: Agent, code: str, queued: int = 0,
         queued_tasks=queued, running_tasks=running,
         completed_tasks=completed, failed_tasks=failed,
         capacity=a.capacity, capacity_reason=a.capacity_reason,
+        cpu_idle=a.cpu_idle, mem_free=a.mem_free, disk_free=a.disk_free,
+        pressure_history=(json.loads(a.pressure_history)
+                          if a.pressure_history else []),
         missing_tools=_jdict(a.missing_tools),
         cannot_run=sorted(k for k, tool in KIND_TOOL.items()
                           if not _has_tool(a, k)),
@@ -770,6 +819,45 @@ def _stale(a: Agent, in_flight: int = 0) -> str:
     return "offline"
 
 
+#: Statuses that mean the ghost is answering. `busy` is one of them:
+#: it is "connected and working", not a degraded state.
+_HEALTHY = ("online", "busy")
+#: ...and the ones that mean it has stopped.
+_DOWN = ("offline", "lost")
+
+
+def announces_offline(was: str, now: str) -> bool:
+    """Whether a status change is a ghost dying, worth saying once.
+
+    Only on the way DOWN from a healthy state. `online -> offline ->
+    lost` is one ghost dying, not two events: the second transition
+    starts from `offline`, which is not healthy, so it says nothing.
+
+    A ghost enrolled and never started is `offline` from birth and was
+    never healthy, so it never announces -- otherwise every token an
+    operator generated and did not use would report a death. The same
+    rule keeps `disabled` quiet: somebody chose that, and a deliberate
+    kill is announced by the retirement line instead.
+    """
+    return was in _HEALTHY and now in _DOWN
+
+
+def announces_online(was: str, now: str) -> bool:
+    """Whether a status change is a ghost answering again.
+
+    The mirror of `announces_offline`, and it has to be a transition
+    for the same reason: `a.status` is set to "online" on EVERY
+    heartbeat, so anything keyed on the new value alone would post a
+    line every thirty seconds for every healthy ghost in the fleet.
+
+    `disabled` is not a down state here. A ghost that was killed and
+    comes back is told to shut down, not welcomed back -- see the
+    `register` handler, which answers it with `shutdown: True` before
+    status is touched at all.
+    """
+    return was in _DOWN and now in _HEALTHY
+
+
 async def reap_lost(session: AsyncSession, project_id: int,
                     except_agent: int | None = None) -> int:
     """Record what each agent now is, and put back the work of the dead.
@@ -812,6 +900,7 @@ async def reap_lost(session: AsyncSession, project_id: int,
     is never read as lost in the first place.
     """
     now = datetime.now(UTC)
+    freed = 0
     # Walked from the agents, not from the held tasks. Going the other
     # way only ever reaches agents that happen to be holding something,
     # and `status` is exactly as wrong on a lost agent that is holding
@@ -819,15 +908,44 @@ async def reap_lost(session: AsyncSession, project_id: int,
     # work in flight to hint otherwise.
     agents = (await session.execute(
         select(Agent).where(Agent.project_id == project_id))).scalars().all()
-    held: dict[int, list[AgentTask]] = {}
+    held: dict[int | None, list[AgentTask]] = {}
     for t in (await session.execute(
             select(AgentTask).where(
                 AgentTask.project_id == project_id,
-                AgentTask.status.in_(("claimed", "running")),
-                AgentTask.agent_id.is_not(None)))).scalars():
+                AgentTask.status.in_(("claimed", "running"))))).scalars():
         held.setdefault(t.agent_id, []).append(t)
 
-    freed = 0
+    # A claim with no holder at all. The two release paths are both
+    # driven by a heartbeat -- this one by another agent's, the
+    # abandonment one in the handler by the HOLDER's -- so a claim
+    # whose holder is gone before it can beat again (a crash between
+    # claiming and starting, or a worker killed mid-request) is held
+    # for good: no heartbeat ever comes to release it. One engagement
+    # sat on exactly this shape for nineteen hours with four agents
+    # beating every thirty seconds around it, because the query above
+    # used to skip `agent_id IS NULL` and neither path could see it.
+    #
+    # Held here rather than in the loop below: there is no agent row
+    # to walk out to, so "lost" does not apply -- the clock alone is
+    # enough, with the same ABANDON_AFTER grace that keeps an in-flight
+    # result POST from being raced into a duplicate run.
+    for t in held.get(None, []):
+        since = _aware(t.claimed_at or t.started_at)
+        if since is None or (now - since) < ABANDON_AFTER:
+            continue
+        quiet = int((now - since).total_seconds() // 60)
+        t.status = "queued"
+        t.agent_id = None
+        t.claimed_at = t.started_at = None
+        t.error = (f"requeued after {quiet} minutes with no holder: the "
+                   "claim was made but no agent is on record for it, so "
+                   "nothing could finish it or release it")
+        freed += 1
+
+    #: Collected rather than announced inline: posting to Slack inside
+    #: the loop would put a network round trip per agent in the middle
+    #: of a heartbeat, and this runs on every beat of every agent.
+    going_down: list[Agent] = []
     for a in agents:
         if a.id == except_agent:
             continue
@@ -841,6 +959,15 @@ async def reap_lost(session: AsyncSession, project_id: int,
         # one row nothing would change: a host six hours dead still
         # read `online` to anything reading the database directly.
         if a.status != state:
+            # Announced only on the way DOWN from a healthy state, and
+            # only once. `online -> offline -> lost` is one ghost dying,
+            # not two events: the second transition starts from
+            # `offline`, which is not healthy, so it says nothing. An
+            # agent enrolled and never started has no `last_seen` and
+            # never was healthy, so it does not announce either --
+            # otherwise every unused token would report a death.
+            if announces_offline(a.status, state):
+                going_down.append(a)
             a.status = state
         if state != "lost":
             continue
@@ -860,6 +987,20 @@ async def reap_lost(session: AsyncSession, project_id: int,
     if freed:
         log.warning("requeued %d task(s) from lost agent(s) in project %d",
                     freed, project_id)
+    # After the loop, and the Project is loaded only when there is
+    # something to say -- this runs on every heartbeat of every agent,
+    # and a row fetched per beat to usually announce nothing is a cost
+    # paid for no reason.
+    if going_down:
+        pr = await session.get(Project, project_id)
+        if pr is not None:
+            now_ = datetime.now(UTC)
+            for a in going_down:
+                seen = _aware(a.last_seen)
+                quiet = int((now_ - seen).total_seconds() // 60) if seen else None
+                await slack.announce_ghost(
+                    session, pr, slack.ghost_offline,
+                    name=a.name, ip=a.outbound_ip, quiet_for=quiet or None)
     return freed
 
 
@@ -965,6 +1106,12 @@ KIND_TOOL: dict[str, str] = {
     "nuclei_tech": "nuclei",
     "nuclei_confirm": "nuclei",
     "httpx": "httpx",
+    # Source code analysis tools. Each requires its own binary on the
+    # ghost; they are installable (see ghost/internal/tools/tools.go)
+    # but not in the baseline because not every engagement needs them.
+    "semgrep": "semgrep",
+    "trufflehog": "trufflehog",
+    "osv": "osv-scanner",
 }
 
 #: Everything an agent is expected to have. Returned by the API so the
@@ -1193,6 +1340,10 @@ async def _import_names(session: AsyncSession, pr: Project, t: AgentTask,
     names = [str(n).strip().rstrip(".").lower()
              for n in (payload.get("names") or []) if str(n).strip()]
     domain = str(payload.get("domain") or "").strip().lower()
+    # Optional map of name -> list of DNS record type labels, e.g.
+    # {"cdn.example.com": ["a", "cname"]}. Populated by the amass agent
+    # when it can read them from the graph; absent on older payloads.
+    record_types: dict[str, list[str]] = payload.get("record_types") or {}
 
     idx = await index_for(session, pr.id)
     created: list[str] = []
@@ -1220,7 +1371,10 @@ async def _import_names(session: AsyncSession, pr: Project, t: AgentTask,
         if not ruling.allowed:
             refused[name] = ruling.reason
             continue
-        tgt = Target(project_id=pr.id, host=name, alive=None)
+        rts = record_types.get(name)
+        dns_rt = json.dumps(sorted(rts)) if rts else None
+        tgt = Target(project_id=pr.id, host=name, alive=None,
+                     dns_record_types=dns_rt)
         session.add(tgt)
         await session.flush()
         await record(session, tgt.id, "discovered",
@@ -1771,6 +1925,13 @@ async def enroll(body: EnrollIn, project: str = Query(...),
     await session.commit()
     await session.refresh(a)
     await broker.publish("agents", action="enroll", project=pr.code)
+    # After the commit: the ghost exists whether or not Slack hears
+    # about it, and a channel that is down must not fail the enrolment
+    # an operator is waiting on. No address yet -- it has not connected
+    # -- and the line says so rather than leaving a blank where a
+    # location goes.
+    await slack.announce_ghost(session, pr, slack.ghost_created,
+                               name=a.name, ip=None)
     return AgentEnrolled(agent=_agent_out(a, pr.code, ceiling=_project_ceiling(pr)),
                          callback_key=cb_raw, call_in_key=ci_raw,
                          enroll_token=tok_raw, enroll_expires_at=expires,
@@ -2835,6 +2996,143 @@ async def retry_task(task_id: int,
         created_at=t.created_at, notes=t.error)
 
 
+@router.post("/tasks/{task_id}/order")
+async def reorder_task(task_id: int, direction: str,
+                       pr: Project = Depends(require_project("user")),
+                       user: User = Depends(get_current_user),
+                       session: AsyncSession = Depends(get_session)):
+    """Move a queued task within the queue.
+
+    `direction` is one of: top, bottom, up, down. The queue is ordered
+    by (priority DESC, id ASC) within each kind, so "top" means the
+    highest priority and lowest id among queued tasks of this kind;
+    "bottom" is the reverse. "up" and "down" swap with the adjacent
+    task in that ordering.
+
+    Only queued tasks can be reordered: a task an agent has claimed is
+    already running, and moving it would change nothing.
+    """
+    if direction not in ("top", "bottom", "up", "down"):
+        raise HTTPException(422, "direction must be top, bottom, up or down")
+    t = await session.get(AgentTask, task_id)
+    if t is None or t.project_id != pr.id:
+        raise HTTPException(404, "no such task")
+    if t.status != "queued":
+        raise HTTPException(
+            409, f"task {task_id} is {t.status}, not queued. "
+                 f"Only a waiting task can be reordered.")
+
+    # All queued tasks of the same kind and project, in dispatch order.
+    siblings = (await session.execute(
+        select(AgentTask).where(
+            AgentTask.project_id == pr.id,
+            AgentTask.kind == t.kind,
+            AgentTask.status == "queued",
+        ).order_by(AgentTask.priority.desc(), AgentTask.id)
+    )).scalars().all()
+
+    if direction == "top":
+        first = siblings[0]
+        # Give it a priority above everything else in the queue.
+        t.priority = (first.priority + 1) if first.id != t.id else max(1, t.priority + 1)
+        # And the lowest id among top-priority tasks: since ids are
+        # immutable, we simply set its priority high enough that it
+        # sorts first. If it is already first, no-op.
+        if first.id == t.id:
+            pass
+        else:
+            t.priority = max(s.priority for s in siblings) + 1
+    elif direction == "bottom":
+        last = siblings[-1]
+        if last.id == t.id:
+            pass
+        else:
+            # Priority below everything, so it sorts last.
+            t.priority = min(s.priority for s in siblings) - 1
+    elif direction == "up":
+        idx = next((i for i, s in enumerate(siblings) if s.id == t.id), None)
+        if idx is None or idx == 0:
+            return {"ok": True, "moved": False}
+        swap_with = siblings[idx - 1]
+        # Swap priorities; if equal, the id order decides, so we
+        # nudge: give this task the other's priority and vice versa.
+        t.priority, swap_with.priority = swap_with.priority, t.priority
+    elif direction == "down":
+        idx = next((i for i, s in enumerate(siblings) if s.id == t.id), None)
+        if idx is None or idx == len(siblings) - 1:
+            return {"ok": True, "moved": False}
+        swap_with = siblings[idx + 1]
+        t.priority, swap_with.priority = swap_with.priority, t.priority
+
+    await session.commit()
+    await audit.record(session, "ui", "ghost.task.reorder", user=user,
+                       project_code=pr.code,
+                       detail=f"moved {t.kind} task {t.id} {direction}",
+                       commit=True)
+    await broker.publish("agents", action="task", project=pr.code)
+    return {"ok": True, "moved": True}
+
+
+@router.post("/tasks/{task_id}/launch")
+async def launch_task_now(task_id: int,
+                          pr: Project = Depends(require_project("user")),
+                          user: User = Depends(get_current_user),
+                          session: AsyncSession = Depends(get_session)):
+    """Give a queued task to an online agent immediately, bypassing the
+    normal capacity model.
+
+    This is for "I want this scan running NOW" — the operator overrides
+    the agent's own judgement about how much it can carry. The task is
+    claimed by the least-loaded eligible agent and set to running; the
+    agent picks it up on its next heartbeat (within ~15 s).
+
+    Only one task per call: a batch override would be a different
+    feature with different failure modes.
+    """
+    t = await session.get(AgentTask, task_id)
+    if t is None or t.project_id != pr.id:
+        raise HTTPException(404, "no such task")
+    if t.status != "queued":
+        raise HTTPException(
+            409, f"task {task_id} is {t.status}, not queued. "
+                 f"Launch now only works on a task that is still waiting.")
+
+    # Find the least-loaded online agent for this project.
+    agents = (await session.execute(
+        select(Agent).where(
+            Agent.project_id == pr.id,
+            Agent.retired_at.is_(None),
+            Agent.status == "online",
+        ))).scalars().all()
+    if not agents:
+        raise HTTPException(409, "no online agents to launch this against")
+
+    # Count what each already holds.
+    load = {a.id: 0 for a in agents}
+    held = (await session.execute(
+        select(AgentTask.agent_id, func.count()).where(
+            AgentTask.project_id == pr.id,
+            AgentTask.status.in_(("claimed", "running")),
+            AgentTask.agent_id.in_([a.id for a in agents]),
+        ).group_by(AgentTask.agent_id))).all()
+    for row in held:
+        if row[0] in load:
+            load[row[0]] = row[1]
+
+    target = min(agents, key=lambda a: (load[a.id], a.id))
+    t.agent_id = target.id
+    t.status = "claimed"
+    t.claimed_at = datetime.now(UTC)
+    t.priority = max((s.priority for s in [t]), default=0)  # keep
+    await session.commit()
+    await audit.record(session, "ui", "ghost.task.launch", user=user,
+                       project_code=pr.code,
+                       detail=f"launched {t.kind} task {t.id} on {target.name}",
+                       commit=True)
+    await broker.publish("agents", action="task", project=pr.code)
+    return {"ok": True, "agent": target.name, "agent_id": target.id}
+
+
 @router.delete("/tasks/{task_id}", status_code=204)
 async def cancel_task(task_id: int,
                       pr: Project = Depends(require_project("user")),
@@ -2924,7 +3222,8 @@ async def import_task_result(agent_id: int, task_id: int,
     res = await _run(session, pr, t.output, t.import_as,
                      f"ghost:{a.name if a else agent_id}",
                      mode=body.mode,
-                     decisions=dict(body.decisions))
+                     decisions=dict(body.decisions),
+                     target_host=t.subject)
     t.import_result = res.model_dump_json()
     await session.commit()
     await broker.publish("agents", action="result", project=pr.code)
@@ -3036,6 +3335,11 @@ async def register(body: RegisterIn, request: Request,
                    a: Agent = Depends(agent_even_if_killed),
                    session: AsyncSession = Depends(get_session)):
     """Ghost announcing itself. Idempotent: it runs on every reconnect."""
+    # Captured before any of it is overwritten. `last_seen` is set
+    # further down, so NULL here is the honest test for "this agent has
+    # never been heard from" -- which is a first start, not a return.
+    was_status = a.status
+    first_contact = a.last_seen is None
     a.platform, a.arch = body.platform, body.arch
     a.version, a.hostname = body.version, body.hostname
     a.privileged = bool(body.privileged)
@@ -3077,6 +3381,12 @@ async def register(body: RegisterIn, request: Request,
     await session.commit()
     code = await _project_code(session, a.project_id)
     await broker.publish("agents", action="register", project=code)
+    if announces_online(was_status, "online"):
+        pr_ = await session.get(Project, a.project_id)
+        if pr_ is not None:
+            await slack.announce_ghost(session, pr_, slack.ghost_online,
+                                       name=a.name, ip=a.outbound_ip,
+                                       first_time=first_contact)
     return {"ok": True, "agent_id": a.id, "project": code,
             "installable": list(INSTALLABLE),
             "task_kinds": sorted(TASK_KINDS),
@@ -3144,6 +3454,10 @@ class HeartbeatIn(BaseModel):
     #: right now, and one name for two different answers is how a
     #: fleet table ends up lying about why a host is idle.
     unaffordable: list[str] = []
+    #: Live pressure fractions in [0,1]. -1 means unmeasurable.
+    cpu_idle: float | None = None
+    mem_free: float | None = None
+    disk_free: float | None = None
 
 
 class RetiredIn(BaseModel):
@@ -3193,6 +3507,12 @@ async def retired(body: RetiredIn,
     await session.commit()
     await broker.publish("agents", action="retired",
                          project=pr.code if pr else None)
+    # Deliberate, so it reads differently from going offline: a ghost
+    # that said goodbye and one that stopped answering are the same
+    # row and completely different news.
+    if pr is not None:
+        await slack.announce_ghost(session, pr, slack.ghost_retired,
+                                   name=a.name, ip=a.outbound_ip)
     return {"ok": True, "recorded": True}
 
 
@@ -3220,9 +3540,26 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
     back in the queue rather than sitting in `claimed` for the rest of
     the engagement with nothing left to complete it.
     """
-    a.last_seen = datetime.now(UTC)
-    a.last_ip = request.client.host if request.client else None
+    now = datetime.now(UTC)
+    ip = request.client.host if request.client else None
+    # Only once it has gone stale. See HEARTBEAT_WRITE_EVERY: a quiet
+    # beat that touches nothing else then writes nothing at all, which
+    # is the point -- this row was being rewritten every 15 seconds
+    # per agent to carry a timestamp read at 90-second resolution.
+    seen = _aware(a.last_seen)
+    if seen is None or (now - seen) >= HEARTBEAT_WRITE_EVERY:
+        a.last_seen = now
+    # An address CHANGE is always written: it is a fact about where
+    # the Ghost is calling from, and the first thing an operator looks
+    # at when one moves. Re-assigning the same address costs nothing —
+    # SQLAlchemy compares against the loaded value and emits no column.
+    if ip != a.last_ip:
+        a.last_ip = ip
+        a.last_seen = now
     if a.status == "disabled":
+        # When it stopped is worth knowing exactly, so the throttle
+        # does not apply to the beat that finds it killed.
+        a.last_seen = now
         # Killed. Answer the heartbeat rather than refusing it, so the
         # agent is told to stop instead of retrying forever against a
         # 403 it cannot interpret. Recorded first: this is the last
@@ -3231,7 +3568,22 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
         await session.commit()
         return {"ok": True, "task": None, "shutdown": True,
                 "reason": "this agent was killed from Oddjob"}
+    # Captured immediately before the write: nothing between the top of
+    # this handler and here touches `status`, and the beat is the only
+    # thing that brings a partitioned ghost back WITHOUT a re-register
+    # -- a container restart re-registers, a network blip does not.
+    was_status = a.status
     a.status = "online"
+    if announces_online(was_status, "online"):
+        pr_ = await session.get(Project, a.project_id)
+        if pr_ is not None:
+            await slack.announce_ghost(
+                session, pr_, slack.ghost_online, name=a.name,
+                ip=a.outbound_ip,
+                # `platform` is only ever set by `register`, so NULL
+                # means this one has never registered -- a first start
+                # rather than a return.
+                first_time=a.platform is None)
 
     # What this agent should be holding, and what it says it managed.
     # Both happen before any of the early returns below: a Ghost at
@@ -3376,6 +3728,30 @@ async def heartbeat(request: Request, body: HeartbeatIn | None = None,
         a.capacity = max(1, int(body.capacity))
     if body is not None and body.capacity_reason:
         a.capacity_reason = body.capacity_reason[:300]
+    # Live pressure fractions for the fleet table tooltip and charts.
+    # -1 means the agent measured but could not determine (non-Linux).
+    if body is not None:
+        if body.cpu_idle is not None:
+            a.cpu_idle = body.cpu_idle
+        if body.mem_free is not None:
+            a.mem_free = body.mem_free
+        if body.disk_free is not None:
+            a.disk_free = body.disk_free
+        # Append to the history ring buffer (max 60 entries ≈ 15 min).
+        if body.cpu_idle is not None or body.mem_free is not None:
+            hist = []
+            if a.pressure_history:
+                try:
+                    hist = json.loads(a.pressure_history)
+                except (ValueError, TypeError):
+                    hist = []
+            hist.append({
+                "t": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "cpu": body.cpu_idle if body.cpu_idle is not None else -1,
+                "mem": body.mem_free if body.mem_free is not None else -1,
+                "disk": body.disk_free if body.disk_free is not None else -1,
+            })
+            a.pressure_history = json.dumps(hist[-60:])
     # Sent back on every heartbeat as `max_parallel`. It used to be the
     # project ceiling, which the agent ignored and which told it
     # nothing about itself; it is the effective per-agent number now,
@@ -3899,6 +4275,74 @@ async def _dial(host: str, port: int, proto: str, nonce: str) -> tuple[bool, str
 TRIM_OUTPUT_BYTES = 4 * 1024 * 1024
 
 
+@router.get("/tasks/{task_id}/secret", response_model=dict)
+async def task_secret(task_id: int, a: Agent = Depends(agent_from_key),
+                      session: AsyncSession = Depends(get_session)):
+    """The credential an authenticating proof presents.
+
+    **This is the one route that hands a client's credential to a
+    Ghost, and every narrowing on it is deliberate.**
+
+    It exists because the alternative is worse. Proving a leaked key
+    still works means presenting it, and the value has to reach the
+    thing that runs the check somehow. Writing it into the template
+    would put it in a row the PoC editor shows; writing it into
+    `agent_tasks.args` would put it in the tasks list. Both are read
+    far more widely than this, and neither leaves a record of who
+    took it.
+
+    What holds it in:
+
+    `agent_from_key`, so it is the agent's own identity and never a
+    user session — the same authentication `start` and `result` use.
+
+    **The task, not the proof.** The agent names a task it was
+    ASSIGNED (`t.agent_id != a.id` is a 404), so holding an agent key
+    is not enough: the server had to have given that agent that task.
+    An agent cannot ask about an arbitrary PoC, or about another
+    agent's.
+
+    **Only a proof that declared it needs one.** `needs_secret` is
+    set when the template was written and checked, and that template
+    was refused unless it sends only to `{{BaseURL}}`. So the value
+    goes to a check that can only put it back to the host under test.
+
+    **Only while the task is live.** A finished task's key is not
+    re-fetchable, so a stale queue entry is not a standing grant.
+
+    An audit entry every time, naming the agent and the finding,
+    because "who could have seen this key" has to stay answerable —
+    the same requirement that put one on the bulk secrets list.
+    """
+    t = await session.get(AgentTask, task_id)
+    if t is None or t.agent_id != a.id:
+        raise HTTPException(404, "no such task for this agent")
+    if t.kind != "poc" or t.status not in ("queued", "running"):
+        raise HTTPException(409, "that task is not a running proof")
+
+    try:
+        poc_id = int(json.loads(t.args or "{}").get("poc_id") or 0)
+    except (ValueError, TypeError):
+        poc_id = 0
+    poc = await session.get(Poc, poc_id) if poc_id else None
+    if poc is None or not poc.needs_secret or poc.vuln_id is None:
+        raise HTTPException(
+            404, "that proof does not authenticate with a stored credential")
+
+    sec = (await session.execute(
+        select(FindingSecret).where(FindingSecret.vuln_id == poc.vuln_id)
+        .limit(1))).scalars().first()
+    if sec is None:
+        raise HTTPException(404, "no credential is stored for that finding")
+
+    await audit.record(
+        session, "agent", "finding.secret.release", commit=True,
+        project_code=(await session.get(Project, t.project_id)).code,
+        detail=(f"released the credential on finding {poc.vuln_id} to agent "
+                f"{a.name!r} for proof {poc.id}"))
+    return {"secret": sec.secret}
+
+
 @router.post("/tasks/{task_id}/result", response_model=dict)
 async def submit_result(task_id: int, body: ResultIn,
                         a: Agent = Depends(agent_from_key),
@@ -4083,7 +4527,8 @@ async def submit_result(task_id: int, body: ResultIn,
         from .scans import _run
         try:
             res = await _run(session, pr, t.output, t.import_as,
-                             f"ghost:{a.name}", mode="strict", decisions={})
+                             f"ghost:{a.name}", mode="strict", decisions={},
+                             target_host=t.subject)
             imported = json.loads(res.model_dump_json())
             # Said in the log as well as carried in the result. This
             # is the unattended path -- a nuclei template release

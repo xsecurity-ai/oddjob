@@ -27,6 +27,12 @@ import { neon, glow, TAB_SX } from '../theme'
 import { ProxySetupDialog } from '../components/ProxySetupDialog'
 import { GhostDebugView } from './GhostDebugView'
 import { CountryPicker } from '../components/CountryPicker'
+import { useRouteParam, useTab } from '../lib/route'
+
+/** The tabs this view renders. Module-level for the same reason as
+ *  every other tab list: the validated set and the rendered tabs are
+ *  one list, so they cannot drift. */
+const GHOST_TABS = ['fleet', 'tasks', 'debug'] as const
 
 const STATUS_COLOUR: Record<string, string> = {
   // `busy` is its own colour because it is not a degraded state: the
@@ -70,6 +76,128 @@ function ago(iso: string | null): string {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`
   return `${Math.floor(s / 86400)}d ago`
+}
+
+/** Format a [0,1] fraction as a percentage for the tooltip. */
+function pct(f: number | null | undefined): string {
+  if (f == null || f < 0) return '—'
+  return `${Math.round((1 - f) * 100)}%`
+}
+
+/** The tooltip text for a ghost row's pressure. */
+function pressureTooltip(row: GhostAgent): string {
+  const cpu = pct(row.cpu_idle)
+  const mem = pct(row.mem_free)
+  const disk = pct(row.disk_free)
+  return `CPU load ${cpu} · Mem used ${mem} · Disk used ${disk}`
+}
+
+/** A minimal inline SVG sparkline. Values are fractions in [0,1]; -1 = unknown. */
+function Sparkline({ values, colour, label }: {
+  values: number[]; colour: string; label: string
+}) {
+  const W = 120, H = 36, PAD = 2
+  const valid = values.filter(v => v >= 0)
+  if (valid.length < 2) {
+    return (
+      <Box sx={{ width: W, height: H + 14 }}>
+        <Typography sx={{ fontSize: 9, color: neon.muted, lineHeight: 1 }}>{label}</Typography>
+        <Typography sx={{ fontSize: 10, color: neon.muted }}>—</Typography>
+      </Box>
+    )
+  }
+  const n = values.length
+  const pts = values.map((v, i) => {
+    if (v < 0) return null
+    const x = PAD + (i / (n - 1)) * (W - 2 * PAD)
+    const y = PAD + (1 - v) * (H - 2 * PAD)
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }).filter(Boolean).join(' ')
+  const last = valid[valid.length - 1]
+  return (
+    <Box sx={{ width: W, height: H + 14 }}>
+      <Typography sx={{ fontSize: 9, color: neon.muted, lineHeight: 1 }}>{label}</Typography>
+      <svg width={W} height={H} style={{ display: 'block' }}>
+        <polyline points={pts} fill="none" stroke={colour} strokeWidth={1.5} />
+      </svg>
+      <Typography sx={{ fontSize: 10, color: colour, fontFamily: "'Share Tech Mono', monospace" }}>
+        {Math.round((1 - last) * 100)}%
+      </Typography>
+    </Box>
+  )
+}
+
+/** Detail panel shown when a ghost name is clicked. */
+function GhostDetailPanel({ agent, onClose }: {
+  agent: GhostAgent; onClose: () => void
+}) {
+  const hist = agent.pressure_history ?? []
+  const cpuVals = hist.map(h => h.cpu)
+  const memVals = hist.map(h => h.mem)
+  const diskVals = hist.map(h => h.disk)
+  // Running task count over time: derive from history timestamps + current.
+  const runningNow = agent.running_tasks ?? 0
+
+  return (
+    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <Box sx={{ width: 8, height: 8, borderRadius: '50%',
+          bgcolor: STATUS_COLOUR[agent.status] ?? neon.muted,
+          boxShadow: glow(STATUS_COLOUR[agent.status] ?? neon.muted, 0.8) }} />
+        <Typography variant="subtitle2" sx={{ color: neon.pink }}>
+          {agent.name}
+        </Typography>
+        <Chip label={agent.status} size="small" sx={{ fontSize: 10 }} />
+      </DialogTitle>
+      <DialogContent>
+        {/* Pressure charts in a single row */}
+        <Stack direction="row" spacing={2} sx={{ mb: 2 }}>
+          <Sparkline values={cpuVals} colour={neon.cyan} label="CPU load" />
+          <Sparkline values={memVals} colour={neon.pink} label="Memory used" />
+          <Sparkline values={diskVals} colour={neon.green} label="Disk used" />
+          <Box sx={{ width: 120, height: 50 }}>
+            <Typography sx={{ fontSize: 9, color: neon.muted, lineHeight: 1 }}>Tools running</Typography>
+            <Typography sx={{ fontSize: 22, fontWeight: 700, color: neon.cyan,
+              fontFamily: "'Share Tech Mono', monospace" }}>
+              {runningNow}
+            </Typography>
+            <Typography sx={{ fontSize: 9, color: neon.muted }}>
+              / {agent.max_parallel ?? '?'} max
+            </Typography>
+          </Box>
+        </Stack>
+
+        <Divider sx={{ borderColor: alpha(neon.muted, 0.2), mb: 1.5 }} />
+
+        {/* Current state */}
+        <Stack spacing={0.75}>
+          <Typography sx={{ fontSize: 11, color: neon.muted }}>
+            Host: {agent.hostname ?? '—'} · {agent.platform ?? ''} {agent.arch ?? ''}
+          </Typography>
+          <Typography sx={{ fontSize: 11, color: neon.muted }}>
+            Version: {agent.version ?? '—'} · Last seen: {ago(agent.last_seen)}
+          </Typography>
+          <Typography sx={{ fontSize: 11, color: neon.muted }}>
+            Capacity: {agent.capacity ?? '?'} ({agent.capacity_reason || 'auto'})
+            {' · '}Override: {agent.parallel_override != null ? agent.parallel_override : 'none'}
+          </Typography>
+          {agent.running.length > 0 && (
+            <Box sx={{ mt: 0.5 }}>
+              <Typography sx={{ fontSize: 10, color: neon.muted, mb: 0.25 }}>
+                Currently running:
+              </Typography>
+              {agent.running.map(r => (
+                <Typography key={r.id} sx={{ fontSize: 10.5, color: neon.cyan,
+                  fontFamily: "'Share Tech Mono', monospace" }}>
+                  · {r.kind} — {r.subject}
+                </Typography>
+              ))}
+            </Box>
+          )}
+        </Stack>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
 function Mono({ children }: { children: React.ReactNode }) {
@@ -518,7 +646,9 @@ function ParallelCell({ eff, own, reason, over, admin, busy, onPick }: {
     : `${own} by its own assessment (${reason || 'no reason given'}).`
   const title = (over
     ? `Set to ${over} for this ghost. ${why} `
-      + `The engagement ceiling still applies on top, so the effective number is ${eff}.`
+      + `The number holds the ghost DOWN to at most ${over}; if its own `
+      + `assessment is higher, that runs instead. The engagement ceiling `
+      + `still applies on top, so the effective number is ${eff}.`
     : `${why} The project's ceiling and that are combined, and the lower runs.`)
     + ' Changing this is pushed to the ghost on its next heartbeat.'
 
@@ -800,13 +930,18 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
    *  on a page that no longer exists. */
   tab?: 'fleet' | 'tasks' | 'debug'
 }) {
-  const [tab, setTab] = useState<'fleet' | 'tasks' | 'debug'>(initialTab)
+  // The tab lives in the URL. `?tab=debug` is what `/ghost-debug` used
+  // to mean, so a bookmark of the old route lands where it always did;
+  // clicking a tab writes the same parameter, and Back walks pages,
+  // not tabs -- which is why this is a replace, not a push.
+  const [tab, setTab] = useTab(GHOST_TABS, initialTab, useRouteParam('tab'))
   const qc = useQueryClient()
   const { canWrite, roleOn } = useAuth()
   const [wizard, setWizard] = useState(false)
   const [confirmKill, setConfirmKill] = useState<GhostAgent | null>(null)
   const [proxyFor, setProxyFor] = useState<GhostAgent | null>(null)
   const [editing, setEditing] = useState<GhostAgent | null>(null)
+  const [detailFor, setDetailFor] = useState<GhostAgent | null>(null)
   // A killed agent leaves the table, because the table answers "what
   // is deployed" and it no longer is. The record stays — it holds the
   // output of scans that ran — so it is hidden rather than deleted,
@@ -933,16 +1068,22 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
       },
     },    {
       field: 'name', headerName: 'Ghost', flex: 1.1, minWidth: 150,
-      renderCell: (p) => (
-        <Stack direction="row" spacing={0.9} sx={{
-          alignItems: "center"
-        }}>
-          <Box sx={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-            bgcolor: STATUS_COLOUR[p.row.status] ?? neon.muted,
-            boxShadow: glow(STATUS_COLOUR[p.row.status] ?? neon.muted, 0.8) }} />
-          <Box sx={{ color: neon.pink, fontWeight: 600 }}>{p.value}</Box>
-        </Stack>
-      ),
+      renderCell: (p) => {
+        const row = p.row as GhostAgent
+        const tip = pressureTooltip(row)
+        return (
+          <Tooltip title={tip} arrow>
+            <Stack direction="row" spacing={0.9} sx={{
+              alignItems: "center", cursor: 'pointer',
+            }} onClick={() => setDetailFor(row)}>
+              <Box sx={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+                bgcolor: STATUS_COLOUR[p.row.status] ?? neon.muted,
+                boxShadow: glow(STATUS_COLOUR[p.row.status] ?? neon.muted, 0.8) }} />
+              <Box sx={{ color: neon.pink, fontWeight: 600 }}>{p.value}</Box>
+            </Stack>
+          </Tooltip>
+        )
+      },
     },
     {
       field: 'hostname', headerName: 'Deployed to', flex: 1.2, minWidth: 160,
@@ -1358,12 +1499,9 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
   }
 
   return (
-    // This view is the only one with content BELOW its table, so it
-    // scrolls as a page rather than letting the table fill the
-    // viewport the way every other view does.
-    //
-    // That is why the height below is explicit. `DataTable` is built
-    // to be a flex child of the app shell -- `flex: 1; min-height: 0;
+    // A flex column so each tab's table fills the remaining viewport
+    // height and scrolls internally rather than making the page scroll.
+    // `DataTable` is built to be a flex child -- `flex: 1; min-height: 0;
     // overflow: hidden` -- and in a plain block those do nothing:
     // `flex` is ignored outside a flex container, `overflow: hidden`
     // then clips, and the grid inside asks for `height: 100%` of a
@@ -1372,7 +1510,7 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
     // what this is fixing. It only became visible when #38 moved the
     // tables off MUI's DataGrid, which did its own scrolling and did
     // not care what its parent was.
-    <Box sx={{ p: 2, flex: 1, minHeight: 0, overflowY: 'auto' }}>
+    <Box sx={{ p: 2, flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       {/* One page, three views of the same fleet: what I have, what it
           is doing, and what it is saying. Debug was a second sidebar
           entry behind a dropdown, which cost a click to reach a view
@@ -1384,26 +1522,30 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
           because hiding Fleet/Tasks from a reader hid the navigation
           itself. */}
       <Tabs value={tab} onChange={(_, v) => setTab(v)}
-        sx={{ minHeight: 34, mb: 1,
+        sx={{ minHeight: 34, mb: 1, flexShrink: 0,
               borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
         <Tab value="fleet" label="Fleet" sx={TAB_SX} />
         <Tab value="tasks" label="Tasks" sx={TAB_SX} />
         {admin && <Tab value="debug" label="Debug" sx={TAB_SX} />}
       </Tabs>
-      {admin && tab === 'debug' && <GhostDebugView project={project} />}
+      {admin && tab === 'debug' && (
+        <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+          <GhostDebugView project={project} />
+        </Box>
+      )}
       {tab === 'tasks' && (
         // The routing row comes too, because the queue depth and the
         // rate live on it -- reading a task list without them is the
         // position without the direction.
-        <>
+        <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <Routing project={project} routing={routing} />
           <GhostTasksTable project={project} />
-        </>
+        </Box>
       )}
       {tab !== 'fleet' ? null : (
       <>
       <Routing project={project} routing={routing} />
-      <Box sx={{ height: '60vh', minHeight: 320,
+      <Box sx={{ flex: 1, minHeight: 320,
                  display: 'flex', flexDirection: 'column' }}>
       <DataTable
         rows={rows}
@@ -1457,6 +1599,10 @@ export function GhostsView({ project, tab: initialTab = 'fleet' }: {
           mode={routing?.mode}
           geoipAvailable={!!routing?.geoip_available}
           onClose={() => setEditing(null)} />
+      )}
+
+      {detailFor && (
+        <GhostDetailPanel agent={detailFor} onClose={() => setDetailFor(null)} />
       )}
 
       <Dialog open={!!confirmKill} onClose={() => setConfirmKill(null)}>

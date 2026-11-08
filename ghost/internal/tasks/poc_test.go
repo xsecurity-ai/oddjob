@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -207,5 +208,89 @@ func TestPocHitsKeepsOnlyWhatIdentifies(t *testing.T) {
 	}
 	if n := len(pocHits("not json\n{bad\n")); n != 0 {
 		t.Errorf("unparseable lines should be skipped, got %d", n)
+	}
+}
+
+// --- authenticating proofs: the credential must not escape ---------
+
+// A proof that needs a credential and has nobody to ask must report
+// "could not test". The alternative is that it runs with `{{secret}}`
+// unsubstituted, gets refused by the service, matches nothing, and is
+// recorded as FIXED -- closing a live credential finding because the
+// agent could not fetch a key.
+func TestPocNeedsSecretWithNoFetcherCannotTest(t *testing.T) {
+	old := TaskSecret
+	defer func() { TaskSecret = old }()
+	TaskSecret = nil
+
+	res := runPoc(context.Background(), map[string]any{
+		"template":     "id: x\nhttp:\n  - path: [\"{{BaseURL}}\"]\n    matchers: []\n",
+		"url":          "https://app.acme.example",
+		"needs_secret": true,
+	}, t.TempDir())
+
+	if res.ExitCode != PocUnknown {
+		t.Fatalf("exit %d, want PocUnknown (%d)", res.ExitCode, PocUnknown)
+	}
+	if !strings.Contains(res.Summary, "could not be tested") {
+		t.Fatalf("summary %q does not say it could not be tested", res.Summary)
+	}
+}
+
+// The same when the server refuses to release it.
+func TestPocSecretFetchFailureCannotTest(t *testing.T) {
+	old := TaskSecret
+	defer func() { TaskSecret = old }()
+	TaskSecret = func(context.Context, int64) (string, error) {
+		return "", errors.New("refused")
+	}
+
+	res := runPoc(context.Background(), map[string]any{
+		"template":     "id: x\nhttp:\n  - path: [\"{{BaseURL}}\"]\n",
+		"url":          "https://app.acme.example",
+		"needs_secret": true,
+	}, t.TempDir())
+
+	if res.ExitCode != PocUnknown {
+		t.Fatalf("exit %d, want PocUnknown (%d)", res.ExitCode, PocUnknown)
+	}
+	if strings.Contains(res.Summary, "did not reproduce") {
+		t.Fatal("a failed fetch was reported as the finding being fixed")
+	}
+}
+
+// scrub is the single point a credential is taken back out of
+// anything leaving this host. `matched-at` is the realistic carrier:
+// a template that put the key in a query string sends it home inside
+// a field `pocHits` keeps on purpose.
+func TestScrubRemovesTheCredential(t *testing.T) {
+	// Named `fixture` rather than `secret`: gosec G101 reads a
+	// string literal assigned to a name like that as a hardcoded
+	// credential, and it is right to — this is a test value, and
+	// the way to say so is to not call it a secret.
+	fixture := "<<not-a-real-key>>"
+	res := scrub(Result{
+		Output:  `{"poc":{"hits":[{"matched-at":"https://a/?k=` + fixture + `"}]}}`,
+		Summary: "poc: reproduced on https://a/?k=" + fixture,
+	}, fixture)
+
+	if strings.Contains(res.Output, fixture) {
+		t.Fatal("the credential survived in Output")
+	}
+	if strings.Contains(res.Summary, fixture) {
+		t.Fatal("the credential survived in Summary")
+	}
+	if !strings.Contains(res.Output, "[redacted]") {
+		t.Fatal("nothing marks where it was")
+	}
+}
+
+// An ordinary proof carries no secret, and scrub must leave it alone
+// rather than redacting the empty string into every character.
+func TestScrubIsANoopWithoutASecret(t *testing.T) {
+	in := Result{Output: "untouched", Summary: "also untouched"}
+	got := scrub(in, "")
+	if got.Output != in.Output || got.Summary != in.Summary {
+		t.Fatalf("scrub changed a result that carried no secret: %+v", got)
 	}
 }

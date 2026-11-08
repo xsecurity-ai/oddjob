@@ -435,6 +435,15 @@ type HeartbeatReq struct {
 	// state and not a red cross against a port that is very likely
 	// fine.
 	Listeners []shell.Status `json:"listeners,omitempty"`
+	// Pressure fractions in [0,1], for the fleet table's tooltip.
+	// -1 means unmeasurable. Sent every beat so the operator hovering
+	// a row sees the live figure without opening the agent's logs.
+	// No omitempty: a value of 0 is meaningful (100 % used) and must
+	// reach the server. An absent field means "this agent predates the
+	// measurement", which the backend reads as NULL.
+	CPUIdle  float64 `json:"cpu_idle"`
+	MemFree  float64 `json:"mem_free"`
+	DiskFree float64 `json:"disk_free"`
 }
 
 func (c *Client) Heartbeat(ctx context.Context, req HeartbeatReq) (*HeartbeatResp, error) {
@@ -500,6 +509,33 @@ func (c *Client) HeldAssets(ctx context.Context, urls []string) ([]string, error
 		return nil, err
 	}
 	return out.Held, nil
+}
+
+// TaskSecret fetches the credential an authenticating proof presents.
+//
+// **The only call this agent makes that returns a client's
+// credential**, and it is deliberately the narrowest one here: it
+// names a task, the server checks that this agent was assigned it and
+// that the proof behind it declared it needs a credential, and it
+// writes an audit entry before answering. See `task_secret` in
+// routers/agents.py for the rest of the reasoning.
+//
+// The value is returned to the caller and goes no further: `runPoc`
+// substitutes it into the template file and scrubs it back out of
+// anything sent home. It is never logged here -- an error from this
+// call is a plumbing failure and cannot contain the key, because the
+// fetch did not succeed.
+func (c *Client) TaskSecret(ctx context.Context, id int64) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var out struct {
+		Secret string `json:"secret"`
+	}
+	if err := c.do(ctx, http.MethodGet,
+		fmt.Sprintf("/api/ghosts/tasks/%d/secret", id), nil, &out); err != nil {
+		return "", err
+	}
+	return out.Secret, nil
 }
 
 func (c *Client) StartTask(ctx context.Context, id int) error {

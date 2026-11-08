@@ -32,6 +32,10 @@ import type { ColumnDef } from '../lib/columns'
 import { AssetModal } from './AssetModal'
 import { DataTable } from './DataTable'
 import { neon, glow } from '../theme'
+import { useExpand, useRouteParam, useTab } from '../lib/route'
+
+/** The groupings the Assets tab renders. */
+const ASSET_BY = ['library', 'page', 'inside'] as const
 
 /** Colour by what the thing is, so the shape of a page's dependency
  *  list is readable without reading every row. */
@@ -43,11 +47,12 @@ const KIND: Record<string, string> = {
 }
 
 export function WebAssetsPanel({ project }: { project: string | null }) {
-  const [filter, setFilter] = useState<'all' | 'third' | 'unversioned'>('all')
-  // The same data read from either end. By library answers "what
-  // are we on and is it old"; by page answers "which page is
-  // still loading the old one", and that is the one you act on.
-  const [by, setBy] = useState<'library' | 'page' | 'inside'>('library')
+  // The grouping lives in the URL under `?tab=` -- the same parameter
+  // every tab in the app uses, because a pasted link has to land on
+  // the reading it names and there is no room for a second one. A
+  // value naming a grouping that no longer exists falls back to
+  // library, never an empty pane.
+  const [by, setBy] = useTab(ASSET_BY, 'library', useRouteParam('tab'))
   // Searching the FILE, which is not the same as the table's own
   // search box: that one matches the columns on screen, this one
   // matches bytes that are deliberately not on screen. Separate
@@ -56,14 +61,28 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
   // look like a bug.
   const [contains, setContains] = useState('')
   const [term, setTerm] = useState('')      // what has been submitted
-  const [open, setOpen] = useState<number | null>(null)
+  // Which of the loaded files to show: all, only third-party ones, or
+  // only the ones whose version cannot be read. Independent of `by` —
+  // both groupings answer their questions over the same narrowed set.
+  const [filter, setFilter] = useState<'all' | 'third' | 'unversioned'>('all')
 
+  // The open file is `?expand=` like every other detail view in the
+  // app: a pasted link lands on the file it names. The rows load
+  // lazily, so an id nothing loaded carries means nothing is open —
+  // the same rule C2 applies to a session that has since closed.
+  // The setter is stable for the life of the component (it closes over
+  // nothing), which is what lets the columns memo below depend on it.
+  const [openExpand, setOpen] = useExpand(useRouteParam('expand'))
   const q = useQuery({
     queryKey: ['web-assets', project, term],
     queryFn: () => api.webAssets(project ?? '', undefined, term || undefined),
     enabled: !!project,
     placeholderData: (prev) => prev,
   })
+
+  const open = openExpand !== null && (q.data?.items ?? [])
+    .some((a) => String(a.id) === openExpand)
+      ? Number(openExpand) : null
 
   const libraries = useMemo(() => {
     const all = q.data?.items ?? []
@@ -110,7 +129,7 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
       // row is also how you select, sort and copy, and making the
       // whole of it open a dialog takes those away.
       renderCell: (p) => (
-        <Box onClick={() => setOpen((p.row as WebAsset).id)}
+        <Box onClick={() => setOpen(String((p.row as WebAsset).id))}
           title="Open the file"
           sx={{ fontFamily: `'Share Tech Mono', monospace`,
                 color: neon.cyan, overflow: 'hidden', cursor: 'pointer',
@@ -212,7 +231,7 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
           // find in Vulns. The modal lists them, and a finding with a
           // line scrolls the file to it.
           <Stack direction="row" spacing={0.6}
-            onClick={() => setOpen(r.id)}
+            onClick={() => setOpen(String(r.id))}
             sx={{ alignItems: 'center', cursor: 'pointer',
                   '&:hover': { textDecoration: 'underline' } }}>
             <Box sx={{ color: neon.text }}>{r.vulns}</Box>
@@ -234,7 +253,7 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
     {
       field: 'secrets', headerName: 'Secrets', width: 96, type: 'number',
       renderCell: (p) => (p.value ?? 0) > 0 ? (
-        <Box onClick={() => setOpen((p.row as WebAsset).id)}
+        <Box onClick={() => setOpen(String((p.row as WebAsset).id))}
           sx={{ color: neon.yellow, fontWeight: 700, cursor: 'pointer',
                 textShadow: glow(neon.yellow, 0.5),
                 '&:hover': { textDecoration: 'underline' } }}>{p.value}</Box>
@@ -274,7 +293,9 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
       valueGetter: (v) => v ?? '' },
     { field: 'first_page', headerName: 'First seen on', flex: 1, minWidth: 200,
       valueGetter: (v) => v ?? '' },
-  ], [])
+  // `setOpen` is stable for the life of the component, so the memo can
+  // depend on it and still hit.
+  ], [setOpen])
 
   const pageColumns: ColumnDef[] = useMemo(() => [
     { field: 'page', headerName: 'Page', flex: 2, minWidth: 260 },

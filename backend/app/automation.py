@@ -97,7 +97,7 @@ from .models import (
     TargetAddress,
     Vuln,
 )
-from .roots import enumerable_roots
+from .roots import walked_zones
 from .scope import ScopeIndex
 from .scopegate import as_host, index_for
 from .tasking import outstanding_subjects, tasked_subjects
@@ -157,8 +157,12 @@ ERROR_SLEEP = 60
 #: Named explicitly rather than taken via `-sC`, which would turn on
 #: the whole `default` category: dozens of scripts, several of which
 #: write to the target. This asks for one read-only script by name.
-NMAP_PROFILES: dict[str, dict] = {
-    "top100": {"profile": "quick"},
+#: One profile is a LIST of arg sets: each becomes its own nmap task,
+#: because a single nmap invocation cannot be both a full TCP sweep
+#: and a UDP top-ports pass at once without doubling the time on the
+#: wire. "top100" is one task; "full" is two (TCP all ports + UDP 20).
+NMAP_PROFILES: dict[str, list[dict]] = {
+    "top100": [{"profile": "quick"}],
     # No `extra`. It used to carry `--script ssl-cert`, and that is
     # now actively harmful: the ghost adds `--script` itself with
     # every -sV, and nmap honours only the LAST --script on the line,
@@ -166,7 +170,7 @@ NMAP_PROFILES: dict[str, dict] = {
     # the profile FALCON runs, so the scripts added in #115 reached
     # nothing at all until this line went. ssl-cert is still run --
     # it is named in the ghost's own set.
-    "full": {"ports": "1-65535"},
+    "full": [{"ports": "1-65535"}, {"technique": "udp"}],
 }
 
 assert set(WEB_CHOICES) == {"off", *WEB_KINDS}
@@ -603,12 +607,17 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
     if s.auto_amass:
         zones: list[str] = []
         seen: set[str] = set()
-        # Redundant against a snapshot built by `snapshot()`, whose
-        # scope_zones already covers every known host. Kept so `plan`
-        # stays a total function of its Snapshot rather than depending
-        # on one particular caller having filled a field -- the unit
-        # tests construct Snapshots directly, and so would anyone
-        # reasoning about this in isolation.
+        # `scope_zones` is the full walk: every known hostname walked
+        # back to its registrable domain, plus scope roots. It covers
+        # targets, certificate SANs and web-address hosts -- the same
+        # set the manual Kitchen Sink enumerate produces.
+        #
+        # The `derived` below is redundant against a snapshot built by
+        # `snapshot()`, whose `scope_zones` already covers every target
+        # host. Kept so `plan` stays a total function of its Snapshot
+        # rather than depending on one particular caller having filled
+        # the field -- the unit tests construct Snapshots directly, and
+        # so would anyone reasoning about this in isolation.
         derived = [gen.registrable(h) for h, _ in name_subjects(s)
                    if not is_ip(h)]
         for z in list(s.scope_zones) + derived:
@@ -787,10 +796,13 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
                         for u in allow(kind, want)[:cap]]
 
     if s.auto_nmap in NMAP_PROFILES:
-        args = NMAP_PROFILES[s.auto_nmap]
+        # The cap is on HOSTS, not tasks: a profile with two arg sets
+        # (TCP full + UDP) queues both for each host it reaches, and
+        # the limit says how many hosts this cycle touches.
         want = sorted(h for h, _ in s.targets if ("nmap", h) not in s.tasked)
-        out += [Candidate("nmap", h, dict(args), "auto_nmap")
-                for h in allow("nmap", want)[:limit]]
+        for h in allow("nmap", want)[:limit]:
+            out += [Candidate("nmap", h, dict(a), "auto_nmap")
+                    for a in NMAP_PROFILES[s.auto_nmap]]
 
     return out
 
@@ -868,8 +880,8 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
         select(DomainSearch.domain).where(
             DomainSearch.project_id == pr.id))).scalars().all())
 
-    # Every zone worth enumerating, from the same function the
-    # "Search for more domains" dialog uses.
+    # Every zone worth enumerating, from the same walk the manual
+    # Kitchen Sink enumerate uses.
     #
     # This used to read only `kind == "wildcard"` and derive the rest
     # from `Target.host`. Both halves were too narrow, and on a real
@@ -879,9 +891,15 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
     # enumerate them; and 626 of its 1,038 targets carried alternate
     # names or TLS SANs that only the dialog's wider sweep read.
     #
-    # The symptom was an operator with auto_amass on still finding
-    # domains waiting every single time they opened the dialog.
-    scope_zones = await enumerable_roots(session, pr.id)
+    # The second narrowing was subtler: `enumerable_roots` took only
+    # the registrable domain of each host, while the manual kitchen
+    # sink walks every parent down to the apex. A project scoped
+    # `*.api.openai.com` could enumerate `api.openai.com` by hand but
+    # the standing order only saw `openai.com`, refused it as a parent
+    # above the wildcard, and queued nothing -- for ever. The operator
+    # with the toggle on went through the dialog one zone at a time,
+    # which is the exact complaint this exists to end.
+    scope_zones = await walked_zones(session, pr.id)
 
     # DERIVED, not hand-listed. A kind missing from this tuple has no
     # entry in `tasked`, so its "have we already done this" check can

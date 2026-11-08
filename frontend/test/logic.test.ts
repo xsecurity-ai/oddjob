@@ -23,6 +23,7 @@ import { byWorstFirst, collapse } from '../src/components/VulnRollupPanel'
 import { maybeSorted, sortedStrings, isRanked } from '../src/lib/sortOptions'
 import { THEMES } from '../src/palettes'
 import { readChoice } from '../src/lib/useStoredChoice'
+import { coalesceDelay } from '../src/lib/useLive'
 import { parse as parseRoute, build as buildRoute,
          SCOPED_VIEWS, GLOBAL_VIEWS } from '../src/lib/route'
 import { classifyScopeEntry, entryLabel } from '../src/lib/scopeEntry'
@@ -364,6 +365,54 @@ check('switching view drops the host from the path',
       buildRoute({ view: 'vulns', project: 'ACME' }) === '/projects/ACME/vulns')
 check('no project builds a bare view path',
       buildRoute({ view: 'targets', project: null }) === '/targets')
+
+// The exchange modals ride in the query string, like `finding` does. A
+// link naming one must round-trip: parse it back to the same number, and
+// build it back into the bar. `parse` takes pathname and search as two
+// arguments — the way App calls it with window.location — so the tests
+// do the same rather than smuggling the query into the path.
+const wp = parseRoute('/projects/ACME/web', '?tab=urls&packet=42')
+check('a packet id parses from the query string',
+      wp.packet === 42 && wp.tab === 'urls' && wp.view === 'web',
+      JSON.stringify(wp))
+check('and rebuilds to itself',
+      buildRoute(wp) === '/projects/ACME/web?tab=urls&packet=42',
+      buildRoute(wp))
+const wr = parseRoute('/projects/ACME/web', '?replay=7')
+check('a replay id parses from the query string', wr.replay === 7, JSON.stringify(wr))
+check('and rebuilds to itself', buildRoute(wr) === '/projects/ACME/web?replay=7',
+      buildRoute(wr))
+// A hand-edited or stale value that is not a positive integer means
+// nothing is open — the same guard `finding` gets, not an empty dialog.
+check('an empty packet id opens nothing',
+      parseRoute('/projects/ACME/web', '?packet=').packet === undefined)
+check('a non-numeric packet id opens nothing',
+      parseRoute('/projects/ACME/web', '?packet=nonsense').packet === undefined)
+check('both can be named at once without one eating the other',
+      buildRoute({ view: 'web', project: 'ACME', packet: 1, replay: 2 })
+      === '/projects/ACME/web?packet=1&replay=2')
+
+// `?orders=` is a bare flag: presence means open, any value counts.
+check('a standing-orders flag parses from the query string',
+      parseRoute('/projects/ACME/targets', '?orders=1').orders === true)
+check('and rebuilds to itself',
+      buildRoute({ view: 'targets', project: 'ACME', orders: true })
+      === '/projects/ACME/targets?orders=1')
+check('a hand-edited value still opens the dialog',
+      parseRoute('/projects/ACME/targets', '?orders=whatever').orders === true)
+check('absence means closed',
+      parseRoute('/projects/ACME/targets').orders === undefined)
+
+// `?section=` names which settings section is showing. A pasted link
+// lands on the section it names; a stale value falls back in the view,
+// not here — parse only rejects the empty string.
+check('a section key parses from the query string',
+      parseRoute('/projects/ACME/settings', '?section=scope').section === 'scope')
+check('and rebuilds to itself',
+      buildRoute({ view: 'settings', project: 'ACME', section: 'scope' })
+      === '/projects/ACME/settings?section=scope')
+check('an empty section name means none',
+      parseRoute('/projects/ACME/settings', '?section=').section === undefined)
 
 console.log('\n== country codes typed by a person ==')
 // The picker is freeSolo, because a country MaxMind returns that is
@@ -1311,6 +1360,30 @@ console.log('\n== a rollup expansion shows each thing once ==')
         both.host === 'web01.acme.example' && both.finding === 7,
         JSON.stringify(both))
 
+  // Tabs and expansions ride in the query like a finding: presence is
+  // the signal, and their values are validated by the view that owns
+  // them, not here. All `parse`/`build` owe is to carry them through
+  // unchanged.
+  const t = parseRoute('/projects/ACME/vulns', '?tab=by-vuln&expand=web01.acme.example')
+  check('a tab and an expansion in the query are read',
+        t.tab === 'by-vuln' && t.expand === 'web01.acme.example', JSON.stringify(t))
+
+  // `build` is the inverse: a URL with both set comes back with both,
+  // and one without them gains none.
+  for (const q of ['?tab=by-vuln&expand=web01.acme.example', '?tab=assets', '',
+                   '?finding=7&expand=42']) {
+    const rt = buildRoute(parseRoute('/projects/ACME/vulns', q))
+    check(`round trip: /projects/ACME/vulns${q}`,
+          rt === '/projects/ACME/vulns' + q, rt)
+  }
+
+  // A tab and a finding together: the rollups open on a named host with
+  // a finding selected in it.
+  const tf = parseRoute('/projects/ACME/vulns', '?tab=by-target&expand=web01.acme.example&finding=7')
+  check('tab, expansion and finding can all be open',
+        tf.tab === 'by-target' && tf.expand === 'web01.acme.example'
+        && tf.finding === 7, JSON.stringify(tf))
+
   // `build` is the inverse and lives next to `parse` so the two cannot
   // drift -- the round trip is what says so.
   for (const path of ['/projects/ACME/vulns',
@@ -1320,6 +1393,48 @@ console.log('\n== a rollup expansion shows each thing once ==')
           buildRoute(parseRoute(path, '')).split('?')[0] === path,
           buildRoute(parseRoute(path, '')))
   }
+}
+
+// ---------------------------------------------------------------------
+// useLive's coalescing window.
+//
+// The hook debounced by resetting its timer on every event, which means a
+// stream arriving faster than the window never reaches the end of it: the
+// grid stops updating for exactly as long as the server keeps talking.
+// Nothing else would have rescued it either — `refetchOnWindowFocus` is
+// off, so the SSE stream is the only thing that refreshes anything.
+// ---------------------------------------------------------------------
+{
+  check('an idle stream waits the short window',
+        coalesceDelay(1_000, 0) === 250, String(coalesceDelay(1_000, 0)))
+  check('inside the burst it keeps coalescing',
+        coalesceDelay(1_200, 1_000) === 250, String(coalesceDelay(1_200, 1_000)))
+  check('the last wait is clipped to the ceiling rather than overshooting it',
+        coalesceDelay(2_900, 1_000) === 100, String(coalesceDelay(2_900, 1_000)))
+  check('at the ceiling it refreshes instead of waiting again',
+        coalesceDelay(3_000, 1_000) === 0, String(coalesceDelay(3_000, 1_000)))
+  check('and past it, too',
+        coalesceDelay(9_999, 1_000) === 0, String(coalesceDelay(9_999, 1_000)))
+
+  // The real shape of the bug: a steady stream for ten seconds, each
+  // event individually looking like a perfectly ordinary coalesce.
+  //
+  // 130ms, not a round number: at 100ms the burst lands EXACTLY on the
+  // ceiling, where `Math.min(250, 2000 - 2000)` is 0 by arithmetic
+  // rather than by the rule. This test passed against the bug until the
+  // interval stopped dividing into the ceiling.
+  let burst = 0
+  let fired = 0
+  let last = 0
+  for (let t = 0; t <= 10_000; t += 130) {
+    const d = coalesceDelay(t, burst)
+    if (!burst) burst = t
+    if (d === 0) { fired++; last = t; burst = 0 }
+  }
+  check('a sustained stream still refreshes rather than starving',
+        fired >= 3, `fired ${fired} times in 10s`)
+  check('...and never goes more than the ceiling without one',
+        10_000 - last <= 2_000, `last refresh at ${last}ms`)
 }
 
 console.log(`\n${'='.repeat(56)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(56)}`)

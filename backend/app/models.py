@@ -48,6 +48,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    false,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -73,7 +74,8 @@ SEVERITIES = ("critical", "high", "medium", "low", "info")
 #: What a person concluded about a finding. See `Vuln.triage`.
 #: `needs_investigating` is the default and the only one a scanner
 #: can produce; the other two are somebody's judgement.
-TRIAGE_STATES = ("needs_investigating", "true_positive", "false_positive")
+TRIAGE_STATES = ("needs_investigating", "true_positive", "false_positive",
+                 "verified_benign")
 PROJECT_STATUSES = ("active", "paused", "complete", "archived")
 
 #: What `Project.auto_web` may be.
@@ -478,13 +480,17 @@ class Target(Base, TimestampMixin):
     #:   cloud   a managed resource — a bucket, a function, a tenant,
     #:           an account — named by whatever identifies it with the
     #:           provider
+    #:   repo    a source code repository, named by its clone URL or
+    #:           org/slug. No IP, no liveness; findings carry file:line.
     #:
     #: The distinction is not cosmetic. A mobile app has no address to
     #: scan, so an empty `ip_addresses` on one is a fact, not a gap in
     #: coverage, and liveness means nothing for it. A cloud resource is
     #: different again: it often DOES resolve, so its addresses are
     #: kept, but "no open ports" on a storage bucket is not the finding
-    #: that the same result on a server would be.
+    #: that the same result on a server would be. A repo is like mobile
+    #: in having no address; findings on it carry file_path and
+    #: line_number rather than port and protocol.
     kind: Mapped[str] = mapped_column(
         String(16), default="host", server_default="host", index=True)
     #: Which cloud, for `kind="cloud"`. Free text rather than an enum
@@ -505,6 +511,10 @@ class Target(Base, TimestampMixin):
     mac_address: Mapped[str | None] = mapped_column(String(32))
     mac_vendor: Mapped[str | None] = mapped_column(String(128))
     hostnames: Mapped[str | None] = mapped_column(Text)      # JSON list
+    #: DNS record types observed for this name, as a JSON list of
+    #: lowercase labels (e.g. ["a", "cname"]). Populated by the amass
+    #: importer; NULL means no record-type information was recorded.
+    dns_record_types: Mapped[str | None] = mapped_column(Text)  # JSON list
     # Everything a scanner reported that has no column of its own: OS class
     # rows, uptime, TCP sequence analysis, traceroute, host-level NSE output.
     # Kept whole because discarding it to fit a schema is how you find out
@@ -855,6 +865,35 @@ class Vuln(Base, TimestampMixin):
     # than forking a duplicate. Unique per project, not globally.
     external_id: Mapped[str | None] = mapped_column(String(128), index=True)
 
+    #: Somebody asked for a proof of this finding, and it has not been
+    #: written yet.
+    #:
+    #: `auto_poc` is a FLOOR and says "prove everything this bad or
+    #: worse, for ever". This is the other half: "prove these, the
+    #: ones I am looking at right now" -- a host, a vulnerability
+    #: across the estate, or a credential -- without moving the floor
+    #: and committing the engagement to every finding at that
+    #: severity from now on.
+    #:
+    #: A timestamp rather than a flag because a proof is queued, not
+    #: built: the worker drains these one at a time against a shared
+    #: model, so a request made at noon may be answered at ten past,
+    #: and "when did somebody ask" is the only thing that distinguishes
+    #: a backlog from a stall. It is NOT cleared when the proof is
+    #: written -- `pocs.vuln_id` existing is what takes the finding out
+    #: of the queue, and keeping the timestamp records that this proof
+    #: exists because a person asked rather than because a floor
+    #: covered it.
+    poc_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True)
+    #: WHICH proof was asked for: `exposure` (the key is still served
+    #: at that URL) or `auth` (the key still works). Two different
+    #: claims, and only the second needs the credential's value at run
+    #: time. NULL alongside a request means `exposure`, which is the
+    #: safe reading -- a request that lost its mode must not silently
+    #: become the one that authenticates.
+    poc_request_mode: Mapped[str | None] = mapped_column(String(16))
+
     # ---- lifecycle: what happened to this between scans -------------
     #
     # See `app/lifecycle.py`. These three answer "is it still there",
@@ -894,6 +933,11 @@ class Vuln(Base, TimestampMixin):
     #: The manifest of the run that last REPORTED it, so a later
     #: sweep can be checked for being able to find the same thing.
     found_by_manifest: Mapped[str | None] = mapped_column(String(32))
+    #: Source location for code findings (SAST, SCA). NULL for network
+    #: findings. The file path is relative to the repo root; combined with
+    #: the target's host (the repo slug) it identifies the exact position.
+    file_path: Mapped[str | None] = mapped_column(String(1024))
+    line_number: Mapped[int | None] = mapped_column(Integer)
 
     target: Mapped[Target] = relationship(back_populates="vulns")
 
@@ -1098,6 +1142,13 @@ class Poc(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(500))
     status: Mapped[str] = mapped_column(String(32), default="unconfirmed", index=True)
     path: Mapped[str | None] = mapped_column(String(1000))
+    #: This proof AUTHENTICATES with a stored credential, so its
+    #: template carries a `{{secret}}` placeholder rather than a
+    #: value. The value is released to the agent holding the task,
+    #: over its own route, and is never written into the template,
+    #: the task args, or anything that is listed or exported.
+    needs_secret: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=false(), default=False)
     # 0 reproduced | 1 not reproduced | 2 could not test
     exit_code: Mapped[int | None] = mapped_column(Integer)
     notes: Mapped[str | None] = mapped_column(Text)
@@ -2101,8 +2152,11 @@ class DomainCandidate(Base, TimestampMixin):
     #: How many separate generation runs proposed it. A name three different
     #: patterns agree on is a better bet than one only a sequence produced.
     times_seen: Mapped[int] = mapped_column(Integer, default=1)
+        # Indexed because it is a foreign key we may delete through:
+        # CLAUDE.md records a delete through an unindexed FK scanning
+        # the whole child table per row. See `e7a3f92c81d4`.
     decided_by: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"))
+        ForeignKey("users.id", ondelete="SET NULL"), index=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -2842,6 +2896,16 @@ class Agent(Base, TimestampMixin):
     capacity: Mapped[int | None] = mapped_column(Integer)
     capacity_reason: Mapped[str | None] = mapped_column(String(300))
 
+    #: Live pressure fractions in [0,1], reported by the agent on each
+    #: heartbeat. NULL means the agent has not sent them (older version)
+    #: or could not measure. -1 means "measured but unknown" (non-Linux).
+    cpu_idle: Mapped[float | None] = mapped_column(Float)
+    mem_free: Mapped[float | None] = mapped_column(Float)
+    disk_free: Mapped[float | None] = mapped_column(Float)
+    #: JSON array of recent readings for the charts, newest last.
+    #: Each entry: {"t": "2026-11-07T15:56:48Z", "cpu": 0.3, "mem": 0.7, "disk": 0.85}
+    pressure_history: Mapped[str | None] = mapped_column(Text)
+
     #: What an OPERATOR says this one ghost may run at once, overriding
     #: the agent's own assessment. NULL means "let the agent decide",
     #: which is the default and right almost always.
@@ -3120,8 +3184,11 @@ class AgentTask(Base, TimestampMixin):
         ForeignKey("agents.id", ondelete="SET NULL"), index=True)
     project_id: Mapped[int] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+        # Indexed because it is a foreign key we may delete through:
+        # CLAUDE.md records a delete through an unindexed FK scanning
+        # the whole child table per row. See `e7a3f92c81d4`.
     requested_by: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"))
+        ForeignKey("users.id", ondelete="SET NULL"), index=True)
 
     #: For `geo` routing: which region this work must run from. Set by
     #: the operator, because the alternative is resolving the target's
@@ -3230,8 +3297,11 @@ class AuditEvent(Base):
     #: Dotted rather than prose so it can be filtered on.
     action: Mapped[str] = mapped_column(String(64), index=True)
     username: Mapped[str | None] = mapped_column(String(128), index=True)
+        # Indexed because it is a foreign key we may delete through:
+        # CLAUDE.md records a delete through an unindexed FK scanning
+        # the whole child table per row. See `e7a3f92c81d4`.
     user_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"))
+        ForeignKey("users.id", ondelete="SET NULL"), index=True)
     ip: Mapped[str | None] = mapped_column(String(64))
     method: Mapped[str | None] = mapped_column(String(8))
     #: Scrubbed before it arrives. Never the query string.
@@ -3297,13 +3367,22 @@ class Exploit(Base):
 class CveRecord(Base):
     """One CVE, enough of it to decide whether to care."""
     __tablename__ = "cve_records"
-    __table_args__ = (
-        Index("ix_cve_severity_score", "severity", "cvss_score"),
-        # The ordering a findings list actually wants: what is being
-        # exploited, then what is likely to be, then how bad it would
-        # be. See `vulnfeed.triage_order`.
-        Index("ix_cve_triage", "kev", "epss", "cvss_score"),
-    )
+    # No __table_args__, and that is a measured decision rather than
+    # an omission. This table carried five btree indexes that took
+    # ZERO scans in three weeks of production traffic -- the planner
+    # never chose one, because every query that reaches this table is
+    # a `LIKE '%x%'` over `products` or `cpes`, which a btree cannot
+    # serve at all. They cost 308 MB and were re-maintained on every
+    # row of the EPSS sweep, which rewrites all 418,608 rows.
+    #
+    # The trigram indexes that DO serve those queries are created in
+    # migration `e7a3f92c81d4` and are deliberately not declared here:
+    # `gin_trgm_ops` is Postgres-only, SQLAlchemy would emit it
+    # against SQLite as well, and the test suites run on SQLite.
+    #
+    # If a query here ever needs ordering by score or triage again,
+    # measure first: `pg_stat_user_indexes.idx_scan` is what says
+    # whether an index on this table is doing anything.
 
     #: CVE-2021-41773. The natural key, for the same reason as above.
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -3311,7 +3390,7 @@ class CveRecord(Base):
     modified: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True)
     summary: Mapped[str | None] = mapped_column(Text)
-    cvss_score: Mapped[float | None] = mapped_column(Float, index=True)
+    cvss_score: Mapped[float | None] = mapped_column(Float)
     cvss_vector: Mapped[str | None] = mapped_column(String(128))
     severity: Mapped[str | None] = mapped_column(String(16), index=True)
     #: JSON list of CPE match strings. What makes version matching
@@ -3322,7 +3401,10 @@ class CveRecord(Base):
     #: cheap first pass before the expensive one. A LIKE over this is
     #: what keeps matching a 4,000-host project from being a join
     #: against 290,000 rows per service.
-    products: Mapped[str | None] = mapped_column(Text, index=True)
+    #: Not btree-indexed: every read of it is `LIKE '%term%'`, which a
+    #: btree cannot answer. The trigram index that can is in
+    #: `e7a3f92c81d4`.
+    products: Mapped[str | None] = mapped_column(Text)
     #: On CISA's Known Exploited Vulnerabilities list: somebody has
     #: been seen using this, in the wild, against somebody.
     #:
@@ -3350,7 +3432,10 @@ class CveRecord(Base):
     #: exploited in the next 30 days. Answers the question CVSS
     #: cannot -- "a 9.8 nobody has ever used" and "a 7.5 being
     #: exploited this week" sort identically by severity alone.
-    epss: Mapped[float | None] = mapped_column(Float, index=True)
+    #: Not indexed, for the same reason as `cvss_score`: nothing has
+    #: ever ordered or filtered on it in SQL, and the index was being
+    #: rewritten 418,608 times per EPSS sweep to serve no query.
+    epss: Mapped[float | None] = mapped_column(Float)
     #: Percentile among all scored CVEs. Carried because the raw
     #: probability is small and hard to read: 0.00042 means little,
     #: "higher than 11% of all CVEs" means something.

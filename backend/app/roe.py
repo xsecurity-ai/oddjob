@@ -143,11 +143,36 @@ IMPACT: dict[str, str] = {
     #: never enables nuclei's `code` protocol, and validates before
     #: it sends. A proof that could delete something would have to
     #: get past all three.
+    #:
+    #: **A proof that AUTHENTICATES is this same band and not a
+    #: higher one**, and the line is worth stating because it looks
+    #: like it should be worse. Presenting a credential the client
+    #: already leaked, to the client's own service, reading the
+    #: reply and changing nothing, is a request — it is what every
+    #: other check here does, with a header on it. What would move
+    #: it is using the credential to act: rotating, writing,
+    #: enumerating behind it. The template is refused if it sends
+    #: anywhere but the host under test, and refused if it reaches
+    #: for a protocol other than http, which is what keeps it a
+    #: request. See `pocbuild.check(carries_secret=True)`.
+    #:
+    #: It is still `state_changing`, so an engagement capped at
+    #: `read_only` never runs one — the ceiling is applied at
+    #: dispatch, to the task, so it covers a proof however it was
+    #: asked for.
     "poc": "state_changing",
     #: Narrower than `nuclei` -- only the CVEs already matched to
     #: something on the host -- but confirming a CVE means sending
     #: the thing that triggers it, which is the same act.
     "nuclei_confirm": "state_changing",
+
+    #: Source code analysis: reads source files, writes nothing to the
+    #: target. The repo is cloned locally and analysed in-process; no
+    #: network traffic reaches the client's estate (except the initial
+    #: git fetch, which is a GET).
+    "semgrep": "read_only",
+    "trufflehog": "read_only",
+    "osv": "read_only",
 
     # ---- not pointed at the client at all ------------------------
     #: Installs a tool on the ghost's own host. Nothing leaves it.

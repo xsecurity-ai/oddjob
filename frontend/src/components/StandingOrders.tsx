@@ -31,7 +31,6 @@
  *  Only with a single project in view: these are per-engagement
  *  settings and there is no sensible "all projects" meaning for them.
  */
-import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Box, Button, Chip, CircularProgress, Dialog, DialogContent, DialogTitle,
@@ -42,6 +41,7 @@ import CloseIcon from '@mui/icons-material/Close'
 import PolicyIcon from '@mui/icons-material/Policy'
 import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
+import { useOrdersDialog } from '../lib/route'
 import { neon } from '../theme'
 
 /** What each switch is for, in the words the operator needs rather than
@@ -409,7 +409,9 @@ export function StandingOrdersControls({ project }: { project: string }) {
  *  screen without being asked for.
  */
 export function StandingOrdersButton({ project }: { project: string }) {
-  const [open, setOpen] = useState(false)
+  // In the url as `?orders=`, so a link to the standing orders opens
+  // them for whoever receives it, and Back closes them.
+  const [open, setOpen] = useOrdersDialog()
   const { live, admin } = useStandingOrders(project)
 
   return (

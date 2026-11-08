@@ -160,6 +160,10 @@ class ParsedVuln(_Scrubbed):
     #: different columns, and a remediation folded into prose can never be
     #: pulled back out.
     remediation: str | None = None
+    #: Source location for code findings (SAST/SCA). Relative file path
+    #: within the repo and the line number. NULL for network findings.
+    file_path: str | None = None
+    line_number: int | None = None
 
 
 @dataclass

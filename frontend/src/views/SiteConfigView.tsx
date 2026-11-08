@@ -305,7 +305,7 @@ export function SiteConfigView() {
             existed was to scroll past every other one. Hidden groups
             stay mounted — see ConfigSections — so switching away
             from a half-filled form does not discard it. */}
-        <ConfigSections id="site" sections={data.groups.map((g) => ({
+        <ConfigSections sections={data.groups.map((g) => ({
           key: g,
           label: g,
           hint: `${data.spec.filter((f) => f.group === g && visible(f)).length}`,

@@ -75,6 +75,16 @@ var Known = map[string]pkg{
 	// wildcard detection are things nothing else here answers -- and
 	// it comes back when it has a runner to be reached through, not
 	// before.
+
+	// Source code analysis tools. Not in Baseline: not every
+	// engagement needs them, and semgrep is a large install. The
+	// agent installs them on demand when its first code task arrives.
+	"semgrep": {apt: "", brew: "semgrep", choco: "semgrep", version: "--version",
+		gomod: "github.com/returntocorp/semgrep@latest"},
+	"trufflehog": {apt: "", brew: "trufflehog", choco: "trufflehog", version: "-version",
+		gomod: "github.com/trufflesecurity/trufflehog/v3@latest"},
+	"osv-scanner": {apt: "", brew: "osv-scanner", choco: "osv-scanner", version: "--version",
+		gomod: "github.com/google/osv-scanner/cmd/osv-scanner@latest"},
 }
 
 type pkg struct {

@@ -389,12 +389,13 @@ def _as(v, want):
 
 # -------------------------------------------------------------- targets
 class _TargetFields(BaseModel):
-    kind: Literal["host", "mobile", "cloud"] = Field(
+    kind: Literal["host", "mobile", "cloud", "repo"] = Field(
         default="host",
         description="host: a machine at an address. mobile: an application, "
                     "named by its bundle/package id, with no IP of its own. "
                     "cloud: a managed resource — bucket, function, tenant, "
-                    "account — named as the provider names it.")
+                    "account — named as the provider names it. repo: a source "
+                    "code repository, named by its clone URL or org/slug.")
     provider: str | None = Field(
         default=None, max_length=32,
         description="Which cloud, for kind=cloud. aws, azure, gcp, oracle, "
@@ -468,11 +469,11 @@ class _TargetFields(BaseModel):
         # disagree about what the target ends up with.
         if self.ip_address and self.ip_address not in self.ip_addresses:
             self.ip_addresses = [self.ip_address, *self.ip_addresses]
-        if self.kind == "mobile":
+        if self.kind in ("mobile", "repo"):
             self.ip_address = None
             self.ip_addresses = []
             self.alive = None
-        if self.kind != "cloud":
+        if self.kind not in ("cloud",):
             # A provider on a host or an app is meaningless and would
             # show up in filters as if it meant something.
             self.provider = None
@@ -492,11 +493,15 @@ class TargetCreate(_TargetFields):
         resource often is not — `arn:aws:iam::123:role/admin` is a
         perfectly good identifier and fails every DNS rule — so
         refusing it would leave the engagement's cloud findings with
-        nowhere to live.
+        nowhere to live. A repo is identified by its clone URL or
+        org/slug, which contains slashes, so it uses the same broader
+        validation as cloud resources.
         """
         try:
-            self.host = (validate_cloud_id(self.host) if self.kind == "cloud"
-                         else validate_host(self.host))
+            if self.kind in ("cloud", "repo"):
+                self.host = validate_cloud_id(self.host)
+            else:
+                self.host = validate_host(self.host)
         except InvalidHost as e:
             raise ValueError(str(e)) from e
         return self
@@ -534,6 +539,10 @@ class TargetOut(_TargetFields):
     mac_address: str | None = None
     mac_vendor: str | None = None
     hostnames: list[str] = []
+    dns_record_types: list[str] = Field(
+        default_factory=list,
+        description="DNS record types observed for this name, e.g. "
+                    "[\"a\", \"cname\"]. Empty when unknown.")
     extra: dict = {}
 
     # Read-only roll-ups of the geolocation held on each address; see
@@ -591,6 +600,11 @@ class TargetOut(_TargetFields):
     def _hostnames(cls, v):
         return _as(v, list)
 
+    @field_validator("dns_record_types", mode="before")
+    @classmethod
+    def _dns_record_types(cls, v):
+        return _as(v, list)
+
     @field_validator("extra", mode="before")
     @classmethod
     def _extra(cls, v):
@@ -600,6 +614,9 @@ class TargetOut(_TargetFields):
     total_highs: int = 0
     total_pocs: int = 0
     total_ports: int = 0
+    #: Number of web addresses (URLs) recorded for this target.
+    #: Non-zero means the target has been web-enumerated.
+    web_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -691,6 +708,9 @@ class _VulnFields(BaseModel):
     description: str | None = None
     remediation: str | None = None
     external_id: str | None = None
+    #: Source location for code findings (SAST/SCA). NULL for network.
+    file_path: str | None = None
+    line_number: int | None = None
 
     @field_validator("severity")
     @classmethod

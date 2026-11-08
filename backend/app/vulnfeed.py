@@ -39,6 +39,7 @@ import re
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import sqlalchemy as sa
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,6 +63,14 @@ NVD_PAGE = 2000
 #: being rate-limited mid-sync costs the whole run, and the difference
 #: between 6 and 7 seconds is nothing against a feed that is allowed to
 #: take an hour.
+#: How many times one NVD request is retried before the run gives up.
+#: NVD answers in well under a second when it is healthy and goes quiet
+#: for minutes when it is not. A single read timeout used to end the
+#: whole invocation -- survivable for a daily top-up, but a first
+#: backfill is many windows long, so on a bad afternoon it never
+#: finishes. Three attempts, spaced by the pacing delay.
+NVD_ATTEMPTS = 3
+
 NVD_DELAY_NO_KEY = 7.0
 NVD_DELAY_KEY = 1.0
 
@@ -172,7 +181,7 @@ async def sync_exploitdb(session: AsyncSession) -> dict:
         await session.rollback()
         st = await _state(session, "exploitdb")
         st.running = False
-        st.error = f"{type(e).__name__}: {e}"[:500]
+        st.error = _why(e)
         await session.commit()
         log.warning("exploitdb sync failed: %s", e)
         return {"source": "exploitdb", "ok": False, "error": st.error}
@@ -332,7 +341,7 @@ async def sync_kev(session: AsyncSession) -> dict:
         await session.rollback()
         st = await _state(session, "kev")
         st.running = False
-        st.error = f"{type(e).__name__}: {e}"[:500]
+        st.error = _why(e)
         await session.commit()
         log.warning("kev sync failed: %s", e)
         return {"source": "kev", "ok": False, "error": st.error}
@@ -373,13 +382,27 @@ async def sync_epss(session: AsyncSession) -> dict:
         held = {c for (c,) in (await session.execute(
             select(CveRecord.id))).all()}
         touch = sorted(held & set(scores))
-        for i in range(0, len(touch), 1000):
-            for cve in touch[i:i + 1000]:
-                sc, pct = scores[cve]
-                await session.execute(
-                    CveRecord.__table__.update()
-                    .where(CveRecord.id == cve)
-                    .values(epss=sc, epss_percentile=pct))
+        # ONE statement per chunk, not one per CVE.
+        #
+        # This loop used to issue an UPDATE per row: 418,608 of them
+        # per sweep, 34.8 MILLION statements over three weeks of
+        # production, and 1.5 hours of database time spent almost
+        # entirely on round trips rather than on work. The rows are
+        # the same; what changed is how many times we ask.
+        #
+        # `executemany` with a bound parameter name per column -- the
+        # WHERE key has to be called something other than `id`,
+        # because a bind parameter sharing a column's name collides
+        # with the one in SET and silently updates the wrong row.
+        stmt = (CveRecord.__table__.update()
+                .where(CveRecord.id == sa.bindparam("b_id"))
+                .values(epss=sa.bindparam("b_epss"),
+                        epss_percentile=sa.bindparam("b_pct")))
+        for i in range(0, len(touch), 5000):
+            chunk = touch[i:i + 5000]
+            await session.execute(stmt, [
+                {"b_id": c, "b_epss": scores[c][0], "b_pct": scores[c][1]}
+                for c in chunk])
             await session.flush()
 
         st.records = len(touch)
@@ -395,7 +418,7 @@ async def sync_epss(session: AsyncSession) -> dict:
         await session.rollback()
         st = await _state(session, "epss")
         st.running = False
-        st.error = f"{type(e).__name__}: {e}"[:500]
+        st.error = _why(e)
         await session.commit()
         log.warning("epss sync failed: %s", e)
         return {"source": "epss", "ok": False, "error": st.error}
@@ -467,6 +490,21 @@ def parse_cve(item: dict) -> dict | None:
     }
 
 
+def _why(e: Exception) -> str:
+    """`Type: message`, and just `Type` when there is no message.
+
+    httpx's timeout and transport exceptions carry an EMPTY str(), so
+    `f"{type(e).__name__}: {e}"` wrote "ReadTimeout: " into the feed's
+    error column -- a trailing colon introducing nothing, which tells an
+    operator that something failed and refuses to say what. A bare
+    "ReadTimeout" is no more informative but it is at least not
+    pretending to explain itself; callers that know more should say so
+    themselves, as the NVD fetch below does.
+    """
+    msg = str(e).strip()
+    return (f"{type(e).__name__}: {msg}" if msg else type(e).__name__)[:500]
+
+
 def _nvd_windows(start: datetime,
                  end: datetime) -> list[tuple[datetime, datetime]]:
     """Split a span into ranges NVD will accept.
@@ -482,6 +520,39 @@ def _nvd_windows(start: datetime,
         out.append((cur, nxt))
         cur = nxt
     return out or [(start, end)]
+
+
+async def _nvd_get(c: httpx.AsyncClient, params: dict,
+                   delay: float) -> httpx.Response:
+    """One NVD page, retried through a transient stall.
+
+    Only TRANSPORT failures are retried -- a timeout, a dropped
+    connection, a DNS blip. An HTTP status is an answer and is handled
+    by the caller: retrying a 403 would spend the rate limit that
+    caused it, and retrying a 404 would be asking the same wrong
+    question louder.
+
+    The error raised on exhaustion says what the httpx exception will
+    not: NVD's timeout exceptions have an empty message, so the feed
+    recorded "ReadTimeout: " and the operator had no way to tell a slow
+    afternoon at NIST from a broken deployment.
+    """
+    last: Exception | None = None
+    for attempt in range(1, NVD_ATTEMPTS + 1):
+        try:
+            return await c.get(NVD_API, params=params)
+        except (httpx.TimeoutException, httpx.TransportError) as e:
+            last = e
+            if attempt < NVD_ATTEMPTS:
+                # Spaced by the pacing delay, widening: a stall NVD is
+                # working through is not helped by asking again at once.
+                await asyncio.sleep(delay * attempt)
+    raise TimeoutError(
+        f"NVD did not answer after {NVD_ATTEMPTS} attempts "
+        f"({type(last).__name__}, read timeout {_TIMEOUT.read:.0f}s) for "
+        f"{params.get('lastModStartDate', '?')[:10]}.."
+        f"{params.get('lastModEndDate', '?')[:10]} "
+        f"at offset {params.get('startIndex')}") from last
 
 
 async def sync_nvd(session: AsyncSession, api_key: str = "",
@@ -562,7 +633,7 @@ async def sync_nvd(session: AsyncSession, api_key: str = "",
                     # back during a backfill and earn a 403.
                     if requests:
                         await asyncio.sleep(delay)
-                    r = await c.get(NVD_API, params=params)
+                    r = await _nvd_get(c, params, delay)
                     pages += 1
                     requests += 1
                     if r.status_code == 403:
@@ -606,7 +677,7 @@ async def sync_nvd(session: AsyncSession, api_key: str = "",
         await session.rollback()
         st = await _state(session, "nvd")
         st.running = False
-        st.error = f"{type(e).__name__}: {e}"[:500]
+        st.error = _why(e)
         # Keep the ground already covered. The rows committed before the
         # failure are in the table whatever happens here; parking the
         # cursor is what stops the next run fetching them all again, and
@@ -814,6 +885,28 @@ def match_kind(cpe: str, version: str | None) -> str | None:
     return "exact" if cpe_ver in version_candidates(version) else None
 
 
+#: One sweep's worth of answers, keyed by what was asked.
+#:
+#: The same question arrives again and again: an estate runs the same
+#: nginx on four hundred hosts, and a lockfile sweep asks about `lodash
+#: 4.17.21` once per lockfile that pins it. `suspected_cves` already
+#: deduplicates per (product, version); the asset and lockfile sweeps
+#: did not, and between them drove 460,446 calls.
+#:
+#: Bounded and cleared by `reset_lead_cache`, which the sweeps call
+#: when they start. NOT a long-lived cache: the CVE corpus is synced
+#: daily and an answer kept across syncs would quietly stop reflecting
+#: it. This exists to stop one sweep asking one question a thousand
+#: times, not to remember anything between them.
+_LEAD_CACHE: dict[tuple, dict] = {}
+_LEAD_CACHE_MAX = 4096
+
+
+def reset_lead_cache() -> None:
+    """Forget the per-sweep answers. Called when a sweep begins."""
+    _LEAD_CACHE.clear()
+
+
 async def leads_for_service(session: AsyncSession, product: str | None,
                             version: str | None, name: str | None = None,
                             banner: str | None = None,
@@ -832,6 +925,11 @@ async def leads_for_service(session: AsyncSession, product: str | None,
     # list whether there is a version to match on cannot drift from
     # what the matching actually uses.
     versions = version_candidates(version)
+
+    key = (product, version, name, banner, limit)
+    hit = _LEAD_CACHE.get(key)
+    if hit is not None:
+        return hit
 
     terms = product_terms(product, name, banner)
     if not terms:
@@ -969,13 +1067,19 @@ async def leads_for_service(session: AsyncSession, product: str | None,
                    f"{unmatchable} could not be matched because NVD has not "
                    "analysed them yet. Only the first group is evidence about "
                    "the version you asked about.")
-    return {
+    out = {
         "terms": terms,
         "cves": cves,
         "exploits": exploits,
         "caveat": caveat,
         "feeds": await status(session),
     }
+    # Only the real answers are cached. The "nothing identifiable"
+    # early return above is not: it costs one function call and
+    # caching it would spend an entry per unidentifiable service.
+    if len(_LEAD_CACHE) < _LEAD_CACHE_MAX:
+        _LEAD_CACHE[key] = out
+    return out
 
 
 # ------------------------------------------- confirmation, not discovery
@@ -1012,12 +1116,12 @@ MAX_CONFIRM_IDS = 40
 
 
 async def suspected_cves(session: AsyncSession, project_id: int,
-                         origins: dict[str, str],
+                         origins: dict[str, list[str]],
                          limit: int = MAX_CONFIRM_IDS,
                          ) -> dict[str, list[str]]:
     """-> {origin: [CVE, …]} the corpus already links to that host.
 
-    `origins` is {origin: host}, as `webtargets.discoverable` gives
+    `origins` is {origin: hosts}, as `webtargets.discoverable` gives
     it. Read once per cycle so the planner stays pure data.
 
     Only services with BOTH a product and a version are asked about.
@@ -1029,7 +1133,11 @@ async def suspected_cves(session: AsyncSession, project_id: int,
 
     if not origins:
         return {}
-    hosts = {h for h in origins.values() if h}
+    # Flattened: `discoverable` gives every host serving an origin,
+    # not one of them. It used to give one, chosen by whatever order
+    # an unordered scan returned, so a host known only as the second
+    # target on a shared origin was silently never confirmed.
+    hosts = {h for hs in origins.values() for h in hs if h}
     if not hosts:
         return {}
 
@@ -1063,10 +1171,25 @@ async def suspected_cves(session: AsyncSession, project_id: int,
             per_host.setdefault(host, set()).update(by_pair[key])
 
     out: dict[str, list[str]] = {}
-    for origin, host in origins.items():
-        got = per_host.get(host)
+    for origin, served_by in origins.items():
+        # The UNION over every host serving the origin, not one of
+        # them. This read `origins` as {origin: host} and used the
+        # value as a dict key -- which raises TypeError now that the
+        # value is a list, for every input that reaches this loop.
+        #
+        # The union is also the right answer on the merits, which is
+        # why the fix is not to pick one host back out. A confirmation
+        # run is nuclei against the ORIGIN; whichever host answers on
+        # the day could be the vulnerable one, so the CVEs worth
+        # asking about are the ones suspected on any of them. Choosing
+        # a single host is what the old code did by accident, and a
+        # CVE present only on the second target was never confirmed.
+        got: set[str] = set()
+        for host in served_by:
+            got |= per_host.get(host) or set()
         if got:
             # Sorted so the same estate produces the same command line
-            # twice, which is what makes two runs comparable.
+            # twice, which is what makes two runs comparable. Still
+            # capped at `limit`: a union is wider than one host's list.
             out[origin] = sorted(got)[:limit]
     return out

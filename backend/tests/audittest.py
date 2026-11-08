@@ -16,6 +16,7 @@ _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
 import json
 import os
 import sqlite3
+import time as _time
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime, timedelta
@@ -814,5 +815,246 @@ check("a sample stamped exactly now lands in the last bucket",
 b = _pts([(_dt(2026, 10, 13, 11, 0), 0, 1, None)])
 check("a naive timestamp is read as UTC rather than raising",
       sum(p["errors"] for p in b) == 1, [p["errors"] for p in b])
+
+
+# ---------------------------------------------------------------------
+# The spool: the per-request line, moved off the request's own path.
+#
+# What matters here is not that it is faster. It is that it is still an
+# audit trail: every entry that was offered is written, a full queue
+# costs latency rather than entries, and a shutdown drains rather than
+# discards. A batching writer that loses rows under load is worse than
+# the slow one it replaced, because it only loses them when something
+# interesting is happening.
+# ---------------------------------------------------------------------
+import asyncio as _aio
+
+from app.audit import SPOOL_MAX, _row, _Spool
+
+
+def _spooled(fn):
+    """Run one coroutine on its own loop, with a spool that collects."""
+    return _aio.run(fn())
+
+
+# A spool nobody started must refuse politely rather than raise or
+# swallow: the caller's fallback is a real write, so False is the
+# answer that keeps the entry.
+_idle = _Spool()
+check("a spool that was never started refuses the entry",
+      _idle.offer({"source": "middleware"}) is False)
+
+
+class _Collect(_Spool):
+    """A spool whose flush records the batches instead of writing them."""
+
+    def __init__(self):
+        super().__init__()
+        self.batches = []
+
+    async def _flush(self, rows):
+        self.batches.append(list(rows))
+
+
+async def _drains():
+    sp = _Collect()
+    sp.start()
+    for i in range(50):
+        sp.offer({"source": "middleware", "action": "request", "ms": i})
+    await sp.stop()
+    return sp
+
+
+_sp = _spooled(_drains)
+_written = [r for b in _sp.batches for r in b]
+check("every offered entry is written", len(_written) == 50, len(_written))
+check("and they keep their order",
+      [r["ms"] for r in _written] == list(range(50)))
+check("a backlog is written in batches, not one statement per row",
+      max((len(b) for b in _sp.batches), default=0) > 1,
+      [len(b) for b in _sp.batches])
+
+
+async def _overflows():
+    """A queue that fills must cost latency, never entries."""
+    sp = _Collect()
+    sp.start()
+    # Nothing has run the drain task yet -- no await since start -- so
+    # the queue fills exactly as it would behind a writer that stalled.
+    refused = 0
+    for i in range(SPOOL_MAX + 100):
+        if not sp.offer({"source": "middleware", "ms": i}):
+            refused += 1
+    await sp.stop()
+    return sp, refused
+
+
+_sp2, _refused = _spooled(_overflows)
+_kept = sum(len(b) for b in _sp2.batches)
+check("past the high-water mark the spool refuses rather than drops",
+      _refused == 100, _refused)
+check("...and what it accepted it still wrote",
+      _kept == SPOOL_MAX, f"{_kept} of {SPOOL_MAX}")
+check("...and it says so, so a writer falling behind is visible",
+      _sp2.overflowed == 100, _sp2.overflowed)
+check("nothing is unaccounted for",
+      _kept + _refused == SPOOL_MAX + 100, _kept + _refused)
+
+
+class _Slow(_Collect):
+    """A writer caught mid-flush, which is where a cancel loses rows."""
+
+    async def _flush(self, rows):
+        await _aio.sleep(0.05)
+        await super()._flush(rows)
+
+
+async def _stops_mid_flush():
+    sp = _Slow()
+    sp.start()
+    for i in range(10):
+        sp.offer({"source": "middleware", "action": "request", "ms": i})
+    # Let the writer take the batch off the queue and get INTO the
+    # flush, so the queue is empty and the only copy of those ten rows
+    # is the list the writer is holding.
+    await _aio.sleep(0.01)
+    for i in range(10, 20):
+        sp.offer({"source": "middleware", "action": "request", "ms": i})
+    await sp.stop()
+    return sp
+
+
+_sp3 = _spooled(_stops_mid_flush)
+_all3 = sorted(r["ms"] for b in _sp3.batches for r in b)
+check("a shutdown during a write does not lose the batch being written",
+      _all3 == list(range(20)), f"{len(_all3)} of 20: {_all3}")
+
+# `offer` has to close the door before the drain finishes, or an entry
+# accepted during the shutdown sits on a queue nobody will read again.
+async def _refuses_after_stop():
+    sp = _Collect()
+    sp.start()
+    await sp.stop()
+    return sp.offer({"source": "middleware", "ms": 1})
+
+
+check("a stopped spool refuses, so the caller writes it instead",
+      _spooled(_refuses_after_stop) is False)
+
+
+# `_row` is shared by both paths now. The historical bug was `source`
+# being the one field `record` did not clip, which surfaced inside the
+# CALLER's commit -- so the clip is the thing to pin down, on the one
+# function both paths go through.
+_long = _row("x" * 99, "a" * 999)
+check("_row clips source to its column", len(_long["source"]) == 16,
+      len(_long["source"]))
+check("_row clips action to its column", len(_long["action"]) == 64,
+      len(_long["action"]))
+
+
+if DB and _pathlib.Path(DB).exists():
+    os.environ["ODDJOB_DB"] = DB
+
+    # A batch is all-or-nothing, so one row the database refuses would
+    # take every good entry beside it down with it. `_flush` retries
+    # singly for exactly that case; this plants the bad row.
+    async def _poisoned():
+        sp = _Spool()
+        now = datetime.now(UTC)
+        good = [_row("backend", "spool.good", detail=f"n{i}") for i in range(4)]
+        for g in good:
+            g["at"] = now
+        bad = _row("backend", "spool.bad")
+        bad["source"] = None                 # NOT NULL; the batch fails
+        bad["at"] = now
+        await sp._flush([good[0], good[1], bad, good[2], good[3]])
+
+    _aio.run(_poisoned())
+    con = sqlite3.connect(DB)
+    _good = con.execute("SELECT COUNT(*) FROM audit_events "
+                        "WHERE action='spool.good'").fetchone()[0]
+    _bad = con.execute("SELECT COUNT(*) FROM audit_events "
+                       "WHERE action='spool.bad'").fetchone()[0]
+    con.close()
+    check("one row the database refuses does not take the batch with it",
+          _good == 4, f"{_good} of 4 survived")
+    check("...and the row that was refused is simply absent", _bad == 0, _bad)
+
+    # End to end: the middleware's line still reaches the table, by
+    # whichever path it took. The unit tests above prove the spool's
+    # bookkeeping; this proves it is wired to a real database.
+    _probe = "/api/zz-spool-probe"
+    call(_probe)
+    _seen = 0
+    for _ in range(50):                      # up to 5s; it is asynchronous now
+        con = sqlite3.connect(DB)
+        _seen = con.execute("SELECT COUNT(*) FROM audit_events "
+                            "WHERE path=?", (_probe,)).fetchone()[0]
+        con.close()
+        if _seen:
+            break
+        _time.sleep(0.1)
+    check("a request still lands in the trail once the spool has run",
+          _seen >= 1, f"{_seen} entries for {_probe}")
+
+    # The entry says when the REQUEST happened. Stamped at flush time a
+    # burst would compress into one instant and reorder against
+    # everything `record` wrote synchronously beside it.
+    con = sqlite3.connect(DB)
+    _at = con.execute("SELECT at FROM audit_events WHERE path=? LIMIT 1",
+                      (_probe,)).fetchone()
+    con.close()
+    check("...stamped with the time of the request, not of the write",
+          _at is not None and abs(
+              (datetime.now(UTC)
+               - datetime.fromisoformat(_at[0]).replace(tzinfo=UTC)
+               ).total_seconds()) < 60, _at)
+
+# ---------------------------------------------------------------------
+# The mailer's cleanup must not eat the real error.
+#
+# `quit()` on a connection the server already dropped raises
+# SMTPServerDisconnected("please run connect() first"). In a `finally`
+# that REPLACES the genuine failure, so an operator whose password was
+# rejected is told about the socket close instead -- which describes
+# nothing they can act on, and is not even true of the send.
+# ---------------------------------------------------------------------
+import smtplib as _smtplib  # noqa: E402
+
+from app import mailer as _mailer  # noqa: E402
+
+
+class _DeadSMTP:
+    """A server that drops the connection, as a real one does on error."""
+
+    def __init__(self, *a, **k): pass
+    def starttls(self, *a, **k): pass
+    def login(self, *a, **k):
+        raise _smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted")
+    def send_message(self, *a, **k): pass
+    def quit(self):
+        raise _smtplib.SMTPServerDisconnected("please run connect() first")
+
+
+_real_smtp = _mailer.smtplib.SMTP
+_mailer.smtplib.SMTP = _DeadSMTP
+try:
+    _cfg = {"smtp.host": "smtp.invalid", "smtp.port": 587,
+            "smtp.security": "starttls", "smtp.username": "u",
+            "smtp.password": "p", "smtp.from_address": "a@acme.example"}
+    try:
+        _mailer._send_sync(_cfg, "b@acme.example", "s", "body")
+        _raised = None
+    except Exception as e:                       # noqa: BLE001
+        _raised = e
+finally:
+    _mailer.smtplib.SMTP = _real_smtp
+
+check("a failed login surfaces as the auth error, not the socket close",
+      isinstance(_raised, _smtplib.SMTPAuthenticationError), type(_raised).__name__)
+check("...and the message still names the real reason",
+      "not accepted" in str(_raised), str(_raised)[:90])
+
 
 print(f"\n{'='*56}\n  {ok} passed, {fail} failed\n{'='*56}")

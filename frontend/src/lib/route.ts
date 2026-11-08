@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 /**
  * The URL is the app's state, not a side effect of it.
@@ -49,6 +49,38 @@ export interface Route {
    *  the two can disagree -- `modal=true` with nothing to show is a
    *  state that cannot render. */
   finding?: number
+  /** Which tab a view is showing.
+   *
+   *  A query parameter, not a path segment: the path names an asset and
+   *  a tab is not one — it is a reading of the same data. Every view
+   *  that has tabs validates its own set (see `useTab` in this file),
+   *  so a URL naming a tab that no longer exists lands on the default
+   *  rather than on an empty pane. */
+  tab?: string
+  /** A table row expanded for detail. The value is the row's identity,
+   *  which differs by table: a hostname in the vulns rollups, a numeric
+   *  id in C2. The view that rendered the row knows what it means; this
+   *  only carries it. */
+  expand?: string
+  /** A web exchange opened for reading, by its id. The same shape as
+   *  `finding` — presence is the whole signal — and the same reason: an
+   *  exchange is something open ON TOP of the web view, not an asset the
+   *  path names. */
+  packet?: number
+  /** A web exchange handed to the editor, by its id. Kept separate from
+   *  `packet` rather than shared with it: the two dialogs are never up
+   *  at once (opening one closes the other), and a single key would make
+   *  "which is open" a question the URL could not answer. */
+  replay?: number
+  /** The standing-orders dialog is open. A bare flag rather than an id
+   *  because the dialog has no object to name — it IS the thing that is
+   *  open, and presence is the whole signal. */
+  orders?: boolean
+  /** Which section a settings screen has selected. The value is the
+   *  section's key; the screen validates it against its own list, so a
+   *  stale or hand-typed value lands on the first section rather than
+   *  an empty pane. */
+  section?: string
 }
 
 /**
@@ -122,12 +154,33 @@ function clean(s: string): string {
  */
 export function parse(pathname: string, search?: string): Route {
   const r = parsePath(pathname)
-  const n = Number(new URLSearchParams(search ?? currentSearch()).get('finding'))
+  const q = new URLSearchParams(search ?? currentSearch())
+  const n = Number(q.get('finding'))
   // `Number('')` is 0 and `Number(null)` is 0, so the guard is on the
   // value being a positive integer rather than on the string being
   // present -- `?finding=` and `?finding=nonsense` both mean nothing
   // is open, which is what a hand-edited URL most often means.
   if (Number.isInteger(n) && n > 0) r.finding = n
+  // `tab` and `expand` are validated by the view that owns them -- a
+  // tab named here that no view renders is a default, not an error --
+  // so parse only rejects the empty string, which means nothing.
+  const tab = q.get('tab')
+  if (tab) r.tab = tab
+  const expand = q.get('expand')
+  if (expand) r.expand = expand
+  // The exchange ids are numbers, so they get the same guard as `finding`
+  // rather than a bare presence check: `?packet=` and `?packet=nonsense`
+  // both mean nothing is open.
+  const packet = Number(q.get('packet'))
+  if (Number.isInteger(packet) && packet > 0) r.packet = packet
+  const replay = Number(q.get('replay'))
+  if (Number.isInteger(replay) && replay > 0) r.replay = replay
+  // `orders` is a bare flag: presence means open, absence means closed.
+  // Any value counts — a hand-edited `?orders=whatever` still opens it,
+  // which is the least surprising behaviour for a yes/no dialog.
+  if (q.get('orders') != null) r.orders = true
+  const section = q.get('section')
+  if (section) r.section = section
   return r
 }
 
@@ -207,6 +260,18 @@ function query(r: Route): string {
   // one -- and dropping it here would break them silently.
   if (r.finding) q.set('finding', String(r.finding))
   else q.delete('finding')
+  if (r.tab) q.set('tab', r.tab)
+  else q.delete('tab')
+  if (r.expand) q.set('expand', r.expand)
+  else q.delete('expand')
+  if (r.packet) q.set('packet', String(r.packet))
+  else q.delete('packet')
+  if (r.replay) q.set('replay', String(r.replay))
+  else q.delete('replay')
+  if (r.orders) q.set('orders', '1')
+  else q.delete('orders')
+  if (r.section) q.set('section', r.section)
+  else q.delete('section')
   const out = q.toString()
   return out ? `?${out}` : ''
 }
@@ -358,8 +423,8 @@ export function rememberProject(code: string | null): void {
  *  Forward, `onNavigate` for anything that pushed in code.
  */
 export function useRouteFinding(): number | null {
-  const read = () =>
-    parse(window.location.pathname, window.location.search).finding ?? null
+  const read = useCallback(() =>
+    parse(window.location.pathname, window.location.search).finding ?? null, [])
   const [id, setId] = useState<number | null>(read)
   useEffect(() => {
     const sync = () => setId(read())
@@ -370,6 +435,117 @@ export function useRouteFinding(): number | null {
     // until the next one.
     sync()
     return () => { window.removeEventListener('popstate', sync); off() }
-  }, [])
+  }, [read])
   return id
+}
+
+/** The tab or expansion named by the address bar, or null.
+ *
+ *  One reader for every value that lives in `?tab` and `?expand`,
+ *  because a value with two readers has to be kept in step with both
+ *  -- which is how state stops meaning anything. Views call this once
+ *  and wire the result into their own controls, so opening something
+ *  by hand-editing the URL opens it exactly as clicking would. */
+export function useRouteParam(
+  key: 'tab' | 'expand' | 'packet' | 'replay' | 'section',
+): string | null {
+  const read = useCallback(() => {
+    const v = parse(window.location.pathname, window.location.search)[key]
+    // `packet` and `replay` are numbers on the Route; stringify them so
+    // every key this hook returns is a string, which is what the views
+    // compare and pass on.
+    return v == null ? null : String(v)
+  }, [key])
+  const [value, setValue] = useState<string | null>(read)
+  useEffect(() => {
+    const sync = () => setValue(read())
+    window.addEventListener('popstate', sync)
+    const off = onNavigate(sync)
+    // Read once on mount too: a component can mount after the
+    // navigation that set this, and would otherwise show nothing
+    // until the next one.
+    sync()
+    return () => { window.removeEventListener('popstate', sync); off() }
+  }, [read])
+  return value
+}
+
+/** A yes/no dialog whose open state lives in the URL.
+ *
+ *  `?orders=` — presence is the whole signal, so a pasted link opens
+ *  the dialog and closing it drops the key. The same shape as
+ *  `?finding=` and `?packet=`, but without an id: the dialog has no
+ *  object to name, it IS the thing that is open.
+ *
+ *  Opening is a `push` so Back closes the dialog; closing is a
+ *  `replace` so Back does not walk through every click on a dialog. */
+export function useOrdersDialog(): [boolean, (v: boolean) => void] {
+  const read = useCallback(() =>
+    parse(window.location.pathname, window.location.search).orders ?? false, [])
+  const [open, setOpen] = useState<boolean>(read)
+  useEffect(() => {
+    const sync = () => setOpen(read())
+    window.addEventListener('popstate', sync)
+    const off = onNavigate(sync)
+    sync()
+    return () => { window.removeEventListener('popstate', sync); off() }
+  }, [read])
+  const set = useCallback((v: boolean) => {
+    const r = parse(window.location.pathname, window.location.search)
+    if (v) r.orders = true
+    else delete r.orders
+    v ? push(r) : replace(r)
+  }, [])
+  return [open, set]
+}
+
+/** A tab whose selection lives in the URL.
+ *
+ *  The tab is a reading of the same data, not an asset, so it is a
+ *  query parameter rather than a path segment -- and it is VALIDATED
+ *  here against the set the view rendered, because a stored or pasted
+ *  value can name a tab that no longer exists. The worst a stale or
+ *  hand-typed URL can do is land on `fallback`, never an empty pane.
+ *
+ *  Switching is a `replace`, not a `push`: Back walks the pages you
+ *  were on, not the tabs you clicked within one. */
+export function useTab<T extends string>(
+  allowed: readonly T[], fallback: T, routeTab: string | null,
+): [T, (t: T) => void] {
+  const tab = allowed.includes(routeTab as T) ? (routeTab as T) : fallback
+  const setTab = useCallback((t: T) => {
+    replace({ ...parse(window.location.pathname), tab: t })
+  }, [])
+  return [tab, setTab]
+}
+
+/** An expansion whose open row lives in the URL.
+ *
+ *  Same shape as a finding -- presence is the whole signal -- but the
+ *  value is the row's identity rather than a number, which differs by
+ *  table: a hostname in the vulns rollups, a numeric id in C2. The
+ *  view that rendered the row is the only one that knows what it means,
+ *  so this hook does not try to validate it; it hands the string back
+ *  and lets the view decide whether it names a row that exists. */
+export function useExpand(
+  routeExpand: string | null,
+): [string | null, (id: string | null) => void] {
+  const setExpand = useCallback((id: string | null) => {
+    replace({ ...parse(window.location.pathname), expand: id ?? undefined })
+  }, [])
+  return [routeExpand, setExpand]
+}
+
+/** The same as `useExpand`, but for a table whose rows can be open at
+ *  once — the web view's URL groups. The bar carries them comma-joined;
+ *  an order nobody keeps is worse than none, so they are sorted on the
+ *  way in. */
+export function useExpandMany(
+  routeExpand: string | null,
+): [Set<string>, (ids: Set<string>) => void] {
+  const setExpand = useCallback((ids: Set<string>) => {
+    const v = [...ids].sort().join(',')
+    replace({ ...parse(window.location.pathname), expand: v || undefined })
+  }, [])
+  return [new Set(routeExpand ? routeExpand.split(',') : []), setExpand]
 }

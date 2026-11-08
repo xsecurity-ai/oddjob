@@ -152,6 +152,27 @@ async def lifespan(app: FastAPI):
                             s, "backend", "audit.prune",
                             detail=f"removed {n} entries older than "
                                    f"{days} days", commit=True)
+
+                    # The same sweep, because it is the same kind of
+                    # thing and a second daily task to schedule is a
+                    # second one to forget. This one is much the
+                    # larger: 13 GB of scanner stdout against 262 MB
+                    # of audit rows.
+                    from .tasking import (
+                        DEFAULT_OUTPUT_RETAIN_DAYS,
+                        prune_task_output,
+                    )
+                    rows, freed = await prune_task_output(s)
+                    if rows:
+                        print(f"tasks: dropped raw output from {rows} "
+                              f"finished task(s), {freed // 1048576} MB")
+                        await _audit.record(
+                            s, "backend", "task.output.prune",
+                            detail=f"dropped the raw output of {rows} "
+                                   f"task(s) finished more than "
+                                   f"{DEFAULT_OUTPUT_RETAIN_DAYS} days "
+                                   f"ago, freeing {freed // 1048576} MB",
+                            commit=True)
             except asyncio.CancelledError:
                 raise
             except Exception as e:               # noqa: BLE001
@@ -161,6 +182,13 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(24 * 60 * 60)
 
     audit_task = asyncio.create_task(_audit_retention())
+
+    # The per-request audit line, off the request's critical path. It
+    # has to start before anything is served, and it is the LAST thing
+    # stopped below, so a shutdown still records what it was doing
+    # while it shut down. See app/audit.py for what is and is not
+    # batched, and why.
+    _audit.spool.start()
 
     # Exploit and CVE data, kept current so "is anything known about
     # this version" can be answered without asking anybody. Off unless
@@ -298,6 +326,10 @@ async def lifespan(app: FastAPI):
     await worker.stop()
     await slack_worker.stop()
     await slack_digest.stop()
+    # Last: everything above can still be audited on its way out, and a
+    # queue thrown away at shutdown is a gap in the trail that nothing
+    # explains.
+    await _audit.spool.stop()
 
 
 app = FastAPI(

@@ -22,15 +22,14 @@
  * The cost is that every section renders. That is exactly what
  * happens today, so it is not a new cost.
  *
- * The choice is remembered per screen, because coming back to a
- * settings page usually means coming back to the same setting.
- * localStorage rather than the URL: it is a preference about how you
- * are reading the page, not a place — and `lib/route.ts` deliberately
- * keeps the route table to things worth pasting to someone.
+ * The choice is in the URL as `?section=`, because a settings page with
+ * six groups is not findable without a way to name where you are. A
+ * pasted link lands on the section it names; switching is a `replace`
+ * so Back does not walk through every dropdown click.
  */
-import { useState } from 'react'
 import { Box, MenuItem, Stack, TextField, Typography, alpha } from '@mui/material'
 import { neon } from '../theme'
+import { parse, replace, useRouteParam } from '../lib/route'
 
 export interface ConfigSection {
   /** Stable across renames: this is what gets remembered. */
@@ -41,33 +40,19 @@ export interface ConfigSection {
   node: React.ReactNode
 }
 
-function remembered(id: string, fallback: string): string {
-  try {
-    return window.localStorage.getItem(`oddjob.config-section.${id}`) || fallback
-  } catch {
-    // Private windows throw. A forgotten tab is a smaller problem
-    // than a settings page that will not render.
-    return fallback
-  }
-}
-
-export function ConfigSections({ id, sections }: {
-  /** Distinguishes one screen's memory from another's. */
-  id: string
+export function ConfigSections({ sections }: {
   sections: ConfigSection[]
 }) {
   const first = sections[0]?.key ?? ''
-  const [picked, setPicked] = useState(() => remembered(id, first))
-  // A remembered section that no longer exists — renamed, or hidden
-  // because the user lost a permission — must not render a blank
-  // page. Falling back is the whole handling.
-  const current = sections.some((s) => s.key === picked) ? picked : first
+  // In the url as `?section=`, so a pasted link lands on the section it
+  // names. A value that no section renders — renamed, or hidden because
+  // the user lost a permission — falls back to the first rather than
+  // rendering a blank page.
+  const routeSection = useRouteParam('section')
+  const current = sections.some((s) => s.key === routeSection) ? routeSection! : first
 
   const choose = (k: string) => {
-    setPicked(k)
-    try {
-      window.localStorage.setItem(`oddjob.config-section.${id}`, k)
-    } catch { /* best effort */ }
+    replace({ ...parse(window.location.pathname, window.location.search), section: k })
   }
 
   return (

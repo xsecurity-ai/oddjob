@@ -164,3 +164,44 @@ async def enumerable_roots(session: AsyncSession, project_id: int) -> set[str]:
     # anything to be learnt by walking this zone", and for a provider
     # it is no even when the project is authorised to work inside it.
     return {r for r in out if not clouds.is_cloud_domain(r)}
+
+
+async def walked_zones(session: AsyncSession, project_id: int) -> set[str]:
+    """Every zone the Kitchen Sink enumerate would hand to amass.
+
+    The manual `/enumerate` with `kitchen_sink=true` walks every known
+    hostname back to its registrable domain via `walk_to_registrable`,
+    producing the host AND every parent down to the apex. This function
+    does the same walk so the `auto_amass` standing order sees exactly
+    the zone set an operator would see in the dialog -- not just the
+    registrable domain (which misses intermediate zones a wildcard scope
+    may authorise) and not only target hosts (which misses certificate
+    SANs and web-address hosts).
+
+    Without this, a project scoped `*.api.openai.com` could enumerate
+    `api.openai.com` by hand but the standing order would only see
+    `openai.com` (the registrable domain), refuse it as a parent above
+    the wildcard, and queue nothing -- for ever. The operator with the
+    toggle on goes through the dialog one zone at a time, which is the
+    exact complaint this exists to end.
+
+    Cloud-provider zones are dropped from the walk's output, matching
+    both `enumerable_roots` and the manual kitchen-sink path: a name
+    whose entire walk lands under a provider's domain contributes
+    nothing.
+    """
+    hosts = await known_hosts(session, project_id)
+    out: set[str] = set()
+    for h in hosts:
+        if gen.is_ip(h):
+            continue
+        for name in gen.walk_to_registrable(h):
+            if not clouds.is_cloud_domain(name):
+                out.add(name)
+    # Scope roots are candidates in their own right even when no host
+    # under them has been observed yet: a fresh project scoped to
+    # `*.new.acme.example` has no targets and the walk is empty, but
+    # the zone is still worth enumerating.
+    out |= {z for z in await scope_roots(session, project_id)
+            if not clouds.is_cloud_domain(z)}
+    return out

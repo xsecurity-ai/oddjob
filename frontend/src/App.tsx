@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react'
 import {
   AppBar, Box, Button, Chip, CircularProgress, Divider, Drawer, IconButton,
   List, ListItemButton, ListItemIcon, ListItemText, MenuItem, Select, Stack,
@@ -32,25 +32,26 @@ import { useAnyUnseen } from './lib/c2unseen'
 import { useStoredFlag } from './lib/useStoredFlag'
 import { lastProject, onNavigate, parse, push, rememberProject, replace,
          type Route, type View } from './lib/route'
-import { C2View } from './views/C2View'
+const C2View = lazy(() => import('./views/C2View').then((m) => ({ default: m.C2View })))
 import { GateView } from './views/GateView'
-import { ProjectsView } from './views/ProjectsView'
-import { TargetsView } from './views/TargetsView'
-import { ServicesView } from './views/ServiceViews'
-import { VulnsView } from './views/VulnsView'
-import { CredentialsView } from './views/CredentialsView'
-import { ProfileView } from './views/ProfileView'
-import { SiteConfigView } from './views/SiteConfigView'
-import { HealthView } from './views/HealthView'
-import { WebView } from './views/WebView'
-import { ImportView } from './views/ImportView'
-import { ReportsView } from './views/ReportsView'
-import { GhostsView } from './views/GhostsView'
-import { ProjectConfigView } from './views/ProjectConfigView'
+const ProjectsView = lazy(() => import('./views/ProjectsView').then((m) => ({ default: m.ProjectsView })))
+const TargetsView = lazy(() => import('./views/TargetsView').then((m) => ({ default: m.TargetsView })))
+const ServicesView = lazy(() => import('./views/ServiceViews').then((m) => ({ default: m.ServicesView })))
+const VulnsView = lazy(() => import('./views/VulnsView').then((m) => ({ default: m.VulnsView })))
+const CredentialsView = lazy(() => import('./views/CredentialsView').then((m) => ({ default: m.CredentialsView })))
+const ProfileView = lazy(() => import('./views/ProfileView').then((m) => ({ default: m.ProfileView })))
+const SiteConfigView = lazy(() => import('./views/SiteConfigView').then((m) => ({ default: m.SiteConfigView })))
+const HealthView = lazy(() => import('./views/HealthView').then((m) => ({ default: m.HealthView })))
+const WebView = lazy(() => import('./views/WebView').then((m) => ({ default: m.WebView })))
+const ImportView = lazy(() => import('./views/ImportView').then((m) => ({ default: m.ImportView })))
+const ReportsView = lazy(() => import('./views/ReportsView').then((m) => ({ default: m.ReportsView })))
+const GhostsView = lazy(() => import('./views/GhostsView').then((m) => ({ default: m.GhostsView })))
+const ProjectConfigView = lazy(() => import('./views/ProjectConfigView').then((m) => ({ default: m.ProjectConfigView })))
 import { StandingOrdersButton } from './components/StandingOrders'
 import { useHostModal } from './components/HostModal'
+import { ViewBoundary } from './components/ViewBoundary'
 import { AgentPanel, AgentView } from './components/AgentPanel'
-import { UsersView } from './views/UsersView'
+const UsersView = lazy(() => import('./views/UsersView').then((m) => ({ default: m.UsersView })))
 import { neon, glow, blink } from './theme'
 import { sorted } from './lib/sortOptions'
 
@@ -106,7 +107,10 @@ export default function App() {
   // Initialised FROM the URL, so a theme switch — which remounts the
   // tree to recompute alpha() colours — lands back where you were
   // instead of resetting to Targets.
-  const [route, setRoute] = useState<Route>(() => parse(window.location.pathname))
+  // The search half too: `?tab=` and `?expand=` ride on the same bar
+  // as the path, and dropping them here would mean a reload lands on
+  // the default tab of the page it named.
+  const [route, setRoute] = useState<Route>(() => parse(window.location.pathname, window.location.search))
   const view = route.view
   const setView = useCallback((v: View) => {
     setRoute((r) => {
@@ -156,7 +160,7 @@ export default function App() {
     // how a modal opening reaches the route this component renders
     // from -- without it the bar said one thing and the app believed
     // another, and Back had nothing to undo.
-    const onPop = () => setRoute(parse(window.location.pathname))
+    const onPop = () => setRoute(parse(window.location.pathname, window.location.search))
     window.addEventListener('popstate', onPop)
     const off = onNavigate(onPop)
     return () => { window.removeEventListener('popstate', onPop); off() }
@@ -400,7 +404,29 @@ export default function App() {
     users: <UsersView />,
     profile: <ProfileView />,
   }
-  const body = views[view]
+  // Each view is its own chunk, fetched when it is first opened.
+  //
+  // Everything used to arrive in one 1,581 KB file before the sign-in
+  // page could render — sixteen views, the terminal emulator, and
+  // every dialog, for a user who was about to look at one of them.
+  //
+  // `GateView` is deliberately NOT lazy: it is the sign-in page, the
+  // first thing anyone sees, and putting a chunk fetch in front of it
+  // adds a round trip at the one moment nothing is cached.
+  const body = (
+    // The boundary is OUTSIDE Suspense and keyed on the view: a chunk
+    // that fails leaves the error latched, and without the key the
+    // next view the operator picks would show the previous one's
+    // failure instead of trying.
+    <ViewBoundary key={view}>
+    <Suspense fallback={
+      <Box sx={{ flex: 1, display: 'flex', alignItems: 'center',
+                 justifyContent: 'center', p: 4 }}>
+        <CircularProgress size={22} sx={{ color: neon.cyan }} />
+      </Box>
+    }>{views[view]}</Suspense>
+    </ViewBoundary>
+  )
 
   // The drawer is already an overlay on small screens, so collapsing there
   // would just make it a narrower overlay. Only the docked rail collapses.

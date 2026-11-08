@@ -116,8 +116,9 @@ export interface Target {
   id: number; host: string; project_id: number; project_code: string
   /** host: a machine at an address. mobile: an application named by
    *  its bundle/package id, with no IP and no meaningful liveness.
-   *  cloud: a managed resource, named as its provider names it. */
-  kind: 'host' | 'mobile' | 'cloud'
+   *  cloud: a managed resource, named as its provider names it.
+   *  repo: a source code repository, named by its clone URL or org/slug. */
+  kind: 'host' | 'mobile' | 'cloud' | 'repo'
   /** Which cloud, for kind=cloud. */
   provider: string | null
   /** The first address observed, or null. A host legitimately has
@@ -166,6 +167,8 @@ export interface Target {
   geo_pending: number
   total_vulns: number; total_criticals: number; total_highs: number
   total_pocs: number; total_ports: number
+  /** Number of web addresses recorded for this target. */
+  web_count: number
   created_at: string; updated_at: string
 }
 
@@ -214,6 +217,8 @@ export interface Vuln {
    *  a scanner has not decided anything. */
   triage: string
   port: number | null; protocol: string | null
+  /** Source location for code findings (SAST/SCA). null for network. */
+  file_path: string | null; line_number: number | null
   description: string | null; remediation: string | null
   external_id: string | null
   created_at: string; updated_at: string
@@ -488,6 +493,14 @@ export interface SecretRow {
   severity: string
   triage: string
   title: string
+  /** The same three states the findings table shows. A credential is
+   *  a finding, so "has this been proved" is the same question here. */
+  poc_state: string
+  poc_detail: string | null
+  poc_id: number | null
+  /** Asked for, not yet written. Distinct from "no proof": one is
+   *  nobody asked, the other is a queue. */
+  poc_requested: boolean
 }
 
 /** A finding in full, with every host it was found on. */
@@ -496,12 +509,33 @@ export interface VulnsByTargetRow {
   project_code: string
   total: number
   critical: number; high: number; medium: number; low: number; info: number
+  /** Findings here that have a proof, and findings somebody asked to
+   *  have proved that the worker has not reached yet. */
+  proofs: number
+  requested: number
 }
 
 /** A rollup, and whether it is all of it. A bare list cannot say
  *  "there was more", and on FALCON the by-title rollup is 5,013 rows
  *  — a limit that cut it silently would look complete. */
-export interface Rollup<T> { items: T[]; truncated: boolean }
+export interface Rollup<T> {
+  items: T[]
+  truncated: boolean
+  /** How many rows the rollup has in total, so a paged view can say
+   *  "100 of 10,860". Null when the caller took the whole thing. */
+  total: number | null
+}
+
+/** A page of a rollup. Same shape as the findings query, minus the
+ *  column filters — a rollup is a GROUP BY and its columns are
+ *  aggregates, so there is nothing to filter on but the search. */
+export interface RollupQuery {
+  q?: string
+  sort?: string
+  order?: 'asc' | 'desc'
+  limit?: number
+  offset?: number
+}
 
 /** One finding AT one severity.
  *
@@ -515,6 +549,8 @@ export interface VulnsByTitleRow {
   severity: string
   hosts: number
   total: number
+  proofs: number
+  requested: number
 }
 
 export interface VulnDetail extends Vuln {
@@ -921,6 +957,12 @@ export interface GhostAgent {
    *  until it has reported. */
   capacity: number | null
   capacity_reason: string | null
+  /** Live pressure fractions in [0,1]. -1 means unmeasurable. */
+  cpu_idle: number | null
+  mem_free: number | null
+  disk_free: number | null
+  /** Recent readings for charts: newest last, max 60 entries. */
+  pressure_history: Array<{ t: string; cpu: number; mem: number; disk: number }>
   /** The effective limit: the operator's per-ghost override if set,
    *  otherwise the agent's own assessment, with the project ceiling
    *  on top of either. What the dispatcher honours. */
@@ -1425,7 +1467,47 @@ export const api = {
     req<ScopeEntry[]>(`/api/projects/${encodeURIComponent(project)}/scope`),
   projectContacts: (project: string) =>
     req<Contact[]>(`/api/projects/${encodeURIComponent(project)}/contacts`),
+  /** EVERY target in the project, in one response.
+   *
+   *  10,340 rows and 8.3 MB on a real engagement. Nothing in the UI
+   *  needs this: the grid pages, and the two callers that wanted a
+   *  whole-estate list only ever read `host`, which `targetHosts`
+   *  gives them for a thirtieth of the bytes.
+   *
+   *  Left here because the API is a public surface and a script may
+   *  well want whole rows — but reach for `targetPage` or
+   *  `targetHosts` from the UI. */
   targets: (project?: string) => req<Page<Target>>('/api/targets' + qs({ project, limit: 100000 })),
+  /** Every host NAME in the project, sorted.
+   *
+   *  For the two autocompletes that need the whole estate: re-pointing
+   *  a C2 session, and mapping an unknown host on import. Both read
+   *  `host` and nothing else. */
+  targetHosts: (project: string) =>
+    req<{ hosts: string[] }>('/api/targets/hosts' + qs({ project })),
+  /** One page of targets, ordered and filtered in the database. */
+  targetPage: (o: {
+    project?: string; q?: string; sort?: string; order?: 'asc' | 'desc'
+    /** true for cloud-named rows, false to exclude them, omitted for
+     *  both. The two tabs on the Targets page. */
+    cloud?: boolean
+    limit?: number; offset?: number
+  } = {}) => req<Page<Target>>('/api/targets' + qs({ limit: 100, ...o })),
+  /** How many targets have an address and no name, and vice versa.
+   *
+   *  Two integers the Enumerate menu is built on. The browser used to
+   *  work them out from every row in the project. */
+  targetGaps: (project: string) =>
+    req<{ needs_name: number; needs_address: number }>(
+      '/api/targets/gaps' + qs({ project })),
+  /** The gap SUBJECTS themselves, for the "all" sweeps.
+   *
+   *  Separate from the counts because the counts are read on every
+   *  visit to the page and this is read when somebody chooses to act
+   *  — a list of several thousand names, against two integers. */
+  targetGapSubjects: (project: string, kind: 'name' | 'address') =>
+    req<{ needs_name: number; needs_address: number; subjects: string[] }>(
+      '/api/targets/gaps' + qs({ project, subjects: kind })),
 
   /** A handful of targets matching what someone has typed.
    *
@@ -1460,10 +1542,11 @@ export const api = {
    *  a project with 23,000 findings cannot be grouped in the browser,
    *  and the rows a tab shows are a few hundred either way. The
    *  findings behind a row are fetched only when it is expanded. */
-  vulnsByTarget: (project: string, q?: string) =>
-    req<Rollup<VulnsByTargetRow>>('/api/vulns/by-target' + qs({ project, q })),
-  vulnsByTitle: (project: string, q?: string) =>
-    req<Rollup<VulnsByTitleRow>>('/api/vulns/by-title' + qs({ project, q })),
+  vulnsByTarget: (project: string, o: RollupQuery = {}) =>
+    req<Rollup<VulnsByTargetRow>>('/api/vulns/by-target'
+      + qs({ project, ...o })),
+  vulnsByTitle: (project: string, o: RollupQuery = {}) =>
+    req<Rollup<VulnsByTitleRow>>('/api/vulns/by-title' + qs({ project, ...o })),
   /** The findings behind one rollup row, fetched when it is expanded.
    *  `title` is an EXACT match, not the substring `q` does: a title
    *  that merely contains this one is a different finding. */
@@ -1476,6 +1559,25 @@ export const api = {
   buildPoc: (project: string, vulnId: number) =>
     req<{ id: number; target_url: string; status: string }>(
       `/api/vulns/${vulnId}/poc` + qs({ project }), { method: 'POST' }),
+  /** Ask for proofs of a whole GROUP, named the way the row that was
+   *  clicked names it: a host, a title at a severity, or finding ids.
+   *
+   *  Returns a COUNT, not proofs. Each proof is a model call and a
+   *  queued task, so four hundred of them cannot happen inside one
+   *  request — the worker drains them ahead of its floor sweep and
+   *  they appear over the following minutes. The caller must say so;
+   *  a dialog that closed on "done" would be claiming otherwise. */
+  requestPocs: (project: string, group: {
+    host?: string; title?: string; severity?: string; vuln_ids?: number[]
+    /** `exposure` (default) — the key is still served at that URL.
+     *  `auth` — it still works, which can only be shown by presenting
+     *  it. Only meaningful for credential findings. */
+    mode?: 'exposure' | 'auth'
+  }) =>
+    req<{ requested: number; already_proved: number
+          already_requested: number; note: string }>(
+      '/api/vulns/poc/request' + qs({ project }),
+      { method: 'POST', body: JSON.stringify(group) }),
   // ------------------------------------------------------------ c2
   /** Shell sessions a Ghost caught. Active by default: the question
    *  on opening the page is almost always "what can I type at now".
@@ -1804,6 +1906,18 @@ export const api = {
     req<void>(`/api/ghosts/tasks/${id}` + qs({ project }),
               { method: 'DELETE' }),
 
+  /** Move a queued task within the queue. direction: top|bottom|up|down */
+  reorderGhostTask: (project: string, id: number, direction: string) =>
+    req<{ ok: boolean; moved: boolean }>(
+      `/api/ghosts/tasks/${id}/order?direction=${direction}` + qs({ project }),
+      { method: 'POST' }),
+
+  /** Give a queued task to the least-loaded online agent immediately. */
+  launchGhostTask: (project: string, id: number) =>
+    req<{ ok: boolean; agent: string; agent_id: number }>(
+      `/api/ghosts/tasks/${id}/launch` + qs({ project }),
+      { method: 'POST' }),
+
   agentStatus: (project: string) =>
     req<AgentStatus>('/api/agent/status' + qs({ project })),
   /** Ask in one thread. `thread` omitted means the newest open one,
@@ -2076,6 +2190,16 @@ export const api = {
   revealSecret: (vulnId: number) =>
     req<{ secret: string; detector: string | null }>(
       `/api/vulns/${vulnId}/secret`),
+
+  /** Store or replace the credential on a finding by hand. */
+  storeSecret: (vulnId: number, body: {
+    secret: string
+    detector?: string | null
+    asset_url?: string | null
+    path?: string | null
+    line?: number | null
+  }) => req<{ secret: string; detector: string | null }>(
+    `/api/vulns/${vulnId}/secret`, { method: 'POST', body: JSON.stringify(body) }),
 
   /** Every stored credential, in clear, with where it came from.
    *

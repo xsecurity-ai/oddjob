@@ -504,6 +504,7 @@ async def _vuln(session: AsyncSession, target: Target, pv: ParsedVuln,
                          port=pv.port, protocol=pv.protocol,
                          description=pv.description, remediation=pv.remediation,
                          external_id=pv.external_id,
+                         file_path=pv.file_path, line_number=pv.line_number,
                          scanner=scanner, first_seen_at=seen_at,
                          last_seen_at=seen_at,
                          found_by_manifest=run_manifest))
@@ -548,6 +549,10 @@ async def _vuln(session: AsyncSession, target: Target, pv: ParsedVuln,
     if pv.remediation and row.remediation != pv.remediation:
         changed.append("remediation updated")
         row.remediation = pv.remediation
+    if pv.file_path and row.file_path != pv.file_path:
+        changed.append(f"location: {pv.file_path}:{pv.line_number or '?'}")
+        row.file_path = pv.file_path
+        row.line_number = pv.line_number
     if changed:
         res.vulns_updated += 1
         await record(session, target.id, "vuln", f"{pv.title}: {'; '.join(changed)}"[:400],
@@ -1281,9 +1286,10 @@ async def _write_chunk(session: AsyncSession, project: Project, scan,
 
 async def _run(session: AsyncSession, project: Project, text: str, fmt: str,
                source: str, mode: str = "strict",
-               decisions: dict | None = None) -> ImportResult:
+               decisions: dict | None = None,
+               target_host: str | None = None) -> ImportResult:
     try:
-        detected, scan = importers.parse(text, fmt)
+        detected, scan = importers.parse(text, fmt, target_host=target_host)
     except ImportError_ as e:
         raise HTTPException(422, str(e)) from e
 

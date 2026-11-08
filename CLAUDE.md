@@ -12,6 +12,7 @@ cd backend  && uv run python runtests.py              # all suites
 cd backend  && uv run python runtests.py webtest      # one, by name
 cd frontend && npx tsc --noEmit && node test/hooks.check.mjs \
                                 && node test/table.scroll.check.mjs
+cd frontend && npm run build && node test/bundle.check.mjs   # needs dist/
 ```
 
 Backend suites live in `backend/tests/`; `runtests.py` stays at the
@@ -80,6 +81,18 @@ rows away with no scrollbar to reach them. It looks correct and is
 simply missing its tail, which is why it shipped twice. Wrap one in
 `display: 'flex', flexDirection: 'column'` and a parent with a
 definite height. `test/table.scroll.check.mjs` catches the shape.
+
+**The app is split into chunks and has to stay split.** It shipped as
+one 1,581 KB file: sixteen views, a terminal emulator and every
+dialog, downloaded before the sign-in page could render. Views are
+`lazy()` in `App.tsx`; one ordinary `import` of a view undoes it and
+nothing else notices. `test/bundle.check.mjs` reads `dist/` after a
+build and fails if a view is back in the entry chunk.
+
+A lazy chunk introduces one failure the eager build could not have:
+a tab open across a deploy asks for hashed filenames the server has
+replaced. `ViewBoundary` catches that and says to reload, which is
+the only thing that fixes it.
 
 **The MIT DataGrid throws above 100 rows a page.** Paging, sorting and
 filtering are all done outside it; the grid gets `pageSize: -1` and one
