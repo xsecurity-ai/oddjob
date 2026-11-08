@@ -2218,10 +2218,10 @@ print("\n== heavy tasks are capped below the slot count ==")
 # was handed six amass tasks.
 from app.routers.agents import heavy_allowance  # noqa: E402
 
-check("a third of the slots, rounded down", heavy_allowance(6) == 2,
+check("half the slots, rounded down", heavy_allowance(6) == 3,
       heavy_allowance(6))
 check("...scaling with the host rather than a flat number",
-      heavy_allowance(30) == 10, heavy_allowance(30))
+      heavy_allowance(30) == 15, heavy_allowance(30))
 # Never zero: an agent that may run tasks but never a heavy one would
 # leave amass work queued for ever with nothing to say why.
 check("never zero, however small the agent", heavy_allowance(1) == 1,
@@ -2251,16 +2251,16 @@ st, hb = call("/api/ghosts/heartbeat", "POST",
                "capacity": 6, "capacity_reason": "6 slots"}, key=HVKEY)
 _kinds = [t["kind"] for t in (hb or {}).get("tasks", [])]
 # Six slots and nine tasks waiting, six of them amass. Without the cap
-# it would take six amass; with it, two.
-check("no more than two of the six slots go to amass",
-      _kinds.count("amass") == 2, str(_kinds))
+# it would take six amass; with it, three (half the slots).
+check("no more than three of the six slots go to amass",
+      _kinds.count("amass") == 3, str(_kinds))
 # The other slots are not wasted on nothing — lighter work fills what
 # it can, which is all three nslookups.
 check("lighter work fills the rest",
       _kinds.count("nslookup") == 3, str(_kinds))
-check("...so it is handed five, not six: there was no more light work",
-      len(_kinds) == 5, f"{len(_kinds)}: {_kinds}")
-# The four amass it did not take are left QUEUED, not failed. This
+check("...so it is handed six: three amass and three nslookup",
+      len(_kinds) == 6, f"{len(_kinds)}: {_kinds}")
+# The three amass it did not take are left QUEUED, not failed. This
 # agent will pick them up on a later beat.
 st, hb2 = call("/api/ghosts/heartbeat", "POST",
                {"ready": True, "running_tasks": [t["id"] for t in

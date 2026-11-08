@@ -502,6 +502,17 @@ export function TargetsView({ project }: { project: string | null }) {
             </Tooltip>
           )
         }
+        if (c.state === 'internal') {
+          return (
+            <Tooltip title={`Private / link-local address${c.addresses.length > 1 ? 'es' : ''}: ${c.addresses.join(', ')}`}>
+              <Chip size="small" label="Internal" sx={{
+                height: 19, fontSize: 10, letterSpacing: '0.06em',
+                bgcolor: alpha(neon.green, 0.15), color: neon.green,
+                border: `1px solid ${alpha(neon.green, 0.5)}`,
+              }} />
+            </Tooltip>
+          )
+        }
         const extra = Math.max(0, c.all.length - 1)
         return (
           <Stack

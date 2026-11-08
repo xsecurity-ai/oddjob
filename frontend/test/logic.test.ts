@@ -677,7 +677,7 @@ check('an address nobody looked up is OUR gap',
       countryCell({ kind: 'host', ip_addresses: ['1.2.3.4'], geo_pending: 1 })
         .state === 'unasked')
 check('an address that WAS looked up and answered nothing is not that gap',
-      countryCell({ kind: 'host', ip_addresses: ['10.0.0.1'], geo_pending: 0 })
+      countryCell({ kind: 'host', ip_addresses: ['93.184.216.34'], geo_pending: 0 })
         .state === 'unknown')
 check('no addresses at all is neither',
       countryCell({ kind: 'host', ip_addresses: [] }).state === 'none')
@@ -710,6 +710,40 @@ const solo = countryCell({ kind: 'host', ip_addresses: ['1.2.3.4'],
                            geo_country: 'US' })
 check('a country with no list still lists itself',
       solo.state === 'known' && eq(solo.all, ['US']))
+
+console.log('== RFC 1918 / APIPA addresses read as Internal ==')
+// A host whose every address is private or link-local is not on the
+// public internet. MaxMind will never give it a country, so "unknown"
+// is misleading — the answer is "internal", full stop.
+check('10.x is internal',
+      countryCell({ kind: 'host', ip_addresses: ['10.1.2.3'] }).state === 'internal')
+check('172.16-31 is internal',
+      countryCell({ kind: 'host', ip_addresses: ['172.20.0.1'] }).state === 'internal')
+check('192.168.x is internal',
+      countryCell({ kind: 'host', ip_addresses: ['192.168.1.1'] }).state === 'internal')
+check('169.254.x (APIPA) is internal',
+      countryCell({ kind: 'host', ip_addresses: ['169.254.0.1'] }).state === 'internal')
+check('a mix of private addresses is still internal',
+      countryCell({ kind: 'host', ip_addresses: ['10.0.0.1', '192.168.1.1'] })
+        .state === 'internal')
+// A host with one public and one private address is NOT fully internal —
+// it has a public presence, so the country lookup still applies.
+check('one public address among privates is not internal',
+      countryCell({ kind: 'host', ip_addresses: ['10.0.0.1', '1.2.3.4'] })
+        .state !== 'internal')
+// 172.15.x and 172.32.x are just outside the 172.16/12 range.
+check('172.15.x is not internal',
+      countryCell({ kind: 'host', ip_addresses: ['172.15.0.1'] })
+        .state !== 'internal')
+check('172.32.x is not internal',
+      countryCell({ kind: 'host', ip_addresses: ['172.32.0.1'] })
+        .state !== 'internal')
+// A stale geo_country does not mask the internal answer: the IP range
+// check runs before the geo lookup result.
+const privWithGeo = countryCell({ kind: 'host', ip_addresses: ['192.168.0.1'],
+                                  geo_country: 'US' })
+check('a private address with a stale geo still reads internal',
+      privWithGeo.state === 'internal')
 
 console.log('== the Enumerate button opens for work that needs no agent ==')
 // Locating addresses reads a database on this machine. Gating the
