@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import clouds
 from . import domains as gen
-from .hosts import dns_subject
+from .hosts import dns_subject, valid_reg_name
 from .models import ProjectScope, Target, WebAddress
 
 #: Hostnames embedded in free text — certificate SANs, mostly.
@@ -195,8 +195,15 @@ async def walked_zones(session: AsyncSession, project_id: int) -> set[str]:
     for h in hosts:
         if gen.is_ip(h):
             continue
+        # RFC 3986 reg-name gate: file-path pollution like
+        # `robots.txt.checkpoints-in.files.openai.com` passes DNS label
+        # validation but is not a zone worth enumerating. Filtering here
+        # stops 50k+ bogus amass tasks from being derived from vhost
+        # sweep artefacts stored in Target.hostnames.
+        if not valid_reg_name(h):
+            continue
         for name in gen.walk_to_registrable(h):
-            if not clouds.is_cloud_domain(name):
+            if not clouds.is_cloud_domain(name) and valid_reg_name(name):
                 out.add(name)
     # Scope roots are candidates in their own right even when no host
     # under them has been observed yet: a fresh project scoped to

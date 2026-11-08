@@ -216,6 +216,44 @@ def is_valid_host(raw: str) -> bool:
         return False
 
 
+# RFC 3986 §3.2.2: reg-name = *( unreserved / pct-encoded / sub-delims )
+# where unreserved = ALPHA / DIGIT / "-" / "." / "_"
+# For DNS hostnames used as amass zones, we are stricter: only letters,
+# digits, hyphens and dots. Underscores appear in SRV/TXT records but not
+# in the names amass enumerates. This rejects file-path-like pollution such
+# as `robots.txt.checkpoints-in.files.openai.com` (which passes DNS label
+# validation because each dot-separated chunk is a legal label, but is
+# clearly a filename concatenated with a domain).
+_RFC3986_HOST = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
+
+
+def valid_reg_name(name: str) -> bool:
+    """Strict RFC 3986 reg-name check for amass zone candidates.
+
+    Rejects names that are technically valid DNS labels but not proper
+    hostnames: those with underscores, leading/trailing hyphens in labels,
+    or that look like file paths (e.g. `robots.txt.example.com`).
+
+    A name passes if every label is 1-63 chars of [a-z0-9-] starting and
+    ending with [a-z0-9], the total is <=253 chars, and there are no
+    consecutive dots. This is intentionally stricter than `validate_host`
+    (which permits underscores for SRV/TXT records) because amass zones
+    must be proper DNS names, not arbitrary label sequences.
+    """
+    h = (name or "").strip().rstrip(".").lower()
+    if not h or len(h) > 253:
+        return False
+    if ".." in h or h.startswith(".") or h.endswith("."):
+        return False
+    labels = h.split(".")
+    for lab in labels:
+        if not lab or len(lab) > 63:
+            return False
+        if not re.match(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$", lab):
+            return False
+    return True
+
+
 #: A cloud resource identifier. Broader than a hostname because that is
 #: not what clouds use: an ARN is `arn:aws:s3:::bucket`, an Azure
 #: resource id is a slash-separated path, a GCP resource is

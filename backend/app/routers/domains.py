@@ -20,7 +20,7 @@ from .. import clouds
 from .. import domains as gen
 from ..db import get_session
 from ..events import broker
-from ..hosts import InvalidHost, validate_host
+from ..hosts import InvalidHost, valid_reg_name, validate_host
 from ..models import (
     DomainCandidate,
     DomainSearch,
@@ -365,6 +365,15 @@ async def enumerate_domains(body: EnumerateRequest, project: str = Query(...),
         except InvalidHost as e:
             refused[d] = str(e)
             continue
+        # RFC 3986 reg-name gate. `validate_host` is lenient about
+        # underscores (SRV/TXT records) and accepts any sequence of legal
+        # DNS labels. Amass zones must be proper hostnames: file-path
+        # pollution like `robots.txt.checkpoints-in.files.openai.com`
+        # passes label validation but is not a zone worth enumerating.
+        if not valid_reg_name(d):
+            refused[d] = (f"{d!r} is not a valid RFC 3986 hostname — "
+                          f"likely a file path or malformed name")
+            continue
         # Independently, for every generated parent as much as for every
         # typed name. This is the check that stops a walk reaching an
         # apex the engagement does not cover.
@@ -433,6 +442,10 @@ def _domains_to_enumerate(body: EnumerateRequest, typed: list[str],
             # "ignore the ip address hosts". An address has no zone, and
             # `registrable()` on one used to return its last two octets.
             addresses += 1
+            continue
+        # RFC 3986 reg-name gate: file-path pollution from vhost sweeps
+        # (e.g. `robots.txt.example.com`) is not a zone worth walking.
+        if not valid_reg_name(h):
             continue
         # Where the walk LANDS is what decides this, not where it
         # started. `i-0a1.eu-west-1.compute.amazonaws.com` walks to
