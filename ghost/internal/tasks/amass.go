@@ -41,6 +41,7 @@ package tasks
 import (
 	"context"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -96,6 +97,19 @@ func runAmassLib(ctx context.Context, args map[string]any, _ string) Result {
 			len(ds), strings.Join(ds, ", "))
 	}
 	dom := ds[0]
+
+	// DNS pre-check: if the domain does not resolve at all (NXDOMAIN or
+	// no A/AAAA records), skip the full enumeration. This saves minutes
+	// of passive-source polling and significant memory on bogus domains
+	// that crept into the queue from vhost-sweep artefacts stored in
+	// Target.hostnames (e.g. `robots.txt.example.com`).
+	if !domainResolves(ctx, dom) {
+		return Result{
+			ExitCode: 0,
+			Output:   fmt.Sprintf("domain %s does not resolve (no A/AAAA records); skipping enumeration", dom),
+			Summary:  fmt.Sprintf("amass: %s — no DNS records, skipped", dom),
+		}
+	}
 
 	cfg := config.NewConfig()
 	cfg.AddDomain(dom)
@@ -255,4 +269,26 @@ func resolversFor(args map[string]any) []string {
 		return rs
 	}
 	return defaultResolvers
+}
+
+// domainResolves performs a quick A/AAAA lookup to confirm the domain
+// exists in DNS before spending minutes on passive-source enumeration.
+// Returns true if any record is found, false for NXDOMAIN or empty.
+// Network errors (timeout, SERVFAIL) return true: we cannot distinguish
+// "does not exist" from "resolver is slow", and a real zone is better
+// enumerated than skipped.
+func domainResolves(ctx context.Context, dom string) bool {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, dom)
+	if err != nil {
+		// NXDOMAIN is definitive; other errors are not.
+		var dnsErr *net.DNSError
+		if e, ok := err.(*net.DNSError); ok && e.IsNotFound {
+			return false
+		}
+		_ = dnsErr
+		return true
+	}
+	return len(ips) > 0
 }

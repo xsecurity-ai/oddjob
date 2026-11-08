@@ -82,7 +82,7 @@ from . import domains as gen
 from . import geoip
 from .db import SessionLocal
 from .events import broker
-from .hosts import dns_subject
+from .hosts import dns_subject, valid_reg_name
 from .lookups import is_ip
 from .models import (
     NMAP_CHOICES,
@@ -624,6 +624,11 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
             if not z or "." not in z or z in seen:
                 continue
             seen.add(z)
+            # RFC 3986 reg-name gate: file-path pollution like
+            # `robots.txt.example.com` passes DNS label validation but
+            # is not a zone worth enumerating.
+            if not valid_reg_name(z):
+                continue
             if z in s.searched or ("amass", z) in s.tasked:
                 continue
             zones.append(z)
