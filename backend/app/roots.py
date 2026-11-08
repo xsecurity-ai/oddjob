@@ -167,28 +167,32 @@ async def enumerable_roots(session: AsyncSession, project_id: int) -> set[str]:
 
 
 async def walked_zones(session: AsyncSession, project_id: int) -> set[str]:
-    """Every zone the Kitchen Sink enumerate would hand to amass.
+    """Every registrable zone the project should hand to amass.
 
-    The manual `/enumerate` with `kitchen_sink=true` walks every known
-    hostname back to its registrable domain via `walk_to_registrable`,
-    producing the host AND every parent down to the apex. This function
-    does the same walk so the `auto_amass` standing order sees exactly
-    the zone set an operator would see in the dialog -- not just the
-    registrable domain (which misses intermediate zones a wildcard scope
-    may authorise) and not only target hosts (which misses certificate
-    SANs and web-address hosts).
+    Each known hostname maps to exactly ONE zone: its registrable
+    domain (the apex). `kiwi.fde.openai.com` yields `openai.com`, not
+    the full chain `kiwi.fde.openai.com / fde.openai.com / openai.com`.
 
-    Without this, a project scoped `*.api.openai.com` could enumerate
-    `api.openai.com` by hand but the standing order would only see
-    `openai.com` (the registrable domain), refuse it as a parent above
-    the wildcard, and queue nothing -- for ever. The operator with the
-    toggle on goes through the dialog one zone at a time, which is the
-    exact complaint this exists to end.
+    The old behaviour -- walking every hostname back through all
+    intermediate labels to the apex and keeping each one as a separate
+    amass task -- was redundant in two ways. First, amass enumerates a
+    zone recursively: running it on `openai.com` discovers
+    `fde.openai.com` and `kiwi.fde.openai.com` among its results, so
+    handing those names to amass as separate tasks is the same work
+    twice. Second, the vhost sweep stores file-path artefacts (e.g.
+    `robots.txt.checkpoints-in.files.openai.com`) in Target.hostnames;
+    walking each one produced thousands of intermediate zones that all
+    collapse to the same registrable domain anyway.
 
-    Cloud-provider zones are dropped from the walk's output, matching
-    both `enumerable_roots` and the manual kitchen-sink path: a name
-    whose entire walk lands under a provider's domain contributes
-    nothing.
+    The result is a small set -- one per registrable domain the project
+    has touched -- rather than O(hostnames x labels) tasks draining the
+    queue for hours.
+
+    Scope roots are included even when no host under them has been
+    observed: a fresh project scoped to `*.new.acme.example` has no
+    targets and the walk is empty, but the zone is still worth
+    enumerating. Cloud-provider zones are dropped, matching both
+    `enumerable_roots` and the manual kitchen-sink path.
     """
     hosts = await known_hosts(session, project_id)
     out: set[str] = set()
@@ -198,13 +202,14 @@ async def walked_zones(session: AsyncSession, project_id: int) -> set[str]:
         # RFC 3986 reg-name gate: file-path pollution like
         # `robots.txt.checkpoints-in.files.openai.com` passes DNS label
         # validation but is not a zone worth enumerating. Filtering here
-        # stops 50k+ bogus amass tasks from being derived from vhost
-        # sweep artefacts stored in Target.hostnames.
+        # stops bogus amass tasks from being derived from vhost sweep
+        # artefacts stored in Target.hostnames.
         if not valid_reg_name(h):
             continue
-        for name in gen.walk_to_registrable(h):
-            if not clouds.is_cloud_domain(name) and valid_reg_name(name):
-                out.add(name)
+        reg = gen.registrable(h)
+        if reg and "." in reg and valid_reg_name(reg) \
+                and not clouds.is_cloud_domain(reg):
+            out.add(reg)
     # Scope roots are candidates in their own right even when no host
     # under them has been observed yet: a fresh project scoped to
     # `*.new.acme.example` has no targets and the walk is empty, but

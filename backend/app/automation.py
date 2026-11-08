@@ -607,10 +607,14 @@ def plan(s: Snapshot, limit: int | None = None) -> list[Candidate]:
     if s.auto_amass:
         zones: list[str] = []
         seen: set[str] = set()
-        # `scope_zones` is the full walk: every known hostname walked
-        # back to its registrable domain, plus scope roots. It covers
-        # targets, certificate SANs and web-address hosts -- the same
-        # set the manual Kitchen Sink enumerate produces.
+        # `scope_zones` is the set of registrable domains (zone apexes)
+        # derived from every known hostname, plus scope roots. Each
+        # hostname maps to exactly one zone via `registrable()` --
+        # `kiwi.fde.openai.com` yields `openai.com`, not the full chain
+        # of intermediate labels. Amass enumerates a zone recursively,
+        # so running it on the apex discovers every subdomain underneath;
+        # handing those subdomains to amass as separate tasks is the
+        # same work repeated.
         #
         # The `derived` below is redundant against a snapshot built by
         # `snapshot()`, whose `scope_zones` already covers every target
