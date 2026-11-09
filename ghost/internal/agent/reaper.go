@@ -4,8 +4,6 @@ import (
 	"context"
 	"log"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // reapChildren reaps orphaned child processes.
@@ -35,15 +33,7 @@ func (a *Agent) reapChildren(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			n := 0
-			for {
-				var st unix.WaitStatus
-				pid, err := unix.Wait4(-1, &st, unix.WNOHANG, nil)
-				if pid <= 0 || err != nil {
-					break
-				}
-				n++
-			}
+			n := reapOnce()
 			if n > 0 {
 				log.Printf("reaped %d orphaned child process(es)", n)
 			}
