@@ -8,9 +8,10 @@
  * them and this shows the group.
  */
 import {
-  Alert, Box, Button, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, Divider, Link, MenuItem, Stack, Table, TableBody, TableCell, TableHead, TableRow, TextField, Tooltip, Typography, alpha,
+  Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Link, MenuItem, Stack, Table, TableBody, TableCell, TableHead, TableRow, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
+import DeleteIcon from '@mui/icons-material/Delete'
 import IconButton from '@mui/material/IconButton'
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -19,6 +20,7 @@ import { SEVERITY_COLOUR } from '../lib/severity'
 import { TRIAGE } from '../lib/triage'
 import { LIFECYCLE_COLOUR, LIFECYCLE_LABEL } from '../lib/lifecycle'
 import { neon, glow } from '../theme'
+import { useAuth } from '../lib/auth'
 
 /** A long scanner paragraph, shown as written rather than reflowed:
  *  the line breaks in a tool's output usually mean something. */
@@ -190,6 +192,7 @@ export function VulnModal({ id, onClose, onHost }: {
   onHost?: (project: string, host: string) => void
 }) {
   const qc = useQueryClient()
+  const { canWrite } = useAuth()
   const mark = useMutation({
     mutationFn: (triage: string) => api.setTriage(id as number, triage),
     onSuccess: () => {
@@ -197,6 +200,22 @@ export function VulnModal({ id, onClose, onHost }: {
       // is showing the same verdict in a column.
       void qc.invalidateQueries({ queryKey: ['vuln', id] })
       void qc.invalidateQueries({ queryKey: ['vulns'] })
+    },
+  })
+  // Removing from the database is offered only once a person has
+  // concluded the finding is not real — false positive or verified
+  // benign. A true positive still needs its evidence, and an
+  // untriaged row is one nobody has judged yet. The confirm dialog
+  // sits in front because the row is gone from every table, export
+  // and report afterwards; proofs are kept (the server nulls their
+  // link) as evidence it was real.
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const del = useMutation({
+    mutationFn: () => api.deleteVuln(id as number),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['vulns'] })
+      void qc.invalidateQueries({ queryKey: ['vuln', id] })
+      onClose()
     },
   })
   const { data, isLoading, error } = useQuery({
@@ -227,6 +246,7 @@ export function VulnModal({ id, onClose, onHost }: {
   const sev = (s: string) => SEVERITY_COLOUR[s] ?? neon.muted
 
   return (
+    <>
     <Dialog open={id != null} onClose={onClose} maxWidth="lg" fullWidth
       slotProps={{ paper: { sx: {
         backgroundColor: alpha(neon.paper, 0.98), backgroundImage: 'none',
@@ -328,6 +348,30 @@ export function VulnModal({ id, onClose, onHost }: {
                 what has been done about it.
               </Typography>
             </Box>
+
+            {/* Removing the row itself. Offered only once the verdict
+                says the finding is not real — a true positive still
+                needs its evidence, and an untriaged row is one nobody
+                has judged yet. The confirm dialog sits in front
+                because afterwards the row is gone from every table,
+                export and report; proofs are kept (the server nulls
+                their link) as evidence it was real. */}
+            {(data.triage === 'false_positive' || data.triage === 'verified_benign')
+             && canWrite(data.project_code) && (
+              <Box>
+                <Button size="small" variant="outlined" color="error"
+                  disabled={del.isPending || mark.isPending}
+                  onClick={() => setConfirmingDelete(true)}
+                  startIcon={<DeleteIcon sx={{ fontSize: 14 }} />}
+                  sx={{ textTransform: 'none', fontSize: 12.5 }}>
+                  {del.isPending ? 'Removing…' : 'Remove from DB'}
+                </Button>
+                <Typography sx={{ fontSize: 11, color: neon.muted, mt: 0.5 }}>
+                  Deletes this finding for good. Its proof, if any, is kept
+                  and unlinked rather than destroyed.
+                </Typography>
+              </Box>
+            )}
 
             {/* Proving it. Beside Triage because they answer adjacent
                 questions -- "what do I think" and "can we show it" --
@@ -521,5 +565,42 @@ export function VulnModal({ id, onClose, onHost }: {
         )}
       </DialogContent>
     </Dialog>
+
+    {confirmingDelete && (
+      <Dialog open onClose={() => !del.isPending && setConfirmingDelete(false)}>
+        <DialogTitle sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 14,
+                             letterSpacing: '0.12em', color: neon.text }}>
+          REMOVE FINDING
+        </DialogTitle>
+        <DialogContent sx={{ p: 2.5, minWidth: 380 }}>
+          <Typography sx={{ fontSize: 13, color: neon.text, mb: 1 }}>
+            This finding is marked{' '}
+            {data?.triage === 'false_positive' ? 'False positive' : 'Verified benign'}
+            . Removing it deletes the row from the database — it will no longer
+            appear in tables, exports or reports.
+          </Typography>
+          <Typography sx={{ fontSize: 12, color: neon.muted }}>
+            The proof of concept, if one exists, is kept and unlinked rather
+            than destroyed. This cannot be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ px: 2.5, pb: 2 }}>
+          <Button size="small" onClick={() => setConfirmingDelete(false)}
+            disabled={del.isPending}
+            sx={{ textTransform: 'none', color: neon.muted }}>
+            Keep it
+          </Button>
+          <Button size="small" variant="contained" color="error"
+            disabled={del.isPending}
+            onClick={() => del.mutate()}
+            startIcon={del.isPending
+              ? <CircularProgress size={12} />
+              : <DeleteIcon sx={{ fontSize: 14 }} />}>
+            {del.isPending ? 'Removing…' : 'Remove'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    )}
+    </>
   );
 }
