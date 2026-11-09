@@ -446,6 +446,8 @@ BY_TITLE_SORT = {
     # renders and what the grid used to sort in the browser.
     "proofs": (func.count(_PROVED_ALIAS.c.vuln_id)
                * 1.0 / func.nullif(func.count(Vuln.id), 0)),
+    "triage_fp": func.count(case((Vuln.triage == "false_positive", 1))),
+    "triage_tp": func.count(case((Vuln.triage == "true_positive", 1))),
 }
 
 BY_TARGET_SORT = {
@@ -458,6 +460,8 @@ BY_TARGET_SORT = {
     "info": func.count(case((Vuln.severity == "info", 1))),
     "proofs": (func.count(_PROVED_ALIAS.c.vuln_id)
                * 1.0 / func.nullif(func.count(Vuln.id), 0)),
+    "triage_fp": func.count(case((Vuln.triage == "false_positive", 1))),
+    "triage_tp": func.count(case((Vuln.triage == "true_positive", 1))),
 }
 
 
@@ -504,6 +508,24 @@ def _proof_counts(proved):
     ]
 
 
+def _triage_counts() -> list:
+    """How much of this group is triaged false positive, true positive,
+    or still untriaged (needs_investigating).
+
+    Three numbers rather than one: an operator scanning a rollup needs
+    to see at a glance whether a row is mostly noise (FP), mostly real
+    (TP), or mostly untouched (untriaged) without expanding it.
+    """
+    return [
+        func.count(case((Vuln.triage == "false_positive", 1)))
+        .label("triage_fp"),
+        func.count(case((Vuln.triage == "true_positive", 1)))
+        .label("triage_tp"),
+        func.count(case((Vuln.triage == "needs_investigating", 1)))
+        .label("triage_untriaged"),
+    ]
+
+
 class VulnsByTargetRow(BaseModel):
     host: str
     project_code: str
@@ -517,6 +539,12 @@ class VulnsByTargetRow(BaseModel):
     #: has asked for a proof of that the worker has not reached.
     proofs: int = 0
     requested: int = 0
+    #: Triage breakdown so the operator can see at a glance how much
+    #: of this host's findings are false positives vs true positives
+    #: vs still untriaged, without expanding the row.
+    triage_fp: int = 0
+    triage_tp: int = 0
+    triage_untriaged: int = 0
 
 
 class VulnsByTitleRow(BaseModel):
@@ -536,6 +564,10 @@ class VulnsByTitleRow(BaseModel):
     total: int
     proofs: int = 0
     requested: int = 0
+    #: Triage breakdown for this (title, severity) group.
+    triage_fp: int = 0
+    triage_tp: int = 0
+    triage_untriaged: int = 0
 
 
 #: What a chained column filter may reach on the by-target rollup.
@@ -588,7 +620,7 @@ async def vulns_by_target(
     proved = _proved_subquery()
     stmt = (select(Target.host, Project.code,
                    func.count(Vuln.id).label("total"), *_sev_counts(),
-                   *_proof_counts(proved))
+                   *_proof_counts(proved), *_triage_counts())
             .join(Target, Target.id == Vuln.target_id)
             .join(Project, Project.id == Target.project_id)
             .outerjoin(proved, proved.c.vuln_id == Vuln.id))
@@ -620,6 +652,8 @@ async def vulns_by_target(
         items=[VulnsByTargetRow(
             host=r.host, project_code=r.code, total=r.total,
             proofs=r.proofs, requested=r.requested,
+            triage_fp=r.triage_fp, triage_tp=r.triage_tp,
+            triage_untriaged=r.triage_untriaged,
             **{sev: getattr(r, sev) for sev in ROLLUP_SEVERITIES})
             for r in rows[:limit]],
         truncated=len(rows) > limit)
@@ -674,7 +708,7 @@ async def vulns_by_title(
     stmt = (select(Vuln.title, Vuln.severity,
                    func.count(func.distinct(Target.host)).label("hosts"),
                    func.count(Vuln.id).label("total"),
-                   *_proof_counts(proved))
+                   *_proof_counts(proved), *_triage_counts())
             .join(Target, Target.id == Vuln.target_id)
             .join(Project, Project.id == Target.project_id)
             .outerjoin(proved, proved.c.vuln_id == Vuln.id))
@@ -702,7 +736,9 @@ async def vulns_by_title(
         total=total,
         items=[VulnsByTitleRow(title=r.title, severity=r.severity,
                                hosts=r.hosts, total=r.total,
-                               proofs=r.proofs, requested=r.requested)
+                               proofs=r.proofs, requested=r.requested,
+                               triage_fp=r.triage_fp, triage_tp=r.triage_tp,
+                               triage_untriaged=r.triage_untriaged)
                for r in rows[:limit]],
         truncated=len(rows) > limit)
 
