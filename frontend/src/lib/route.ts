@@ -76,6 +76,13 @@ export interface Route {
    *  because the dialog has no object to name — it IS the thing that is
    *  open, and presence is the whole signal. */
   orders?: boolean
+  /** A proof of concept opened for reading, by its id. The same shape
+   *  as `finding` — presence is the whole signal — and the same reason:
+   *  a proof is something open ON TOP of the vulns grid, not an asset
+   *  the path names. The chip that opens it knows the finding's title
+   *  for the header; a pasted link does not, so the modal fetches the
+   *  proof itself and falls back to its own title. */
+  poc?: number
   /** Which section a settings screen has selected. The value is the
    *  section's key; the screen validates it against its own list, so a
    *  stale or hand-typed value lands on the first section rather than

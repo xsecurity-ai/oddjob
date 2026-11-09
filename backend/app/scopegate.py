@@ -130,6 +130,17 @@ async def assert_allowed(session: AsyncSession, project_id: int, host: str,
 #: is still a host even though nothing about the string says so.
 TARGET_KEYS = ("targets", "target", "hosts", "host", "url", "urls")
 
+#: Keys whose value is DATA the runner reads, not a host it dials.
+#: A token under one of these is never tested against the scope list.
+#:
+#: `template` is the nuclei YAML body in a poc task: it contains file
+#: paths (`news.js`, `highcharts.js`), example domains from the template
+#: metadata (`attacker.tld`), and dotted identifiers that look exactly
+#: like hosts to `targetish` but are data the runner feeds to nuclei,
+#: not addresses the agent resolves or dials. The host a poc task
+#: actually touches is in `url`, which IS in TARGET_KEYS above.
+NON_TARGET_KEYS = frozenset({"template"})
+
 #: Everything else in the args dict is read too -- see `task_hosts`.
 #: This used to be an allowlist of six keys and nothing else, which
 #: was a gate with a door beside it:
@@ -217,10 +228,14 @@ def task_hosts(args: dict | None) -> list[str]:
             # that stops at the first nesting level is a gate with a
             # documented way around it.
             for k, item in v.items():
+                if k in NON_TARGET_KEYS:
+                    continue
                 take(item, strict or k in TARGET_KEYS)
 
     if isinstance(args, dict):
         for k, v in args.items():
+            if k in NON_TARGET_KEYS:
+                continue
             take(v, k in TARGET_KEYS)
     return out
 

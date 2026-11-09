@@ -2195,6 +2195,12 @@ export const api = {
       '/api/vulns/triage',
       { method: 'POST', body: JSON.stringify({ ids, triage }) }),
 
+  /** Remove a finding from the database. The server checks the
+   *  caller's role against the target and cascades to secrets;
+   *  proofs are kept (SET NULL) as evidence it was real. */
+  deleteVuln: (vulnId: number) =>
+    req<void>(`/api/vulns/${vulnId}`, { method: 'DELETE' }),
+
   /** The credential behind a secret finding.
    *
    *  Its own call, not a field on the vuln: a value returned by the

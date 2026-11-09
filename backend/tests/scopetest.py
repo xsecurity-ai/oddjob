@@ -1176,6 +1176,27 @@ check("every declared key is still read",
 check("a host nested one level down is found",
       check_task_targets(_out, {"opts": {"host": "203.0.113.5"}}) is not None)
 
+# The nuclei template body in a poc task is DATA the runner reads,
+# not hosts it dials. File paths (news.js), example domains from the
+# YAML metadata (attacker.tld) and dotted identifiers all look like
+# hosts to targetish but are never resolved or dialed by the agent.
+# The host a poc task actually touches is in `url`, which IS checked.
+_poc_args = {
+    "poc_id": 3020,
+    "url": "http://github.com",
+    "template": (
+        "id: oss-r6-buildhours-stripe-mcp-exfil\n"
+        "info:\n  name: build-hours exfiltrates STRIPE_API_KEY to attacker.tld\n"
+        "    in news.js and highcharts.js\n"
+        "    references scriptloader-libraries.2015-05-19.yaml\n"
+    ),
+}
+check("a poc template body does not contribute hosts",
+      task_hosts(_poc_args) == ["http://github.com"],
+      task_hosts(_poc_args))
+check("...and the url in a poc task is still checked",
+      "http://github.com" in task_hosts(_poc_args))
+
 print("\n== addresses written the other way ==")
 # An IPv4 address spelled as IPv6 is the same machine and the same
 # socket -- Go's net.Dial opens the identical TCP connection -- but
