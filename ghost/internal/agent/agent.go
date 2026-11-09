@@ -492,6 +492,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Periodic janitor: removes orphaned temp files older than an hour.
 	go a.janitor(ctx)
 
+	// Reap orphaned child processes (Chrome zombies from screenshot tasks).
+	go a.reapChildren(ctx)
+
 	tick := time.NewTicker(a.cfg.Heartbeat)
 	defer tick.Stop()
 
