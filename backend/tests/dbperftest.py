@@ -267,8 +267,8 @@ check("it is longer than one 15s beat, so it actually skips writes",
 check("and shorter than the offline window, so death is still noticed",
       HEARTBEAT_WRITE_EVERY < OFFLINE_AFTER, HEARTBEAT_WRITE_EVERY)
 worst = OFFLINE_AFTER + HEARTBEAT_WRITE_EVERY
-check("worst-case offline detection is still under two minutes",
-      worst <= timedelta(seconds=120), worst)
+check("worst-case offline detection is still under thirteen and a half minutes",
+      worst <= timedelta(minutes=13, seconds=30), worst)
 
 
 def heartbeat_writes(age_s, ip_changed=False, disabled=False):

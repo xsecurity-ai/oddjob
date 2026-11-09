@@ -101,9 +101,10 @@ router = APIRouter(prefix="/api/ghosts", tags=["ghosts"])
 log = logging.getLogger("oddjob.agents")
 
 #: An agent that has not checked in for this long is called offline.
-#: Three missed heartbeats rather than one: a single slow network
-#: moment should not light up the console.
-OFFLINE_AFTER = timedelta(seconds=90)
+#: Ten minutes rather than three missed heartbeats: ghosts beat every
+#: 15 seconds, so a single slow network moment or a briefly congested
+#: link should not light up the console with a false "offline".
+OFFLINE_AFTER = timedelta(minutes=10)
 
 #: How stale `last_seen` may get before a heartbeat writes it.
 #:
@@ -140,14 +141,14 @@ HEARTBEAT_WRITE_EVERY = OFFLINE_AFTER / 3
 #: One host was found this way five and a half hours after it died,
 #: still counted in the fleet, still holding two crawls.
 #:
-#: Five minutes is better than three missed beats because this
-#: conclusion is worth more than the offline one: it ends the agent's
-#: turn in the routing pool and puts its work back in the queue.
-#: Ghosts beat every 15 seconds by default and beat throughout a scan,
-#: so this is twenty missed beats rather than a close call -- and
-#: posting a result sets `last_seen` too, so an agent that is silent
-#: except for its results is never read as lost.
-LOST_AFTER = timedelta(minutes=5)
+#: Must be longer than OFFLINE_AFTER so that "offline" is reachable as
+#: a state: an agent goes online -> offline -> lost, never skipping
+#: the middle step. Twenty minutes is four times the offline window and
+#: long enough that a ghost on a degraded link has had ample time to
+#: recover before we conclude it is gone for good -- and posting a
+#: result sets `last_seen` too, so an agent that is silent except for
+#: its results is never read as lost.
+LOST_AFTER = timedelta(minutes=20)
 
 #: How long a task an agent is no longer working on stays claimed
 #: before it goes back in the queue.

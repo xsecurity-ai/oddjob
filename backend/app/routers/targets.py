@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import addresses, lifecycle, pocwork, webtargets
 from ..db import get_session
 from ..events import broker
+from ..filtering import apply_filters
 from ..hosts import normalise_host
 from ..models import (
     Event,
@@ -54,6 +55,114 @@ from ..weburl import parse as parse_url
 from .projects import resolve_project
 
 router = APIRouter(prefix="/api/targets", tags=["targets"])
+
+
+def _country_clause(code: str):
+    """Targets that have ANY address in the given country.
+
+    The column shows the first located address's country, but a filter
+    should match when any of the target's addresses is in the requested
+    country — a host behind a CDN answering in JP and US is still "in"
+    both countries for filtering purposes.
+    """
+    return (select(1)
+            .join(target_address_links,
+                  target_address_links.c.address_id == TargetAddress.id)
+            .where(target_address_links.c.target_id == Target.id,
+                   TargetAddress.geo_country == code)
+            .exists())
+
+
+#: Columns the client may filter on. `geo_country` is special: it is not
+#: a plain column but an EXISTS subquery matching any of the target's
+#: addresses, so `_apply_target_filters` handles it separately.
+#: `ip_address` is also a subquery but is evaluated lazily by SQLAlchemy,
+#: so it can be called at module level.
+_TARGET_FILTERABLE: dict[str, object] = {
+    "host": Target.host,
+    "kind": Target.kind,
+    "geo_country": None,  # sentinel: handled by _country_clause
+    "ip_address": None,   # sentinel: resolved in _apply_target_filters
+    "alive": Target.alive,
+    "hacked": Target.hacked,
+}
+
+
+def _apply_target_filters(stmt, raw: str | None, logic: str = "and"):
+    """Apply chained column filters to the targets query.
+
+    `geo_country` is intercepted and translated into an EXISTS subquery
+    over the target's addresses (any address in the country matches).
+    All other fields are plain columns and go through `apply_filters`.
+    """
+    if not (raw or "").strip():
+        return stmt
+    import json as _json
+    try:
+        items = _json.loads(raw)
+    except ValueError as e:
+        raise HTTPException(400, f"filters is not valid JSON: {e}") from e
+    if not isinstance(items, list):
+        raise HTTPException(400, "filters must be a JSON array")
+
+    geo_clauses = []
+    rest_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise HTTPException(400, f"each filter must be an object, got {item!r}")
+        field = str(item.get("field") or "")
+        if field == "geo_country":
+            op = str(item.get("op") or item.get("operator") or "is")
+            value = item.get("value")
+            if op == "isEmpty":
+                # No address has a country.
+                from sqlalchemy import exists as _exists
+                from sqlalchemy import not_ as _not
+                geo_clauses.append(_not(_exists(
+                    select(1)
+                    .join(target_address_links,
+                          target_address_links.c.address_id == TargetAddress.id)
+                    .where(target_address_links.c.target_id == Target.id,
+                           TargetAddress.geo_country.isnot(None)))))
+            elif op == "isNotEmpty":
+                from sqlalchemy import exists as _exists
+                geo_clauses.append(_exists(
+                    select(1)
+                    .join(target_address_links,
+                          target_address_links.c.address_id == TargetAddress.id)
+                    .where(target_address_links.c.target_id == Target.id,
+                           TargetAddress.geo_country.isnot(None))))
+            elif value is None or value == "":
+                pass  # not armed yet
+            else:
+                vals = value if isinstance(value, list) else [str(value)]
+                if op in ("isAnyOf", "in"):
+                    from sqlalchemy import or_ as _or
+                    geo_clauses.append(_or(*[_country_clause(v) for v in vals]))
+                elif op in ("not", "doesNotEqual", "!="):
+                    from sqlalchemy import not_ as _not
+                    geo_clauses.append(_not(_country_clause(vals[0])))
+                else:  # is, equals, =
+                    geo_clauses.append(_country_clause(vals[0]))
+        elif field in _TARGET_FILTERABLE:
+            rest_items.append(item)
+        else:
+            raise HTTPException(
+                400, f"cannot filter on {field!r}. Filterable: "
+                     f"{', '.join(sorted(_TARGET_FILTERABLE))}")
+
+    from sqlalchemy import or_ as _or
+    if geo_clauses:
+        stmt = stmt.where(_or(*geo_clauses) if len(geo_clauses) > 1
+                          else geo_clauses[0])
+    if rest_items:
+        # Resolve the `ip_address` sentinel to its scalar subquery now
+        # that we are inside a function where `_first_address` is defined.
+        allowed = {k: v for k, v in _TARGET_FILTERABLE.items() if v is not None}
+        if "ip_address" in [str(i.get("field", "")) for i in rest_items]:
+            allowed["ip_address"] = _first_address()
+        stmt = apply_filters(stmt, _json.dumps(rest_items), allowed, logic)
+    return stmt
 
 
 def _counts_query():
@@ -189,6 +298,11 @@ async def list_targets(
         None, description="true for cloud-named rows only, false to exclude "
                           "them; omit for both. The Targets page shows the "
                           "two as separate tabs."),
+    filters: str | None = Query(
+        None,
+        description='chained column filters, as JSON: '
+                    '[{"field":"geo_country","op":"isAnyOf","value":["US","JP"]}]'),
+    logic: str = Query("and", pattern="^(and|or)$"),
     sort: str | None = Query("host"),
     order: str = Query("asc", pattern="^(asc|desc)$"),
     limit: int = Query(5000, ge=0),
@@ -219,6 +333,7 @@ async def list_targets(
     stmt = apply_search(stmt, q, [Target.host, Target.os,
                                   Target.notes, Target.tags, Project.code],
                         extra=_address_like)
+    stmt = _apply_target_filters(stmt, filters, logic)
     stmt = apply_sort(stmt, sort, order, {
         "host": Target.host, "ip_address": _first_address(),
         "ip_addresses": _first_address(), "alive": Target.alive,
