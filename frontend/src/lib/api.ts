@@ -1505,6 +1505,7 @@ export const api = {
      *  both. The two tabs on the Targets page. */
     cloud?: boolean
     limit?: number; offset?: number
+    filters?: string; logic?: 'and' | 'or'
   } = {}) => req<Page<Target>>('/api/targets' + qs({ limit: 100, ...o })),
   /** How many targets have an address and no name, and vice versa.
    *

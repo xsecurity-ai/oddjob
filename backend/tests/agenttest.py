@@ -1825,11 +1825,9 @@ st, tb = call(f"/api/ghosts/{AB}/tasks?project=AGENT", "POST",
 call("/api/ghosts/heartbeat", "POST", {}, key=KB)          # claims it
 call(f"/api/ghosts/tasks/{tb['id']}/start", "POST", {}, key=KB)
 
-# Three minutes. Past OFFLINE_AFTER, which is what this is about, and
-# short of LOST_AFTER, which is now a different conclusion entirely.
-# This used to say ten minutes, back when any number past ninety
-# seconds meant the same thing; it does not any more, and a stale
-# agent mid-task is only `busy` inside that window.
+# Three minutes. Inside OFFLINE_AFTER (ten minutes), which is what
+# this is about: a stale agent mid-task reads as busy, not offline,
+# because the task itself is evidence it is alive.
 _asyncio.run(_age_heartbeat(AB, 180))
 
 st, rows = call("/api/ghosts?project=AGENT", token=admin)
@@ -1847,19 +1845,19 @@ check("a busy agent still counts as present for routing",
 # is the right answer and must still be reachable.
 call(f"/api/ghosts/tasks/{tb['id']}/result", "POST",
      {"status": "done", "output": "", "exit_code": 0}, key=KB)
-_asyncio.run(_age_heartbeat(AB, 180))
+_asyncio.run(_age_heartbeat(AB, 610))
 st, rows = call("/api/ghosts?project=AGENT", token=admin)
 me = next((a for a in (rows or []) if a["id"] == AB), {})
 check("once idle and stale, it is offline again",
       me.get("status") == "offline", str(me.get("status")))
 
-# And past five minutes it stops being either. Offline is "not heard
+# And past twenty minutes it stops being either. Offline is "not heard
 # from lately"; lost is "not coming back", and it is the second one
 # that takes the agent out of the routing pool.
-_asyncio.run(_age_heartbeat(AB, 600))
+_asyncio.run(_age_heartbeat(AB, 1260))
 st, rows = call("/api/ghosts?project=AGENT", token=admin)
 me = next((a for a in (rows or []) if a["id"] == AB), {})
-check("quiet past five minutes and it is lost, not merely offline",
+check("quiet past twenty minutes and it is lost, not merely offline",
       me.get("status") == "lost", str(me.get("status")))
 
 st, rt2 = call("/api/ghosts/routing?project=AGENT", token=admin)
@@ -2697,10 +2695,10 @@ check("quiet a couple of minutes while working is busy, not dead",
       _stale(_quiet_for(2), 1) == "busy", _stale(_quiet_for(2), 1))
 # The one that was wrong. Holding work used to outrank every clock, so
 # this agent read as `busy` for as long as the corpse held the task.
-check("quiet past five minutes is lost even while holding work",
-      _stale(_quiet_for(6), 1) == "lost", _stale(_quiet_for(6), 1))
+check("quiet past twenty minutes is lost even while holding work",
+      _stale(_quiet_for(25), 1) == "lost", _stale(_quiet_for(25), 1))
 check("...and lost with nothing held, too",
-      _stale(_quiet_for(6), 0) == "lost", _stale(_quiet_for(6), 0))
+      _stale(_quiet_for(25), 0) == "lost", _stale(_quiet_for(25), 0))
 _killed = _quiet_for(600, status="disabled")
 check("an operator's decision still outranks the clock",
       _stale(_killed) == "disabled", _stale(_killed))

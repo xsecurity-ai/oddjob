@@ -168,6 +168,7 @@ export function TargetsView({ project }: { project: string | null }) {
   // now, which is what made paging possible at all.
   const table = useServerTable('targets', {
     sort: 'host', order: 'asc', pageSize: 100,
+    filterable: ['host', 'kind', 'geo_country', 'ip_address', 'alive', 'hacked'],
   })
   const { data, isLoading, error } = useQuery({
     queryKey: ['targets', project, tab, table.query],
@@ -183,6 +184,8 @@ export function TargetsView({ project }: { project: string | null }) {
       cloud: tab === 'cloud',
       limit: table.query.pageSize,
       offset: table.query.page * table.query.pageSize,
+      filters: table.query.filters || undefined,
+      logic: table.query.logic,
     }),
     enabled: !!project,
     placeholderData: (prev) => prev,
@@ -478,6 +481,11 @@ export function TargetsView({ project }: { project: string | null }) {
     // last two would read as "no geolocation for this host", which is
     // a claim about the host made out of a claim about us.
     { field: 'geo_country', headerName: 'Country', width: widths.country,
+      type: 'singleSelect',
+      valueOptions: [
+        'US', 'GB', 'DE', 'FR', 'JP', 'NL', 'SG', 'AU', 'CA', 'BR',
+        'IN', 'KR', 'SE', 'CH', 'AT', 'BE', 'IT', 'ES', 'PL', 'DK',
+      ],
       valueGetter: (v) => v ?? '',
       renderCell: (p) => {
         const c = countryCell(p.row)
