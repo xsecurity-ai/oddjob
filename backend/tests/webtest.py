@@ -698,6 +698,44 @@ check("whose status is absent rather than invented",
       and (dead or {}).get("web", {}).get("crawled") is False,
       str((dead or {}).get("web"))[:120])
 
+# The target can also go away BETWEEN the queueing and the delivery.
+# That used to 500 the whole result POST — the filing raised "the
+# target is gone", the handler rolled back, then wrote `import_result`
+# through the now-detached task object and lazy-loaded outside the
+# greenlet. The ghost spools a 500 forever, so one replay against a
+# deleted target looped its result every thirty seconds for a day.
+# The exchange stays on the task, which is where the evidence is; the
+# delivery must land.
+call(f"/api/targets?project={_X}", "POST", {"host": "203.0.113.78"}, token=admin)
+_gone = [t for t in call(f"/api/targets?project={_X}&limit=50", token=admin)[1]["items"]
+         if t["host"] == "203.0.113.78"][0]
+st, seed3 = call("/api/web", "POST",
+                 {"target_id": _gone["id"], "url": "http://203.0.113.78/x",
+                  "method": "GET"}, token=admin)
+st, _gq = call(f"/api/web/{seed3['id']}/replay", "POST",
+               {"raw": "GET /x HTTP/1.1\r\nHost: 203.0.113.78\r\n\r\n"},
+               token=admin)
+_gtid = _gq["task_id"]
+_tk = _take(_gtid)
+# The target dies while the task is still in the ghost's hand.
+st, _del = call(f"/api/targets/{_X}/203.0.113.78", "DELETE", token=admin)
+check("the target can be deleted after queueing", st == 204, str(st))
+_gout = {"status": 200, "elapsed_ms": 9,
+         "response_b64": _b64.b64encode(
+             b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").decode()}
+_st_res = call(f"/api/ghosts/tasks/{_gtid}/result", "POST",
+               {"status": "done", "output": json.dumps(_gout), "stderr": "",
+                "summary": "replay", "exit_code": 0}, key=GKEY)
+check("a result against a deleted target is delivered, not a 500",
+      _st_res[0] == 200 and (_st_res[1] or {}).get("ok") is True,
+      f"{_st_res[0]} {str(_st_res[1])[:120]}")
+_gone_rep = call(f"/api/web/replays/{_gtid}", token=admin)[1] or {}
+check("the task reads done with the exchange kept on it",
+      _gone_rep.get("state") == "done" and _gone_rep.get("error"),
+      f"{_gone_rep.get('state')} {str(_gone_rep.get('error'))[:90]}")
+check("and says the filing did not land, rather than inventing a row",
+      _gone_rep.get("web") is None, str(_gone_rep)[:120])
+
 # ---------------------------------------------- the dispatch rule
 # "Skip the line and go to the first available; if none are available
 # then choose one and task anyone; if there is no ghost at all, say

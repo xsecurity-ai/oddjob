@@ -4517,12 +4517,23 @@ async def submit_result(task_id: int, body: ResultIn,
             # detail goes to the log rather than down the wire, for the
             # reason the lookup branch below gives — this response is
             # read by a process on somebody else's network.
+            #
+            # The rollback expires `t`, so re-reading ANY attribute of
+            # it after that point — including the id in this log line —
+            # lazy-loads outside the greenlet and 500s the whole
+            # submission, which is how one replay against a deleted
+            # target looped its result back every thirty seconds for a
+            # day. The id is captured before the rollback because an
+            # integer does not detach.
+            tid = t.id
             await session.rollback()
             log.warning("filing the replay result for task %s failed",
-                        t.id, exc_info=True)
-            t.import_result = json.dumps(
-                {"error": "could not be filed; see the server log"})
-            await session.commit()
+                        tid, exc_info=True)
+            fresh = await session.get(AgentTask, tid)
+            if fresh is not None:
+                fresh.import_result = json.dumps(
+                    {"error": "could not be filed; see the server log"})
+                await session.commit()
             imported = {**(imported or {}),
                         "replay": {"error": "could not be filed"}}
 
@@ -4543,7 +4554,6 @@ async def submit_result(task_id: int, body: ResultIn,
             # delivered its work and that must land; a lookup that could
             # not be applied is still on the task, and the Targets page
             # will offer it the next time anybody looks.
-            await session.rollback()
             # The detail goes to the log, not down the wire. This
             # response is read by a Ghost sitting inside a client's
             # network, and the exception text here can carry a SQL
@@ -4554,9 +4564,13 @@ async def submit_result(task_id: int, body: ResultIn,
             #
             # The agent gets a stable marker instead: enough to know
             # the lookup did not apply and to say so, and useless to
-            # anyone who has got hold of a ghost's key.
+            # anyone who has got hold of a ghost's key. The id is read
+            # before the rollback for the reason the replay branch gives:
+            # the rollback expires `t`, and the log line would lazy-load.
+            tid = t.id
+            await session.rollback()
             log.warning("applying lookup results for task %s failed",
-                        t.id, exc_info=True)
+                        tid, exc_info=True)
             resolved = {"error": "could not be applied; see the server log"}
         imported = {**(imported or {}), "lookup": resolved}
 
