@@ -1825,10 +1825,12 @@ st, tb = call(f"/api/ghosts/{AB}/tasks?project=AGENT", "POST",
 call("/api/ghosts/heartbeat", "POST", {}, key=KB)          # claims it
 call(f"/api/ghosts/tasks/{tb['id']}/start", "POST", {}, key=KB)
 
-# Three minutes. Inside OFFLINE_AFTER (ten minutes), which is what
-# this is about: a stale agent mid-task reads as busy, not offline,
-# because the task itself is evidence it is alive.
-_asyncio.run(_age_heartbeat(AB, 180))
+# Twelve minutes. Past OFFLINE_AFTER (ten minutes) and short of
+# LOST_AFTER (twenty), which is what this is about: a stale agent
+# mid-task reads as busy, not offline or lost, because the task
+# itself is evidence it is alive -- but only while the beat is inside
+# the window where that evidence still holds.
+_asyncio.run(_age_heartbeat(AB, 720))
 
 st, rows = call("/api/ghosts?project=AGENT", token=admin)
 me = next((a for a in (rows or []) if a["id"] == AB), {})
@@ -2691,8 +2693,11 @@ def _quiet_for(minutes, status="online"):
 
 
 check("a beating agent is online", _stale(_quiet_for(0)) == "online")
-check("quiet a couple of minutes while working is busy, not dead",
-      _stale(_quiet_for(2), 1) == "busy", _stale(_quiet_for(2), 1))
+# `busy` is the middle ground: the beat has gone quiet past the offline
+# window, but not far enough to call the agent lost, and it is holding
+# work, so the work is what keeps it read as alive.
+check("quiet past ten minutes while working is busy, not dead",
+      _stale(_quiet_for(12), 1) == "busy", _stale(_quiet_for(12), 1))
 # The one that was wrong. Holding work used to outrank every clock, so
 # this agent read as `busy` for as long as the corpse held the task.
 check("quiet past twenty minutes is lost even while holding work",

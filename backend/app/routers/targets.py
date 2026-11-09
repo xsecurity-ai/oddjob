@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import addresses, lifecycle, pocwork, webtargets
 from ..db import get_session
 from ..events import broker
+from ..filtering import apply_filters
 from ..hosts import normalise_host
 from ..models import (
     Event,
@@ -29,7 +30,6 @@ from ..models import Poc as PocM
 from ..models import Service as SvcM
 from ..models import Vuln as VulnM
 from ..portcoverage import LEVELS, Range, needed, parse_ports
-from ..filtering import apply_filters
 from ..query import apply_search, apply_sort, paginate
 from ..schemas import (
     EventCreate,
@@ -116,7 +116,8 @@ def _apply_target_filters(stmt, raw: str | None, logic: str = "and"):
             value = item.get("value")
             if op == "isEmpty":
                 # No address has a country.
-                from sqlalchemy import exists as _exists, not_ as _not
+                from sqlalchemy import exists as _exists
+                from sqlalchemy import not_ as _not
                 geo_clauses.append(_not(_exists(
                     select(1)
                     .join(target_address_links,
@@ -150,7 +151,7 @@ def _apply_target_filters(stmt, raw: str | None, logic: str = "and"):
                 400, f"cannot filter on {field!r}. Filterable: "
                      f"{', '.join(sorted(_TARGET_FILTERABLE))}")
 
-    from sqlalchemy import and_ as _and, or_ as _or
+    from sqlalchemy import or_ as _or
     if geo_clauses:
         stmt = stmt.where(_or(*geo_clauses) if len(geo_clauses) > 1
                           else geo_clauses[0])
