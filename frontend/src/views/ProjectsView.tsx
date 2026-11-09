@@ -96,6 +96,7 @@ export function ProjectsView({ onOpen, onConfigure }: {
     },
     {
       field: 'status', headerName: 'Status', width: 110,
+      type: 'singleSelect', valueOptions: ['active', 'archived'],
       renderCell: (p) => {
         const c = p.value === 'active' ? neon.green
           : p.value === 'archived' ? neon.muted : neon.yellow

@@ -326,6 +326,7 @@ function ListenersTab({ project }: { project: string }) {
       type: 'singleSelect', valueOptions: ['tcp', 'udp'] },
     { field: 'port', headerName: 'Port', width: 90, type: 'number' },
     { field: 'state', headerName: 'State', width: 190,
+      type: 'singleSelect', valueOptions: ['bound', 'failed', 'pending'],
       renderCell: (p) => {
         const colour = p.row.state === 'bound' ? neon.green
           : p.row.state === 'failed' ? neon.red : neon.muted

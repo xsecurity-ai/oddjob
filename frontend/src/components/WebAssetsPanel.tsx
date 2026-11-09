@@ -169,6 +169,7 @@ export function WebAssetsPanel({ project }: { project: string | null }) {
     },
     {
       field: 'kind', headerName: 'Kind', width: 108,
+      type: 'singleSelect', valueOptions: Object.keys(KIND),
       renderCell: (p) => (
         <Chip size="small" label={p.value} sx={{
           height: 17, fontSize: 9.5,

@@ -24,6 +24,7 @@ import { useQuery } from '@tanstack/react-query'
 import type { ColumnDef } from '../lib/columns'
 import { api, type Vuln, type VulnsByTargetRow, type VulnsByTitleRow } from '../lib/api'
 import { SEVERITY_COLOUR as SEV } from '../lib/severity'
+import { TRIAGE, TRIAGE_COLOUR } from '../lib/triage'
 import { DataTable } from './DataTable'
 import { ProofCell, ProveGroupDialog, type Group } from './ProveGroup'
 import { useAuth } from '../lib/auth'
@@ -52,6 +53,38 @@ function Severity({ value }: { value: string }) {
                textShadow: value === 'critical' ? glow(neon.red, 0.45) : 'none' }}>
       {value}
     </Box>
+  )
+}
+
+/** A compact triage breakdown: FP / TP / untriaged counts in one cell.
+ *  Zero is shown as a dash so the column reads "nothing here" rather
+ *  than blank. The tooltip spells out what each number means. */
+function TriageBreakdown({ fp, tp, untriaged }: {
+  fp: number; tp: number; untriaged: number
+}) {
+  if (!fp && !tp && !untriaged) {
+    return <Box sx={{ color: alpha(neon.muted, 0.4) }}>—</Box>
+  }
+  return (
+    <Tooltip title={`${fp} false positive · ${tp} true positive · ${untriaged} untriaged`}>
+      <Box sx={{ fontSize: 10.5, cursor: 'help', display: 'flex', gap: 0.5, alignItems: 'center' }}>
+        {fp > 0 && (
+          <Box component="span" sx={{ color: TRIAGE_COLOUR['false_positive'], fontWeight: 700 }}>
+            {fp}
+          </Box>
+        )}
+        {tp > 0 && (
+          <Box component="span" sx={{ color: TRIAGE_COLOUR['true_positive'], fontWeight: 700 }}>
+            {tp}
+          </Box>
+        )}
+        {untriaged > 0 && (
+          <Box component="span" sx={{ color: TRIAGE_COLOUR['needs_investigating'], fontWeight: 700 }}>
+            {untriaged}?
+          </Box>
+        )}
+      </Box>
+    </Tooltip>
   )
 }
 
@@ -257,6 +290,18 @@ export function VulnsByTarget({ project, onFinding, expand, onExpand }: {
       renderCell: (p) => <Count n={p.value as number} colour={SEV[s]} />,
     })),
     {
+      // Triage breakdown: FP / TP / untriaged at a glance.
+      field: 'triage_fp', headerName: 'Triage', width: 120, type: 'number',
+      renderCell: (p) => {
+        const r = p.row as VulnsByTargetRow
+        return <TriageBreakdown fp={r.triage_fp} tp={r.triage_tp}
+          untriaged={r.triage_untriaged} />
+      },
+    },
+    { field: 'triage', headerName: 'Filter triage', width: 0,
+      type: 'singleSelect', valueOptions: TRIAGE.map((t) => t.value),
+      renderCell: () => null },
+    {
       // Sorted by how much of the host is PROVED, not by the raw
       // count: "40 of 40" and "40 of 4,000" are the same number and
       // opposite answers to "is this host evidenced".
@@ -374,6 +419,7 @@ export function VulnsByTitle({ project, onFinding, expand, onExpand }: {
 
   const columns: ColumnDef<VulnsByTitleRow>[] = [
     { field: 'severity', headerName: 'Severity', width: 104,
+      type: 'singleSelect', valueOptions: [...SEVERITIES],
       renderCell: (p) => <Severity value={String(p.value)} /> },
     { field: 'title', headerName: 'Finding', flex: 3, minWidth: 260 },
     { field: 'hosts', headerName: 'Hosts', width: 96, type: 'number',
@@ -386,6 +432,18 @@ export function VulnsByTitle({ project, onFinding, expand, onExpand }: {
       ) },
     { field: 'total', headerName: 'Findings', width: 100, type: 'number',
       renderCell: (p) => <Count n={p.value as number} /> },
+    {
+      // Triage breakdown: FP / TP / untriaged at a glance.
+      field: 'triage_fp', headerName: 'Triage', width: 120, type: 'number',
+      renderCell: (p) => {
+        const r = p.row as VulnsByTitleRow
+        return <TriageBreakdown fp={r.triage_fp} tp={r.triage_tp}
+          untriaged={r.triage_untriaged} />
+      },
+    },
+    { field: 'triage', headerName: 'Filter triage', width: 0,
+      type: 'singleSelect', valueOptions: TRIAGE.map((t) => t.value),
+      renderCell: () => null },
     {
       field: 'proofs', headerName: 'Proof', width: 148, type: 'number',
       // Ranked by coverage in SQL — see BY_TITLE_SORT.
