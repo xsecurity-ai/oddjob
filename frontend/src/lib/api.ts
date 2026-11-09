@@ -513,6 +513,10 @@ export interface VulnsByTargetRow {
    *  have proved that the worker has not reached yet. */
   proofs: number
   requested: number
+  /** Triage breakdown for this host's findings. */
+  triage_fp: number
+  triage_tp: number
+  triage_untriaged: number
 }
 
 /** A rollup, and whether it is all of it. A bare list cannot say
@@ -556,6 +560,10 @@ export interface VulnsByTitleRow {
   total: number
   proofs: number
   requested: number
+  /** Triage breakdown for this (title, severity) group. */
+  triage_fp: number
+  triage_tp: number
+  triage_untriaged: number
 }
 
 export interface VulnDetail extends Vuln {
