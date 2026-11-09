@@ -81,6 +81,7 @@ export function CredentialsView({ project }: { project: string | null }) {
       },
     },
     { field: 'kind', headerName: 'Kind', width: 104,
+      type: 'singleSelect', valueOptions: ['password', 'token', 'hash', 'key'],
       renderCell: (p) => (
         <Chip size="small" label={p.value} sx={{
           height: 19, fontSize: 10, bgcolor: alpha(neon.purple, 0.15),
@@ -88,6 +89,7 @@ export function CredentialsView({ project }: { project: string | null }) {
         }} />
       ) },
     { field: 'validated', headerName: 'Validated', width: 112,
+      type: 'singleSelect', valueOptions: ['works', 'failed', 'none'],
       renderCell: (p) => {
         const c = VALID_COLOUR[p.value] ?? neon.muted
         const label = p.value === 'none' ? 'not tried' : p.value

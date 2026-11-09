@@ -112,8 +112,10 @@ function HostsBody({ subject }: { subject: Subject }) {
     },
     { field: 'port', headerName: 'Port', width: 90, type: 'number',
       renderCell: (p) => <Box sx={{ color: neon.cyan, fontWeight: 700 }}>{p.value}</Box> },
-    { field: 'protocol', headerName: 'Proto', width: 84 },
+    { field: 'protocol', headerName: 'Proto', width: 84,
+      type: 'singleSelect', valueOptions: ['tcp', 'udp'] },
     { field: 'state', headerName: 'State', width: 96,
+      type: 'singleSelect', valueOptions: ['open', 'closed', 'filtered', 'open|filtered'],
       renderCell: (p) => {
         const c = p.value === 'open' ? neon.green : p.value === 'closed' ? neon.red : neon.yellow
         return <Box sx={{ color: c }}>{p.value}</Box>
@@ -185,8 +187,10 @@ function ExploreBody({ subject }: { subject: Subject }) {
       ) },
     { field: 'port', headerName: 'Port', width: 86, type: 'number',
       renderCell: (p) => <Box sx={{ color: neon.cyan, fontWeight: 700 }}>{p.value}</Box> },
-    { field: 'protocol', headerName: 'Proto', width: 80 },
+    { field: 'protocol', headerName: 'Proto', width: 80,
+      type: 'singleSelect', valueOptions: ['tcp', 'udp'] },
     { field: 'state', headerName: 'State', width: 92,
+      type: 'singleSelect', valueOptions: ['open', 'closed', 'filtered', 'open|filtered'],
       renderCell: (p) => {
         const c = p.value === 'open' ? neon.green : p.value === 'closed' ? neon.red : neon.yellow
         return <Box sx={{ color: c }}>{p.value}</Box>

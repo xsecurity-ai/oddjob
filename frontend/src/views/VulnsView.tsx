@@ -308,6 +308,7 @@ export function VulnsView({ project }: { project: string | null }) {
     },
     {
       field: 'status', headerName: 'Status', width: 104,
+      type: 'singleSelect', valueOptions: ['open', 'closed'],
       renderCell: (p) => (
         <Box sx={{ color: p.value === 'open' ? neon.yellow : neon.muted }}>{p.value}</Box>
       ),
@@ -316,6 +317,7 @@ export function VulnsView({ project }: { project: string | null }) {
       // What a PERSON concluded. Next to Status on purpose: they are
       // adjacent questions and reading them together is the point.
       field: 'triage', headerName: 'Triage', width: 178,
+      type: 'singleSelect', valueOptions: TRIAGE.map((t) => t.value),
       renderCell: (p) => (
         <Select size="small" variant="standard" disableUnderline
           value={String(p.value ?? 'needs_investigating')}

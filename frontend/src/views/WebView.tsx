@@ -372,7 +372,8 @@ export function WebView({ project }: { project: string | null }) {
     { field: 'title', headerName: 'Title', flex: 2, minWidth: 180,
       valueGetter: (v) => v ?? '' },
     { field: 'port', headerName: 'Port', width: 78, type: 'number' },
-    { field: 'scheme', headerName: 'Scheme', width: 86 },
+    { field: 'scheme', headerName: 'Scheme', width: 86,
+      type: 'singleSelect', valueOptions: ['http', 'https'] },
     // No `webserver` column. The header is still collected by every
     // importer that sees one and `q` still searches it -- it is just
     // not worth a column of its own, which on this data was blank on

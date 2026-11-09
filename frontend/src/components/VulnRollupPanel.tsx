@@ -24,7 +24,7 @@ import { useQuery } from '@tanstack/react-query'
 import type { ColumnDef } from '../lib/columns'
 import { api, type Vuln, type VulnsByTargetRow, type VulnsByTitleRow } from '../lib/api'
 import { SEVERITY_COLOUR as SEV } from '../lib/severity'
-import { TRIAGE_COLOUR } from '../lib/triage'
+import { TRIAGE, TRIAGE_COLOUR } from '../lib/triage'
 import { DataTable } from './DataTable'
 import { ProofCell, ProveGroupDialog, type Group } from './ProveGroup'
 import { useAuth } from '../lib/auth'
@@ -298,6 +298,9 @@ export function VulnsByTarget({ project, onFinding, expand, onExpand }: {
           untriaged={r.triage_untriaged} />
       },
     },
+    { field: 'triage', headerName: 'Filter triage', width: 0,
+      type: 'singleSelect', valueOptions: TRIAGE.map((t) => t.value),
+      renderCell: () => null },
     {
       // Sorted by how much of the host is PROVED, not by the raw
       // count: "40 of 40" and "40 of 4,000" are the same number and
@@ -416,6 +419,7 @@ export function VulnsByTitle({ project, onFinding, expand, onExpand }: {
 
   const columns: ColumnDef<VulnsByTitleRow>[] = [
     { field: 'severity', headerName: 'Severity', width: 104,
+      type: 'singleSelect', valueOptions: [...SEVERITIES],
       renderCell: (p) => <Severity value={String(p.value)} /> },
     { field: 'title', headerName: 'Finding', flex: 3, minWidth: 260 },
     { field: 'hosts', headerName: 'Hosts', width: 96, type: 'number',
@@ -437,6 +441,9 @@ export function VulnsByTitle({ project, onFinding, expand, onExpand }: {
           untriaged={r.triage_untriaged} />
       },
     },
+    { field: 'triage', headerName: 'Filter triage', width: 0,
+      type: 'singleSelect', valueOptions: TRIAGE.map((t) => t.value),
+      renderCell: () => null },
     {
       field: 'proofs', headerName: 'Proof', width: 148, type: 'number',
       // Ranked by coverage in SQL — see BY_TITLE_SORT.

@@ -51,6 +51,7 @@ const protoCol: ColumnDef<Service> = {
   field: 'protocol',
   headerName: 'Proto',
   width: 92,
+  type: 'singleSelect', valueOptions: ['tcp', 'udp'],
   renderCell: (p) => (
     <Chip
       size="small"
@@ -179,6 +180,7 @@ export function ServicesView({ project }: { project: string | null }) {
     field: 'state',
     headerName: 'State',
     width: 100,
+    type: 'singleSelect', valueOptions: ['open', 'closed', 'filtered', 'open|filtered'],
     renderCell: (p) => {
       const c = p.value === 'open' ? neon.green : p.value === 'closed' ? neon.red : neon.yellow
       return <Box sx={{ color: c, textShadow: glow(c, 0.35) }}>{p.value}</Box>

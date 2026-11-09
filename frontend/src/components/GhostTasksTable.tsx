@@ -209,6 +209,7 @@ export function GhostTasksTable({ project }: { project: string }) {
     },
     {
       field: 'kind', headerName: 'Kind', width: 110,
+      type: 'singleSelect', valueOptions: ['nmap', 'masscan', 'portscan', 'amass', 'gobuster', 'vhost', 'katana', 'screenshot', 'nuclei', 'nuclei_tech', 'nuclei_confirm', 'httpx', 'replay', 'nslookup', 'reverse_ip', 'semgrep', 'trufflehog', 'osv', 'install'],
       renderCell: (p) => (
         <Chip size="small" label={p.value} sx={{
           height: 19, fontSize: 10.5, color: neon.cyan,
@@ -228,6 +229,7 @@ export function GhostTasksTable({ project }: { project: string }) {
     },
     {
       field: 'state', headerName: 'Status', width: 124,
+      type: 'singleSelect', valueOptions: ['queued', 'claimed', 'running', 'done', 'failed', 'cancelled'],
       renderCell: (p) => {
         const c = STATE_COLOUR[String(p.value)] ?? neon.muted
         return (
