@@ -103,7 +103,7 @@ export function WebDiscoveryDialog({ project, onClose, onQueued }: {
     return a
   }
 
-  const run = () => {
+  const run = (rerun: boolean) => {
     // Snapshotted before closing: `rows` comes from a query this
     // dialog owns, and the work must run against what was on screen
     // when Queue was pressed rather than whatever a refetch produces
@@ -111,6 +111,9 @@ export function WebDiscoveryDialog({ project, onClose, onQueued }: {
     const planned = rows.map((r) => ({ url: r.url, owes: [...r.owes] }))
     const auth = authArgs()
     const tasks = planned.reduce((n, r) => n + r.owes.length, 0)
+    // The "Rerun on targets" button forces the re-run regardless of the
+    // checkbox; the Queue button honours whatever is ticked.
+    const sink = kitchenSink || rerun
 
     detach(async () => {
       // Grouped by kind, because one task carries one kind. A URL
@@ -128,12 +131,12 @@ export function WebDiscoveryDialog({ project, onClose, onQueued }: {
         // Sequential rather than parallel: each call is one request
         // creating up to a few thousand rows, and firing them at once
         // only makes the server do the same work with more contention.
-        // `kitchenSink` is the re-run. The listing already filtered
+        // `sink` is the re-run. The listing already filtered
         // on it, but the server enforces it independently and the
         // two must agree — otherwise ticking the box produces a list
         // the queue then silently declines.
         const r = await queueEach(project, agent, kind, urls, auth, region,
-                                  false, kitchenSink)
+                                  false, sink)
         ids.push(...r.ids)
         failed.push(...r.failed)
         done.push(...r.alreadyDone)
@@ -142,7 +145,7 @@ export function WebDiscoveryDialog({ project, onClose, onQueued }: {
         throw new Error(
           done.length
             ? `Nothing was queued: all ${done.length} had already been `
-              + 'done. Tick Kitchen Sink to run them again.'
+              + 'done. Use Rerun on targets to run them again.'
             : `Nothing was queued. ${failed[0]?.why ?? ''}`)
       }
       await qc.invalidateQueries({ queryKey: ['agents'] })
@@ -151,11 +154,11 @@ export function WebDiscoveryDialog({ project, onClose, onQueued }: {
       return `Queued ${ids.length} task${ids.length === 1 ? '' : 's'} `
            + `(${kinds}) over ${planned.length} URL`
            + `${planned.length === 1 ? '' : 's'}`
-           + (kitchenSink ? ', including ones already done' : '')
+           + (sink ? ', including ones already done' : '')
            + `. Results import into ${project} as each reports back.`
            + (done.length
-              ? ` ${done.length} skipped as already done — tick Kitchen `
-                + 'Sink to repeat them.'
+              ? ` ${done.length} skipped as already done — use Rerun on `
+                + 'targets to repeat them.'
               : '')
            + (failed.length
               ? ` ${failed.length} refused: ${failed[0].subject} — `
@@ -305,7 +308,7 @@ export function WebDiscoveryDialog({ project, onClose, onQueued }: {
             <Alert severity="info" variant="outlined" sx={{ fontSize: 12 }}>
               {pending.data?.considered
                 ? 'Every web URL on this project has already had this work '
-                  + 'done. Tick Kitchen Sink to run it again.'
+                  + 'done. Use Rerun on targets to run it again.'
                 : 'No web services and no recorded URLs on this project yet. '
                   + 'Port-scan something first — an open 80 or 443 is what '
                   + 'makes a URL to crawl.'}
@@ -375,10 +378,19 @@ export function WebDiscoveryDialog({ project, onClose, onQueued }: {
       </DialogContent>
       <DialogActions sx={{ px: 3, pb: 2 }}>
         <Button onClick={onClose} sx={{ color: neon.muted }}>Close</Button>
-        <Button variant="outlined" disabled={stop} onClick={run}
+        <Button variant="outlined" disabled={stop} onClick={() => run(false)}
           sx={{ color: neon.pink, borderColor: alpha(neon.pink, 0.6) }}>
           {`Queue ${pending.data?.tasks ?? 0} task`
            + `${pending.data?.tasks === 1 ? '' : 's'}`}
+        </Button>
+        {/* Forces a re-run of every URL on screen, including ones already
+            done, without requiring the user to find and tick Kitchen Sink.
+            The listing still only shows what is owed (or everything when
+            Kitchen Sink is ticked), so this button queues that list with
+            rescan=true. */}
+        <Button variant="outlined" disabled={stop} onClick={() => run(true)}
+          sx={{ color: neon.yellow, borderColor: alpha(neon.yellow, 0.6) }}>
+          Rerun on targets
         </Button>
       </DialogActions>
     </EnumerateDialog>
