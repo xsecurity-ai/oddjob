@@ -986,6 +986,47 @@ async def set_bulk_triage(body: TriageIn,
     return await _set_triage(session, user, body.ids, body.triage)
 
 
+class SeverityIn(BaseModel):
+    severity: str = Field(..., min_length=1, max_length=16)
+
+
+@router.patch("/vulns/{vuln_id}/severity", response_model=TriageOut)
+async def set_severity(vuln_id: int, body: SeverityIn,
+                       user: User = Depends(get_current_user),
+                       session: AsyncSession = Depends(get_session)):
+    """Change the severity of one finding.
+
+    A person's judgement about how bad it is, independent of what
+    the scanner reported. The same permission model as triage: the
+    caller must be able to write to the target's project.
+    """
+    sev = body.severity.lower()
+    if sev not in SEVERITIES:
+        raise HTTPException(
+            422, f"severity is one of {', '.join(SEVERITIES)}")
+    v = (await session.execute(
+        select(Vuln).where(Vuln.id == vuln_id))).scalar_one_or_none()
+    if v is None:
+        raise HTTPException(404, "finding not found")
+    t = await session.get(Target, v.target_id)
+    if t is None:
+        raise HTTPException(404, "target not found")
+    vis = await visible_project_ids(session, user)
+    if vis is not None and t.project_id not in vis:
+        raise HTTPException(403, "no access to this project")
+    try:
+        await assert_role_for_target(session, user, t.id, "user")
+    except HTTPException:
+        raise HTTPException(403, "no write access to this finding") from None
+    if v.severity != sev:
+        v.severity = sev
+        changed = 1
+    else:
+        changed = 0
+    await session.commit()
+    return TriageOut(changed=changed, refused=[])
+
+
 class SecretOut(BaseModel):
     """The credential behind a finding, when someone asks for it."""
     secret: str
