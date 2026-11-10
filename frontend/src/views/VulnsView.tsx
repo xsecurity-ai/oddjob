@@ -160,6 +160,16 @@ export function VulnsView({ project }: { project: string | null }) {
     onSettled: () => setProving(null),
   })
 
+  // Severity edit: a person's judgement about how bad it is,
+  // independent of what the scanner reported.
+  const sevMut = useMutation({
+    mutationFn: ({ id, severity }: { id: number; severity: string }) =>
+      api.setSeverity(id, severity),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['vulns'] })
+    },
+  })
+
   const { mutate: markMutate, isPending: marking } = mark
   const columns: ColumnDef<Vuln>[] = useMemo(() => [
     {
@@ -173,11 +183,24 @@ export function VulnsView({ project }: { project: string | null }) {
       renderCell: (p) => {
         const c = SEV_COLOUR[p.value] ?? neon.muted
         return (
-          <Chip size="small" label={p.value} sx={{
-            height: 20, fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase',
-            bgcolor: alpha(c, 0.16), color: c,
-            border: `1px solid ${alpha(c, 0.6)}`, textShadow: glow(c, 0.45),
-          }} />
+          <Select size="small" variant="standard" disableUnderline
+            value={String(p.value ?? 'info')}
+            disabled={!canWrite(project)}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => sevMut.mutate({
+              id: Number((p.row as { id: number }).id),
+              severity: e.target.value,
+            })}
+            sx={{
+              fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase',
+              color: c, fontWeight: 700,
+              '& .MuiSelect-select': { py: 0 },
+            }}>
+            {(['critical', 'high', 'medium', 'low', 'info'] as const).map((s) => (
+              <MenuItem key={s} value={s}
+                sx={{ fontSize: 11, color: SEV_COLOUR[s] }}>{s}</MenuItem>
+            ))}
+          </Select>
         )
       },
     },
@@ -353,7 +376,7 @@ export function VulnsView({ project }: { project: string | null }) {
       renderCell: (p) => (
         <Box sx={{ color: neon.purple, fontSize: 11.5, letterSpacing: '0.06em' }}>{p.value}</Box>
       ) },
-  ], [canWrite, open, project, markMutate, marking, proving, proveMut])
+  ], [canWrite, open, project, markMutate, marking, proving, proveMut, sevMut])
 
   /* Two readings of the same findings. Secrets are not a severity
      or a filter on the grid above: the question there is "what is

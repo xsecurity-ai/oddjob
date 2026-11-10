@@ -2201,6 +2201,13 @@ export const api = {
   deleteVuln: (vulnId: number) =>
     req<void>(`/api/vulns/${vulnId}`, { method: 'DELETE' }),
 
+  /** Change the severity of one finding. A person's judgement about
+   *  how bad it is, independent of what the scanner reported. */
+  setSeverity: (vulnId: number, severity: string) =>
+    req<{ changed: number; refused: number[] }>(
+      `/api/vulns/${vulnId}/severity`,
+      { method: 'PATCH', body: JSON.stringify({ severity }) }),
+
   /** The credential behind a secret finding.
    *
    *  Its own call, not a field on the vuln: a value returned by the

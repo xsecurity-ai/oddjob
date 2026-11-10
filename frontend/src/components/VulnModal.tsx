@@ -8,7 +8,7 @@
  * them and this shows the group.
  */
 import {
-  Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Link, MenuItem, Stack, Table, TableBody, TableCell, TableHead, TableRow, TextField, Tooltip, Typography, alpha,
+  Alert, Box, Button, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Link, MenuItem, Select, Stack, Table, TableBody, TableCell, TableHead, TableRow, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import DeleteIcon from '@mui/icons-material/Delete'
@@ -218,6 +218,16 @@ export function VulnModal({ id, onClose, onHost }: {
       onClose()
     },
   })
+  // Changing severity: a person's judgement about how bad it is,
+  // independent of what the scanner reported.
+  const sevMut = useMutation({
+    mutationFn: (severity: string) => api.setSeverity(id as number, severity),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['vuln', id] })
+      void qc.invalidateQueries({ queryKey: ['vulns'] })
+    },
+  })
+
   const { data, isLoading, error } = useQuery({
     queryKey: ['vuln', id],
     queryFn: () => api.vuln(id as number),
@@ -257,11 +267,22 @@ export function VulnModal({ id, onClose, onHost }: {
           alignItems: "flex-start"
         }}>
           {data && (
-            <Chip size="small" label={data.severity.toUpperCase()} sx={{
-              height: 20, fontSize: 10, fontWeight: 700, mt: 0.25,
-              bgcolor: alpha(sev(data.severity), 0.18), color: sev(data.severity),
-              border: `1px solid ${alpha(sev(data.severity), 0.6)}`,
-            }} />
+            <Select size="small" variant="standard" disableUnderline
+              value={data.severity}
+              disabled={!canWrite(data.project_code) || sevMut.isPending}
+              onChange={(e) => sevMut.mutate(e.target.value)}
+              sx={{
+                mt: 0.25, fontSize: 10, fontWeight: 700, letterSpacing: '0.08em',
+                textTransform: 'uppercase', color: sev(data.severity),
+                '& .MuiSelect-select': { py: 0, px: 0.75 },
+                bgcolor: alpha(sev(data.severity), 0.18),
+                border: `1px solid ${alpha(sev(data.severity), 0.6)}`,
+                borderRadius: 1, height: 20, minWidth: 72,
+              }}>
+              {(['critical', 'high', 'medium', 'low', 'info'] as const).map((s) => (
+                <MenuItem key={s} value={s} sx={{ fontSize: 11, color: sev(s) }}>{s}</MenuItem>
+              ))}
+            </Select>
           )}
           <Typography sx={{
             fontFamily: `'Orbitron', sans-serif`, fontSize: 14, fontWeight: 700,
