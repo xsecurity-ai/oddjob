@@ -136,6 +136,19 @@ st, s4 = call("/api/targets?q=bare+IP")
 check("search hits notes column", s4["total"] == 1)
 st, s5 = call("/api/targets?sort=nope")
 check("bad sort field -> 422", s5 is not None and st == 422, f"status={st}")
+# Nullable columns must sort NULLs last in both directions. Postgres' default
+# puts them first for ASC, so a grid of mostly-populated values with a few
+# gaps reads as "the sort is broken" -- the gaps float to the top.
+st, s6 = call("/api/targets?sort=os&order=asc")
+_os_asc = [t["os"] for t in s6["items"]]
+check("ASC sort puts null os last",
+      all(x is None for x in _os_asc[_os_asc.index(None):]) if None in _os_asc else True,
+      f"order={_os_asc}")
+st, s7 = call("/api/targets?sort=os&order=desc")
+_os_desc = [t["os"] for t in s7["items"]]
+check("DESC sort puts null os last",
+      all(x is None for x in _os_desc[_os_desc.index(None):]) if None in _os_desc else True,
+      f"order={_os_desc}")
 
 print("\n== single mutation fires SSE ==")
 before = len(events)
