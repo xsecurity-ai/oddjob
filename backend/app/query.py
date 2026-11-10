@@ -46,7 +46,14 @@ def apply_sort(stmt: Select, sort: str | None, order: str, allowed: dict[str, An
     col = allowed.get(sort)
     if col is None:
         raise HTTPException(422, f"cannot sort by {sort!r}; allowed: {sorted(allowed)}")
-    return stmt.order_by(desc(col) if order.lower() == "desc" else asc(col))
+    # NULLs last in both directions. Postgres' default puts them first for
+    # ASC and (depending on the column) first or last for DESC, so a grid of
+    # mostly-populated values with a handful of gaps reads as "the sort is
+    # broken" -- the gaps float to the top of an ascending country list.
+    # Every list endpoint shares this helper, so the rule holds everywhere.
+    if order.lower() == "desc":
+        return stmt.order_by(desc(col).nulls_last())
+    return stmt.order_by(asc(col).nulls_last())
 
 
 async def paginate(session: AsyncSession, stmt: Select,
