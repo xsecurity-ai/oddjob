@@ -101,11 +101,21 @@ const WEB = [
 // Two runs, not one. Every technology-detection template is `info`
 // severity, so the `-severity critical,high` the vulnerability run
 // uses would discard all 1,228 of them — they cannot share a task.
+//
+// `both+confirm` adds a third run on top: nuclei asked only about the
+// CVEs the local corpus already matched to a service on that host by
+// EXACT version. That is the "versioning" half of it — the CPE match
+// needs a detected version, so a URL whose services gave no version
+// produces no confirmation task (which is intended: a product-wide CPE
+// match would be every CVE that vendor ever had). The kitchen sink
+// holds this selector at `both+confirm`, so the value has to exist in
+// the list or MUI renders the selector blank.
 const NUCLEI = [
   { value: 'off', label: 'Off' },
   { value: 'vuln', label: 'CVE templates' },
   { value: 'tech', label: 'Fingerprint only' },
   { value: 'both', label: 'CVEs + fingerprint' },
+  { value: 'both+confirm', label: 'cve + versioning' },
 ]
 
 const NMAP = [
