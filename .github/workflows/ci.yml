@@ -338,13 +338,24 @@ jobs:
       # entry every time, evicting the buildkit blobs that make the
       # agent image build 17s instead of 503s -- paying for this cache
       # with the one that already works.
+      #
+      # The key also carries the commit. A shared build cache that is
+      # keyed on go.sum alone replayed a STALE test result: an earlier
+      # run of an old function left its compiled package in the shared
+      # cache, and every later run -- including ones that checked out
+      # the fix -- ran the old binary. TestParseCPUAcctStatUsec failed
+      # four times on PR #211 this way, with the fix verified present
+      # in the merge ref each time. The commit in the key costs one
+      # cache entry per push (a few hundred MB) and makes a run's cache
+      # its own; restore-keys still falls back to the previous graph so
+      # an unchanged dependency set stays warm.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: needs.changes.outputs.ghost == 'true'
         with:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: go-${{ runner.os }}-ghost-${{ hashFiles('ghost/go.sum') }}
+          key: go-${{ runner.os }}-ghost-${{ github.sha }}-${{ hashFiles('ghost/go.sum') }}
           # A dependency bump should start from the previous graph
           # rather than from nothing: most of it is unchanged, and a
           # partial hit still saves the bulk of those 415 seconds.
