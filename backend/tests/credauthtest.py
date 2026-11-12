@@ -61,6 +61,16 @@ a = build_from_credentials([C("cookie", "PHPSESSID", "deadbeef")])
 check("cookie with username -> name=value",
       a.as_args().get("cookies") == "PHPSESSID=deadbeef")
 
+# A whole browser session, exactly as `curl -b` or a Burp export carries it:
+# several cookies on one line, values full of '=' and '%'. It must reach the
+# task verbatim -- katana sends it as ONE Cookie header, so any mangling here
+# would log the crawl out.
+browser_session = ("cf_clearance=CrViDbRa5ThToB7k; __cf_bm=m7c2FOlzqetgNozY; "
+                   "ph_phc_x_posthog=%7B%22id%22%3A%2201a1d1c4%22%7D")
+a = build_from_credentials([C("cookie", None, browser_session)])
+check("full browser cookie line passes through verbatim",
+      a.as_args().get("cookies") == browser_session)
+
 a = build_from_credentials([C("other", None, "X-Api-Key: 42")])
 check("other -> raw header line",
       a.as_args().get("headers") == ["X-Api-Key: 42"])

@@ -97,8 +97,8 @@ export const SPECS: Record<EntityKind, FieldSpec[]> = {
     { name: 'host', label: 'Host', type: 'text',
       help: 'Free text — a credential often predates the inventory row.' },
     { name: 'username', label: 'Username', type: 'text' },
-    { name: 'secret', label: 'Secret', type: 'text', bulk: false,
-      help: 'Stored in plaintext. Protect oddjob.db accordingly.' },
+    { name: 'secret', label: 'Secret', type: 'multiline', bulk: false,
+      help: 'Stored in plaintext. Protect oddjob.db accordingly. For a cookie credential, paste the whole Cookie line straight from your browser or Burp — it is sent verbatim.' },
     { name: 'kind', label: 'Kind', type: 'select', options: [
       { value: 'password', label: 'password' }, { value: 'hash', label: 'hash' },
       { value: 'key', label: 'key' }, { value: 'token', label: 'token' },
