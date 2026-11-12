@@ -378,8 +378,28 @@ def finding_line(severity: str, host: str, title: str) -> str:
             .strip())
 
 
+def finding_link(base: str | None, project_code: str | None,
+                 vuln_id: int | None) -> str | None:
+    """A pasted link to the finding.
+
+    The thread says where it is and what it says; this is where to GO.
+    `?finding=` on top of the project's vulns view opens the detail
+    pane directly, which is the address the UI itself navigates to --
+    so a link pasted here lands exactly where clicking through would.
+
+    Without a base URL there is no absolute address to give and a
+    relative one resolves against whatever page Slack happens to be on,
+    so nothing at all: the thread still says where it is.
+    """
+    if not base or vuln_id is None or not project_code:
+        return None
+    return f"{base.rstrip('/')}/projects/{project_code.upper()}" \
+           f"/vulns?finding={vuln_id}"
+
+
 def finding_thread(port: int | None, protocol: str | None,
-                   detail: str | None, url: str | None = None) -> str:
+                   detail: str | None, url: str | None = None,
+                   link: str | None = None) -> str:
     """The reply under it: where it is and what it says.
 
     Truncated, because a scanner's detail paragraph can be thousands of
@@ -397,6 +417,9 @@ def finding_thread(port: int | None, protocol: str | None,
         d = detail.strip()
         bits.append(d[:2800] + ("\n…(truncated — see Oddjob for the rest)"
                                 if len(d) > 2800 else ""))
+    if link:
+        # Last, so the thing to click on is the last thing read.
+        bits.append(f"*Oddjob:* <{link}|open this finding>")
     return "\n".join(bits) or "_No further detail was recorded._"
 
 
@@ -1212,14 +1235,27 @@ async def announce_ghost(session, project, line_for, *, name: str,
 
 async def announce_finding(session, project, *, severity: str, host: str,
                            title: str, port=None, protocol=None,
-                           detail=None, url=None) -> list[Posted]:
+                           detail=None, url=None, vuln_id=None) -> list[Posted]:
     """The one-liner in the channel, the detail in its thread.
 
     Two calls rather than one long message: the channel stays scannable
     and the detail is still one click away. If the first fails there is
     nothing to thread under, so the second is skipped rather than
     posted loose into the channel.
+
+    When the caller knows the finding's id -- which both of its call
+    sites do, having just written or read the row -- the thread ends on
+    a pasted link to it. The id is NOT derived from the title and host:
+    a title repeats across hosts and a host carries many findings, so
+    guessing an address would be worse than giving none.
     """
+    base = None
+    try:
+        from .routers.settings import load_all
+        base = (await load_all(session)).get("site.base_url")
+    except Exception as e:                   # noqa: BLE001
+        log.debug("could not read site settings for a finding link: %s", e)
+    link = finding_link(base, getattr(project, "code", None), vuln_id)
     results = []
     for tok, ch in await targets_for(session, project):
         head = await post(tok, ch, finding_line(severity, host, title))
@@ -1227,6 +1263,6 @@ async def announce_finding(session, project, *, severity: str, host: str,
         if head.ok and head.ts:
             results.append(await post(
                 tok, head.channel or ch,
-                finding_thread(port, protocol, detail, url),
+                finding_thread(port, protocol, detail, url, link),
                 thread_ts=head.ts))
     return results

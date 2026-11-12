@@ -499,22 +499,24 @@ async def _vuln(session: AsyncSession, target: Target, pv: ParsedVuln,
                                Vuln.port == pv.port)
             .order_by(Vuln.id).limit(1))).scalars().first()
     if row is None:
-        session.add(Vuln(target_id=target.id, title=pv.title[:1000],
-                         severity=pv.severity, status=pv.status,
-                         port=pv.port, protocol=pv.protocol,
-                         description=pv.description, remediation=pv.remediation,
-                         external_id=pv.external_id,
-                         file_path=pv.file_path, line_number=pv.line_number,
-                         scanner=scanner, first_seen_at=seen_at,
-                         last_seen_at=seen_at,
-                         found_by_manifest=run_manifest))
+        v = Vuln(target_id=target.id, title=pv.title[:1000],
+                 severity=pv.severity, status=pv.status,
+                 port=pv.port, protocol=pv.protocol,
+                 description=pv.description, remediation=pv.remediation,
+                 external_id=pv.external_id,
+                 file_path=pv.file_path, line_number=pv.line_number,
+                 scanner=scanner, first_seen_at=seen_at,
+                 last_seen_at=seen_at,
+                 found_by_manifest=run_manifest)
+        session.add(v)
         res.vulns_created += 1
         # Findings are one of only two things that reach Slack. Gathered
         # here and posted after the commit: a finding announced and then
-        # rolled back is worse than one announced late.
+        # rolled back is worse than one announced late. The id in the
+        # tuple is pending until that same commit flushes it.
         if announce is not None:
             announce.append((pv.severity, target.host, pv.title, pv.port,
-                             pv.protocol, pv.description))
+                             pv.protocol, pv.description, v.id))
         await record(session, target.id, "vuln",
                      f"{pv.severity.upper()}: {pv.title}"[:400],
                      detail=pv.description, actor=scan.tool, source=source)
@@ -1122,10 +1124,10 @@ async def _announce_findings(session, project, findings: list) -> None:
     worth = [f for f in findings if (f[0] or "").lower() in ANNOUNCE_AT]
     if not worth:
         return
-    for sev, host, title, port, proto, detail in worth[:ANNOUNCE_CAP]:
+    for sev, host, title, port, proto, detail, vid in worth[:ANNOUNCE_CAP]:
         await slack.announce_finding(session, project, severity=sev, host=host,
                                      title=title, port=port, protocol=proto,
-                                     detail=detail)
+                                     detail=detail, vuln_id=vid)
     if len(worth) > ANNOUNCE_CAP:
         await slack.announce(
             session, project,
