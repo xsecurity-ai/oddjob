@@ -408,7 +408,15 @@ jobs:
           ls -la "$(go env GOROOT)/bin" 2>/dev/null | head
           echo "--- source: how many definitions ---"
           grep -c '^func parseCPUAcctStatUsec' internal/capacity/sys_linux.go
-          sed -n '/^func parseCPUAcctStatUsec/,/^}/p' internal/capacity/sys_linux.go
+          echo "--- the function WITH line numbers (what the compiler reads) ---"
+          awk '/^func parseCPUAcctStatUsec/{p=1} p{printf "%d: %s\n", NR, $0} /^}/{if(p)exit}' internal/capacity/sys_linux.go
+          echo "--- git state of that file (is the working copy what HEAD has?) ---"
+          if git -C .. status --short ghost/internal/capacity/sys_linux.go 2>/dev/null | grep -q .; then
+            echo "WORKING COPY DIFFERS FROM HEAD:"
+            git -C .. diff HEAD -- ghost/internal/capacity/sys_linux.go | head -40
+          else
+            echo "working copy matches HEAD"
+          fi
           echo "--- build the test binary with a private GOCACHE ---"
           GOCACHE="$(mktemp -d)" go test -race -c -o /tmp/cap.test ./internal/capacity/
           echo "--- what the BINARY contains (the compiled constant) ---"
