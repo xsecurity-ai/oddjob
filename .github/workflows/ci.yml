@@ -398,14 +398,21 @@ jobs:
         # pass and the shared cache was replaying a stale binary; fail
         # and the source CI checks out is not what we think it is.
         run: |
-          echo "--- function body in the checked-out source ---"
+          # Ground truth, because a fresh compile of the verified source
+          # kept failing with the pre-fix value in 14ms. Build the test
+          # binary explicitly, prove which function it contains, and run
+          # IT directly — no go-test result cache anywhere in between.
+          echo "--- source: how many definitions ---"
+          grep -c '^func parseCPUAcctStatUsec' internal/capacity/sys_linux.go
           sed -n '/^func parseCPUAcctStatUsec/,/^}/p' internal/capacity/sys_linux.go
-          # The capacity package imports nothing outside the standard
-          # library, so a private GOMODCACHE cannot change what compiles
-          # — it can only prove that the module cache is not involved.
-          echo "--- fresh-cache run (private GOCACHE and GOMODCACHE) ---"
-          GOCACHE="$(mktemp -d)" GOMODCACHE="$(mktemp -d)" \
-            go test -race -count=1 -v \
+          echo "--- build the test binary with a private GOCACHE ---"
+          GOCACHE="$(mktemp -d)" go test -race -c -o /tmp/cap.test ./internal/capacity/
+          echo "--- what the BINARY contains (the compiled constant) ---"
+          strings /tmp/cap.test | grep -F 'parseCPUAcctStatUsec = ' || true
+          echo "--- run the binary directly, not through go test ---"
+          /tmp/cap.test -test.v -test.run 'TestParseCPUAcctStatUsec|TestParseCPUStatUsec'
+          echo "--- and once more through go test, same private GOCACHE ---"
+          GOCACHE="$(mktemp -d)" go test -race -count=1 -v \
             -run 'TestParseCPUAcctStatUsec|TestParseCPUStatUsec' \
             ./internal/capacity/
           echo "--- full run ---"
