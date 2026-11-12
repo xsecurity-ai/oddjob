@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 
+from ..hosts import InvalidHost, validate_host
 from .model import ImportError_, ParsedScan
 
 #: The built-in wordlist is 4,751 entries. A ceiling well above it is
@@ -81,11 +82,23 @@ def parse(text: str) -> ParsedScan:
 
     names: list[str] = []
     seen: set[str] = set()
+    rejected = 0
     for h in (o.get("hits") or [])[:MAX_HITS]:
         if not isinstance(h, dict):
             continue
         n = str(h.get("vhost") or "").strip().lower().rstrip(".")
         if not n or n == origin or n in seen:
+            continue
+        try:
+            validate_host(n)
+        except InvalidHost:
+            # The wordlist is a directory list, not a subdomain list:
+            # entries like `.git/logs/` and `.well-known/acme-challenge`
+            # are paths that the vhost scanner appended to the domain.
+            # They answered as Host headers (the server did not 400),
+            # but they are not names a resolver would accept, so they
+            # do not belong in `hostnames`.
+            rejected += 1
             continue
         seen.add(n)
         names.append(n)
@@ -95,11 +108,21 @@ def parse(text: str) -> ParsedScan:
     if not names:
         for n in (o.get("found") or [])[:MAX_HITS]:
             n = str(n).strip().lower().rstrip(".")
-            if n and n != origin and n not in seen:
-                seen.add(n)
-                names.append(n)
+            if not n or n == origin or n in seen:
+                continue
+            try:
+                validate_host(n)
+            except InvalidHost:
+                rejected += 1
+                continue
+            seen.add(n)
+            names.append(n)
 
     host.hostnames.extend(names)
+    if rejected:
+        scan.errors.append(
+            f"{rejected} vhost name(s) were not well-formed hostnames "
+            f"(paths from the wordlist, e.g. '.git/logs/') and were dropped")
 
     wc = o.get("wildcard") or {}
     if isinstance(wc, dict) and wc.get("answers"):
