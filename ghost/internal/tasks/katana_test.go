@@ -144,6 +144,63 @@ func TestKatanaCrawls(t *testing.T) {
 	}
 }
 
+// A whole browser session -- several cookies on one line, exactly as a
+// curl -b or a Burp export carries it -- must reach the site verbatim.
+// This is the operator's real case: they paste the Cookie header of a
+// logged-in browser and expect the crawl to be that browser. katana
+// parses custom headers by splitting on the FIRST colon only, so the
+// values (full of '=' and '%') survive; what this proves is that the
+// whole line arrives as ONE Cookie header rather than being mangled or
+// dropped partway through.
+func TestKatanaMultiCookieSession(t *testing.T) {
+	var mu sync.Mutex
+	var sawCookie string
+	mux := http.NewServeMux()
+	page := func(body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			if c := r.Header.Get("Cookie"); c != "" {
+				sawCookie = c
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = fmt.Fprint(w, body)
+		}
+	}
+	mux.HandleFunc("/", page(`<html><head><title>Root</title></head><body>
+		<a href="/one">one</a></body></html>`))
+	mux.HandleFunc("/one", page(`<html><body>one</body></html>`))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	session := "cf_clearance=CrViDbRa5ThToB7k; __cf_bm=m7c2FOlzqetgNozY; ph_phc_x_posthog=%7B%22id%22%3A%2201a1d1c4%22%7D"
+	res := runKatana(context.Background(), map[string]any{
+		"url":     srv.URL,
+		"depth":   2,
+		"cookies": session,
+	}, t.TempDir())
+
+	if res.Status != "done" {
+		t.Fatalf("status=%s err=%s stderr=%s", res.Status, res.Error, res.Stderr)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// Every cookie in the pasted line is present and intact.
+	for _, want := range []string{
+		"cf_clearance=CrViDbRa5ThToB7k",
+		"__cf_bm=m7c2FOlzqetgNozY",
+		"ph_phc_x_posthog=%7B%22id%22%3A%2201a1d1c4%22%7D",
+	} {
+		if !strings.Contains(sawCookie, want) {
+			t.Errorf("cookie %q missing or mangled on the wire: %q", want, sawCookie)
+		}
+	}
+	// It is ONE Cookie header carrying all three, not three separate ones.
+	if got := strings.Count(sawCookie, ";"); got < 2 {
+		t.Errorf("expected the three cookies joined into one line, got %q", sawCookie)
+	}
+}
+
 // The old name still routes, because tasks queued before the swap are
 // still in queues and still say "gospider".
 // The `gospider` half of this is gone with the alias: across the

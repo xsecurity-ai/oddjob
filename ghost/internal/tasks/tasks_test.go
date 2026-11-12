@@ -517,6 +517,36 @@ func TestNucleiPacingYieldsToTheOperatorPerFlag(t *testing.T) {
 	}
 }
 
+// A cookie-kind credential on a target must authenticate the probe and
+// the template run exactly as it does the crawl. httpx and nuclei have
+// no -cookie flag of their own, so the session rides in as a plain
+// `Cookie:` header; without this the crawler was logged in but the
+// templates ran against the login page.
+func TestHTTPToolsCarryTheSessionCookie(t *testing.T) {
+	session := "cf_clearance=CrViDbRa5ThToB7k; __cf_bm=m7c2FOlzqetgNozY"
+	args := map[string]any{"cookies": session}
+
+	// httpx and nuclei both spell the header identically. `-H` appears
+	// more than once (the user agent is first), so look for the cookie
+	// line among ALL of them rather than taking the first value.
+	argv, _ := nucleiArgv(t.Context(), []string{"https://a.acme.example/"},
+		args, "/tmp/out.jsonl")
+	if !hasHeaderFlag(argv, "Cookie: "+session) {
+		t.Errorf("nuclei argv does not carry the session cookie as a header: %v", argv)
+	}
+
+	got := extraHeaderArgs(args)
+	want := []string{"-H", "Cookie: " + session}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("extraHeaderArgs = %v, want %v", got, want)
+	}
+
+	// No cookie means no invented header.
+	if g := extraHeaderArgs(map[string]any{}); len(g) != 0 {
+		t.Errorf("empty args produced headers: %v", g)
+	}
+}
+
 // assertFlag checks whose value ended up on the command line.
 //
 // `ours` true means the sizer supplied it: the flag is present and
@@ -546,6 +576,18 @@ func valueOf(argv []string, flag string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// hasHeaderFlag reports whether `-H value` is on the line. Unlike valueOf
+// it scans every occurrence, because -H legitimately appears more than
+// once (the user agent plus whatever the task carries).
+func hasHeaderFlag(argv []string, value string) bool {
+	for i, a := range argv {
+		if a == "-H" && i+1 < len(argv) && argv[i+1] == value {
+			return true
+		}
+	}
+	return false
 }
 
 // hasFlag has to see both spellings of the same option.

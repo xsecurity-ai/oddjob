@@ -258,12 +258,22 @@ func headerArgs(args map[string]any) []string {
 // "Name: value" form katana's `headerList` uses. Without this an
 // authenticated credential reached the crawler but not the probe and
 // the template runs, which is most of what they exist for.
+//
+// The `cookies` string rides along as its own `-H Cookie: ...` line, so
+// a cookie-kind credential on a target authenticates the probe and the
+// template run exactly as it does the crawl. katana reads `cookies`
+// itself (see headerList) and never calls this, so there is no tool that
+// sees the same session twice; httpx and nuclei have no `-cookie` flag
+// of their own, which is why the raw header is the only way in.
 func extraHeaderArgs(args map[string]any) []string {
 	var out []string
 	for _, h := range stringsArg(args, "headers") {
 		if h = strings.TrimSpace(h); h != "" && strings.Contains(h, ":") {
 			out = append(out, "-H", h)
 		}
+	}
+	if c := strings.TrimSpace(str(args, "cookies")); c != "" {
+		out = append(out, "-H", "Cookie: "+c)
 	}
 	return out
 }
