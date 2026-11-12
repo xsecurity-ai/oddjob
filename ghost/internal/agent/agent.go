@@ -1036,6 +1036,14 @@ func (a *Agent) execute(ctx context.Context, t *client.Task) {
 	}
 
 	start := time.Now()
+	// How much of this host the run costs. Measured around the task by
+	// sampling its own process tree, so the figure is the tool's and not
+	// the whole agent's. Best-effort: a platform it cannot read reports
+	// nothing rather than failing the result over a missing measurement.
+	samp := resourceSampler{}
+	if err := samp.begin(); err != nil {
+		samp = resourceSampler{} // no baseline; Stop will report nothing
+	}
 	// Recovered rather than allowed to crash: one malformed task must
 	// not take down an agent that is the only way onto that network.
 	res := func() (r tasks.Result) {
@@ -1061,12 +1069,17 @@ func (a *Agent) execute(ctx context.Context, t *client.Task) {
 	log.Printf("task %d: %s in %s — %s", t.ID, res.Status,
 		time.Since(start).Round(time.Second), res.Summary+res.Error)
 
+	// The run's cost, measured around it. Stopped here, after the tool
+	// has exited, so its final CPU and memory are included; nil when the
+	// platform could not measure it, which the server treats as "unknown".
+	resource := samp.stop()
+
 	// On disk before it goes on the wire. From here the result is
 	// owed to the server and will be re-sent until acknowledged,
 	// including across a restart.
 	if a.sp != nil {
 		if err := a.sp.Finish(t.ID, res.Status, res.Output, res.Stderr,
-			res.Summary, res.ExitCode, res.Error); err != nil {
+			res.Summary, res.ExitCode, res.Error, resource); err != nil {
 			log.Printf("task %d: spool: %v", t.ID, err)
 		}
 	}
@@ -1074,6 +1087,7 @@ func (a *Agent) execute(ctx context.Context, t *client.Task) {
 	a.report(ctx, t.ID, client.Result{
 		Status: res.Status, Output: res.Output, Stderr: res.Stderr,
 		Summary: res.Summary, ExitCode: res.ExitCode, Error: res.Error,
+		Resource: resource,
 	})
 
 	// Per-task cleanup: remove any temp files this task left behind.
@@ -1272,7 +1286,7 @@ func (a *Agent) drain(ctx context.Context) {
 			"reporting it as interrupted", e.TaskID)
 		_ = a.sp.Finish(e.TaskID, "failed", "", "", "", -1,
 			"the agent stopped while this task was running; "+
-				"it did not complete and produced no output")
+				"it did not complete and produced no output", nil)
 	}
 
 	pending, _ := a.sp.Pending()
@@ -1285,6 +1299,7 @@ func (a *Agent) drain(ctx context.Context) {
 		a.report(ctx, e.TaskID, client.Result{
 			Status: e.Status, Output: e.Output, Stderr: e.Stderr,
 			Summary: e.Summary, ExitCode: e.ExitCode, Error: e.Error,
+			Resource: e.Resource,
 		})
 	}
 }
