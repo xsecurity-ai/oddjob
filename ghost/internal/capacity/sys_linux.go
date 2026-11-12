@@ -222,9 +222,19 @@ func cpuMaxQuotaCores() int {
 // microseconds, or -1 when it cannot be read.
 func cgroupCPUUsageUsec() int64 {
 	// cgroup v2: cpu.stat under the cgroup's own directory, reached
-	// through the path named in /proc/self/cgroup.
+	// through the path named in /proc/self/cgroup. A container at the
+	// root of its own cgroup namespace (path "/") still has a valid
+	// cpu.stat at /sys/fs/cgroup/cpu.stat — the kernel namespaces it,
+	// so it is THIS container's counter, not the host's. The old code
+	// returned "" for "/" and fell back to the host-wide /proc/stat,
+	// which on a shared droplet reads the other tenants' load and
+	// reports 0% idle, stalling the fleet.
 	if p := selfCgroupPath("v2"); p != "" {
-		b, err := os.ReadFile("/sys/fs/cgroup" + p + "/cpu.stat") // #nosec G304 — p comes from /proc/self/cgroup, not from a request
+		dir := "/sys/fs/cgroup"
+		if p != "/" {
+			dir += p
+		}
+		b, err := os.ReadFile(dir + "/cpu.stat") // #nosec G304 — dir comes from /proc/self/cgroup, not from a request
 		if err == nil {
 			if u := parseCPUStatUsec(b); u > 0 {
 				return u
@@ -246,7 +256,9 @@ func cgroupCPUUsageUsec() int64 {
 // selfCgroupPath is this process's path in the named cgroup hierarchy,
 // or "" when it cannot be determined. v2 lines are "0::<path>"; v1
 // lines are "<id>:<controllers>:<path>" and the cpu controller must
-// be among them.
+// be among them. A container at the root of its own namespace reports
+// "/" — that is a valid path (the cgroup files live at the top of the
+// namespaced hierarchy), not "unknown".
 func selfCgroupPath(kind string) string {
 	b, err := os.ReadFile("/proc/self/cgroup")
 	if err != nil {
@@ -259,10 +271,7 @@ func selfCgroupPath(kind string) string {
 			if len(f) < 3 || f[1] != "" {
 				continue
 			}
-			if f[2] == "/" {
-				return ""
-			}
-			return f[2]
+			return f[2] // "/" is valid: the root of this namespace's hierarchy
 		default:
 			if len(f) < 3 || !strings.Contains(f[1], "cpu") {
 				continue

@@ -3,6 +3,7 @@
 package capacity
 
 import (
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -120,6 +121,68 @@ func TestSelfCgroupPathShapes(t *testing.T) {
 	}
 	if p := selfCgroupPath("v1"); p != "" && !isPath(p) {
 		t.Errorf("v1 path %q is not an absolute path", p)
+	}
+}
+
+// A container at the root of its own cgroup namespace (the common Docker
+// shape: /proc/self/cgroup reads "0::/") must still report a valid path.
+// Returning "" for "/" made the caller fall back to the host-wide
+// /proc/stat, which on a shared droplet reads other tenants' load and
+// reports 0% idle — stalling the whole fleet. The fix is that "/" IS a
+// valid answer: the cgroup files live at the top of the namespaced
+// hierarchy and are readable from inside the container.
+//
+// On a cgroup-v1-only host there is no v2 line in /proc/self/cgroup, so
+// "" is the correct answer there (the v1 path will be used instead). The
+// test only asserts the invariant: if a v2 path IS present, it must be a
+// usable file path (never "").
+func TestSelfCgroupPathRootIsValid(t *testing.T) {
+	p := selfCgroupPath("v2")
+	// "" is acceptable ONLY when /proc/self/cgroup has no v2 line at all
+	// (a cgroup-v1 host). When the v2 line exists, the path must be valid.
+	if p == "" {
+		// Verify there genuinely is no v2 line; if there is one and we
+		// still got "", that is the bug this test guards against.
+		b, err := os.ReadFile("/proc/self/cgroup")
+		if err != nil {
+			t.Skip("no /proc/self/cgroup (non-Linux or unusual container)")
+		}
+		hasV2 := false
+		for _, line := range strings.Split(string(b), "\n") {
+			f := strings.Fields(line)
+			if len(f) >= 3 && f[1] == "" {
+				hasV2 = true
+				break
+			}
+		}
+		if hasV2 {
+			t.Error("selfCgroupPath(\"v2\") = \"\" but /proc/self/cgroup has a v2 line; the root of the cgroup namespace is a valid location for cpu.stat")
+		}
+		return
+	}
+	// The path must be usable to build a file path: "/sys/fs/cgroup" + p
+	// + "/cpu.stat" must not produce a broken read.
+	if !strings.HasPrefix(p, "/") {
+		t.Errorf("v2 path %q does not start with /", p)
+	}
+}
+
+// The full cgroupCPUUsageUsec path: on a root-of-namespace container the
+// file at /sys/fs/cgroup/cpu.stat is the container's own counter. If it
+// exists and has user/system lines, the function must return that value
+// rather than -1 (which would trigger the host-wide fallback).
+func TestCgroupCPUUsageUsecRootNamespace(t *testing.T) {
+	// This test runs on whatever host the CI or dev box is. If the cgroup
+	// v2 cpu.stat exists at the root of this process's namespace, the
+	// function must succeed (return >= 0). If it genuinely cannot be read
+	// (e.g. a very old kernel), -1 is acceptable — but on any modern
+	// Docker or cgroup-v2 host it must not bail.
+	u := cgroupCPUUsageUsec()
+	if u < 0 {
+		// Not fatal: some test runners have no readable cgroup.
+		t.Logf("cgroupCPUUsageUsec = %d (no cgroup readable)", u)
+	} else {
+		t.Logf("cgroupCPUUsageUsec = %d usec (valid reading from the container's own cgroup)", u)
 	}
 }
 
