@@ -197,6 +197,34 @@ st, r = call(f"/api/projects/{codes[0]}/acl", "POST", {"username": "reader", "ro
 check("granting a role in the same request as the promotion works",
       st == 201, f"status={st} {str(r)[:90]}")
 
+print("\n== site admins appear in every project's acl listing ==")
+# effective_role() has always treated site-admins membership as admin on
+# EVERY project without an ACL row. The listing used to show only the raw
+# rows, so a newly promoted admin was invisible on projects they had never
+# been explicitly granted — the Users page said "nobody but X and Y" while
+# the whole group could actually administer it. They must now appear as
+# virtual entries (id < 0) that cannot be revoked from this screen.
+st, r = call(f"/api/projects/{codes[0]}/acl", token=admin)
+fa = [a for a in r if a["username"] == "freshadmin"]
+check("a site admin with no explicit row is listed as admin",
+      len(fa) == 1 and fa[0]["role"] == "admin" and fa[0]["id"] < 0,
+      str([(a["username"], a["role"], a["id"]) for a in r]))
+st, _ = call(f"/api/projects/{codes[0]}/acl/{fa[0]['id']}", "DELETE", token=admin)
+check("revoking a virtual entry is refused (no row to delete)", st == 404, f"status={st}")
+# A user who HAS an explicit row appears exactly once — the row wins — and
+# revoking it removes the row without stripping the group-derived admin.
+st, _ = call(f"/api/projects/{codes[0]}/acl", "POST",
+             {"username": "freshadmin2", "role": "user"}, token=admin)
+st, r = call(f"/api/projects/{codes[0]}/acl", token=admin)
+fa2 = [a for a in r if a["username"] == "freshadmin2"]
+check("an explicit row is not duplicated by the group membership", len(fa2) == 1,
+      str([(a["username"], a["role"], a["id"]) for a in fa2]))
+st, _ = call(f"/api/projects/{codes[0]}/acl/{fa2[0]['id']}", "DELETE", token=admin)
+st, r = call(f"/api/projects/{codes[0]}/acl", token=admin)
+fa2b = [a for a in r if a["username"] == "freshadmin2"]
+check("revoking the row leaves the virtual entry behind",
+      len(fa2b) == 1 and fa2b[0]["id"] < 0, str(fa2b))
+
 print("\n== lockout protection ==")
 # freshadmin and freshadmin2 are both site admins by the time this runs,
 # so removing brandon does NOT empty the group: the removal succeeds.
