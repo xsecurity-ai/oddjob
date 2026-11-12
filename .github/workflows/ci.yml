@@ -904,7 +904,9 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: go-${{ runner.os }}-lint-${{ matrix.goos }}-${{ hashFiles('ghost/go.sum') }}
+          # Commit in the key for the same reason as the ghost job's
+          # cache: a shared build cache replayed stale compiled packages.
+          key: go-${{ runner.os }}-lint-${{ matrix.goos }}-${{ github.sha }}-${{ hashFiles('ghost/go.sum') }}
           restore-keys: |
             go-${{ runner.os }}-lint-${{ matrix.goos }}-
 
