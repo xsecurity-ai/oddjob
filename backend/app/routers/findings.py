@@ -1672,7 +1672,7 @@ async def create_vuln(body: VulnCreate, project: str = Query(...),
     # filing six thousand has not.
     await slack.announce_finding(
         session, pr, severity=v.severity, host=t.host, title=v.title,
-        port=v.port, protocol=v.protocol, detail=v.description)
+        port=v.port, protocol=v.protocol, detail=v.description, vuln_id=v.id)
 
     # A finding somebody typed in. No scanner is responsible for
     # looking for it again, so its lifecycle reads `unconfirmed` and

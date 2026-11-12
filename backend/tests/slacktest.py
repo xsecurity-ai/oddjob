@@ -164,6 +164,25 @@ from app import slack
 check("finding line is `$severity on $host: $title`",
       "*HIGH* on `web01`: SQLi" in slack.finding_line("high", "web01", "SQLi"),
       slack.finding_line("high", "web01", "SQLi"))
+check("finding link is the address the UI navigates to",
+      slack.finding_link("https://oddjob.test/", "bruno", 6219)
+      == "https://oddjob.test/projects/BRUNO/vulns?finding=6219")
+check("a trailing slash on the base URL is not doubled",
+      slack.finding_link("https://oddjob.test", "bruno", 6219)
+      == "https://oddjob.test/projects/BRUNO/vulns?finding=6219")
+check("with no base URL there is nothing to give",
+      slack.finding_link(None, "bruno", 6219) is None)
+check("and neither with no id",
+      slack.finding_link("https://oddjob.test", "bruno", None) is None)
+thread = slack.finding_thread(8443, "tcp", "the detail", link="https://x/v")
+check("the thread ends on the link to open the finding",
+      "*Oddjob:* <https://x/v|open this finding>" in thread and
+      thread.strip().split("\n")[-1].startswith("*Oddjob:*"), thread)
+# The argument is optional, so a caller that does not know the id posts
+# exactly what it always did.
+check("without one the thread is unchanged",
+      slack.finding_thread(8443, "tcp", "the detail") ==
+      "*Port:* `8443/tcp`\nthe detail")
 check("engagement started", "Engagement started." in slack.engagement_started("FALCON"))
 check("engagement stopped", "Engagement stopped." in slack.engagement_stopped("FALCON"))
 check("import started names type and file",
@@ -572,6 +591,40 @@ call("/api/vulns?project=SLK", "POST",
 check("a low one is announced too, because a person chose to file it",
       sent("*LOW* on `hand.slk.example`") is not None,
       str([p.get("text") for p in POSTED])[:160])
+
+# The thread ends on the address of the finding itself, so a click in
+# Slack lands where a click through the UI would. Driven with a real
+# base URL, because without one there is no link and nothing to check.
+print("\n== the announcement links to the finding ==")
+call("/api/settings", "PATCH",
+     {"values": {"site.base_url": "https://oddjob.test"}}, token=admin)
+POSTED.clear()
+st, v = call("/api/vulns?project=SLK", "POST",
+             {"host": "hand.slk.example", "title": "Linked finding",
+              "severity": "high"}, token=admin)
+check("the finding is created", st == 201, f"{st} {str(v)[:80]}")
+head = sent("*HIGH* on `hand.slk.example`: Linked finding")
+check("and announced", head is not None,
+      str([p.get("text") for p in POSTED])[:200])
+thread = next((p for p in POSTED if p.get("thread_ts")), None)
+if thread:
+    check("the thread carries the link to open it",
+          "*Oddjob:* <https://oddjob.test/projects/SLK/vulns?finding=%s|open this finding>" % v["id"]
+          in (thread.get("text") or ""), str(thread.get("text"))[:200])
+    check("and it is the last line of the thread",
+          (thread.get("text") or "").strip().split("\n")[-1].startswith("*Oddjob:*"),
+          str((thread.get("text") or "").strip().split("\n")[-1])[:80])
+# No base URL, no link: a relative address would resolve against whatever
+# page Slack happens to be on, which is worse than none.
+call("/api/settings", "PATCH", {"values": {"site.base_url": ""}}, token=admin)
+POSTED.clear()
+call("/api/vulns?project=SLK", "POST",
+     {"host": "hand.slk.example", "title": "No link without a base URL",
+      "severity": "medium"}, token=admin)
+thread = next((p for p in POSTED if p.get("thread_ts")), None)
+check("with no base URL the thread has no Oddjob line",
+      thread is not None and "*Oddjob:*" not in (thread.get("text") or ""),
+      str(thread.get("text"))[:160])
 
 # The setting says "Create a channel per new project". It used to say
 # only that: ensure_channel existed and nothing called it.
