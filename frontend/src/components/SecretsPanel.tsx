@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Stack, Tooltip, alpha, Chip } from '@mui/material'
 import { RestartAlt as RestartAltIcon } from '@mui/icons-material'
 import { useQuery } from '@tanstack/react-query'
@@ -191,10 +191,12 @@ export function SecretsPanel({ project, onFinding, groupBy = 'target' }: {
     staleTime: 0,
   })
 
-  // Which groups are open. Hosts start closed: the whole point of
-  // the change is that an estate's worth of secrets is unreadable
-  // as a flat list, and opening every one of them again on load
-  // would put it straight back.
+  // Which groups are open. They start OPEN: the reason to land on this
+  // tab is to read the values, and a two-level collapse (type → file →
+  // secret) that hides every value until both levels are expanded makes
+  // the page look empty when it is full. The user can still collapse
+  // groups they do not want; "Expand all / Collapse all" remains for
+  // resetting.
   const [openHosts, setOpenHosts] = useState<Set<string>>(new Set())
   const [openFiles, setOpenFiles] = useState<Set<string>>(new Set())
 
@@ -209,6 +211,22 @@ export function SecretsPanel({ project, onFinding, groupBy = 'target' }: {
   // keys off it, and a dependency whose identity changes every time
   // is a memo that never hits and reads as though it does.
   const grouped = useMemo(() => group(data ?? [], groupBy), [data, groupBy])
+
+  // When the data first arrives, open every group so the secrets are
+  // visible without two clicks of expansion per row. Runs once: after
+  // this the user's own toggles are their state and a refetch (filter
+  // change) should not stomp them.
+  const expandedRef = useRef(false)
+  useEffect(() => {
+    if (!data || data.length === 0 || expandedRef.current) return
+    expandedRef.current = true
+    setOpenHosts(new Set(grouped.keys()))
+    const files = new Set<string>()
+    for (const [h, fs] of grouped) {
+      for (const f of fs.keys()) files.add(`${h}|${f}`)
+    }
+    setOpenFiles(files)
+  }, [data, grouped])
   // One finished list, in the order it is read: host, then its
   // files when the host is open, then their secrets when the file
   // is. Sorted worst-first within each level so the thing worth
