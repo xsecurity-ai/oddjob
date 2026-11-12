@@ -252,6 +252,22 @@ func headerArgs(args map[string]any) []string {
 	return []string{"-H", "User-Agent: " + userAgent(args)}
 }
 
+// Extra headers a task carries, as `-H` flags for the tools that take
+// them (httpx, nuclei). `headers` holds whatever the task was given --
+// a bearer token, a session cookie, an anti-CSRF header -- in the same
+// "Name: value" form katana's `headerList` uses. Without this an
+// authenticated credential reached the crawler but not the probe and
+// the template runs, which is most of what they exist for.
+func extraHeaderArgs(args map[string]any) []string {
+	var out []string
+	for _, h := range stringsArg(args, "headers") {
+		if h = strings.TrimSpace(h); h != "" && strings.Contains(h, ":") {
+			out = append(out, "-H", h)
+		}
+	}
+	return out
+}
+
 // nmapUserAgent renders the NSE script argument.
 //
 // nmap's own default announces the Nmap Scripting Engine, which is
@@ -939,6 +955,7 @@ func nucleiArgv(ctx context.Context, tg []string,
 		argv = append(argv, "-t", nucleiTemplates)
 	}
 	argv = append(argv, headerArgs(args)...)
+	argv = append(argv, extraHeaderArgs(args)...)
 	for _, t := range tg {
 		argv = append(argv, "-u", t)
 	}
@@ -1062,6 +1079,7 @@ func runHTTPX(ctx context.Context, args map[string]any, workDir string) Result {
 		argv = append(argv, "-favicon", "-jarm")
 	}
 	argv = append(argv, headerArgs(args)...)
+	argv = append(argv, extraHeaderArgs(args)...)
 	for _, t := range tg {
 		argv = append(argv, "-u", t)
 	}

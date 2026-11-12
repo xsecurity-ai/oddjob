@@ -11,6 +11,8 @@ from ..events import broker
 from ..filtering import apply_filters
 from ..hosts import normalise_host
 from ..models import (
+    ROLE_ORDER,
+    Credential,
     Event,
     Implant,
     Poc,
@@ -19,6 +21,7 @@ from ..models import (
     Service,
     Target,
     TargetAddress,
+    TargetCredential,
     TargetOrigin,
     User,
     Vuln,
@@ -32,6 +35,7 @@ from ..models import Vuln as VulnM
 from ..portcoverage import LEVELS, Range, needed, parse_ports
 from ..query import apply_search, apply_sort, paginate
 from ..schemas import (
+    CredentialOut,
     EventCreate,
     EventOut,
     ImplantOut,
@@ -46,7 +50,7 @@ from ..schemas import (
     VulnOut,
 )
 from ..scopegate import assert_allowed, index_for
-from ..security import get_current_user, require_project, visible_project_ids
+from ..security import effective_role, get_current_user, require_project, visible_project_ids
 from ..tasking import tasked_subjects
 from ..timeline import describe_changes, record
 from ..webtargets import PROBE_KINDS, WEB_KINDS
@@ -946,6 +950,7 @@ async def get_target(project: str, host: str,
 
 @router.get("/{project}/{host}/detail", response_model=TargetDetail)
 async def target_detail(project: str, host: str,
+                        user: User = Depends(get_current_user),
                         _: Project = Depends(require_project("readonly")),
                         session: AsyncSession = Depends(get_session)):
     """Target plus its services, vulns and PoCs — one request for the modal."""
@@ -990,6 +995,24 @@ async def target_detail(project: str, host: str,
                        poc_detail=pocwork.why_unconfirmed(poc),
                        poc_id=poc.id if poc is not None else None)
 
+    # The credentials a task against this target will carry: assigned to
+    # it by hand, or filed under one of its names. Same rule the queueing
+    # paths use — see app.credauth — so the modal shows what will be sent.
+    role = await effective_role(session, user, t.project_id)
+    reveal = bool(role and ROLE_ORDER[role] >= ROLE_ORDER["user"])
+    linked_ids = {r.credential_id for r in (await session.execute(
+        select(TargetCredential).where(
+            TargetCredential.target_id == t.id))).scalars().all()}
+    names = {t.host}
+    for n in (t.hostnames or []):
+        n = str(n).strip().lower()
+        if n:
+            names.add(n)
+    creds = [c for c in (await session.execute(
+        select(Credential).where(Credential.project_id == t.project_id)
+        .order_by(Credential.id))).scalars().all()
+             if c.id in linked_ids or (c.host or "").strip().lower() in names]
+
     return TargetDetail(
         target=await _one(session, t.id),
         services=[ServiceOut(**{k: getattr(x, k) for k in _SERVICE_KEYS},
@@ -1002,6 +1025,15 @@ async def target_detail(project: str, host: str,
         # Empty means nothing recorded where this target came from,
         # not that it came from nowhere. The modal says which.
         origins=(await _origins_for(session, [t.id])).get(t.id, []),
+        credentials=[CredentialOut(
+            **{k: getattr(c, k) for k in
+               ("id", "project_id", "host", "service", "port", "username",
+                "kind", "source", "validated", "notes", "created_at",
+                "updated_at")},
+            project_code=code,
+            secret=c.secret if reveal else None,
+            secret_set=bool(c.secret),
+        ) for c in creds],
     )
 
 

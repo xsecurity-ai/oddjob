@@ -68,6 +68,7 @@ from .. import (
     shellwork,
     slack,
 )
+from ..automation import CRED_TASK_KINDS
 from ..db import get_session
 from ..events import broker
 from ..hosts import validate_host
@@ -86,7 +87,7 @@ from ..models import (
     User,
     WebAsset,
 )
-from ..scopegate import as_host, check_task_targets, index_for, refuse
+from ..scopegate import as_host, check_task_targets, index_for, refuse, task_hosts
 from ..security import (
     get_current_user,
     new_agent_key,
@@ -2444,15 +2445,26 @@ async def create_task(agent_id: int, body: TaskIn,
                      f"{', '.join(INSTALLABLE)}")
     await _assert_task_in_scope(session, pr, body.kind, body.args)
 
+    task_args = dict(body.args or {})
+    # Credentials for the target this task names, when there are any.
+    # Merged last so an argument the operator sent still wins over the
+    # store; only web kinds read them — see CRED_TASK_KINDS.
+    if body.kind in CRED_TASK_KINDS:
+        from ..credauth import auth_args_for_host
+        for h in task_hosts(task_args):
+            ca = await auth_args_for_host(session, pr.id, h)
+            if ca:
+                task_args.update(ca)
+                break
     t = AgentTask(agent_id=a.id, project_id=pr.id, requested_by=user.id,
                   kind=body.kind,
-                  args=json.dumps(body.args or {}),
+                  args=json.dumps(task_args),
                   region=(body.region or "").strip().lower() or None,
                   import_as=body.import_as or TASK_KINDS.get(body.kind),
                   status="queued")
     session.add(t)
     await session.flush()
-    await _record_tasking(session, pr, body.kind, body.args or {}, user,
+    await _record_tasking(session, pr, body.kind, task_args, user,
                           a, t.id)
     await session.commit()
     await session.refresh(t)
@@ -2672,6 +2684,16 @@ async def queue_per_host(session: AsyncSession, pr: Project, kind: str,
     if kind in WEB_TASK_KINDS and not rescan:
         done = await tasked_subjects(session, pr.id, (kind,))
 
+    # Credentials the batch should carry, loaded once for every host it
+    # names. A manual queue is the operator's own decision to scan, and a
+    # credential on file for the target is part of what that decision
+    # means: the crawl sees the application behind the login, not the
+    # login. Only web kinds read them — see CRED_TASK_KINDS.
+    from ..credauth import auth_args_for_hosts, host_of
+    creds_by_host = (await auth_args_for_hosts(session, pr.id,
+                                              [host_of(s) or s for s in subjects])
+                     if kind in CRED_TASK_KINDS else {})
+
     for raw in subjects:
         subject = (raw or "").strip()
         if not subject or subject in seen:
@@ -2711,16 +2733,20 @@ async def queue_per_host(session: AsyncSession, pr: Project, kind: str,
         if (kind, subject.lower()) in done:
             repeated.append(subject)
             continue
+        task_args = {**args, "targets": [subject]}
+        # Merged last so a hand-sent argument still wins over the store.
+        h = host_of(subject) or subject.lower()
+        if creds_by_host.get(h):
+            task_args.update(creds_by_host[h])
         t = AgentTask(
             agent_id=agent.id if agent else None, project_id=pr.id,
             requested_by=user.id, kind=kind,
-            args=json.dumps({**args, "targets": [subject]}),
+            args=json.dumps(task_args),
             region=region,
             import_as=TASK_KINDS.get(kind), status="queued")
         session.add(t)
         await session.flush()
-        await _record_tasking(session, pr, kind,
-                              {**args, "targets": [subject]}, user,
+        await _record_tasking(session, pr, kind, task_args, user,
                               agent, t.id)
         created.append(t.id)
 
@@ -2815,15 +2841,25 @@ async def create_pooled_task(body: TaskIn,
                  "`region` — or queue it against a specific agent")
     await _assert_task_in_scope(session, pr, body.kind, body.args)
 
+    task_args = dict(body.args or {})
+    # Same merge as the agent-addressed path: a credential on file for
+    # the target this task names goes with it.
+    if body.kind in CRED_TASK_KINDS:
+        from ..credauth import auth_args_for_host
+        for h in task_hosts(task_args):
+            ca = await auth_args_for_host(session, pr.id, h)
+            if ca:
+                task_args.update(ca)
+                break
     t = AgentTask(agent_id=None, project_id=pr.id, requested_by=user.id,
                   kind=body.kind,
-                  args=json.dumps(body.args or {}),
+                  args=json.dumps(task_args),
                   region=(body.region or "").strip().lower() or None,
                   import_as=body.import_as or TASK_KINDS.get(body.kind),
                   status="queued")
     session.add(t)
     await session.flush()
-    await _record_tasking(session, pr, body.kind, body.args or {}, user,
+    await _record_tasking(session, pr, body.kind, task_args, user,
                           None, t.id)
     await session.commit()
     await session.refresh(t)

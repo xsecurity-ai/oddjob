@@ -1237,6 +1237,20 @@ class TargetDetail(BaseModel):
     #: Where this target came from, when anything recorded it. Empty
     #: means nothing did — see `TargetOriginOut`.
     origins: list[TargetOriginOut] = []
+    #: Credentials on file for this target: the ones assigned to it by
+    #: hand and the ones whose recorded host is one of its names. These
+    #: are what a queued web task will carry — see `app/credauth.py`.
+    credentials: list[CredentialOut] = []
+
+
+class TargetAssignCreds(BaseModel):
+    """The full set of credential ids assigned to a target.
+
+    Replaces rather than appends: the caller sends everything the target
+    should have, which makes "remove one" the same call as "add one" and
+    leaves no partial state if the list is edited twice in quick succession.
+    """
+    credential_ids: list[int] = []
 
 
 # --------------------------------------------------------------- explore
