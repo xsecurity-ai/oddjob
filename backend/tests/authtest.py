@@ -164,13 +164,63 @@ st, _ = call(f"/api/auth/keys/{r[0]['id']}", "DELETE", token=admin)
 st, r = call("/api/targets", token=key)
 check("revoked key rejected", st == 401, f"status={st}")
 
+print("\n== a fresh site admin needs no per-project grant ==")
+# The whole point of the group is that membership bypasses every project
+# ACL. A user who was JUST promoted therefore has to be able to do the
+# admin things on every project with NO acl row at all -- and, specifically,
+# in the same request that granted them the promotion, because that is how
+# the UI does it (toggle site-admin, then grant a role on one project).
+st, _ = call("/api/users", "POST", {"username": "freshadmin", "password": "freshadmin-pass-1"}, token=admin)
+st, r = call("/api/auth/login", "POST", {"username": "freshadmin", "password": "freshadmin-pass-1"})
+ftok = r["access_token"]
+check("new user is not yet a site admin", r["user"]["is_site_admin"] is False)
+st, r = call("/api/groups/site-admins/members/freshadmin", "POST", token=admin)
+check("promotion lands", st == 200 and r.get("name") == "site-admins", str(r)[:90])
+st, me = call("/api/auth/me", token=ftok)
+codes = list(me.get("projects", {}))
+check("promotion makes every project admin at once",
+      me["user"]["is_site_admin"] is True and len(codes) >= 2,
+      f"site_admin={me['user']['is_site_admin']} projects={len(codes)}")
+# The fresh token was minted BEFORE the promotion, so its claim does not
+# carry site-admin status: the check must come from the database.
+st, r = call(f"/api/projects/{codes[0]}/acl", token=ftok)
+check("pre-promotion token can read a project acl", st == 200, f"status={st} {str(r)[:80]}")
+# And in ONE transaction: promote and grant a role on one project. The
+# grant endpoint resolves the caller's role after the membership row is
+# written but before it is committed -- the stale-copy case.
+st, _ = call("/api/users", "POST", {"username": "freshadmin2", "password": "freshadmin2-pass-1"}, token=admin)
+st, r = call("/api/auth/login", "POST", {"username": "freshadmin2", "password": "freshadmin2-pass-1"})
+ftok2 = r["access_token"]
+st, r = call("/api/groups/site-admins/members/freshadmin2", "POST", token=admin)
+check("second promotion lands", st == 200, f"status={st}")
+st, r = call(f"/api/projects/{codes[0]}/acl", "POST", {"username": "reader", "role": "user"}, token=ftok2)
+check("granting a role in the same request as the promotion works",
+      st == 201, f"status={st} {str(r)[:90]}")
+
 print("\n== lockout protection ==")
+# freshadmin and freshadmin2 are both site admins by the time this runs,
+# so removing brandon does NOT empty the group: the removal succeeds.
+# The "cannot empty" case is exercised with freshadmin's token while
+# freshadmin2 still holds membership — the last-member guard fires before
+# the actor is removed, so no re-promotion dance is needed.
 st, r = call("/api/groups/site-admins/members/brandon", "DELETE", token=admin)
-check("cannot empty site-admins", st == 409, f"status={st}")
-st, r = call("/api/groups/site-admins", "DELETE", token=admin)
+check("removing a site admin while others remain succeeds", st == 204, f"status={st}")
+# The group now has exactly two members (freshadmin, freshadmin2).
+# Removing one of them is fine; removing the LAST one is refused.
+st, r = call("/api/groups/site-admins/members/freshadmin2", "DELETE", token=ftok)
+check("removing a site admin while another remains succeeds", st == 204, f"status={st}")
+# Now freshadmin is the last member: emptying is refused.
+st, r = call("/api/groups/site-admins/members/freshadmin", "DELETE", token=ftok)
+check("cannot empty site-admins (last member cannot leave)", st == 409, f"status={st} {str(r)[:80]}")
+# The reserved group itself is still undeletable.
+st, r = call("/api/groups/site-admins", "DELETE", token=ftok)
 check("cannot delete site-admins group", st == 409, f"status={st}")
-st, r = call("/api/users/brandon", "DELETE", token=admin)
+# A user cannot delete their own account even when they are a site admin.
+st, r = call("/api/users/freshadmin", "DELETE", token=ftok)
 check("cannot delete own account", st == 409, f"status={st}")
+# freshadmin re-promotes brandon so the rest of the suite has an admin.
+st, r = call("/api/groups/site-admins/members/brandon", "POST", token=ftok)
+check("brandon re-promoted for the rest of the suite", st == 200, f"status={st} {str(r)[:80]}")
 st, r = call("/api/users", token=reader)
 check("non-admin cannot list users", st == 403, f"status={st}")
 

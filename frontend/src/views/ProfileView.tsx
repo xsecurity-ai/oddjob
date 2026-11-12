@@ -121,6 +121,7 @@ export function ProfileView() {
   const qc = useQueryClient()
   const u = me!.user
 
+  const [username, setUsername] = useState(u.username)
   const [fullName, setFullName] = useState(u.full_name ?? '')
   const [email, setEmail] = useState(u.email ?? '')
   const [slack, setSlack] = useState(u.slack_handle ?? '')
@@ -139,6 +140,10 @@ export function ProfileView() {
     try {
       const saved = await api.updateProfile({
         full_name: fullName || null, email: email || null,
+        // A rename is a real identity change: the server normalises it
+        // (lowercase, trimmed) and follows it into every grant, so read
+        // the saved name back rather than trusting what was typed.
+        ...(username.trim() !== u.username ? { username: username.trim() } : {}),
         // Empty clears it, which is the only way to stop it being
         // offered. The server stores it bare, so read the saved value
         // back rather than leaving "@someone" on screen beside a row
@@ -148,6 +153,7 @@ export function ProfileView() {
       // Read back from the response so the server's @-stripping
       // shows, rather than leaving what was typed on screen.
       setSlack(saved.slack_handle ?? '')
+      setUsername(saved.username)
       await refresh()
       setMsg({ kind: 'ok', text: 'Details saved.' })
     } catch (e) {
@@ -244,6 +250,12 @@ export function ProfileView() {
           </Stack>
 
           <Stack component="form" onSubmit={saveDetails} spacing={2}>
+            <TextField size="small" label="Username" value={username}
+                       onChange={(e) => setUsername(e.target.value)}
+                       helperText={`Your name on the site: it is what you sign in with, and
+                                    what appears in timelines and audit trails. Letters, digits
+                                    and . _ - only. Renaming keeps your grants — they follow
+                                    the account, not its name.`.replace(/\s+/g, ' ')} />
             <TextField size="small" label="Full name" value={fullName}
                        onChange={(e) => setFullName(e.target.value)} />
             <TextField size="small" label="Email" type="email" value={email}

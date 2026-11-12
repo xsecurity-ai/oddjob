@@ -200,7 +200,7 @@ import sys as _sys
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from datetime import UTC, datetime
 
-from sqlalchemy import create_engine, update
+from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import Session
 
 from app.models import MagicLink
@@ -228,6 +228,31 @@ print("\n== invite (site admin, reports honestly) ==")
 call("/api/users", "PATCH", {}, token=admin)
 st, r = call("/api/auth/invite/root", "POST", token=admin)
 check("invite sends", st == 200 and r["ok"] is True, str(r)[:80])
+
+# The invitation link must outlive the session that sent it. It lives in
+# the database rather than memory, so a restart cannot kill it — what can
+# kill it is a TTL too short for onboarding, which is why this asserts the
+# expiry window directly instead of trusting the email's wording.
+from app.routers import magic as _magic
+
+_eng2 = create_engine("sqlite:///" + os.environ.get("ODDJOB_DB", "/tmp/ms-m.db"))
+with Session(_eng2) as _s:
+    _rows = _s.execute(
+        select(MagicLink).where(MagicLink.purpose == "invite")
+        .order_by(MagicLink.id.desc())).scalars().all()
+    _now = datetime.now(UTC)
+    for _l in _rows:
+        _exp = _l.expires_at if _l.expires_at.tzinfo else _l.expires_at.replace(tzinfo=UTC)
+        check(f"invite link {_l.id} expires about 3 days out",
+              2 * 86400 < (_exp - _now).total_seconds() <= 4 * 86400,
+              f"seconds={int((_exp - _now).total_seconds())}")
+    check("invite email says the truth about its own expiry",
+          "3 days" in INBOX[-1], "")
+_eng2.dispose()
+check("login links stay short-lived",
+      _magic.TTL_MINUTES <= 60 and _magic.INVITE_TTL_DAYS >= 3,
+      f"login={_magic.TTL_MINUTES}min invite={_magic.INVITE_TTL_DAYS}d")
+
 call("/api/users", "POST", {"username": "noemail", "password": "noemail-pass-1"}, token=admin)
 st, r = call("/api/auth/invite/noemail", "POST", token=admin)
 check("missing email reported, not hidden", r["ok"] is False and "no email" in r["detail"], str(r))
