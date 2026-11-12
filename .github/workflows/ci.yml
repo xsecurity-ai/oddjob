@@ -414,7 +414,7 @@ jobs:
           echo "--- what the BINARY contains (the compiled constant) ---"
           strings /tmp/cap.test | grep -F 'parseCPUAcctStatUsec = ' || true
           echo "--- run the binary directly, not through go test ---"
-          /tmp/cap.test -test.v -test.run 'TestParseCPUAcctStatUsec|TestParseCPUStatUsec'
+          /tmp/cap.test -test.v -test.run 'TestParseCPUAcctStatUsec|TestParseCPUStatUsec|TestDiagPrintInput'
           echo "--- and once more through go test, same private GOCACHE ---"
           GOCACHE="$(mktemp -d)" go test -race -count=1 -v \
             -run 'TestParseCPUAcctStatUsec|TestParseCPUStatUsec' \
