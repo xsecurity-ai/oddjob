@@ -3,6 +3,7 @@
 package capacity
 
 import (
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -130,18 +131,38 @@ func TestSelfCgroupPathShapes(t *testing.T) {
 // reports 0% idle — stalling the whole fleet. The fix is that "/" IS a
 // valid answer: the cgroup files live at the top of the namespaced
 // hierarchy and are readable from inside the container.
+//
+// On a cgroup-v1-only host there is no v2 line in /proc/self/cgroup, so
+// "" is the correct answer there (the v1 path will be used instead). The
+// test only asserts the invariant: if a v2 path IS present, it must be a
+// usable file path (never "").
 func TestSelfCgroupPathRootIsValid(t *testing.T) {
-	// On a host where this test runs in its own namespace (Docker, CI),
-	// the v2 path is "/". On a bare-metal dev box it may be a longer
-	// path. Either way it must not be "".
 	p := selfCgroupPath("v2")
+	// "" is acceptable ONLY when /proc/self/cgroup has no v2 line at all
+	// (a cgroup-v1 host). When the v2 line exists, the path must be valid.
 	if p == "" {
-		t.Fatal("selfCgroupPath(\"v2\") = \"\", want a path (\"/\" at minimum); the root of the cgroup namespace is a valid location for cpu.stat")
+		// Verify there genuinely is no v2 line; if there is one and we
+		// still got "", that is the bug this test guards against.
+		b, err := os.ReadFile("/proc/self/cgroup")
+		if err != nil {
+			t.Skip("no /proc/self/cgroup (non-Linux or unusual container)")
+		}
+		hasV2 := false
+		for _, line := range strings.Split(string(b), "\n") {
+			f := strings.Fields(line)
+			if len(f) >= 3 && f[1] == "" {
+				hasV2 = true
+				break
+			}
+		}
+		if hasV2 {
+			t.Error("selfCgroupPath(\"v2\") = \"\" but /proc/self/cgroup has a v2 line; the root of the cgroup namespace is a valid location for cpu.stat")
+		}
+		return
 	}
 	// The path must be usable to build a file path: "/sys/fs/cgroup" + p
-	// + "/cpu.stat" must not produce a double-slash that breaks the read.
-	// (The kernel tolerates "///", so this is a belt-and-braces check.)
-	if p != "/" && !strings.HasPrefix(p, "/") {
+	// + "/cpu.stat" must not produce a broken read.
+	if !strings.HasPrefix(p, "/") {
 		t.Errorf("v2 path %q does not start with /", p)
 	}
 }
@@ -158,9 +179,8 @@ func TestCgroupCPUUsageUsecRootNamespace(t *testing.T) {
 	// Docker or cgroup-v2 host it must not bail.
 	u := cgroupCPUUsageUsec()
 	if u < 0 {
-		// Not fatal: some test runners (macOS cross-compile) have no
-		// cgroup at all. On Linux with cgroup v2 this should succeed.
-		t.Logf("cgroupCPUUsageUsec = %d (no cgroup readable; acceptable on non-Linux)", u)
+		// Not fatal: some test runners have no readable cgroup.
+		t.Logf("cgroupCPUUsageUsec = %d (no cgroup readable)", u)
 	} else {
 		t.Logf("cgroupCPUUsageUsec = %d usec (valid reading from the container's own cgroup)", u)
 	}
