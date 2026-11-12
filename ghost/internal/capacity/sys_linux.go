@@ -153,8 +153,15 @@ func cgroupCPUBusy() (busy, wall uint64, ok bool) {
 	if b < 0 {
 		return 0, 0, false
 	}
-	wall = uint64(time.Since(cgroupWallStart).Microseconds()) * uint64(coresForWall())
-	// #nosec G115 — b is checked >= 0 above; the conversion cannot overflow.
+	// Both operands are non-negative: the wall clock since process
+	// start and a core count of at least one, so the product cannot
+	// overflow for any lifetime this agent will live.
+	w := time.Since(cgroupWallStart).Microseconds()
+	if w < 0 {
+		w = 0
+	}
+	wall = uint64(w) * uint64(coresForWall()) // #nosec G115 — both operands non-negative, see above
+	// b is checked >= 0 above; the conversion cannot overflow.
 	bu := uint64(b) // #nosec G115
 	return bu, wall, true
 }
@@ -290,9 +297,11 @@ func parseCPUStatUsec(b []byte) int64 {
 
 // parseCPUAcctStatUsec sums the v1 cpuacct.stat user and system
 // counters, in microseconds. The kernel names them `user` and
-// `system` and counts nanoseconds, so each is divided down.
+// `system` and counts NANOseconds, so the sum is divided down ONCE
+// rather than each field: dividing per line loses up to 999 ns of
+// remainder per counter, which at these magnitudes is a visible error.
 func parseCPUAcctStatUsec(b []byte) int64 {
-	var sum int64
+	var sumNS int64
 	for _, line := range strings.Split(string(b), "\n") {
 		f := strings.Fields(line)
 		if len(f) < 2 {
@@ -304,10 +313,10 @@ func parseCPUAcctStatUsec(b []byte) int64 {
 		}
 		switch f[0] {
 		case "user", "system":
-			sum += n / 1000
+			sumNS += n
 		}
 	}
-	return sum
+	return sumNS / 1000
 }
 
 // cpuSetCores is how many cores this cgroup's CPUSET names, or 0 when
@@ -332,7 +341,7 @@ func cpuSetCores() int {
 		default:
 			continue
 		}
-		b, err := os.ReadFile(p) // #nosec G304 — p is built from /proc/self/cgroup fields, not from a request
+		b, err := os.ReadFile(p) // #nosec G703,G304 — p is built from /proc/self/cgroup fields, not from a request
 		if err != nil {
 			continue
 		}
