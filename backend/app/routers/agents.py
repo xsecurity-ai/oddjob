@@ -87,8 +87,13 @@ from ..models import (
     WebAsset,
 )
 from ..scopegate import as_host, check_task_targets, index_for, refuse
-from ..security import (get_current_user, new_agent_key, require_project,
-                        require_site_admin, verify_key)
+from ..security import (
+    get_current_user,
+    new_agent_key,
+    require_project,
+    require_site_admin,
+    verify_key,
+)
 from ..tasking import outstanding_subjects, tasked_subjects
 from ..timeline import record
 from ..webtargets import WEB_TASK_KINDS

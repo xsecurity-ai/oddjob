@@ -73,7 +73,9 @@ func (s *resourceSampler) stop() *client.Resource {
 		r.MemPeakBytes = s.peakMem
 	}
 	if okN && netNow >= s.baseNet {
-		r.NetBytes = int64(netNow - s.baseNet)
+		// The delta is bounded by what moved on this host's interfaces
+		// during one task, far from 2^63.
+		r.NetBytes = int64(netNow - s.baseNet) // #nosec G115
 	}
 	return r
 }
