@@ -1618,6 +1618,13 @@ export const api = {
     req<{ ok: boolean; id: number; target_url: string; note: string }>(
       `/api/pocs/${id}/run` + qs({ project }),
       { method: 'POST', body: JSON.stringify(url ? { url } : {}) }),
+  /** Record that an operator confirmed this proof by hand — run it
+   *  outside the platform (browser, staging, curl) and tell the record
+   *  so. Sets exit_code=0, validated_at=now; the operator's words
+   *  become the verdict. */
+  confirmPoc: (project: string, id: number, verdict: string) =>
+    req<PocDetail>(`/api/pocs/${id}/confirm` + qs({ project }),
+      { method: 'POST', body: JSON.stringify({ verdict }) }),
   /** `state` is live | ended | all. `scans` includes peers
    *  identified as port scanners — they are kept either way, this
    *  only hides them. */
