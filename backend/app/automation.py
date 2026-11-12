@@ -78,8 +78,8 @@ from dataclasses import dataclass, field, replace
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import clouds, geoip
 from . import domains as gen
-from . import geoip
 from .db import SessionLocal
 from .events import broker
 from .hosts import dns_subject, valid_reg_name
@@ -93,6 +93,7 @@ from .models import (
     DomainSearch,
     Poc,
     Project,
+    ProjectScope,
     Target,
     TargetAddress,
     Vuln,
@@ -101,6 +102,7 @@ from .roots import walked_zones
 from .scope import ScopeIndex
 from .scopegate import as_host, index_for
 from .tasking import outstanding_subjects, tasked_subjects
+from .timeline import record
 from .webtargets import WEB_KINDS, crawl_seeds, discoverable
 
 log = logging.getLogger(__name__)
@@ -412,6 +414,61 @@ def name_subjects(s: Snapshot) -> list[tuple[str, bool]]:
     unaskable ABOUT BY NAME.
     """
     return [(h, has) for h, has in s.targets if h not in s.not_dns_named]
+
+
+async def scope_hosts(session: AsyncSession, project_id: int) -> set[str]:
+    """The hostnames the scope NAMES that are worth holding as targets.
+
+    A scope is an authorisation and a target list is an inventory; until
+    this existed they were kept separately and the gap between them was
+    invisible. `auto_amass` enumerates under a zone, and amass's results
+    become targets on import — so a project scoped to a WILDCARD or a
+    range fills in its own estate as enumeration runs. But a scope entry
+    that NAMES a specific host (`app.acme.example`) authorises touching
+    exactly that name: nothing enumerates it into existence, and with no
+    target row the port-scanning policies never see it. The named host
+    sat in scope, out of inventory, unscanned, for ever — which is what
+    "add targets to the scope" was supposed to mean.
+
+    Two kinds of entry contribute:
+
+      fqdn        the name itself. With `include_subdomains` the zone
+                  comes with it and amass will find the rest; without it
+                  the entry names exactly one host, and that is the one
+                  that must exist as a target for anything to run at it.
+      wildcard    its apex. `*.acme.example` does not cover the apex in
+                  DNS terms, but the apex is where TLS certificates are
+                  served from and where a vhost sweep starts; holding it
+                  is what makes "scan everything in scope" true for the
+                  zone the operator wrote down.
+
+    Excluded entries contribute nothing: barring a name does not make it
+    an asset. Cloud-provider zones are dropped, matching `walked_zones`
+    and `enumerable_roots` — the provider's apex is infrastructure, not
+    a client host to scan.
+    """
+    out: set[str] = set()
+    rows = (await session.execute(
+        select(ProjectScope.value, ProjectScope.kind,
+               ProjectScope.included, ProjectScope.include_subdomains)
+        .where(ProjectScope.project_id == project_id))).all()
+    for value, kind, included, subs in rows:
+        if not included or not value:
+            continue
+        v = (value or "").strip().lower()
+        if kind == "fqdn":
+            # Without `include_subdomains` the entry names exactly one
+            # host and that is the one that must exist as a target.
+            # With it, the zone comes along and amass will find the
+            # rest; only the apex itself is owed a row here, exactly
+            # as `scope_roots` infers it for enumeration.
+            out.add(v if not subs else gen.registrable(v) or v)
+        elif kind == "wildcard":
+            base = v[2:].strip()          # "*.x.y" -> "x.y"
+            if base:
+                out.add(base)
+    return {h for h in out
+            if h and "." in h and not clouds.is_cloud_domain(h)}
 
 
 @dataclass(frozen=True)
@@ -1042,6 +1099,47 @@ async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
             # above.
             await session.rollback()
             log.warning("cert naming: %s", e)
+
+    # A scope entry that NAMES a host is an authorisation AND an asset:
+    # the operator wrote it down because they intend it to be worked,
+    # and every policy below reads its subjects from the target list.
+    # Until this existed, a project scoped to `app.acme.example` (a
+    # plain FQDN, no wildcard) had nothing to enumerate it into
+    # existence -- amass runs under zones, not single names -- so the
+    # named host never became a target and every policy looked at an
+    # estate that did not include what the scope said was in it.
+    #
+    # Creating the row is the whole of the work: `plan` reads the
+    # snapshot AFTER this, so the new target is a candidate for
+    # resolution, port scanning and everything else in the same cycle.
+    # The gate still decides per subject downstream; this only fills
+    # the inventory with what the operator already authorised.
+    try:
+        want_hosts = await scope_hosts(session, pr.id)
+        if want_hosts:
+            have = set((await session.execute(
+                select(Target.host).where(
+                    Target.project_id == pr.id))).scalars().all())
+            missing = sorted(want_hosts - have)
+            if missing:
+                for h in missing:
+                    t = Target(project_id=pr.id, host=h, alive=None)
+                    session.add(t)
+                    await session.flush()
+                    await record(session, t.id, "discovered",
+                                 "added from the project scope",
+                                 detail=("The scope names this host; it now "
+                                         "has a target row so the standing "
+                                         "orders can work it."),
+                                 actor=None, source="standing-orders")
+                await session.commit()
+                log.info("scope named %d host(s) in %s: %s", len(missing),
+                         pr.code, ", ".join(missing[:5]))
+    except Exception as e:                   # noqa: BLE001
+        # Never fatal to the cycle. A row that could not be written is a
+        # gap; the scans are the job -- the same rule cert naming follows.
+        await session.rollback()
+        log.warning("scope materialisation: %s", e)
 
     snap = await snapshot(session, pr)
     want = plan(snap)
