@@ -229,7 +229,7 @@ func cgroupCPUUsageUsec() int64 {
 	// returned "" for "/" and fell back to the host-wide /proc/stat,
 	// which on a shared droplet reads the other tenants' load and
 	// reports 0% idle, stalling the fleet.
-	if p := selfCgroupPath("v2"); p != "" || p == "/" {
+	if p := selfCgroupPath("v2"); p != "" {
 		dir := "/sys/fs/cgroup"
 		if p != "/" {
 			dir += p
