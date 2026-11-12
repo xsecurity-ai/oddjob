@@ -176,9 +176,11 @@ func runVhost(ctx context.Context, args map[string]any, workDir string) Result {
 
 	names := make([]string, 0, len(found))
 	hits := make([]vhostHit, 0, len(found))
+	dropped := 0
 	for r := range found {
 		n := strings.TrimSpace(r.Vhost)
-		if n == "" {
+		if n == "" || !validVhostName(n) {
+			dropped++
 			continue
 		}
 		h := vhostHit{Vhost: n, Status: r.StatusCode, Size: r.Size}
@@ -209,7 +211,13 @@ func runVhost(ctx context.Context, args map[string]any, workDir string) Result {
 		"url": url, "domain": domain, "wordlist": which,
 		"found": names, "hits": hits,
 	}
+	if dropped > 0 {
+		out["dropped"] = dropped
+	}
 	sum := fmt.Sprintf("vhost: %d name(s) on %s", len(names), url)
+	if dropped > 0 {
+		sum += fmt.Sprintf(", %d dropped (not valid hostnames)", dropped)
+	}
 	// Reported, not just acted on. An operator reading "0 found"
 	// needs to know whether that was a clean result or a wildcard
 	// that swallowed the run.
@@ -226,6 +234,52 @@ func runVhost(ctx context.Context, args map[string]any, workDir string) Result {
 		Stderr:  tail(strings.Join(stderr, "\n"), 4000),
 		Summary: sum,
 	}
+}
+
+// validVhostName says whether a swept "name" is a hostname at all.
+//
+// The wordlist supplies DIRECTORY words as well as names -- SecLists'
+// common.txt has `.git/logs/` and `.bash_history` in it, because the
+// same list feeds content discovery next door -- and with
+// `AppendDomain: true` those become `".git/logs/.media.weavy.ai"`,
+// which is not a name: no resolver accepts it, no certificate will
+// ever cover it, and stored as a hostname it becomes a bucket findings
+// accumulate in. The backend importer applies the same rule to what
+// arrives, so a sweep run by an older agent cannot re-introduce them;
+// this check keeps the output honest at the source.
+//
+// Mirrors `validate_host` in app/hosts.py: lowercase labels of
+// alnum/hyphen/underscore, alnum or underscore at each end, no label
+// over 63 characters, nothing over 253 overall.
+func validVhostName(n string) bool {
+	if n == "" || len(n) > 253 || strings.ContainsAny(n, "/\\ \t") {
+		return false
+	}
+	for _, label := range strings.Split(n, ".") {
+		if !validLabel(label) {
+			return false
+		}
+	}
+	return true
+}
+
+func validLabel(l string) bool {
+	if l == "" || len(l) > 63 {
+		return false
+	}
+	for i := 0; i < len(l); i++ {
+		c := l[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '-' || c == '_':
+			if i == 0 || i == len(l)-1 {
+				return false // labels end in alnum or underscore
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // vhostHit is one name the address answered to, and what it said.
