@@ -82,11 +82,18 @@ from ..models import (
     ProxyGrant,
     Setting,
     Target,
+    TaskResourceSample,
     User,
     WebAsset,
 )
 from ..scopegate import as_host, check_task_targets, index_for, refuse
-from ..security import get_current_user, new_agent_key, require_project, verify_key
+from ..security import (
+    get_current_user,
+    new_agent_key,
+    require_project,
+    require_site_admin,
+    verify_key,
+)
 from ..tasking import outstanding_subjects, tasked_subjects
 from ..timeline import record
 from ..webtargets import WEB_TASK_KINDS
@@ -678,6 +685,15 @@ class ResultIn(BaseModel):
     summary: str | None = None
     exit_code: int | None = None
     error: str | None = None
+    #: How much of the ghost this run used. Optional and new: an agent
+    #: that predates reporting it sends nothing, and a result must never
+    #: be rejected over a missing measurement. Stored on its own table,
+    #: not on the task, because it describes the fleet's machinery rather
+    #: than the client's estate.
+    resource: dict | None = Field(
+        default=None,
+        description="How much of the ghost this run used: cpu_seconds, "
+                    "mem_peak_bytes, net_bytes, duration_seconds")
 
 
 def _tools(raw: str | None) -> dict:
@@ -4381,6 +4397,49 @@ async def task_secret(task_id: int, a: Agent = Depends(agent_from_key),
     return {"secret": sec.secret}
 
 
+@router.get("/tasks/resources", response_model=list[dict])
+async def list_task_resources(project: str,
+                              user: User = Depends(require_site_admin),
+                              session: AsyncSession = Depends(get_session)):
+    """How much of a ghost each task used.
+
+    Site-admin only, and deliberately NOT on the task serializers: the
+    figures describe this fleet's own machinery — how hard one unit of
+    work hit a host — not the client's estate, so nothing a project
+    member can read should carry them. The question answered is "how
+    much would a scan like this cost on a ghost like that", which is
+    what an operator weighs before pointing heavy work at a small host.
+
+    One row per task (the latest attempt), joined to the task's kind and
+    subject so a reader can group by kind without a second round trip.
+    """
+    pr = (await session.execute(
+        select(Project).where(Project.code == project))).scalars().first()
+    if pr is None:
+        raise HTTPException(404, "no such project")
+    rows = (await session.execute(
+        select(TaskResourceSample, AgentTask.kind, AgentTask.args)
+        .join(AgentTask, AgentTask.id == TaskResourceSample.task_id)
+        .where(AgentTask.project_id == pr.id)
+        .order_by(TaskResourceSample.created_at.desc())
+        .limit(500))).all()
+    out = []
+    for s, kind, args in rows:
+        subj = _subject(kind, json.loads(args) if args else {})
+        out.append({
+            "task_id": s.task_id,
+            "agent_id": s.agent_id,
+            "kind": kind,
+            "subject": None if subj in ("", "—") else subj,
+            "cpu_seconds": s.cpu_seconds,
+            "mem_peak_bytes": s.mem_peak_bytes,
+            "net_bytes": s.net_bytes,
+            "duration_seconds": s.duration_seconds,
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+        })
+    return out
+
+
 @router.post("/tasks/{task_id}/result", response_model=dict)
 async def submit_result(task_id: int, body: ResultIn,
                         a: Agent = Depends(agent_from_key),
@@ -4443,6 +4502,38 @@ async def submit_result(task_id: int, body: ResultIn,
                                  if requeued else "")
                               + (f" exit={t.exit_code}" if t.exit_code is not None else "")
                               + (f" import={t.import_as}" if t.import_as else ""))
+    # The run's cost, when the agent measured it. One row per task: an
+    # attempt that requeued replaces the last sample so the table holds
+    # the most recent measurement of this work rather than a history. A
+    # missing `duration_seconds` is filled from the task's own clock,
+    # because that is what a CPU figure needs to be read as a rate.
+    if body.resource:
+        r = body.resource
+        existing = (await session.execute(
+            select(TaskResourceSample)
+            .where(TaskResourceSample.task_id == t.id))).scalars().first()
+        if existing is not None:
+            await session.delete(existing)
+        # _aware on both: SQLite hands back naive datetimes for the same
+        # column Postgres returns aware, and subtracting the two raises.
+        sa = _aware(t.started_at)
+        fa = _aware(t.finished_at)
+        dur = (fa - sa) if (sa and fa) else None
+        duration = (float(r["duration_seconds"])
+                    if isinstance(r.get("duration_seconds"), (int, float))
+                    else (dur.total_seconds() if dur else None))
+        session.add(TaskResourceSample(
+            task_id=t.id, agent_id=a.id,
+            cpu_seconds=(float(r["cpu_seconds"])
+                         if isinstance(r.get("cpu_seconds"), (int, float))
+                         else None),
+            mem_peak_bytes=(int(r["mem_peak_bytes"])
+                            if isinstance(r.get("mem_peak_bytes"), int)
+                            else None),
+            net_bytes=(int(r["net_bytes"])
+                       if isinstance(r.get("net_bytes"), int) else None),
+            duration_seconds=duration,
+        ))
     await session.commit()
 
     imported = None

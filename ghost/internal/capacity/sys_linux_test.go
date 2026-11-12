@@ -3,6 +3,8 @@
 package capacity
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -41,8 +43,22 @@ func TestParseCPUAcctStatUsec(t *testing.T) {
 	// slip is the whole hazard: reading ns as us would make every busy
 	// sample a thousand times too large and the idle figure zero.
 	const sample = "user 1000000000\nsystem 234567890\n"
-	if got := parseCPUAcctStatUsec([]byte(sample)); got != 1234567890 {
-		t.Errorf("parseCPUAcctStatUsec = %d usec, want 1234567890", got)
+	// Expected value computed from the sample's own fields rather than
+	// written as a constant: if the literal and the expectation ever
+	// drift apart, the failure says which number it actually held.
+	var want int64
+	for _, line := range strings.Split(sample, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		n, _ := strconv.ParseInt(f[1], 10, 64)
+		want += n
+	}
+	want /= 1000
+	got := parseCPUAcctStatUsec([]byte(sample))
+	if got != want {
+		t.Errorf("parseCPUAcctStatUsec = %d usec, want %d (sum of the sample's user+system fields, divided once); sample=%q", got, want, sample)
 	}
 	if got := parseCPUAcctStatUsec(nil); got != 0 {
 		t.Errorf("empty input gave %d, want 0", got)

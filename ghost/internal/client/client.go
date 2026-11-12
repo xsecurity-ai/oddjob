@@ -262,13 +262,27 @@ func (c *Client) Enroll(ctx context.Context, token, pub, kexPub string) (*Enroll
 	return &out, err
 }
 
+// Resource is how much of this host one task used, measured around the
+// run by the agent itself. Reported with the result so the server can
+// keep a per-task cost in its own database and an operator can answer
+// "how hard would that scan hit this ghost". Every field is optional:
+// a platform or a moment where it could not be measured omits it, and
+// a result must never fail to deliver over a missing measurement.
+type Resource struct {
+	CPUSec       float64 `json:"cpu_seconds,omitempty"`
+	MemPeakBytes int64   `json:"mem_peak_bytes,omitempty"`
+	NetBytes     int64   `json:"net_bytes,omitempty"`
+	DurationSec  float64 `json:"duration_seconds,omitempty"`
+}
+
 type Result struct {
-	Status   string `json:"status"` // done | failed
-	Output   string `json:"output,omitempty"`
-	Stderr   string `json:"stderr,omitempty"`
-	Summary  string `json:"summary,omitempty"`
-	ExitCode int    `json:"exit_code"`
-	Error    string `json:"error,omitempty"`
+	Status   string    `json:"status"` // done | failed
+	Output   string    `json:"output,omitempty"`
+	Stderr   string    `json:"stderr,omitempty"`
+	Summary  string    `json:"summary,omitempty"`
+	ExitCode int       `json:"exit_code"`
+	Error    string    `json:"error,omitempty"`
+	Resource *Resource `json:"resource,omitempty"`
 }
 
 // newNonce mirrors the identity package's: 128 bits, used once.

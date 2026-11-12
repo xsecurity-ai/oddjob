@@ -3635,6 +3635,96 @@ check("and no key is no answer",
       call("/api/ghosts/assets/held", "POST", {"urls": []})[0] in (401, 403),
       call("/api/ghosts/assets/held", "POST", {"urls": []})[0])
 
+print("== per-task resource capture ==")
+# A result can carry how much of the ghost the run used. It is stored on
+# its own table, not on the task, because it describes the fleet's
+# machinery rather than the client's estate -- and so it is only visible
+# to a site admin, never through the task serializers a project member reads.
+# A fresh agent: the ones enrolled earlier in this suite have been killed
+# and unenrolled by the sections that test that, so AID no longer exists.
+st, _enr = call("/api/ghosts?project=AGENT", "POST",
+                {"name": "resource-agent"}, token=admin)
+RAID = ((_enr or {}).get("agent") or {}).get("id")
+RKEY = (_enr or {}).get("callback_key")
+check("an agent to measure against is enrolled", RAID is not None, str(_enr)[:120])
+st, _t = call(f"/api/ghosts/{RAID}/tasks?project=AGENT", "POST",
+              {"kind": "nslookup", "args": {"targets": ["res.example"]}},
+              token=admin)
+RID = (_t or {}).get("id")
+check("a task to measure is queued", RID is not None, str(_t)[:120])
+st, _ = call(f"/api/ghosts/tasks/{RID}/start", "POST", {}, key=RKEY)
+check("the agent marks it running", st == 200, f"status={st}")
+# A result WITH a resource measurement. The server must store it.
+st, _ = call(f"/api/ghosts/tasks/{RID}/result", "POST",
+             {"status": "done", "output": "[]", "stderr": "",
+              "summary": "done", "exit_code": 0,
+              "resource": {"cpu_seconds": 3.5, "mem_peak_bytes": 67108864,
+                           "net_bytes": 1048576, "duration_seconds": 12.0}},
+             key=RKEY)
+check("a result carrying a resource is accepted", st == 200, f"status={st}")
+
+# A site admin can read it back, with the task's kind and subject joined in.
+st, res = call("/api/ghosts/tasks/resources?project=AGENT", "GET", token=admin)
+check("the internal resource endpoint answers a site admin", st == 200,
+      f"status={st} {str(res)[:160]}")
+row = next((r for r in (res or []) if r.get("task_id") == RID), None)
+check("...and the row is there, with its measurement intact",
+      row is not None and row.get("cpu_seconds") == 3.5
+      and row.get("mem_peak_bytes") == 67108864
+      and row.get("net_bytes") == 1048576
+      and row.get("duration_seconds") == 12.0, str(row)[:160])
+check("...and it carries the task's kind so it can be grouped by tool",
+      row is not None and row.get("kind") == "nslookup", str(row)[:160])
+
+# A result WITHOUT a resource must still be accepted (an older agent),
+# and leaves no sample behind.
+st, _t2 = call(f"/api/ghosts/{RAID}/tasks?project=AGENT", "POST",
+               {"kind": "nslookup", "args": {"targets": ["nores.example"]}},
+               token=admin)
+RID2 = (_t2 or {}).get("id")
+call(f"/api/ghosts/tasks/{RID2}/start", "POST", {}, key=RKEY)
+st, _ = call(f"/api/ghosts/tasks/{RID2}/result", "POST",
+             {"status": "done", "output": "[]", "stderr": "",
+              "summary": "done", "exit_code": 0}, key=RKEY)
+check("a result with no resource is still accepted", st == 200, f"status={st}")
+st, res2 = call("/api/ghosts/tasks/resources?project=AGENT", "GET", token=admin)
+check("...and it leaves no sample row behind",
+      st == 200 and not any(r.get("task_id") == RID2 for r in (res2 or [])),
+      str([r.get('task_id') for r in (res2 or [])]))
+
+# A second attempt on the SAME task replaces the first sample rather than
+# piling up a history: one row per task, the most recent measurement.
+st, _ = call(f"/api/ghosts/tasks/{RID}/result", "POST",
+             {"status": "done", "output": "[]", "stderr": "",
+              "summary": "done", "exit_code": 0,
+              "resource": {"cpu_seconds": 9.0, "mem_peak_bytes": 134217728,
+                           "net_bytes": 2097152, "duration_seconds": 20.0}},
+             key=RKEY)
+st, res3 = call("/api/ghosts/tasks/resources?project=AGENT", "GET", token=admin)
+rows = [r for r in (res3 or []) if r.get("task_id") == RID]
+check("a re-run replaces the sample rather than adding a second row",
+      len(rows) == 1 and rows[0].get("cpu_seconds") == 9.0,
+      f"{len(rows)} row(s): {str(rows)[:160]}")
+
+# The data is internal: a project admin who is not a site admin gets no
+# answer from the endpoint at all, so it cannot leak into their views.
+st, _u = call("/api/users", "POST",
+              {"username": "resuser", "password": "res-password-1"}, token=admin)
+check("a non-site-admin user is created for the access check", st == 201,
+      f"status={st} {str(_u)[:120]}")
+call("/api/projects/AGENT/acl", "POST", {"username": "resuser", "role": "admin"},
+     token=admin)
+st, _login = call("/api/auth/login", "POST",
+                  {"username": "resuser", "password": "res-password-1"})
+USER_TOKEN = _login.get("access_token") if isinstance(_login, dict) else None
+check("the new user can sign in", st == 200 and USER_TOKEN is not None,
+      f"status={st}")
+if USER_TOKEN:
+    st, rr = call("/api/ghosts/tasks/resources?project=AGENT", "GET",
+                  token=USER_TOKEN)
+    check("a project admin who is not a site admin is refused",
+          st == 403, f"status={st} {str(rr)[:120]}")
+
 
 print(f"\n{ok} passed, {fail} failed")
 _sys.exit(1 if fail else 0)
