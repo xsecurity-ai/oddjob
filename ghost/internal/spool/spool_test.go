@@ -21,7 +21,7 @@ func TestAResultSurvivesTheProcessThatMadeIt(t *testing.T) {
 	if err := s.Begin(7, "nmap"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Finish(7, "done", "<nmaprun>...</nmaprun>", "", "1 host", 0, ""); err != nil {
+	if err := s.Finish(7, "done", "<nmaprun>...</nmaprun>", "", "1 host", 0, "", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -48,9 +48,7 @@ func TestDeliveredIsWhatClearsIt(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
 	_ = s.Begin(1, "nmap")
-	_ = s.Finish(1, "done", "out", "", "", 0, "")
-
-	// A failed send must not clear it — that is the bug this guards.
+	_ = s.Finish(1, "done", "out", "", "", 0, "", nil)
 	s.Attempted(1)
 	if p, _ := s.Pending(); len(p) != 1 {
 		t.Fatal("a failed delivery attempt dropped the result")
@@ -81,8 +79,7 @@ func TestInterruptedWorkIsVisible(t *testing.T) {
 	s, _ := Open(dir)
 	_ = s.Begin(3, "masscan")
 	_ = s.Begin(4, "nmap")
-	_ = s.Finish(4, "done", "x", "", "", 0, "")
-
+	_ = s.Finish(4, "done", "x", "", "", 0, "", nil)
 	again, _ := Open(dir)
 	orphans, err := again.Orphaned()
 	if err != nil {
@@ -100,7 +97,7 @@ func TestResultsComeBackInOrder(t *testing.T) {
 	s, _ := Open(t.TempDir())
 	for _, id := range []int{30, 4, 100, 2} {
 		_ = s.Begin(id, "nmap")
-		_ = s.Finish(id, "done", "x", "", "", 0, "")
+		_ = s.Finish(id, "done", "x", "", "", 0, "", nil)
 	}
 	p, _ := s.Pending()
 	var got []int
@@ -122,7 +119,7 @@ func TestACorruptEntryIsSetAsideNotFatal(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
 	_ = s.Begin(1, "nmap")
-	_ = s.Finish(1, "done", "good", "", "", 0, "")
+	_ = s.Finish(1, "done", "good", "", "", 0, "", nil)
 	if err := os.WriteFile(filepath.Join(dir, "task-2.json"),
 		[]byte("{truncated"), 0o600); err != nil {
 		t.Fatal(err)
@@ -146,9 +143,7 @@ func TestTheSpoolIsNotWorldReadable(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
 	_ = s.Begin(1, "nmap")
-	_ = s.Finish(1, "done", "client scan output", "", "", 0, "")
-
-	// The spool holds raw scan output for someone else's estate. Any
+	_ = s.Finish(1, "done", "client scan output", "", "", 0, "", nil)
 	// local user being able to read it is a disclosure.
 	st, err := os.Stat(filepath.Join(dir, "task-1.json"))
 	if err != nil {
@@ -163,7 +158,7 @@ func TestNoTemporaryFilesAreLeftBehind(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
 	_ = s.Begin(1, "nmap")
-	_ = s.Finish(1, "done", strings.Repeat("x", 4096), "", "", 0, "")
+	_ = s.Finish(1, "done", strings.Repeat("x", 4096), "", "", 0, "", nil)
 	names, _ := filepath.Glob(filepath.Join(dir, "*.tmp"))
 	if len(names) != 0 {
 		t.Errorf("left temporary files behind: %v", names)

@@ -28,6 +28,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/xsecurity-ai/oddjob/ghost/internal/client"
 )
 
 // State is where a task has got to, from this agent's point of view.
@@ -66,6 +68,11 @@ type Entry struct {
 	Summary  string `json:"summary,omitempty"`
 	ExitCode int    `json:"exit_code,omitempty"`
 	Error    string `json:"error,omitempty"`
+
+	// How much of the host this run used, when it was measured. Kept
+	// with the result for the same reason: a crash between finishing
+	// and reporting must not lose it either.
+	Resource *client.Resource `json:"resource,omitempty"`
 }
 
 type Spool struct {
@@ -93,7 +100,7 @@ func (s *Spool) Begin(id int, kind string) error {
 // Finish stores the result. After this returns the result is on disk,
 // and will be delivered eventually whatever happens to the process.
 func (s *Spool) Finish(id int, status, output, stderr, summary string,
-	exit int, errText string) error {
+	exit int, errText string, resource *client.Resource) error {
 	s.mu.Lock()
 	e, err := s.read(id)
 	s.mu.Unlock()
@@ -104,6 +111,7 @@ func (s *Spool) Finish(id int, status, output, stderr, summary string,
 	e.EndedAt = time.Now().UTC().Format(time.RFC3339)
 	e.Status, e.Output, e.Stderr = status, output, stderr
 	e.Summary, e.ExitCode, e.Error = summary, exit, errText
+	e.Resource = resource
 	return s.write(e)
 }
 
