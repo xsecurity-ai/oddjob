@@ -68,6 +68,7 @@ from .. import (
     shellwork,
     slack,
 )
+from ..automation import CRED_TASK_KINDS
 from ..db import get_session
 from ..events import broker
 from ..hosts import validate_host
@@ -86,8 +87,7 @@ from ..models import (
     User,
     WebAsset,
 )
-from ..scopegate import (as_host, check_task_targets, index_for, refuse,
-                         task_hosts)
+from ..scopegate import as_host, check_task_targets, index_for, refuse, task_hosts
 from ..security import (
     get_current_user,
     new_agent_key,
@@ -97,7 +97,6 @@ from ..security import (
 )
 from ..tasking import outstanding_subjects, tasked_subjects
 from ..timeline import record
-from ..automation import CRED_TASK_KINDS
 from ..webtargets import WEB_TASK_KINDS
 from .enumerate import apply_auto
 from .scans import HostDecision

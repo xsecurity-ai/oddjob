@@ -58,7 +58,6 @@ that the scope gate's `task_hosts` walk never sees a secret as a host.
 from __future__ import annotations
 
 import base64
-import binascii
 from dataclasses import dataclass, field
 
 
@@ -85,7 +84,7 @@ class CredAuth:
 
 
 def _basic(username: str, secret: str) -> str:
-    raw = f"{username}:{secret}".encode("utf-8")
+    raw = f"{username}:{secret}".encode()
     return "Basic " + base64.b64encode(raw).decode("ascii")
 
 

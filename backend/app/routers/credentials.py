@@ -16,8 +16,7 @@ from ..db import get_session
 from ..events import broker
 from ..models import ROLE_ORDER, Credential, Project, Target, TargetCredential, User
 from ..query import apply_search, apply_sort, paginate
-from ..schemas import (CredentialCreate, CredentialOut, CredentialUpdate, Page,
-                       TargetAssignCreds)
+from ..schemas import CredentialCreate, CredentialOut, CredentialUpdate, Page, TargetAssignCreds
 from ..security import effective_role, get_current_user, require_project, visible_project_ids
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])

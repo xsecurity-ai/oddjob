@@ -80,9 +80,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import clouds, geoip
 from . import domains as gen
+from .credauth import host_of
 from .db import SessionLocal
 from .events import broker
-from .credauth import host_of
 from .hosts import dns_subject, valid_reg_name
 from .lookups import is_ip
 from .models import (

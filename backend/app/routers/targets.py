@@ -11,6 +11,7 @@ from ..events import broker
 from ..filtering import apply_filters
 from ..hosts import normalise_host
 from ..models import (
+    ROLE_ORDER,
     Credential,
     Event,
     Implant,
@@ -29,7 +30,6 @@ from ..models import (
     target_address_links,
 )
 from ..models import Poc as PocM
-from ..models import ROLE_ORDER
 from ..models import Service as SvcM
 from ..models import Vuln as VulnM
 from ..portcoverage import LEVELS, Range, needed, parse_ports
@@ -42,7 +42,6 @@ from ..schemas import (
     Page,
     PocOut,
     ServiceOut,
-    TargetAssignCreds,
     TargetCreate,
     TargetDetail,
     TargetOriginOut,
@@ -51,8 +50,7 @@ from ..schemas import (
     VulnOut,
 )
 from ..scopegate import assert_allowed, index_for
-from ..security import (effective_role, get_current_user, require_project,
-                        visible_project_ids)
+from ..security import effective_role, get_current_user, require_project, visible_project_ids
 from ..tasking import tasked_subjects
 from ..timeline import describe_changes, record
 from ..webtargets import PROBE_KINDS, WEB_KINDS
