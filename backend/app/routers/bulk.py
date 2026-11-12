@@ -58,7 +58,7 @@ from ..schemas import (
 )
 from ..scope import BARRED
 from ..scopegate import index_for
-from ..security import effective_role, get_current_user
+from ..security import effective_role, get_current_user, is_site_admin_member
 
 router = APIRouter(prefix="/api/bulk", tags=["bulk"])
 
@@ -116,7 +116,8 @@ async def bulk_import(payload: BulkPayload,
     if pr is None:
         if not payload.create_project:
             raise HTTPException(404, f"no project {payload.project!r}")
-        if not user.is_site_admin:
+        if not await is_site_admin_member(session, user.id):
+            # Database membership — see is_site_admin_member in security.py.
             # Creating a project is a site-level act; otherwise any user with
             # an import token could spawn projects outside the ACL model.
             raise HTTPException(

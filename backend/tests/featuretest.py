@@ -67,6 +67,51 @@ st, r = call("/api/auth/login", "POST", {"username": "root", "password": "new-pa
 check("new password works", st == 200, f"status={st}")
 admin = r["access_token"]
 
+print("\n== renaming an account ==")
+# A rename must not strand anything that is resolved from the user id:
+# the project grant, site-admin membership and sign-in all follow the
+# account rather than its name.
+st, _ = call("/api/users", "POST", {"username": "renamed", "password": "renamed-pass-1"}, token=admin)
+st, r = call("/api/projects/ALPHA/acl", "POST", {"username": "renamed", "role": "user"}, token=admin)
+check("grant before rename", st == 201, f"status={st}")
+st, r = call("/api/auth/login", "POST", {"username": "renamed", "password": "renamed-pass-1"})
+rtok = r["access_token"]
+# Reading the ACL list is admin-only; a plain `user` grant gets 403. The
+# point of this check is that the grant EXISTS for the account, which the
+# me endpoint reports with the same resolution as every other route.
+st, me = call("/api/auth/me", token=rtok)
+check("granted user sees the project before rename",
+      me.get("projects", {}).get("ALPHA") == "user", str(me)[:120])
+
+st, r = call("/api/auth/me", "PATCH", {"username": "Bad Name"}, token=rtok)
+check("bad alphabet refused with the same sentence as creation",
+      st == 422 and "only letters, digits, . _ -" in str(r), f"status={st} {str(r)[:80]}")
+st, r = call("/api/auth/me", "PATCH", {"username": "root"}, token=rtok)
+check("collision with another account 409s", st == 409, f"status={st} {str(r)[:80]}")
+
+st, r = call("/api/auth/me", "PATCH", {"username": "newname"}, token=rtok)
+check("self-service rename applies", st == 200 and r["username"] == "newname",
+      f"status={st} {str(r)[:80]}")
+st, r = call("/api/auth/login", "POST", {"username": "newname", "password": "renamed-pass-1"})
+check("the new name signs in", st == 200, f"status={st}")
+rtok = r["access_token"]
+# The grant is keyed by user id, so it must still resolve to the account
+# under its NEW name. A rename that stranded it would leave this empty.
+st, me = call("/api/auth/me", token=rtok)
+check("the grant followed the rename",
+      me.get("projects", {}).get("ALPHA") == "user", str(me)[:120])
+st, me = call("/api/auth/me", token=rtok)
+check("site-admin membership is by id, not name",
+      me["user"]["is_site_admin"] is False and me["user"]["username"] == "newname", str(me)[:80])
+
+# The site-admin endpoint renames the same way, and the audit trail —
+# denormalised on purpose — follows the account.
+st, r = call("/api/users/newname", "PATCH", {"username": "finalname"}, token=admin)
+check("site admin renames another account", st == 200 and r["username"] == "finalname",
+      f"status={st} {str(r)[:80]}")
+st, r = call("/api/auth/login", "POST", {"username": "finalname", "password": "renamed-pass-1"})
+check("rename is usable immediately", st == 200, f"status={st}")
+
 print("\n== credentials ==")
 st, c = call("/api/credentials?project=ALPHA", "POST",
              {"host": "h1.alpha.test", "username": "svc_admin", "secret": "hunter2",

@@ -917,6 +917,9 @@ class UserCreate(BaseModel):
 class UserUpdate(BaseModel):
     email: str | None = None
     full_name: str | None = None
+    #: Renaming an account. Same alphabet as UserCreate; the endpoint
+    #: checks it against the other accounts before applying it.
+    username: str | None = Field(default=None, min_length=1, max_length=64)
     password: str | None = Field(default=None, min_length=8)
     is_active: bool | None = None
 
@@ -1295,6 +1298,9 @@ class ProfileUpdate(BaseModel):
     authorisation is the whole problem."""
     full_name: str | None = None
     email: str | None = None
+    #: The account's name. Same alphabet as UserCreate; the endpoint
+    #: checks it against the other accounts before applying it.
+    username: str | None = Field(default=None, min_length=1, max_length=64)
     #: The handle to offer when an engagement with Slack asks. Stored
     #: without the @, so the two spellings do not become two people.
     slack_handle: str | None = Field(default=None, max_length=128)
