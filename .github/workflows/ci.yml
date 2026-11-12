@@ -421,9 +421,9 @@ jobs:
           GOCACHE="$(mktemp -d)" go test -race -c -o /tmp/cap.test ./internal/capacity/
           echo "--- what the BINARY contains (the compiled constant) ---"
           strings /tmp/cap.test | grep -F 'parseCPUAcctStatUsec = ' || true
-          echo "--- disassemble the function IN THE CI-BUILT BINARY ---"
+          echo "--- disassemble the function IN THE CI-BUILT BINARY (full) ---"
           go tool objdump -s "parseCPUAcctStatUsec" /tmp/cap.test 2>&1 \
-            | grep -E "QUO|DIVL|DIVQ|RETQ|0x3e8|ADDQ|MOVQ.*SP\)" | tail -40 || true
+            | grep -E "QUO|DIVL|DIVQ|RETQ|0x3e8|sumNS|:316|:317|:318|:319|:320" || true
           echo "--- run the binary directly, not through go test ---"
           /tmp/cap.test -test.v -test.run 'TestParseCPUAcctStatUsec|TestParseCPUStatUsec|TestDiagPrintInput'
           echo "--- and once more through go test, same private GOCACHE ---"
