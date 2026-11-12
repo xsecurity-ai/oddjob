@@ -65,7 +65,7 @@ def _country_clause(code: str):
     country — a host behind a CDN answering in JP and US is still "in"
     both countries for filtering purposes.
     """
-    return (select(1)
+    return (select(TargetAddress.id)
             .join(target_address_links,
                   target_address_links.c.address_id == TargetAddress.id)
             .where(target_address_links.c.target_id == Target.id,
@@ -119,7 +119,7 @@ def _apply_target_filters(stmt, raw: str | None, logic: str = "and"):
                 from sqlalchemy import exists as _exists
                 from sqlalchemy import not_ as _not
                 geo_clauses.append(_not(_exists(
-                    select(1)
+                    select(TargetAddress.id)
                     .join(target_address_links,
                           target_address_links.c.address_id == TargetAddress.id)
                     .where(target_address_links.c.target_id == Target.id,
@@ -127,7 +127,7 @@ def _apply_target_filters(stmt, raw: str | None, logic: str = "and"):
             elif op == "isNotEmpty":
                 from sqlalchemy import exists as _exists
                 geo_clauses.append(_exists(
-                    select(1)
+                    select(TargetAddress.id)
                     .join(target_address_links,
                           target_address_links.c.address_id == TargetAddress.id)
                     .where(target_address_links.c.target_id == Target.id,
