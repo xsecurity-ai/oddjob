@@ -376,7 +376,17 @@ jobs:
       - name: Tests
         if: env.RUN == 'true'
         working-directory: ghost
-        run: go test -race ./...
+        # -count=1: the build cache is shared across runs (it has to be —
+        # it is what makes the cross-compile cheap), and go test reuses
+        # a cached package result whenever its inputs hash the same.
+        # That made TestParseCPUAcctStatUsec fail on a PR whose code had
+        # already passed: an earlier run of the OLD function left a
+        # poisoned entry in the shared cache, and every later run —
+        # including ones that checked out the fix — replayed the old
+        # result instead of running the test. The test binary itself is
+        # rebuilt from source; only its RESULT is what -count=1 stops
+        # being trusted.
+        run: go test -race -count=1 ./...
 
       # The agent is only useful if it reaches the host it is needed
       # on, and that host is whatever the client has. A target that
