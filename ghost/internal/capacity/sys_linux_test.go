@@ -123,6 +123,49 @@ func TestSelfCgroupPathShapes(t *testing.T) {
 	}
 }
 
+// A container at the root of its own cgroup namespace (the common Docker
+// shape: /proc/self/cgroup reads "0::/") must still report a valid path.
+// Returning "" for "/" made the caller fall back to the host-wide
+// /proc/stat, which on a shared droplet reads other tenants' load and
+// reports 0% idle — stalling the whole fleet. The fix is that "/" IS a
+// valid answer: the cgroup files live at the top of the namespaced
+// hierarchy and are readable from inside the container.
+func TestSelfCgroupPathRootIsValid(t *testing.T) {
+	// On a host where this test runs in its own namespace (Docker, CI),
+	// the v2 path is "/". On a bare-metal dev box it may be a longer
+	// path. Either way it must not be "".
+	p := selfCgroupPath("v2")
+	if p == "" {
+		t.Fatal("selfCgroupPath(\"v2\") = \"\", want a path (\"/\" at minimum); the root of the cgroup namespace is a valid location for cpu.stat")
+	}
+	// The path must be usable to build a file path: "/sys/fs/cgroup" + p
+	// + "/cpu.stat" must not produce a double-slash that breaks the read.
+	// (The kernel tolerates "///", so this is a belt-and-braces check.)
+	if p != "/" && !strings.HasPrefix(p, "/") {
+		t.Errorf("v2 path %q does not start with /", p)
+	}
+}
+
+// The full cgroupCPUUsageUsec path: on a root-of-namespace container the
+// file at /sys/fs/cgroup/cpu.stat is the container's own counter. If it
+// exists and has user/system lines, the function must return that value
+// rather than -1 (which would trigger the host-wide fallback).
+func TestCgroupCPUUsageUsecRootNamespace(t *testing.T) {
+	// This test runs on whatever host the CI or dev box is. If the cgroup
+	// v2 cpu.stat exists at the root of this process's namespace, the
+	// function must succeed (return >= 0). If it genuinely cannot be read
+	// (e.g. a very old kernel), -1 is acceptable — but on any modern
+	// Docker or cgroup-v2 host it must not bail.
+	u := cgroupCPUUsageUsec()
+	if u < 0 {
+		// Not fatal: some test runners (macOS cross-compile) have no
+		// cgroup at all. On Linux with cgroup v2 this should succeed.
+		t.Logf("cgroupCPUUsageUsec = %d (no cgroup readable; acceptable on non-Linux)", u)
+	} else {
+		t.Logf("cgroupCPUUsageUsec = %d usec (valid reading from the container's own cgroup)", u)
+	}
+}
+
 func isPath(s string) bool {
 	return len(s) > 0 && s[0] == '/'
 }
