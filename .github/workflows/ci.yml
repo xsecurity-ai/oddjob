@@ -402,6 +402,10 @@ jobs:
           # kept failing with the pre-fix value in 14ms. Build the test
           # binary explicitly, prove which function it contains, and run
           # IT directly — no go-test result cache anywhere in between.
+          echo "--- toolchain actually used (GOROOT at test time) ---"
+          go env GOROOT GOVERSION GOTOOLCHAIN
+          echo "GOFLAGS=$GOFLAGS  GOOVERLAY=$(go env GOOVERLAY 2>/dev/null || true)"
+          ls -la "$(go env GOROOT)/bin" 2>/dev/null | head
           echo "--- source: how many definitions ---"
           grep -c '^func parseCPUAcctStatUsec' internal/capacity/sys_linux.go
           sed -n '/^func parseCPUAcctStatUsec/,/^}/p' internal/capacity/sys_linux.go
