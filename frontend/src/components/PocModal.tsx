@@ -104,6 +104,20 @@ export function PocModal({ project, pocId, title, onClose }: {
     onError: (e) => setSaid((e as Error).message),
   })
 
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [confirmText, setConfirmText] = useState('')
+  const confirm = useMutation({
+    mutationFn: () => api.confirmPoc(project, pocId, confirmText),
+    onSuccess: () => {
+      setConfirmOpen(false)
+      setConfirmText('')
+      setSaid('Proof confirmed.')
+      void qc.invalidateQueries({ queryKey: ['poc', project, pocId] })
+      void qc.invalidateQueries({ queryKey: ['vulns'] })
+    },
+    onError: (e) => setSaid((e as Error).message),
+  })
+
   const d: PocDetail | undefined = poc.data
   const dirty = d !== undefined && draft !== null
     && draft !== (d.template ?? '')
@@ -294,7 +308,40 @@ export function PocModal({ project, pocId, title, onClose }: {
           sx={{ color: neon.green, borderColor: alpha(neon.green, 0.5) }}>
           {run.isPending ? 'Queueing…' : dirty ? 'Save and run' : 'Run'}
         </Button>
+        <Button variant="outlined"
+          disabled={!d || d.state === 'Available, Confirmed' || confirm.isPending}
+          onClick={() => setConfirmOpen(true)}
+          sx={{ color: neon.yellow, borderColor: alpha(neon.yellow, 0.5) }}>
+          Confirm manually
+        </Button>
       </DialogActions>
+
+      <Dialog open={confirmOpen} onClose={() => !confirm.isPending && setConfirmOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ color: neon.yellow, pb: 1 }}>
+          Confirm proof by hand
+        </DialogTitle>
+        <DialogContent>
+          <Typography sx={{ fontSize: 12, color: neon.muted, mb: 1.5, lineHeight: 1.6 }}>
+            You have run this script outside the platform — in a browser,
+            against staging, with curl — and it reproduced. Record what you
+            saw; it becomes the proof's verdict.
+          </Typography>
+          <TextField autoFocus fullWidth multiline minRows={3} maxRows={8}
+            value={confirmText}
+            onChange={(e) => setConfirmText(e.target.value)}
+            placeholder="e.g. Reproduced in browser: /admin panel accessible without auth"
+            slotProps={{ htmlInput: { spellCheck: false } }} />
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setConfirmOpen(false)} disabled={confirm.isPending}
+            sx={{ color: neon.muted }}>Cancel</Button>
+          <Button variant="contained" disabled={!confirmText.trim() || confirm.isPending}
+            onClick={() => confirm.mutate()}
+            sx={{ bgcolor: alpha(neon.yellow, 0.9), color: '#111' }}>
+            {confirm.isPending ? 'Saving…' : 'Confirm'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Dialog>
   )
 }

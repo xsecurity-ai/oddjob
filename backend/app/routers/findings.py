@@ -2177,6 +2177,59 @@ async def run_poc(poc_id: int, body: PocRequest | None = None,
                     "a Ghost has run it."}
 
 
+class PocConfirmIn(BaseModel):
+    """What an operator records when they have confirmed a proof by hand.
+
+    The script was run outside the platform — against a staging host,
+    in a browser, with a tool the agent image does not carry — and the
+    operator is telling the record so. `verdict` is what they saw; it
+    becomes the row's verdict because that is where a reader looks for
+    "what did this proof show". `exit_code` defaults to 0 (reproduced)
+    because the only reason to confirm by hand is that it worked.
+    """
+    verdict: str = Field(min_length=1, max_length=4000)
+
+
+@router.post("/pocs/{poc_id}/confirm", response_model=PocDetail)
+async def confirm_poc(poc_id: int, body: PocConfirmIn,
+                      project: str = Query(...),
+                      pr: Project = Depends(require_project("user")),
+                      user: User = Depends(get_current_user),
+                      session: AsyncSession = Depends(get_session)):
+    """Record that an operator confirmed this proof by hand.
+
+    Distinct from `POST /pocs/{id}/run`, which asks a Ghost to run the
+    script and report back. This is for the case where the operator has
+    already run it — in a browser, against staging, with curl — and is
+    telling the record so. The row gets `exit_code=0` and
+    `validated_at=now`, which is what makes `availability()` read
+    "Available, Confirmed", and the operator's own words become the
+    verdict.
+
+    The same permission model as editing: the caller must be able to
+    write to the target's project.
+    """
+    from datetime import UTC, datetime
+
+    poc, target = await _poc_for(session, poc_id, pr)
+    if not (poc.template or "").strip():
+        raise HTTPException(422, "this proof has no script to confirm")
+    poc.exit_code = 0
+    poc.validated_at = datetime.now(UTC)
+    poc.status = "confirmed"
+    poc.verdict = body.verdict.strip()[:4000]
+    await session.commit()
+    await audit.record(session, "ui", "poc.confirm", user=user, commit=True,
+                       project_code=pr.code,
+                       detail=f"manually confirmed the proof for {target.host} "
+                              f"(proof {poc_id}): {body.verdict.strip()[:200]}")
+    await broker.publish("pocs", action="update", project=pr.code, id=poc.id)
+    if poc.vuln_id:
+        await broker.publish("vulns", action="update", project=pr.code,
+                             host=target.host)
+    return _poc_detail(poc, target, pr.code)
+
+
 @router.delete("/pocs/{poc_id}", status_code=204)
 async def delete_poc(poc_id: int, user: User = Depends(get_current_user),
                      session: AsyncSession = Depends(get_session)):
