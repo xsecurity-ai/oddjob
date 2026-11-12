@@ -30,8 +30,16 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_session
-from .models import (ROLE_ORDER, SITE_ADMIN_GROUP, ApiKey, Group, Project,
-                     ProjectACL, User, user_groups)
+from .models import (
+    ROLE_ORDER,
+    SITE_ADMIN_GROUP,
+    ApiKey,
+    Group,
+    Project,
+    ProjectACL,
+    User,
+    user_groups,
+)
 
 ALGO = "HS256"
 TOKEN_TTL_HOURS = int(os.environ.get("ODDJOB_TOKEN_TTL_HOURS", "12"))
