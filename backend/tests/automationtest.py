@@ -507,7 +507,7 @@ print("\n--- the scope gate refuses a candidate the policy wanted ---")
 # asserting it on `plan` would be asserting the wrong layer.
 import asyncio  # noqa: E402
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import func, select  # noqa: E402
 
 from app.automation import run_once, snapshot  # noqa: E402
 from app.db import SessionLocal  # noqa: E402
@@ -1760,6 +1760,135 @@ check("the source agrees -- every literal kind checked is loaded",
       + ", ".join(sorted(_asked - set(TASKED_KINDS))))
 check("...and the regex found the checks at all, rather than nothing",
       len(_asked) >= 4, str(sorted(_asked)))
+
+
+# ===================================================================
+# Scope entries that name a host become targets
+# ===================================================================
+#
+# A scope is an authorisation and a target list is an inventory. Until
+# the materialisation step in `run_once` existed, a project scoped to
+# a plain FQDN (`app.acme.example`, no wildcard) had nothing to
+# enumerate it into existence: amass runs under zones, not single
+# names. The named host sat in scope, out of inventory, unscanned,
+# for ever -- which is what "add targets to the scope" was supposed
+# to mean.
+
+print("\n== a scope entry that names a host becomes a target ==")
+from app.automation import scope_hosts  # noqa: E402
+
+call("/api/projects", "POST",
+     {"code": "SCOPEM", "name": "Scope materialise",
+      "scope": ["app.acme.example", "*.sub.acme.example",
+                "!excluded.acme.example"]}, token=admin)
+
+
+async def scope_materialise():
+    async with SessionLocal() as s:
+        pr = (await s.execute(
+            select(Project).where(
+                Project.code == "SCOPEM"))).scalar_one()
+
+        # `scope_hosts` derives the materializable names from the rows.
+        want = await scope_hosts(s, pr.id)
+        check("a plain FQDN entry contributes its own name",
+              "app.acme.example" in want, sorted(want))
+        check("a wildcard entry contributes its apex",
+              "sub.acme.example" in want, sorted(want))
+        check("an excluded entry contributes nothing",
+              "excluded.acme.example" not in want, sorted(want))
+
+        # Before any cycle: the project has no targets yet.
+        have = set((await s.execute(
+            select(Target.host).where(
+                Target.project_id == pr.id))).scalars().all())
+        check("nothing is materialised before a cycle runs",
+              have == set(), sorted(have))
+
+        # With an agent online and kitchen sink on, one cycle
+        # materialises the named hosts AND queues work for them.
+        s.add(Agent(project_id=pr.id, name="scope-mat-ghost",
+                    status="online", callback_key_hash="m" * 64))
+        pr.kitchen_sink = True
+        await s.commit()
+
+        await run_once(s, pr)
+
+        have = set((await s.execute(
+            select(Target.host).where(
+                Target.project_id == pr.id))).scalars().all())
+        check("the FQDN named host now has a target row",
+              "app.acme.example" in have, sorted(have))
+        check("the wildcard apex now has a target row",
+              "sub.acme.example" in have, sorted(have))
+        check("the excluded host does NOT get a row",
+              "excluded.acme.example" not in have, sorted(have))
+
+        # The new targets are candidates for the policies in the SAME
+        # cycle: nmap is queued for them.
+        nmap_subs = []
+        for raw in (await s.execute(
+                select(AgentTask.args).where(
+                    AgentTask.project_id == pr.id,
+                    AgentTask.kind == "nmap"))).scalars():
+            nmap_subs += json.loads(raw).get("targets") or []
+        check("nmap is queued for the materialised FQDN host",
+              "app.acme.example" in nmap_subs, sorted(nmap_subs))
+
+        # Second cycle: idempotent. No duplicate rows, no re-queue.
+        await run_once(s, pr)
+        count = (await s.execute(
+            select(func.count(Target.id)).where(
+                Target.project_id == pr.id,
+                Target.host.in_(["app.acme.example", "sub.acme.example"]))
+            )).scalar_one()
+        check("a second cycle does not duplicate the rows",
+              count == 2, count)
+
+
+asyncio.run(scope_materialise())
+
+print("\n== a wildcard with include_subdomains materialises the apex ==")
+# `include_subdomains` on an fqdn entry means the zone comes along and
+# amass finds the rest. Only the apex is owed a row here.
+call("/api/projects", "POST", {"code": "SUBS", "name": "Subs"}, token=admin)
+call("/api/projects/SUBS/scope", "POST",
+     {"lines": ["deep.sub.acme.example"], "include_subdomains": True},
+     token=admin)
+
+
+async def subs_apex():
+    async with SessionLocal() as s:
+        pr = (await s.execute(
+            select(Project).where(
+                Project.code == "SUBS"))).scalar_one()
+        want = await scope_hosts(s, pr.id)
+        check("include_subdomains materialises the registrable domain",
+              "acme.example" in want, sorted(want))
+        check("...not the full name (amass finds those)",
+              "deep.sub.acme.example" not in want, sorted(want))
+
+
+asyncio.run(subs_apex())
+
+print("\n== a cloud-provider scope entry is not materialised ==")
+call("/api/projects", "POST", {"code": "CLOUDM", "name": "Cloud mat"},
+     token=admin)
+call("/api/projects/CLOUDM/scope", "POST",
+     {"lines": ["mybucket.s3.amazonaws.com"]}, token=admin)
+
+
+async def cloud_not_materialised():
+    async with SessionLocal() as s:
+        pr = (await s.execute(
+            select(Project).where(
+                Project.code == "CLOUDM"))).scalar_one()
+        want = await scope_hosts(s, pr.id)
+        check("a cloud provider domain is not materialised",
+              len(want) == 0, sorted(want))
+
+
+asyncio.run(cloud_not_materialised())
 
 
 print(f"\n{ok} passed, {fail} failed")
