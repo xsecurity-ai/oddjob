@@ -3245,6 +3245,49 @@ class AgentTask(Base, TimestampMixin):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class TaskResourceSample(Base, TimestampMixin):
+    """How much of a ghost one task used.
+
+    A single row per task, written when the agent reports its result:
+    the CPU it burned as a fraction of one core over the whole run,
+    the peak memory its process tree held, and the network bytes it
+    moved. The question this answers is "how much would this kind of
+    work cost on this host", which is what an operator needs before
+    pointing a heavy scan at a small ghost.
+
+    **Internal by design.** The data lives here rather than on
+    `agent_tasks` and is exposed only through a site-admin endpoint,
+    because it describes the fleet's own machinery, not the client's
+    estate: nothing in a report or a project view should read "this
+    scan used 3.1 cores".
+
+    The numbers are the agent's own measurement of its own child
+    process tree, so they are honest about the tool but say nothing
+    about the host around it -- which is exactly the point.
+    """
+    __tablename__ = "task_resource_samples"
+    __table_args__ = (Index("ix_task_resources_task", "task_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: CASCADE with the task: a sample without its task is an orphan,
+    #: and deleting a project takes its tasks and their costs with it.
+    #: The named index in `__table_args__` covers reads; no second one.
+    task_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="CASCADE"))
+    agent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"))
+    #: Seconds of CPU consumed across all cores, over the run. A task
+    #: that pinned two cores for a minute reports ~120 here; one that
+    #: idled most of its time reports close to zero.
+    cpu_seconds: Mapped[float | None] = mapped_column(Float)
+    #: The peak resident memory of the task's process tree, in bytes.
+    mem_peak_bytes: Mapped[int | None] = mapped_column(Integer)
+    #: Network bytes the task moved, both directions, over the run.
+    net_bytes: Mapped[int | None] = mapped_column(Integer)
+    #: How long the run took, so a CPU figure can be read as a rate.
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+
+
 # ========================================================== audit trail
 #: Where an entry came from. Kept as a small closed set because the log
 #: is read by filtering it, and a free-form origin string turns that
