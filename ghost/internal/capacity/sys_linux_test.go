@@ -3,8 +3,6 @@
 package capacity
 
 import (
-	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -49,35 +47,6 @@ func TestParseCPUAcctStatUsec(t *testing.T) {
 	if got := parseCPUAcctStatUsec(nil); got != 0 {
 		t.Errorf("empty input gave %d, want 0", got)
 	}
-}
-
-// TestDiagPrintInput is a temporary diagnostic: it prints the exact
-// bytes the test feeds to parseCPUAcctStatUsec, byte by byte, and
-// computes the expected result inline. It exists because CI has kept
-// running a binary that returns the pre-fix value from this very
-// source, and the only way left to tell which side is lying is to make
-// the test say out loud exactly what it holds in memory. Remove it
-// once the mystery is solved.
-func TestDiagPrintInput(t *testing.T) {
-	const sample = "user 1000000000\nsystem 234567890\n"
-	t.Logf("len(sample)=%d", len(sample))
-	for i, c := range []byte(sample) {
-		t.Logf("  [%d]=%q (0x%02x)", i, string(c), c)
-	}
-	// The expected result, computed the way the function should:
-	// sum the two ns counters, divide once.
-	var expect int64
-	for _, line := range strings.Split(sample, "\n") {
-		f := strings.Fields(line)
-		if len(f) < 2 {
-			continue
-		}
-		n, _ := strconv.ParseInt(f[1], 10, 64)
-		expect += n
-	}
-	expect /= 1000
-	t.Logf("expected (sum then /1000) = %d", expect)
-	t.Logf("parseCPUAcctStatUsec(sample) = %d", parseCPUAcctStatUsec([]byte(sample)))
 }
 
 // The wall side: a cgroup with two cores gets two core-seconds per
