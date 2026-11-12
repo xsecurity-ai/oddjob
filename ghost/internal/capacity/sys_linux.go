@@ -154,7 +154,8 @@ func cgroupCPUBusy() (busy, wall uint64, ok bool) {
 		return 0, 0, false
 	}
 	wall = uint64(time.Since(cgroupWallStart).Microseconds()) * uint64(coresForWall())
-	return uint64(b), wall, true
+	// #nosec G115 — b is already checked >= 0 above, so the int64→uint64 conversion cannot overflow.
+	return uint64(b), wall, true // #nosec G115
 }
 
 // cgroupWallStart is when this process began, read once. The busy
@@ -215,7 +216,7 @@ func cgroupCPUUsageUsec() int64 {
 	// cgroup v2: cpu.stat under the cgroup's own directory, reached
 	// through the path named in /proc/self/cgroup.
 	if p := selfCgroupPath("v2"); p != "" {
-		b, err := os.ReadFile("/sys/fs/cgroup" + p + "/cpu.stat")
+		b, err := os.ReadFile("/sys/fs/cgroup" + p + "/cpu.stat") // #nosec G304 — p comes from /proc/self/cgroup, not from a request
 		if err == nil {
 			if u := parseCPUStatUsec(b); u > 0 {
 				return u
@@ -224,7 +225,7 @@ func cgroupCPUUsageUsec() int64 {
 	}
 	// cgroup v1: cpuacct.stat under the cpu controller's hierarchy.
 	if p := selfCgroupPath("v1"); p != "" {
-		b, err := os.ReadFile("/sys/fs/cgroup/cpu" + p + "/cpuacct.stat")
+		b, err := os.ReadFile("/sys/fs/cgroup/cpu" + p + "/cpuacct.stat") // #nosec G304 — p comes from /proc/self/cgroup, not from a request
 		if err == nil {
 			if u := parseCPUAcctStatUsec(b); u > 0 {
 				return u
