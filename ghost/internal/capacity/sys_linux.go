@@ -154,8 +154,9 @@ func cgroupCPUBusy() (busy, wall uint64, ok bool) {
 		return 0, 0, false
 	}
 	wall = uint64(time.Since(cgroupWallStart).Microseconds()) * uint64(coresForWall())
-	// #nosec G115 — b is already checked >= 0 above, so the int64→uint64 conversion cannot overflow.
-	return uint64(b), wall, true // #nosec G115
+	// #nosec G115 — b is checked >= 0 above; the conversion cannot overflow.
+	bu := uint64(b) // #nosec G115
+	return bu, wall, true
 }
 
 // cgroupWallStart is when this process began, read once. The busy
@@ -331,7 +332,7 @@ func cpuSetCores() int {
 		default:
 			continue
 		}
-		b, err := os.ReadFile(p)
+		b, err := os.ReadFile(p) // #nosec G304 — p is built from /proc/self/cgroup fields, not from a request
 		if err != nil {
 			continue
 		}
