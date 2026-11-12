@@ -359,6 +359,11 @@ export function UsersView() {
                 )}
                 {(acl.data ?? []).map((a) => {
                   const c = ROLE_COLOUR[a.role] ?? neon.muted
+                  // A negative id marks a virtual entry: the user administers
+                  // this project through site-admins membership, not an ACL
+                  // row, so there is nothing to revoke here. Removing them
+                  // happens in the group section above.
+                  const virtual = a.id < 0
                   return (
                     <Stack
                       key={a.id}
@@ -370,19 +375,31 @@ export function UsersView() {
                         py: 0.7,
                         borderRadius: 0.6,
                         background: alpha(neon.bgDeep, 0.5),
-                        border: `1px solid ${alpha(neon.purple, 0.2)}`
+                        border: `1px solid ${alpha(neon.purple, virtual ? 0.4 : 0.2)}`
                       }}>
                       <Box sx={{ flex: 1, fontSize: 13,
                                  color: a.group ? neon.purple : neon.pink }}>
                         {a.username ?? `group: ${a.group}`}
+                        {virtual && (
+                          <Typography component="span" sx={{ ml: 0.8, fontSize: 10.5,
+                                                            color: alpha(neon.muted, 0.7) }}>
+                            via site-admins
+                          </Typography>
+                        )}
                       </Box>
                       <Chip size="small" label={a.role} sx={chip(c)} />
-                      <Tooltip title="Revoke">
-                        <IconButton size="small" onClick={() => revoke.mutate(a.id)}
-                          sx={{ color: neon.muted, '&:hover': { color: neon.red } }}>
-                          <DeleteIcon sx={{ fontSize: 16 }} />
-                        </IconButton>
-                      </Tooltip>
+                      {virtual ? (
+                        <Tooltip title="Site admin — membership grants this on every project">
+                          <Box sx={{ width: 28 }} />
+                        </Tooltip>
+                      ) : (
+                        <Tooltip title="Revoke">
+                          <IconButton size="small" onClick={() => revoke.mutate(a.id)}
+                            sx={{ color: neon.muted, '&:hover': { color: neon.red } }}>
+                            <DeleteIcon sx={{ fontSize: 16 }} />
+                          </IconButton>
+                        </Tooltip>
+                      )}
                     </Stack>
                   );
                 })}

@@ -669,17 +669,45 @@ async def delete_group(name: str, _: User = Depends(require_site_admin),
 
 
 # ------------------------------------------------------------------ acls
+async def _site_admin_users(session: AsyncSession) -> list[User]:
+    """Every active member of the site-admins group, ordered by username.
+
+    These users are admins of EVERY project through the group alone — no
+    per-project ACL row required (see `effective_role`). The ACL listing
+    folds them in as virtual entries so a project's membership screen shows
+    who actually holds admin there, not just who has an explicit row.
+    """
+    g = (await session.execute(select(Group).where(
+        Group.name == SITE_ADMIN_GROUP))).scalar_one_or_none()
+    if not g:
+        return []
+    return [u for u in sorted(g.users, key=lambda u: u.username) if u.is_active]
+
+
 @router.get("/projects/{project}/acl", response_model=list[AclOut])
 async def list_acl(project: str, pr: Project = Depends(require_project("admin")),
                    session: AsyncSession = Depends(get_session)):
+    rows = (await session.execute(
+        select(ProjectACL).where(ProjectACL.project_id == pr.id))).scalars().all()
     out = []
-    for a in (await session.execute(
-            select(ProjectACL).where(ProjectACL.project_id == pr.id))).scalars():
+    for a in rows:
         u = await session.get(User, a.user_id) if a.user_id else None
         g = await session.get(Group, a.group_id) if a.group_id else None
         out.append(AclOut(id=a.id, project_code=pr.code, role=a.role,
                           username=u.username if u else None,
                           group=g.name if g else None))
+    # Site admins hold admin on every project by group membership alone.
+    # Surface them here as virtual entries (id < 0) so the Users page shows
+    # who actually administers this project. A user with an explicit row
+    # appears exactly once: the row wins, and revoking it does not strip the
+    # group-derived admin — that only leaves when they leave site-admins.
+    listed = {u.username for u in (await session.execute(
+        select(User).where(User.id.in_(
+            [a.user_id for a in rows if a.user_id])))).scalars()}
+    for u in await _site_admin_users(session):
+        if u.username not in listed:
+            out.append(AclOut(id=-u.id, project_code=pr.code, role="admin",
+                              username=u.username))
     return out
 
 
