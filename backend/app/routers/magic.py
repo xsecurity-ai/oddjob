@@ -6,7 +6,8 @@ handling is deliberately strict:
   single use    `used_at` is stamped inside the same transaction that signs
                 you in, so a link forwarded to a mailing list, or sitting in
                 a mailbox someone else can read, works exactly once.
-  short lived   15 minutes by default.
+  short lived   login links for 15 minutes, invitations for three days —
+                see `INVITE_TTL_DAYS` for why the two differ.
   hashed        only a hash is stored; the plaintext lives in the email.
   constant answer
                 requesting a link ALWAYS returns 202, whether or not the
@@ -43,6 +44,11 @@ log = logging.getLogger("oddjob.magic")
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 TTL_MINUTES = 15
+#: An invitation is onboarding, not an emergency: the person it is mailed
+#: to has to notice it, have time, and choose a password. Fifteen minutes
+#: made that a race against the mailbox, so the link sat dead in the inbox
+#: long before anybody got to it. Three days from issue.
+INVITE_TTL_DAYS = 3
 WINDOW_SECONDS = 900
 
 # Two different limits, because they defend against two different things.
@@ -78,17 +84,25 @@ def _throttled(key: str, cooldown: int, cap: int) -> bool:
 
 
 def _hash(token: str) -> str:
-    # SHA-256, not argon2: these are 256-bit random tokens with a 15-minute
-    # life, so there is nothing to brute force, and a login path should not
-    # spend 100ms of CPU per lookup.
+    # SHA-256, not argon2: these are 256-bit random tokens with at most a
+    # three-day life, so there is nothing to brute force, and a login path
+    # should not spend 100ms of CPU per lookup.
     return hashlib.sha256(token.encode()).hexdigest()
 
 
 async def _issue(session: AsyncSession, user: User, purpose: str) -> str:
     token = secrets.token_urlsafe(32)
+    # The two purposes live for different lengths of time because they
+    # defend against different things. A login link is requested at the
+    # moment of signing in and should die quickly if it is not used; an
+    # invitation is onboarding and has to survive until its owner gets to
+    # the mailbox, so it outlives the session that sent it by days. Both
+    # are single use either way.
+    ttl = (timedelta(days=INVITE_TTL_DAYS) if purpose == "invite"
+           else timedelta(minutes=TTL_MINUTES))
     session.add(MagicLink(
         user_id=user.id, token_hash=_hash(token), purpose=purpose,
-        expires_at=datetime.now(UTC) + timedelta(minutes=TTL_MINUTES)))
+        expires_at=datetime.now(UTC) + ttl))
     await session.commit()
     return token
 
@@ -101,7 +115,7 @@ def _email_body(cfg: dict, token: str, purpose: str) -> tuple[str, str]:
         subject = f"You have been invited to {site}"
         body = (f"An account has been created for you on {site}.\n\n"
                 f"Open this link to sign in and set a password:\n\n  {link}\n\n"
-                f"It works once and expires in {TTL_MINUTES} minutes.\n")
+                f"It works once and expires in {INVITE_TTL_DAYS} days.\n")
     else:
         subject = f"Your {site} sign-in link"
         body = (f"Open this link to sign in to {site}:\n\n  {link}\n\n"
