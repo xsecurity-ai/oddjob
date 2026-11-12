@@ -82,6 +82,7 @@ from . import clouds, geoip
 from . import domains as gen
 from .db import SessionLocal
 from .events import broker
+from .credauth import host_of
 from .hosts import dns_subject, valid_reg_name
 from .lookups import is_ip
 from .models import (
@@ -237,6 +238,18 @@ NUCLEI_KINDS: dict[str, tuple[str, ...]] = {
 assert set(NUCLEI_CHOICES) == {"off", *NUCLEI_KINDS}
 assert set(NUCLEI_PROFILES) == {k for ks in NUCLEI_KINDS.values() for k in ks}
 
+#: The task kinds that speak HTTP and therefore accept credentials.
+#:
+#: Derived from the two policy maps plus `httpx`, which has no policy of
+#: its own but the same arguments. Anything not listed here reads no
+#: headers (nmap, amass, nslookup, vhost), so a credential merged into
+#: its arguments would be text the scope gate walks looking for hosts —
+#: and `Authorization: Basic ...` is full of dotted tokens.
+CRED_TASK_KINDS: frozenset[str] = frozenset(
+    {k for ks in WEB_KINDS.values() for k in ks}
+    | {k for ks in NUCLEI_KINDS.values() for k in ks}
+    | {"httpx"})
+
 
 #: Every kind `plan()` asks "has this already been tasked" about.
 #:
@@ -351,6 +364,11 @@ class Snapshot:
     #: (kind, subject) this project has ever tasked. See "one attempt
     #: per subject" in the module docstring.
     tasked: set[tuple[str, str]] = field(default_factory=set)
+    #: {host: auth-args} — credentials on file for each host, folded to
+    #: the keys a task runner understands (`headers`, `cookies`,
+    #: `username`, `password`). Merged into web tasks by `run_once` so
+    #: a crawl is authenticated when the engagement says it should be.
+    creds: dict[str, dict] = field(default_factory=dict)
 
 
 #: What each policy is set to when the kitchen sink is open.
@@ -1020,6 +1038,15 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
     # list without anybody noticing.
     seeds = await crawl_seeds(session, pr.id)
 
+    # Credentials the web tasks should carry. Loaded once per cycle for
+    # every host that has a name on record: a crawl or a probe queued
+    # without them sees the login page and nothing behind it, which is
+    # most of the application. Empty dict when nothing matches, which is
+    # the common case and costs the plan no extra work.
+    from .credauth import auth_args_for_hosts
+    cred_hosts = [h for h, _ in targets if h not in not_dns_named]
+    creds_by_host = await auth_args_for_hosts(session, pr.id, cred_hosts)
+
     return Snapshot(
         auto_amass=bool(pr.auto_amass),
         auto_resolve_ips=bool(pr.auto_resolve_ips),
@@ -1040,7 +1067,8 @@ async def snapshot(session: AsyncSession, pr: Project) -> Snapshot:
         suspected=suspected,
         # Loaded here with the rest of the estate so `gaps` can ask it
         # without a session, and so `run_once` does not load it twice.
-        scope=await index_for(session, pr.id))
+        scope=await index_for(session, pr.id),
+        creds=creds_by_host)
 
 
 async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
@@ -1201,6 +1229,16 @@ async def run_once(session: AsyncSession, pr: Project) -> dict[str, int]:
             continue
         args = dict(c.args) if c.kind == "amass" else {**c.args,
                                                        "targets": aimed}
+        # Credentials for the host this task points at, when there are
+        # any. Merged AFTER `targets` so a hand-queued argument can still
+        # win; only kinds that speak HTTP get them, because nmap and amass
+        # read no headers and carrying secrets in their arguments would be
+        # text the scope gate then walks looking for hosts.
+        if c.kind != "amass" and c.kind in CRED_TASK_KINDS:
+            host = (c.args.get("targets") or [c.subject])
+            h = host_of(str(host[0])) if host else None
+            if h and h in snap.creds:
+                args.update(snap.creds[h])
         t = AgentTask(agent_id=None, project_id=pr.id, requested_by=None,
                       kind=c.kind, args=json.dumps(args),
                       import_as=_import_as(c.kind), status="queued")

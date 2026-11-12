@@ -2570,6 +2570,40 @@ class Credential(Base, TimestampMixin):
     notes: Mapped[str | None] = mapped_column(Text)
 
 
+class TargetCredential(Base):
+    """An explicit assignment of a credential to a target.
+
+    A `Credential` carries a free-text `host`, which is how the importers
+    file what they find; nothing stops two targets from sharing that name,
+    and nothing makes a credential found on one name apply to another. This
+    row IS the operator's decision: "this credential is for this target",
+    whatever either of them is called.
+
+    There is deliberately no `kind` or scope here beyond the pair itself.
+    The credential already says what it is (password, token, cookie); the
+    target already says where it lives. What this row adds is the link, and
+    a link has nothing else to say.
+
+    Matching at task-queue time is the union of these rows and credentials
+    whose `host` equals the target's own name — see `app.credauth`, which
+    builds the arguments from both without this table having to duplicate
+    what the importers already wrote down.
+    """
+    __tablename__ = "target_credentials"
+    __table_args__ = (
+        UniqueConstraint("target_id", "credential_id",
+                         name="uq_target_credential"),
+        Index("ix_target_credentials_target", "target_id"),
+        Index("ix_target_credentials_credential", "credential_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("targets.id", ondelete="CASCADE"))
+    credential_id: Mapped[int] = mapped_column(
+        ForeignKey("credentials.id", ondelete="CASCADE"))
+
+
 # ================================================================ settings
 class Setting(Base, TimestampMixin):
     """Site-wide configuration, one row per key.

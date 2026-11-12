@@ -351,4 +351,51 @@ check("...and nothing else",
       {i["title"] for i in _exact["items"]} == {"Shared finding"},
       {i["title"] for i in _exact["items"]})
 
+print("\n== credentials on a target ==")
+# web01 was deleted in the cascade section above; bring it back for this one.
+st, _ = call("/api/targets?project=APITEST", "POST", {"host": "web01.example.com"})
+check("re-created web01 for the credential checks", st == 201, st)
+# A credential filed under the target's own name applies without any
+# row; one filed elsewhere applies only when assigned. The detail
+# endpoint is what the host modal renders, so it must show both.
+st, c1 = call("/api/credentials?project=APITEST", "POST",
+              {"host": "web01.example.com", "username": "admin",
+               "secret": "pw-1", "kind": "password"})
+check("credential filed under the target's name is created", st == 201, st)
+st, c2 = call("/api/credentials?project=APITEST", "POST",
+              {"host": "elsewhere.example.com", "username": "svc",
+               "secret": "tok-2", "kind": "token"})
+check("credential filed under another name is created", st == 201, st)
+
+st, det = call("/api/targets/APITEST/web01.example.com/detail")
+_creds = (det or {}).get("credentials", [])
+_ids = {c["id"] for c in _creds}
+check("detail lists the credential filed under its own name",
+      st == 200 and c1["id"] in _ids, _ids)
+check("...and not one that is neither assigned nor named to it",
+      st == 200 and c2["id"] not in _ids, _ids)
+
+st, r = call("/api/credentials/targets/APITEST/web01.example.com", "PUT",
+             {"credential_ids": [c2["id"]]})
+check("assigning a credential to the target succeeds", st == 200, st)
+st, det = call("/api/targets/APITEST/web01.example.com/detail")
+_ids = {c["id"] for c in (det or {}).get("credentials", [])}
+check("the assigned credential now appears on the target",
+      st == 200 and c2["id"] in _ids, _ids)
+check("...alongside the one named to it", c1["id"] in _ids, _ids)
+
+# Replace semantics: sending an empty set unassigns everything.
+st, r = call("/api/credentials/targets/APITEST/web01.example.com", "PUT",
+             {"credential_ids": []})
+check("clearing the assignment succeeds", st == 200, st)
+st, det = call("/api/targets/APITEST/web01.example.com/detail")
+_ids = {c["id"] for c in (det or {}).get("credentials", [])}
+check("unassigned is gone; named-to-it survives without a row",
+      st == 200 and c2["id"] not in _ids and c1["id"] in _ids, _ids)
+
+# A credential that does not exist cannot be assigned here.
+st, r = call("/api/credentials/targets/APITEST/web01.example.com", "PUT",
+             {"credential_ids": [999999]})
+check("an unknown credential id is refused", st == 404, st)
+
 print(f"\n{'='*52}\n  {ok} passed, {fail} failed\n{'='*52}")

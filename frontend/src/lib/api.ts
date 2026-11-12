@@ -626,6 +626,9 @@ export interface TargetDetail {
   /** Where this target came from. Empty means nothing recorded it —
    *  see `TargetOrigin`. */
   origins: TargetOrigin[]
+  /** Credentials a task against this target will carry: assigned by hand
+   *  or filed under one of its names. See app/credauth.py on the backend. */
+  credentials: Credential[]
 }
 
 /** Worst-first. Severity is a string in the DB, so every sort needs this —
@@ -1722,6 +1725,10 @@ export const api = {
     req<Page<Credential>>('/api/credentials' + qs({ project, limit: 100000 })),
   createCredential: (project: string, body: Record<string, unknown>) =>
     req<Credential>('/api/credentials' + qs({ project }), { method: 'POST', body: JSON.stringify(body) }),
+  assignTargetCredentials: (project: string, host: string, credentialIds: number[]) =>
+    req<Credential[]>(
+      `/api/credentials/targets/${encodeURIComponent(project)}/${encodeURIComponent(host)}`,
+      { method: 'PUT', body: JSON.stringify({ credential_ids: credentialIds }) }),
 
   createTarget: (project: string, body: Record<string, unknown>) =>
     req<Target>('/api/targets' + qs({ project }), { method: 'POST', body: JSON.stringify(body) }),

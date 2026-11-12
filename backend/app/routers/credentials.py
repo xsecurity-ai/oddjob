@@ -14,9 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
 from ..events import broker
-from ..models import ROLE_ORDER, Credential, Project, User
+from ..models import ROLE_ORDER, Credential, Project, Target, TargetCredential, User
 from ..query import apply_search, apply_sort, paginate
-from ..schemas import CredentialCreate, CredentialOut, CredentialUpdate, Page
+from ..schemas import (CredentialCreate, CredentialOut, CredentialUpdate, Page,
+                       TargetAssignCreds)
 from ..security import effective_role, get_current_user, require_project, visible_project_ids
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
@@ -127,3 +128,65 @@ async def delete_credential(cred_id: int, user: User = Depends(get_current_user)
     await session.delete(c)
     await session.commit()
     await broker.publish("credentials", action="delete", project=code)
+
+
+@router.put("/targets/{project}/{host}", response_model=list[CredentialOut])
+async def assign_target_credentials(project: str, host: str, body: TargetAssignCreds,
+                                    _: Project = Depends(require_project("user")),
+                                    user: User = Depends(get_current_user),
+                                    session: AsyncSession = Depends(get_session)):
+    """Replace the credentials assigned to this target.
+
+    Lives under /api/credentials because it manages CREDENTIALS; the path
+    carries the target because that is what they are being assigned to.
+
+    The set is replaced rather than appended so that removing one is the
+    same call as adding one and a slow client cannot leave half-edited
+    state behind. Credentials whose host already names this target still
+    apply without a row here — see `app/credauth.py` — so this only ever
+    ADDS coverage, never removes what the importers recorded.
+    """
+    from ..hosts import normalise_host
+    t = (await session.execute(
+        select(Target).where(Target.project_id == _.id,
+                             Target.host == normalise_host(host)))).scalar_one_or_none()
+    if t is None:
+        raise HTTPException(404, f"no target {host!r} in project {_.code}")
+    want = set(body.credential_ids)
+    have = {r.credential_id for r in (await session.execute(
+        select(TargetCredential).where(
+            TargetCredential.target_id == t.id))).scalars().all()}
+    for cid in sorted(want):
+        c = await session.get(Credential, cid)
+        if c is None or c.project_id != t.project_id:
+            raise HTTPException(404, f"no credential {cid} in this project")
+    for cid in have - want:
+        row = (await session.execute(
+            select(TargetCredential).where(
+                TargetCredential.target_id == t.id,
+                TargetCredential.credential_id == cid))).scalar_one()
+        await session.delete(row)
+    for cid in want - have:
+        session.add(TargetCredential(target_id=t.id, credential_id=cid))
+    await session.flush()
+    from ..timeline import record
+    if want - have:
+        await record(session, t.id, "credential",
+                     "assigned to this target: " + ", ".join(
+                         f"credential {c}" for c in sorted(want - have)), actor=user)
+    if have - want:
+        await record(session, t.id, "credential",
+                     "unassigned from this target: " + ", ".join(
+                         f"credential {c}" for c in sorted(have - want)),
+                     actor=user)
+    await session.commit()
+    await broker.publish("credentials", action="update", project=_.code)
+    rows = (await session.execute(
+        select(Credential).where(Credential.id.in_(want)).order_by(Credential.id)
+    )).scalars().all() if want else []
+    return [CredentialOut(
+        **{k: getattr(c, k) for k in
+           ("id", "project_id", "host", "service", "port", "username",
+            "kind", "source", "validated", "notes", "created_at", "updated_at")},
+        project_code=_.code,
+        secret=c.secret, secret_set=bool(c.secret)) for c in rows]

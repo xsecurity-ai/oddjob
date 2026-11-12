@@ -1,12 +1,14 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from 'react'
 import {
-  Box, Button, Chip, CircularProgress, Dialog, DialogContent, DialogTitle,
-  Divider, IconButton, Stack, Table, TableBody, TableCell, TableHead,
-  TableRow, Tooltip, Typography, alpha,
+  Box, Button, Checkbox, Chip, CircularProgress, Dialog, DialogContent,
+  DialogTitle, Divider, IconButton, List, ListItemButton, ListItemText,
+  Stack, Table, TableBody, TableCell, TableHead, TableRow, Tooltip,
+  Typography, alpha,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import MergeTypeIcon from '@mui/icons-material/MergeType'
-import { useQuery } from '@tanstack/react-query'
+import KeyIcon from '@mui/icons-material/Key'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, SEVERITY_RANK } from '../lib/api'
 import { Timeline } from './Timeline'
 import { VulnModal } from './VulnModal'
@@ -154,6 +156,145 @@ function MergeButton({ project, host, onMerged }: {
           onMerged={onMerged} onClose={() => setOpen(false)} />
       )}
     </>
+  )
+}
+
+function CredentialsSection({ project, host, creds }: {
+  project: string; host: string; creds: import('../lib/api').Credential[]
+}) {
+  const { canWrite } = useAuth()
+  const qc = useQueryClient()
+  const [pickOpen, setPickOpen] = useState(false)
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+
+  const allCreds = useQuery({
+    queryKey: ['credentials', project],
+    queryFn: () => api.credentials(project),
+    enabled: pickOpen,
+  })
+
+  const assignMut = useMutation({
+    mutationFn: (ids: number[]) => api.assignTargetCredentials(project, host, ids),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['target-detail', project, host] })
+      setPickOpen(false)
+      setSelected(new Set())
+    },
+  })
+
+  const toggle = (id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  // The set of credential ids that currently apply to this target.
+  const appliedIds = new Set(creds.map((c) => c.id))
+  // All project credentials, for the picker.
+  const pool = (allCreds.data?.items ?? []) as import('../lib/api').Credential[]
+
+  return (
+    <Box sx={{ mt: 3 }}>
+      <Stack direction="row" spacing={1} sx={{ alignItems: 'baseline', mb: 1 }}>
+        <Typography sx={{
+          fontFamily: `'Orbitron', sans-serif`, fontSize: 11, letterSpacing: '0.16em',
+          textTransform: 'uppercase', color: neon.pink, textShadow: glow(neon.pink, 0.5),
+        }}>Credentials</Typography>
+        <Typography sx={{ color: neon.muted, fontSize: 11 }}>{creds.length}</Typography>
+        {canWrite(project) && (
+          <Button size="small" startIcon={<KeyIcon fontSize="small" />}
+            onClick={() => { setSelected(new Set()); setPickOpen(true) }}
+            sx={{ ml: 'auto', fontSize: 11.5, color: neon.cyan,
+                  borderColor: alpha(neon.cyan, 0.45) }}
+            variant="outlined">
+            Assign
+          </Button>
+        )}
+      </Stack>
+      {creds.length === 0
+        ? <Typography sx={{ color: alpha(neon.muted, 0.6), fontSize: 12.5 }}>
+            None on file for this target.</Typography>
+        : (
+          <Table size="small">
+            <TableHead><TableRow>
+              {['Host', 'Kind', 'Username', 'Secret'].map((h) =>
+                <TableCell key={h} sx={headSx}>{h}</TableCell>)}
+            </TableRow></TableHead>
+            <TableBody>
+              {creds.map((c) => (
+                <TableRow key={c.id} hover>
+                  <TableCell sx={cellSx}>{c.host || dash}</TableCell>
+                  <TableCell sx={cellSx}>
+                    <Chip label={c.kind} size="small"
+                      sx={{ fontSize: 10.5, height: 20 }} />
+                  </TableCell>
+                  <TableCell sx={cellSx}>{c.username || dash}</TableCell>
+                  <TableCell sx={cellSx}>
+                    {c.secret_set
+                      ? <Box component="span" sx={{ color: neon.muted }}>••••••</Box>
+                      : dash}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+
+      {pickOpen && (
+        <Dialog open onClose={() => setPickOpen(false)} maxWidth="sm" fullWidth>
+          <DialogTitle sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 13,
+                              letterSpacing: '0.1em', color: neon.pink }}>
+            Assign credentials to {host}
+          </DialogTitle>
+          <Divider />
+          <DialogContent dividers>
+            {pool.length === 0
+              ? <Typography sx={{ color: neon.muted, py: 2 }}>
+                  No credentials in this project yet.</Typography>
+              : (
+                <>
+                  <List dense disablePadding sx={{ maxHeight: 340, overflowY: 'auto' }}>
+                    {pool.map((c) => (
+                      <ListItemButton key={c.id} onClick={() => toggle(c.id)}
+                        selected={selected.has(c.id)}>
+                        <Checkbox size="small" checked={appliedIds.has(c.id) || selected.has(c.id)}
+                          sx={{ color: neon.cyan, mr: 0.5 }} />
+                        <ListItemText
+                          primary={`${c.host || '(no host)'} — ${c.kind}${c.username ? ' / ' + c.username : ''}`}
+                          secondary={appliedIds.has(c.id) && !selected.has(c.id)
+                            ? 'Currently applied to this target' : undefined}
+                          sx={{ '& .MuiListItemText-primary': { fontSize: 12.5 },
+                                '& .MuiListItemText-secondary': { fontSize: 11, color: neon.muted } }} />
+                      </ListItemButton>
+                    ))}
+                  </List>
+                  <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>
+                    <Button size="small" variant="outlined"
+                      onClick={() => setSelected(new Set(pool.map((c) => c.id)))}
+                      sx={{ fontSize: 11.5, color: neon.cyan, borderColor: alpha(neon.cyan, 0.4) }}>
+                      Select all
+                    </Button>
+                    <Button size="small" variant="outlined"
+                      onClick={() => setSelected(new Set())}
+                      sx={{ fontSize: 11.5, color: neon.muted, borderColor: alpha(neon.muted, 0.3) }}>
+                      Clear
+                    </Button>
+                  </Stack>
+                </>
+              )}
+          </DialogContent>
+          <Box sx={{ px: 2, py: 1.5 }}>
+            <Button size="small" variant="contained" disabled={assignMut.isPending}
+              onClick={() => assignMut.mutate(Array.from(selected))}
+              sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 11, letterSpacing: '0.08em' }}>
+              {assignMut.isPending ? 'Saving…' : `Assign ${selected.size} credential${selected.size === 1 ? '' : 's'}`}
+            </Button>
+          </Box>
+        </Dialog>
+      )}
+    </Box>
   )
 }
 
@@ -376,6 +517,9 @@ function Body({ project, host, onVuln }: {
           )}
         </Box>
       )}
+
+      {/* ---- credentials ---- */}
+      <CredentialsSection project={project} host={host} creds={data.credentials} />
 
       {/* ---- ports ---- */}
       <Section title="Open Ports" count={open.length}>

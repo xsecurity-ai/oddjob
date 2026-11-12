@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Alert, Badge, Box, Button, Chip, Snackbar, Stack, Tab, Tabs, Tooltip, alpha,
+  Alert, Badge, Box, Button, Checkbox, Chip, Dialog, DialogContent,
+  DialogTitle, Divider, ListItemButton, Snackbar, Stack, Tab, Tabs, Tooltip,
+  Typography, alpha,
 } from '@mui/material'
 import ScanIcon from '@mui/icons-material/RadarOutlined'
+import KeyIcon from '@mui/icons-material/Key'
 import type { ColumnDef } from '../lib/columns'
 import { countryCell, extraAddresses } from '../lib/cellFacts'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -159,6 +162,7 @@ export function TargetsView({ project }: { project: string | null }) {
   const [toast, setToast] = useState<
     { message: string; severity: 'success' | 'error' | 'info' } | null>(null)
   const [selected, setSelected] = useState<number[]>([])
+  const [assignCredsOpen, setAssignCredsOpen] = useState(false)
 
   // Paged in the database. This fetched every target in the project
   // -- 10,338 rows and 8.2 MB on this engagement -- to render a
@@ -729,6 +733,10 @@ export function TargetsView({ project }: { project: string | null }) {
           loading={pending.isLoading} error={pending.error as Error | null}
           auto={auto} onClose={() => setPicking(false)} />
       )}
+      {assignCredsOpen && project && (
+        <AssignCredsDialog project={project} rows={rows} selectedIds={selected}
+          onClose={() => setAssignCredsOpen(false)} />
+      )}
       <Tabs value={tab} onChange={(_, v) => setTab(v)}
         sx={{ minHeight: 34, px: 2, pt: 0.5,
               borderBottom: `1px solid ${alpha(neon.purple, 0.25)}` }}>
@@ -802,10 +810,195 @@ export function TargetsView({ project }: { project: string | null }) {
               sx={{ color: neon.cyan, borderColor: alpha(neon.cyan, 0.5), fontSize: 11, py: 0.3 }}>
               Import report
             </Button>
+            <Button size="small" variant="outlined" startIcon={<KeyIcon sx={{ fontSize: 16 }} />}
+              onClick={() => setAssignCredsOpen(true)}
+              sx={{ color: neon.pink, borderColor: alpha(neon.pink, 0.5), fontSize: 11, py: 0.3 }}>
+              Assign credentials
+            </Button>
           </>
         ) : undefined}
       />
       )}
     </>
+  )
+}
+
+/* --------------------------------------------------------------------------
+   Bulk credential assignment: pick the targets (the selected rows, or every
+   target in scope) and the credentials they should carry. The endpoint is
+   per-host — it REPLACES a target's assignment set — so each chosen host gets
+   its own PUT with the full list. A named-to-credential still applies after
+   the call; this only adds rows on top of what the importers recorded.
+-------------------------------------------------------------------------- */
+
+function AssignCredsDialog({ project, rows, selectedIds, onClose }: {
+  project: string
+  rows: Target[]
+  /** Target ids already selected in the grid when the dialog opened. */
+  selectedIds: number[]
+  onClose: () => void
+}) {
+  const qc = useQueryClient()
+  const [hosts, setHosts] = useState<Set<string>>(
+    new Set(rows.filter((t) => selectedIds.includes(t.id)).map((t) => t.host)))
+  const [allTargets, setAllTargets] = useState(selectedIds.length === 0)
+  const [credSel, setCredSel] = useState<Set<number>>(new Set())
+
+  const creds = useQuery({
+    queryKey: ['credentials', project],
+    queryFn: () => api.credentials(project),
+  })
+
+  // "All targets" needs the full list; the grid only holds one page.
+  const allRows = useQuery({
+    queryKey: ['targets-all-assign', project],
+    queryFn: () => api.targetPage({ project, limit: 100000, offset: 0 }),
+    enabled: allTargets,
+  })
+
+  const [busy, setBusy] = useState(false)
+  const [done, setDone] = useState<string | null>(null)
+
+  const toggleHost = (h: string) => {
+    setAllTargets(false)
+    setHosts((prev) => {
+      const next = new Set(prev)
+      if (next.has(h)) next.delete(h); else next.add(h)
+      return next
+    })
+  }
+
+  const toggleCred = (id: number) => {
+    setCredSel((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  const targetList = allTargets
+    ? (allRows.data?.items ?? []).map((t) => t.host)
+    : Array.from(hosts)
+
+  const save = async () => {
+    if (targetList.length === 0 || credSel.size === 0) return
+    setBusy(true)
+    let ok = 0, failed = 0
+    for (const h of targetList) {
+      try {
+        await api.assignTargetCredentials(project, h, Array.from(credSel))
+        ok++
+      } catch { failed++ }
+    }
+    setBusy(false)
+    setDone(`Assigned ${credSel.size} credential${credSel.size === 1 ? '' : 's'} to ${ok} target${ok === 1 ? '' : 's'}${failed ? ` (${failed} failed)` : ''}`)
+    qc.invalidateQueries({ queryKey: ['target-detail'] })
+  }
+
+  return (
+    <Dialog open onClose={onClose} maxWidth="md" fullWidth>
+      <DialogTitle sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 13,
+                          letterSpacing: '0.1em', color: neon.pink }}>
+        Assign credentials to targets
+      </DialogTitle>
+      <Divider />
+      <DialogContent dividers sx={{ minHeight: 320 }}>
+        {done ? (
+          <Stack spacing={1.5} sx={{ py: 3, alignItems: 'center' }}>
+            <Typography sx={{ color: neon.green, fontSize: 13 }}>{done}</Typography>
+            <Button size="small" variant="outlined" onClick={onClose}
+              sx={{ color: neon.cyan, borderColor: alpha(neon.cyan, 0.4) }}>Done</Button>
+          </Stack>
+        ) : (
+          <Stack spacing={2}>
+            {/* Targets */}
+            <Box>
+              <Typography sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 10,
+                                  letterSpacing: '0.14em', textTransform: 'uppercase',
+                                  color: alpha(neon.cyan, 0.75), mb: 0.8 }}>
+                Targets ({targetList.length})
+              </Typography>
+              <Stack direction="row" spacing={1} sx={{ mb: 1 }}>
+                <Button size="small" variant="outlined" onClick={() => setAllTargets(true)}
+                  sx={{ fontSize: 11, color: allTargets ? neon.cyan : neon.muted,
+                        borderColor: alpha(allTargets ? neon.cyan : neon.muted, 0.4) }}>
+                  All targets in project
+                </Button>
+                <Button size="small" variant="outlined" onClick={() => setAllTargets(false)}
+                  sx={{ fontSize: 11, color: !allTargets ? neon.cyan : neon.muted,
+                        borderColor: alpha(!allTargets ? neon.cyan : neon.muted, 0.4) }}>
+                  Selected rows ({hosts.size})
+                </Button>
+              </Stack>
+              {!allTargets && (
+                <Box sx={{ maxHeight: 160, overflowY: 'auto', border: `1px solid ${alpha(neon.cyan, 0.2)}`, p: 1 }}>
+                  {rows.length === 0
+                    ? <Typography sx={{ color: neon.muted, fontSize: 12 }}>No rows on this page.</Typography>
+                    : rows.map((t) => (
+                      <ListItemButton key={t.id} onClick={() => toggleHost(t.host)}
+                        selected={hosts.has(t.host)}
+                        sx={{ px: 0.5, py: 0.25, minHeight: 30 }}>
+                        <Checkbox size="small" checked={hosts.has(t.host)}
+                          sx={{ color: neon.cyan, mr: 0.5 }} />
+                        <Typography sx={{ fontSize: 12 }}>{t.host}</Typography>
+                      </ListItemButton>
+                    ))}
+                </Box>
+              )}
+              {allTargets && (
+                <Typography sx={{ color: neon.muted, fontSize: 12 }}>
+                  {allRows.isLoading ? 'Loading…' : `${targetList.length} targets in ${project}`}
+                </Typography>
+              )}
+            </Box>
+            {/* Credentials */}
+            <Box>
+              <Typography sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 10,
+                                  letterSpacing: '0.14em', textTransform: 'uppercase',
+                                  color: alpha(neon.pink, 0.75), mb: 0.8 }}>
+                Credentials ({credSel.size} selected)
+              </Typography>
+              <Stack direction="row" spacing={1} sx={{ mb: 1 }}>
+                <Button size="small" variant="outlined"
+                  onClick={() => setCredSel(new Set((creds.data?.items ?? []).map((c) => c.id)))}
+                  sx={{ fontSize: 11, color: neon.cyan, borderColor: alpha(neon.cyan, 0.4) }}>
+                  Select all
+                </Button>
+                <Button size="small" variant="outlined" onClick={() => setCredSel(new Set())}
+                  sx={{ fontSize: 11, color: neon.muted, borderColor: alpha(neon.muted, 0.3) }}>
+                  Clear
+                </Button>
+              </Stack>
+              <Box sx={{ maxHeight: 200, overflowY: 'auto', border: `1px solid ${alpha(neon.pink, 0.25)}`, p: 1 }}>
+                {creds.isLoading
+                  ? <Typography sx={{ color: neon.muted, fontSize: 12 }}>Loading…</Typography>
+                  : (creds.data?.items ?? []).length === 0
+                    ? <Typography sx={{ color: neon.muted, fontSize: 12 }}>No credentials in this project yet.</Typography>
+                    : (creds.data?.items ?? []).map((c) => (
+                      <ListItemButton key={c.id} onClick={() => toggleCred(c.id)}
+                        selected={credSel.has(c.id)}
+                        sx={{ px: 0.5, py: 0.25, minHeight: 30 }}>
+                        <Checkbox size="small" checked={credSel.has(c.id)}
+                          sx={{ color: neon.pink, mr: 0.5 }} />
+                        <Typography sx={{ fontSize: 12 }}>
+                          {c.host || '(no host)'} — {c.kind}{c.username ? ` / ${c.username}` : ''}
+                        </Typography>
+                      </ListItemButton>
+                    ))}
+              </Box>
+            </Box>
+          </Stack>
+        )}
+      </DialogContent>
+      {!done && (
+        <Box sx={{ px: 2, py: 1.5 }}>
+          <Button size="small" variant="contained" disabled={busy || targetList.length === 0 || credSel.size === 0}
+            onClick={() => void save()}
+            sx={{ fontFamily: `'Orbitron', sans-serif`, fontSize: 11, letterSpacing: '0.08em' }}>
+            {busy ? 'Assigning…' : `Assign to ${targetList.length} target${targetList.length === 1 ? '' : 's'}`}
+          </Button>
+        </Box>
+      )}
+    </Dialog>
   )
 }
