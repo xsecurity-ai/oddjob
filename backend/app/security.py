@@ -30,7 +30,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_session
-from .models import ROLE_ORDER, SITE_ADMIN_GROUP, ApiKey, Project, ProjectACL, User
+from .models import (ROLE_ORDER, SITE_ADMIN_GROUP, ApiKey, Group, Project,
+                     ProjectACL, User, user_groups)
 
 ALGO = "HS256"
 TOKEN_TTL_HOURS = int(os.environ.get("ODDJOB_TOKEN_TTL_HOURS", "12"))
@@ -149,16 +150,43 @@ async def get_current_user(request: Request,
     return u
 
 
-async def require_site_admin(user: User = Depends(get_current_user)) -> User:
-    if not user.is_site_admin:
+async def require_site_admin(user: User = Depends(get_current_user),
+                             session: AsyncSession = Depends(get_session)) -> User:
+    # From the database, not `user.is_site_admin`: the token may predate a
+    # membership change made by another request in this browser session.
+    if not await is_site_admin_member(session, user.id):
         raise HTTPException(403, f"membership of {SITE_ADMIN_GROUP!r} is required")
     return user
 
 
 # ---------------------------------------------------------- project roles
+async def is_site_admin_member(session: AsyncSession, user_id: int) -> bool:
+    """Site-admin membership read from the database.
+
+    The `User.is_site_admin` property answers from the `groups` list that
+    was loaded when this request's session first touched the row — and an
+    identity change made EARLIER in the same browser session, by another
+    request against a different session, is not in it. A token stays valid
+    for hours; membership does not wait for it to expire. The database is
+    the only copy that is ever current, so every decision that says "may
+    this person do the site-admin thing" asks it. (The property remains
+    right for rows this request itself changed, and for serialising a
+    user's own view of themselves — which is where `UserOut` uses it.)
+    """
+    return (await session.execute(
+        select(user_groups.c.group_id)
+        .join(Group, Group.id == user_groups.c.group_id)
+        .where(user_groups.c.user_id == user_id,
+               Group.name == SITE_ADMIN_GROUP))).first() is not None
+
+
 async def effective_role(session: AsyncSession, user: User, project_id: int) -> str | None:
     """Highest role the user holds on the project, or None for no access."""
-    if user.is_site_admin:
+    # Site admins bypass every per-project ACL. The membership comes from
+    # the database rather than `user.groups` — see is_site_admin_member.
+    # The role a site admin holds on a project IS admin, and it cannot be
+    # lost by revoking an ACL row they never needed.
+    if await is_site_admin_member(session, user.id):
         return "admin"
     gids = [g.id for g in user.groups]
     conds = [ProjectACL.user_id == user.id]
@@ -174,7 +202,9 @@ async def effective_role(session: AsyncSession, user: User, project_id: int) -> 
 
 async def visible_project_ids(session: AsyncSession, user: User) -> list[int] | None:
     """Projects the user can see at all. None means "every project"."""
-    if user.is_site_admin:
+    # Database membership — a person demoted minutes ago still holds a
+    # valid token, and `user.groups` would not know about it.
+    if await is_site_admin_member(session, user.id):
         return None
     gids = [g.id for g in user.groups]
     conds = [ProjectACL.user_id == user.id]

@@ -1,6 +1,7 @@
 """Login, users, groups, per-project ACLs and API keys."""
 from __future__ import annotations
 
+import logging
 import re
 from datetime import UTC, datetime
 
@@ -36,6 +37,7 @@ from ..security import (
     create_access_token,
     effective_role,
     get_current_user,
+    is_site_admin_member,
     hash_password,
     new_api_key,
     require_project,
@@ -45,6 +47,7 @@ from ..security import (
 from .magic import deliver_invite
 from .settings import load_all
 
+log = logging.getLogger("oddjob.auth")
 router = APIRouter(prefix="/api", tags=["auth"])
 
 
@@ -148,7 +151,12 @@ async def me(user: User = Depends(get_current_user),
         role = await effective_role(session, user, pr.id)
         if role:
             projects[pr.code] = role
-    return MeResponse(user=UserOut.model_validate(user), projects=projects)
+    out = UserOut.model_validate(user)
+    # The flag is a decision the UI makes from this response — who may see
+    # the site-admin views — so it must say what the database says, not
+    # what the session's copy of the row said at request start.
+    out.is_site_admin = await is_site_admin_member(session, user.id)
+    return MeResponse(user=out, projects=projects)
 
 
 @router.patch("/auth/me", response_model=UserOut)
@@ -174,6 +182,12 @@ async def update_profile(body: ProfileUpdate, user: User = Depends(get_current_u
             if not verify_password(current, user.password_hash):
                 raise HTTPException(403, "current password is incorrect")
         user.password_hash = hash_password(new)
+
+    if "username" in data:
+        # The account's own name. Everything else here is resolved from
+        # the user id, so a rename cannot strand a grant; what it DOES
+        # touch is where the name was copied in as data — see _rename.
+        await _rename(session, user, data.pop("username"))
 
     if "slack_handle" in data:
         # Stored bare. "@alice" and "alice" are one person, and keeping
@@ -205,7 +219,7 @@ async def selectable_users(user: User = Depends(get_current_user),
     person from a list; they do not need the staff directory. Site admins use
     the full endpoint.
     """
-    if not user.is_site_admin:
+    if not await is_site_admin_member(session, user.id):
         admin_somewhere = (await session.execute(
             select(ProjectACL.id).where(ProjectACL.user_id == user.id,
                                         ProjectACL.role == "admin").limit(1))).first()
@@ -294,6 +308,58 @@ def username_from_email(email: str) -> str:
     # name the account after. Better a dull name the admin can change than
     # a 422 they cannot act on.
     return name or "user"
+
+
+async def _rename(session: AsyncSession, u: User, new: str) -> None:
+    """Change an account's username and follow it into every place the
+    name is stored as data rather than resolved from the user id.
+
+    The check runs here rather than in the caller so the self-service
+    endpoint and the site-admin endpoint cannot disagree about what a
+    rename may cost:
+
+      * the alphabet is UserCreate's, and the 422 carries the same
+        sentence for both;
+      * the unique index is the real guard — the lookup above it is only
+        the friendly path, because two renames onto one name race exactly
+        the way two creations do;
+      * `AuditEvent.username` is denormalised on purpose (a deleted
+        account must not drag its history out of the table), so a rename
+        that did not follow it would leave the trail naming somebody else.
+        The rows are keyed by user_id, which does not change;
+      * `Event.actor` is free text that may equally be a tool name like
+        "nmap", and the timeline is append-only by convention — entries
+        are never rewritten when the underlying row changes. Old entries
+        keep the old name; new ones carry the new one.
+
+    Deliberately NOT touched: `Credential.username` (the credential's own
+    target username, not its owner), `ProxyGrant.username` (a random
+    per-grant string, independent of the account), and the JWT claim (an
+    existing token keeps the old name until it is reissued; nothing here
+    depends on it).
+    """
+    new = (new or "").strip().lower()
+    if not new.replace("-", "").replace("_", "").replace(".", "").isalnum():
+        raise HTTPException(422, "username may contain only letters, digits, . _ -")
+    clash = (await session.execute(
+        select(User).where(User.username == new, User.id != u.id))).scalar_one_or_none()
+    if clash:
+        raise HTTPException(409, f"the username {new!r} is already taken by another account")
+    old = u.username
+    try:
+        u.username = new
+        await session.flush()
+        from ..models import AuditEvent
+        await session.execute(AuditEvent.__table__.update()
+                              .where(AuditEvent.user_id == u.id)
+                              .values(username=new))
+    except IntegrityError as e:
+        # Two renames raced onto the same name. The unique index is the
+        # real guard; the lookup above it is only the friendly path.
+        await session.rollback()
+        raise HTTPException(409, f"user {new!r} already exists") from e
+    if old != new:
+        log.info("user %s renamed to %s", old, new)
 
 
 def _clean_username(v: str) -> str:
@@ -416,7 +482,10 @@ async def invite_user(body: UserInvite, actor: User = Depends(get_current_user),
     email = (body.email or "").strip().lower()
     if not _EMAIL.match(email):
         raise HTTPException(422, "a valid email address is required")
-    if not actor.is_site_admin and not body.grants:
+    # Database membership — `actor` was loaded at the start of this
+    # request and does not know about changes made by earlier requests
+    # in the same browser session. See is_site_admin_member.
+    if not await is_site_admin_member(session, actor.id) and not body.grants:
         raise HTTPException(
             403, "only a site administrator may create an account with no project grant")
 
@@ -504,6 +573,10 @@ async def update_user(username: str, body: UserUpdate,
     if "password" in data and data["password"]:
         u.password_hash = hash_password(data.pop("password"))
     data.pop("password", None)
+    if "username" in data:
+        # Same rules as the self-service rename — see _rename for what a
+        # rename touches and, deliberately, what it leaves alone.
+        await _rename(session, u, data.pop("username"))
     for k, v in data.items():
         setattr(u, k, v)
     await session.commit()
@@ -519,7 +592,9 @@ async def delete_user(username: str, actor: User = Depends(require_site_admin),
         raise HTTPException(404, f"no user {username!r}")
     if u.id == actor.id:
         raise HTTPException(409, "refusing to delete the account you are signed in as")
-    if u.is_site_admin:
+    # Database membership — `u` was just selected, but a row deleted by an
+    # earlier request in this browser session would still show it here.
+    if await is_site_admin_member(session, u.id):
         admins = (await session.execute(
             select(Group).where(Group.name == SITE_ADMIN_GROUP))).scalar_one_or_none()
         if admins and len(admins.users) <= 1:
@@ -708,7 +783,8 @@ async def create_key(name: str, user: User = Depends(get_current_user),
 async def revoke_key(key_id: int, user: User = Depends(get_current_user),
                      session: AsyncSession = Depends(get_session)):
     k = await session.get(ApiKey, key_id)
-    if not k or (k.user_id != user.id and not user.is_site_admin):
+    # Database membership — see is_site_admin_member.
+    if not k or (k.user_id != user.id and not await is_site_admin_member(session, user.id)):
         raise HTTPException(404, f"no api key {key_id}")
     k.revoked = True
     await session.commit()

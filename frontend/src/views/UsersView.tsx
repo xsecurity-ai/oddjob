@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import {
   Alert, Box, Button, Chip, Divider, IconButton, MenuItem, Paper, Select,
-  Stack, Tooltip, Typography, alpha,
+  Stack, TextField, Tooltip, Typography, alpha,
 } from '@mui/material'
 import DeleteIcon from '@mui/icons-material/DeleteOutlined'
 import PersonAddIcon from '@mui/icons-material/PersonAddAlt'
@@ -69,6 +69,10 @@ export function UsersView() {
   const [newUser, setNewUser] = useState(false)
   const [grantWho, setGrantWho] = useState('')
   const [grantRole, setGrantRole] = useState<string>('readonly')
+  // The row whose name is being edited. One at a time: the field is inline
+  // in the account list, and a second open editor would blur the first.
+  const [renaming, setRenaming] = useState<number | null>(null)
+  const [renameTo, setRenameTo] = useState('')
 
   const users = useQuery({ queryKey: ['users'], queryFn: api.users, enabled: isSiteAdmin })
   const picker = useQuery({ queryKey: ['users-selectable'], queryFn: api.selectableUsers })
@@ -80,6 +84,10 @@ export function UsersView() {
   const fail = (e: unknown) =>
     setMsg({ kind: 'err', text: e instanceof Error ? e.message : String(e) })
   const refresh = () => qc.invalidateQueries()
+  const commitRename = (u: { id: number; username: string }) => {
+    if (!renameTo.trim()) return
+    rename.mutate({ old: u.username, next: renameTo.trim() })
+  }
 
   const grant = useMutation({
     mutationFn: () => api.grant(project, { username: grantWho, role: grantRole }),
@@ -114,6 +122,15 @@ export function UsersView() {
   const remove = useMutation({
     mutationFn: (username: string) => api.deleteUser(username),
     onSuccess: refresh, onError: fail,
+  })
+  const rename = useMutation({
+    // Renaming an account follows the name into every grant and into the
+    // audit trail server-side — see `_rename` in the auth router. The UI
+    // only has to ask for a new name.
+    mutationFn: (v: { old: string; next: string }) =>
+      api.updateUser(v.old, { username: v.next }),
+    onSuccess: () => { setRenaming(null); refresh() },
+    onError: fail,
   })
 
   return (
@@ -150,7 +167,36 @@ export function UsersView() {
                       border: `1px solid ${alpha(neon.purple, 0.2)}`,
                       opacity: u.is_active ? 1 : 0.5
                     }}>
-                    <Box sx={{ minWidth: 140, color: neon.pink, fontSize: 13 }}>{u.username}</Box>
+                    {renaming === u.id ? (
+                      <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
+                        <TextField size="small" autoFocus value={renameTo}
+                          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setRenameTo(e.target.value)}
+                          onKeyDown={(e: React.KeyboardEvent) => {
+                            if (e.key === 'Enter') { e.preventDefault(); commitRename(u) }
+                            if (e.key === 'Escape') setRenaming(null)
+                          }}
+                          sx={{ width: 140, fontSize: 13 }} />
+                        <Button size="small" onClick={() => commitRename(u)}
+                          disabled={rename.isPending || !renameTo.trim()
+                            || renameTo.trim().toLowerCase() === u.username}
+                          sx={{ fontSize: 10.5, color: neon.green, minWidth: 0 }}>
+                          Save
+                        </Button>
+                        <IconButton size="small" onClick={() => setRenaming(null)}
+                          sx={{ color: neon.muted }}>
+                          <DeleteIcon sx={{ fontSize: 14 }} />
+                        </IconButton>
+                      </Stack>
+                    ) : (
+                      <Tooltip title={self ? 'Your own name lives on the Profile page' : 'Rename'}>
+                        <Box component="span" role={self ? undefined : 'button'} tabIndex={self ? undefined : 0}
+                          onClick={self ? undefined : () => { setRenaming(u.id); setRenameTo(u.username) }}
+                          sx={{ minWidth: 140, color: neon.pink, fontSize: 13, cursor: self ? 'default' : 'pointer',
+                                 '&:hover': { textDecoration: 'underline' } }}>
+                          {u.username}
+                        </Box>
+                      </Tooltip>
+                    )}
                     <Box sx={{ flex: 1, fontSize: 12, color: neon.muted,
                                overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {u.full_name || u.email || ''}
