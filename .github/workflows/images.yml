@@ -493,33 +493,3 @@ jobs:
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
           echo "| oddjob-app | \`${image_id:0:19}…\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "oddjob-app is now on ${image_id}"
-
-          # TEMP (debug-ghost-task-failures): the BRUNO ghosts view is full of
-          # failed tasks and I cannot reach the box from this laptop right now,
-          # so print what the app itself sees: the recent task rows and any
-          # error lines from the container log. Remove with the fix.
-          # Echo to stdout as well as the summary: the step summary is only
-          # visible in the web UI, but the log is what `gh run view --log`
-          # hands me from this laptop.
-          bruno_tasks=$(remote 'cd ~/Containers/oddjob && docker exec oddjob-db-1 psql -U oddjob -d oddjob -At -F "|" -c "
-            SELECT t.id, t.kind, t.status, a.name, left(coalesce(t.error, chr(45)), 200)
-              FROM agent_tasks t LEFT JOIN agents a ON a.id = t.agent_id
-             WHERE t.project_id = (SELECT id FROM projects WHERE code = chr(66)||chr(82)||chr(85)||chr(78)||chr(79))
-             ORDER BY t.id DESC LIMIT 40;"' 2>&1) || true
-          echo "### Debug: BRUNO ghost tasks (temporary)"
-          echo "$bruno_tasks"
-          { echo ""; echo "### Debug: BRUNO ghost tasks (temporary)"; echo '```'; echo "$bruno_tasks"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          bruno_agents=$(remote 'cd ~/Containers/oddjob && docker exec oddjob-db-1 psql -U oddjob -d oddjob -At -F "|" -c "
-            SELECT a.name, a.version, a.platform, a.arch, a.created_at::date
-              FROM agents a
-             WHERE a.project_id = (SELECT id FROM projects WHERE code = chr(66)||chr(82)||chr(85)||chr(78)||chr(79))
-             ORDER BY a.id;"' 2>&1) || true
-          echo ""
-          echo "### Debug: BRUNO ghost versions (temporary)"
-          echo "$bruno_agents"
-          { echo ""; echo "### Debug: BRUNO ghost versions (temporary)"; echo '```' ; echo "$bruno_agents"; echo '```' ; } >> "$GITHUB_STEP_SUMMARY"
-          bruno_logs=$(remote 'cd ~/Containers/oddjob && docker compose logs app --since 12h 2>&1 | grep -iE "error|fail|exception|traceback" | tail -40' 2>&1) || true
-          echo ""
-          echo "### Debug: app log errors (temporary)"
-          echo "$bruno_logs"
-          { echo ""; echo "### Debug: app log errors (temporary)"; echo '```'; echo "$bruno_logs"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
