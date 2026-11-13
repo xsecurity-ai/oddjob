@@ -462,6 +462,121 @@ func TestNucleiFailsWhenItCouldNotRun(t *testing.T) {
 	}
 }
 
+// A nuclei that cannot run says so with a FATAL line and nothing else,
+// which is not enough to know what to do about it: "no templates" on
+// a host you cannot reach is a guess until someone SSHs there. The
+// diagnosis rides along in the same error -- where the binary lives,
+// which template directory was used (and by what), and whether that
+// directory exists and holds anything.
+func TestNucleiDiagnosisWhenTemplatesMissing(t *testing.T) {
+	dir := t.TempDir()
+	falseBin, err := exec.LookPath("false")
+	if err != nil {
+		t.Skip("no `false` on this box to stand in for a broken nuclei")
+	}
+	if err := os.Symlink(falseBin, filepath.Join(dir, "nuclei")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Point the built-in path at something that is not there.
+	t.Setenv("GHOST_NUCLEI_TEMPLATES", filepath.Join(dir, "no-such-corpus"))
+	res := Runners["nuclei"](t.Context(),
+		map[string]any{"targets": []any{"https://a.acme.example/"}}, t.TempDir())
+
+	if res.Status != "failed" {
+		t.Fatalf("status %q, want failed", res.Status)
+	}
+	for _, want := range []string{
+		"did not run (exit 1)",
+		"; diagnosis:",
+		"GHOST_NUCLEI_TEMPLATES=" + filepath.Join(dir, "no-such-corpus"),
+		"does not exist on this host",
+	} {
+		if !strings.Contains(res.Error, want) {
+			t.Errorf("error does not contain %q:\n%s", want, res.Error)
+		}
+	}
+}
+
+// The directory exists but is empty: a half-fetched corpus. The
+// diagnosis must say the directory WAS looked at and found bare, which
+// is a different fix (re-fetch) than "does not exist" (point the env
+// var somewhere).
+func TestNucleiDiagnosisWhenTemplateDirEmpty(t *testing.T) {
+	dir := t.TempDir()
+	falseBin, err := exec.LookPath("false")
+	if err != nil {
+		t.Skip("no `false` on this box to stand in for a broken nuclei")
+	}
+	if err := os.Symlink(falseBin, filepath.Join(dir, "nuclei")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	empty := t.TempDir()
+	t.Setenv("GHOST_NUCLEI_TEMPLATES", empty)
+	res := Runners["nuclei"](t.Context(),
+		map[string]any{"targets": []any{"https://a.acme.example/"}}, t.TempDir())
+
+	if res.Status != "failed" {
+		t.Fatalf("status %q, want failed", res.Status)
+	}
+	for _, want := range []string{
+		"; diagnosis:",
+		"contains no yaml files",
+	} {
+		if !strings.Contains(res.Error, want) {
+			t.Errorf("error does not contain %q:\n%s", want, res.Error)
+		}
+	}
+}
+
+// The directory exists and holds templates: then the failure is not
+// the corpus at all, and the diagnosis should say so -- with a count --
+// rather than sending the operator to re-fetch.
+func TestNucleiDiagnosisWhenTemplateDirPopulated(t *testing.T) {
+	dir := t.TempDir()
+	falseBin, err := exec.LookPath("false")
+	if err != nil {
+		t.Skip("no `false` on this box to stand in for a broken nuclei")
+	}
+	if err := os.Symlink(falseBin, filepath.Join(dir, "nuclei")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	corpus := t.TempDir()
+	sub := filepath.Join(corpus, "technologies")
+	if err := os.Mkdir(sub, 0o755); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	for _, f := range []string{
+		filepath.Join(corpus, "a.yaml"),
+		filepath.Join(sub, "b.yaml"),
+		filepath.Join(corpus, "not-a-template.txt"),
+	} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("GHOST_NUCLEI_TEMPLATES", corpus)
+	res := Runners["nuclei"](t.Context(),
+		map[string]any{"targets": []any{"https://a.acme.example/"}}, t.TempDir())
+
+	if res.Status != "failed" {
+		t.Fatalf("status %q, want failed", res.Status)
+	}
+	for _, want := range []string{
+		"; diagnosis:",
+		"2 yaml files there",
+	} {
+		if !strings.Contains(res.Error, want) {
+			t.Errorf("error does not contain %q:\n%s", want, res.Error)
+		}
+	}
+}
+
 // The templates come from the image, and the path is overridable for
 // an agent installed by hand that has no image.
 func TestNucleiTemplateDirIsOverridable(t *testing.T) {
