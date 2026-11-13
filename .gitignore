@@ -71,6 +71,13 @@ __pycache__/
 .vscode/
 *.swp
 
+# The SSH key the images workflow uses to redeploy oddjob.helms.world on
+# every image push. The private half lives in .deploy/ locally and as the
+# ODDJOB_DEPLOY_SSH_KEY GitHub secret; only its public half is installed
+# on the mediacenter's authorized_keys. Never commit the private key to a
+# public repo.
+.deploy/
+
 # Agent worktrees. Checkouts of this same repo, created while work is
 # parallelised; committing them as gitlinks points at branches that do
 # not exist for anyone else.
