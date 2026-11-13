@@ -417,3 +417,63 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           .github/scripts/publish.sh ghost  "$GHOST_BUILD"  "$GHOST_HAVE"
           .github/scripts/publish.sh oddjob "$ODDJOB_BUILD" "$ODDJOB_HAVE"
+
+  # The mediacenter runs the baked image (cr0n1cx/oddjob:develop), so a
+  # new :develop is only live once that host pulls it. This job does that
+  # automatically on every merge, so "redeploy after every image push" is
+  # a property of the pipeline rather than something someone remembers.
+  #
+  # Only the develop pointer deploys. A nightly (schedule) or a manual
+  # rebuild moves :nightly / re-points a tag, but the host keeps running
+  # whatever :develop was when it last pulled — pulling :nightly onto it
+  # would run untested bytes on the live instance. So this job is gated
+  # on pointer == develop, which is exactly the push-to-main case.
+  deploy:
+    needs: [plan, publish]
+    if: always() && needs.plan.result == 'success' && needs.publish.result == 'success' && needs.plan.outputs.pointer == 'develop'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull and recreate the app on the mediacenter
+        env:
+          DEPLOY_HOST: ${{ secrets.ODDJOB_DEPLOY_HOST }}
+          DEPLOY_KEY: ${{ secrets.ODDJOB_DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          # The key arrives as a secret with no trailing newline; add one,
+          # because ssh rejects a private key whose final line is not
+          # newline-terminated. 0600 or ssh calls it too open.
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/oddjob_deploy
+          chmod 600 ~/.ssh/oddjob_deploy
+
+          # The host is the whole user@host, from the secret, so rotating
+          # the box or the account is a secret change, not a workflow edit.
+          remote() {
+            ssh -i ~/.ssh/oddjob_deploy \
+                -o StrictHostKeyChecking=accept-new \
+                "$DEPLOY_HOST" "$@"
+          }
+
+          echo "### Deploying to \`${DEPLOY_HOST##*@}\`" >> "$GITHUB_STEP_SUMMARY"
+          # The app runs a baked image with no source bind-mount, so the
+          # only thing that changes what it serves is the image. Pull the
+          # fresh :develop and force-recreate the app container on it.
+          # --force-recreate rather than plain up: compose sees the same
+          # tag and would otherwise leave the old container running because
+          # "the config has not changed" — which is precisely the case we
+          # are in, since the name did not move, only the bytes behind it.
+          remote 'cd ~/Containers/oddjob && docker compose pull app'
+          remote 'cd ~/Containers/oddjob && PROXY_TLS_PORT=18444 docker compose up -d --force-recreate app'
+
+          # Prove it actually came up and report which image ID it is now
+          # running. .Image is the resolved image ID (sha256:…), not the
+          # tag, so a force-recreate that pulled nothing — registry lag —
+          # would show the old ID and read as "deployed but unchanged"
+          # rather than a clean success.
+          sleep 5
+          image_id=$(remote 'docker inspect oddjob-app --format "{{.Image}}"')
+          echo "| container | running image |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| oddjob-app | \`${image_id:0:19}…\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "oddjob-app is now on ${image_id}"

@@ -609,8 +609,8 @@ check("and announced", head is not None,
 thread = next((p for p in POSTED if p.get("thread_ts")), None)
 if thread:
     check("the thread carries the link to open it",
-          "*Oddjob:* <https://oddjob.test/projects/SLK/vulns?finding=%s|open this finding>" % v["id"]
-          in (thread.get("text") or ""), str(thread.get("text"))[:200])
+          ("*Oddjob:* <https://oddjob.test/projects/SLK/vulns?finding={}|open this finding>"
+           .format(v["id"])) in (thread.get("text") or ""), str(thread.get("text"))[:200])
     check("and it is the last line of the thread",
           (thread.get("text") or "").strip().split("\n")[-1].startswith("*Oddjob:*"),
           str((thread.get("text") or "").strip().split("\n")[-1])[:80])
