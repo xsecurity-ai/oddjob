@@ -324,11 +324,24 @@ check("add_finding",
 v = run(M.list_vulns(project="MCPT"))
 check("list_vulns sees it", v["total"] == 1, v)
 
+# A credential and its finding in one call. The value goes to the stored
+# credential, not the description: a description is listed, searched,
+# exported and pasted into Slack, and a key in one of those is live.
+sf = run(M.add_secret_finding("MCPT", "web.acme.example",
+                              "Hardcoded AWS key", "AKIA" + "X" * 16))
+check("add_secret_filing makes the finding", (sf or {}).get("finding", {}).get("title")
+      == "Hardcoded AWS key", str(sf)[:80])
+check("...and returns the value it stored",
+      (sf or {}).get("secret", {}).get("secret") == "AKIA" + "X" * 16,
+      str((sf or {}).get("secret"))[:40])
+v2 = run(M.list_vulns(project="MCPT"))
+check("list_vulns sees both findings now", v2["total"] == 2, v2)
+
 g = run(M.get_target("MCPT", "web.acme.example"))
 check("get_target returns the target", g.get("target", {}).get("host") == "web.acme.example")
 check("get_target carries services with product and version",
       any(s["product"] == "nginx" and s["version"] == "1.18.0" for s in g["services"]))
-check("get_target carries findings", len(g["vulns"]) == 1)
+check("get_target carries findings", len(g["vulns"]) == 2)
 # The four-call version had no implants in it at all, because nobody
 # adding C2 tracking came back to add a fifth call. /detail has them.
 check("get_target carries implants (the key the old version dropped)",
@@ -630,11 +643,21 @@ check("every API surface is either reachable from MCP or deliberately not",
 # The other direction: a prefix on the withheld list that the server
 # has quietly started calling. That is the one that matters, because
 # it is how a secret reaches a third party's logs.
-_leaked = sorted(set(NEVER_EXPOSED) & _reach)
+#
+# One prefix holds both: /api/secrets/finding WRITES a credential (which
+# is what add_secret_finding exists to do and so is exposed), while the
+# GETs under the same prefix hand back the VALUES (withheld). So this
+# check compares paths, not prefixes, with that one write allowed.
+_EXPOSED_UNDER_WITHHELD = {"/api/secrets/finding"}
+_called_paths = set(re.findall(r'/api/[a-z0-9\-_{}/]+', _src))
+_leaked = sorted(p for p in _called_paths
+                 if "/" + p.split("/")[2] in NEVER_EXPOSED
+                 and p not in _EXPOSED_UNDER_WITHHELD)
 check("...and nothing withheld has crept back in",
       not _leaked,
-      "NOW REACHABLE: " + ", ".join(f"{p} ({NEVER_EXPOSED[p]})"
-                                    for p in _leaked) if _leaked
+      "NOW REACHABLE: " + ", ".join(
+          f"{p} ({NEVER_EXPOSED['/' + p.split('/')[2]]})" for p in _leaked)
+      if _leaked
       else "none of the withheld prefixes are called")
 
 
