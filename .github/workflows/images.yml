@@ -509,6 +509,15 @@ jobs:
           echo "### Debug: BRUNO ghost tasks (temporary)"
           echo "$bruno_tasks"
           { echo ""; echo "### Debug: BRUNO ghost tasks (temporary)"; echo '```'; echo "$bruno_tasks"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          bruno_agents=$(remote 'cd ~/Containers/oddjob && docker exec oddjob-db-1 psql -U oddjob -d oddjob -At -F "|" -c "
+            SELECT a.name, a.version, a.platform, a.arch, a.created_at::date
+              FROM agents a
+             WHERE a.project_id = (SELECT id FROM projects WHERE code = chr(66)||chr(82)||chr(85)||chr(78)||chr(79))
+             ORDER BY a.id;"' 2>&1) || true
+          echo ""
+          echo "### Debug: BRUNO ghost versions (temporary)"
+          echo "$bruno_agents"
+          { echo ""; echo "### Debug: BRUNO ghost versions (temporary)"; echo '```' ; echo "$bruno_agents"; echo '```' ; } >> "$GITHUB_STEP_SUMMARY"
           bruno_logs=$(remote 'cd ~/Containers/oddjob && docker compose logs app --since 12h 2>&1 | grep -iE "error|fail|exception|traceback" | tail -40' 2>&1) || true
           echo ""
           echo "### Debug: app log errors (temporary)"
