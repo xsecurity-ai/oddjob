@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -926,7 +927,14 @@ var Parallelism = func() int { return 1 }
 // An override exists because an agent installed by hand -- `go
 // install`, brew, choco -- has no image and therefore no bundled
 // templates, and should be able to point at wherever it put them.
-var nucleiTemplates = envOr("GHOST_NUCLEI_TEMPLATES", "/opt/nuclei-templates")
+//
+// Read per call rather than once at init: the environment is a
+// runtime fact (an operator can set GHOST_NUCLEI_TEMPLATES in the
+// agent's unit file without rebuilding), and tests need to redirect
+// it with t.Setenv between cases.
+func nucleiTemplates() string {
+	return envOr("GHOST_NUCLEI_TEMPLATES", "/opt/nuclei-templates")
+}
 
 func envOr(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
@@ -961,8 +969,9 @@ func nucleiArgv(ctx context.Context, tg []string,
 	// Named explicitly so the failure, if the path is ever wrong, is
 	// a missing directory rather than a silent fallback to an empty
 	// default.
-	if _, err := os.Stat(nucleiTemplates); err == nil {
-		argv = append(argv, "-t", nucleiTemplates)
+	tmplDir := nucleiTemplates()
+	if _, err := os.Stat(tmplDir); err == nil {
+		argv = append(argv, "-t", tmplDir)
 	}
 	argv = append(argv, headerArgs(args)...)
 	argv = append(argv, extraHeaderArgs(args)...)
@@ -998,6 +1007,61 @@ func nucleiArgv(ctx context.Context, tg []string,
 	return argv, paced
 }
 
+// templateDiagnosis turns a bare "no templates provided for scan" into
+// something an operator can act on without SSHing to the agent.
+//
+// The failure is a state of THIS host -- where the binary lives, which
+// template directory it was pointed at (and by what), whether that
+// directory exists, and how many templates are in it -- so only the
+// agent can report it. The message travels home in the task's error
+// field, which is exactly where an operator looks when a scan says
+// "did not run".
+func templateDiagnosis() string {
+	var b strings.Builder
+	b.WriteString("; diagnosis: ")
+	if p := tools.Path("nuclei"); p != "" {
+		b.WriteString("nuclei at " + p)
+	} else {
+		b.WriteString("nuclei NOT on PATH")
+	}
+	tmplDir := nucleiTemplates()
+	if v := os.Getenv("GHOST_NUCLEI_TEMPLATES"); v != "" {
+		b.WriteString(", templates dir from GHOST_NUCLEI_TEMPLATES=" + v)
+	} else {
+		b.WriteString(", templates dir is the built-in " + tmplDir)
+	}
+	if _, err := os.Stat(tmplDir); err == nil {
+		n := countYaml(tmplDir)
+		if n > 0 {
+			fmt.Fprintf(&b, ", %d yaml files there -- the directory exists; check that it holds the corpus nuclei wants", n)
+		} else {
+			b.WriteString(", but it contains no yaml files -- an empty or half-fetched template directory")
+		}
+	} else if os.IsNotExist(err) {
+		b.WriteString("; the directory does not exist on this host -- a hand-installed agent has no baked templates, point GHOST_NUCLEI_TEMPLATES at a real corpus")
+	} else {
+		fmt.Fprintf(&b, "; %v", err)
+	}
+	return b.String()
+}
+
+// countYaml counts *.yaml files under dir. A template corpus is
+// thousands of small files, so a full walk is cheap enough for an
+// error path that runs once per failed task. The walk's error is
+// assigned to _ on purpose: a directory that vanished between the
+// Stat and the walk still yields whatever it counted, and the
+// diagnosis has already said the directory exists.
+func countYaml(dir string) int {
+	n := 0
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(d.Name(), ".yaml") {
+			n++
+		}
+		return nil
+	})
+	return n
+}
+
 func runNuclei(ctx context.Context, args map[string]any, workDir string) Result {
 	tg := targets(args)
 	if len(tg) == 0 {
@@ -1030,8 +1094,8 @@ func runNuclei(ctx context.Context, args map[string]any, workDir string) Result 
 	// operator gets "this did not run" instead, and the URL stays
 	// eligible to be tasked again.
 	if r.code != 0 && out == "" {
-		return failed("nuclei did not run (exit %d): %s",
-			r.code, tail(r.stderr, 400))
+		return failed("nuclei did not run (exit %d): %s%s",
+			r.code, tail(r.stderr, 400), templateDiagnosis())
 	}
 	return Result{Status: "done", Output: out, Stderr: tail(r.stderr, 4000),
 		// The pacing rides in the summary rather than a log line.
