@@ -433,35 +433,28 @@ jobs:
     if: always() && needs.plan.result == 'success' && needs.publish.result == 'success' && needs.plan.outputs.pointer == 'develop'
     runs-on: ubuntu-latest
     steps:
+      # The mediacenter is on the LAN (192.168.50.0/24), which a
+      # GitHub-hosted runner cannot reach directly. It advertises that
+      # subnet as a Tailscale route and is an exit node, so joining the
+      # tailnet is what makes 192.168.50.202 reachable. The official action
+      # handles install, join, and cleanup: the node it creates is ephemeral
+      # and logs out when the job ends, leaving no residue on the tailnet.
+      # The auth key is reusable (one key for every deploy) and plain — no
+      # route attributes of its own; the node simply accepts the subnet the
+      # mediacenter advertises. `ping` blocks until the mediacenter is
+      # actually reachable, so a later step never races the join.
+      - name: Tailscale
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          authkey: ${{ secrets.ODDJOB_DEPLOY_TS_AUTHKEY }}
+          ping: 192.168.50.202
+
       - name: Pull and recreate the app on the mediacenter
         env:
           DEPLOY_HOST: ${{ secrets.ODDJOB_DEPLOY_HOST }}
           DEPLOY_KEY: ${{ secrets.ODDJOB_DEPLOY_SSH_KEY }}
-          TS_AUTHKEY: ${{ secrets.ODDJOB_DEPLOY_TS_AUTHKEY }}
         run: |
           set -euo pipefail
-
-          # The mediacenter is on the LAN (192.168.50.0/24), which a
-          # GitHub-hosted runner cannot reach directly. It advertises that
-          # subnet as a Tailscale route and is an exit node, so joining the
-          # tailnet is what makes 192.168.50.202 reachable. The auth key is
-          # ephemeral (the CI node vanishes when the job ends) and reusable
-          # (one key for every deploy), scoped to exactly that subnet.
-          curl -fsSL https://tailscale.com/install.sh | sh
-          tailscale up --authkey="$TS_AUTHKEY" --hostname=ci-oddjob-deploy \
-            --accept-routes --reset
-          # `up` returns once the node is registered, but the accepted
-          # subnet route (192.168.50.0/24) can lag a moment behind. Poll
-          # until our own tailnet IP is assigned — the point at which the
-          # route is live and 192.168.50.202 is dialable through it —
-          # rather than guessing at a fixed sleep.
-          for i in $(seq 1 30); do
-            if tailscale ip -4 >/dev/null 2>&1; then
-              break
-            fi
-            sleep 2
-          done
-          echo "joined tailnet as: $(tailscale status --self | awk '{print $3}')"
 
           # The SSH key arrives as a secret with no trailing newline; add
           # one, because ssh rejects a private key whose final line is not
