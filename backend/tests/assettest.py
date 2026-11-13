@@ -1249,6 +1249,57 @@ check("a refused read writes no audit entry",
               for r in _lrows),
       "an empty readonly result was logged as a read")
 
+print("\n== a credential filed in one call ==")
+# The API used to answer "add this secret" with two endpoints: file the
+# finding, then store the value against the id it just handed back. One
+# credential is two round trips and an id to carry between them, which
+# is exactly what `POST /secrets/finding` exists not to do. The value
+# must land in `finding_secrets`, never in the description -- a
+# description is listed, searched, exported and pasted into Slack, and
+# a key in one of those is a live key.
+st, r = call("/api/secrets/finding?project=ASSET", "POST",
+             {"host": "127.0.0.1", "title": "Key typed in by hand",
+              "secret": PLANTED + "-filed", "severity": "critical",
+              "description": "Found in a config file.",
+              "detector": "manual"}, token=admin)
+check("the finding is created with its credential", st == 201, f"{st} {str(r)[:80]}")
+_fid = (r or {}).get("finding", {}).get("id")
+check("...and the value comes back so the caller knows it landed",
+      (r or {}).get("secret", {}).get("secret") == PLANTED + "-filed",
+      str((r or {}).get("secret"))[:60])
+
+st, one = call(f"/api/vulns/{_fid}", token=admin) if _fid else (404, None)
+check("the finding exists on its own", st == 200 and (one or {}).get("id") == _fid,
+      f"{st} {str(one)[:80]}")
+check("...and the value is NOT in its description",
+      PLANTED not in json.dumps((one or {}).get("description") or ""),
+      str((one or {}).get("description"))[:80])
+
+st, val = call(f"/api/vulns/{_fid}/secret", token=admin) if _fid else (404, None)
+check("the credential is stored and revealable",
+      st == 200 and (val or {}).get("secret") == PLANTED + "-filed", f"{st} {str(val)[:60]}")
+
+st, rows = call("/api/secrets?project=ASSET", token=admin)
+_filed = [x for x in (rows or []) if x.get("vuln_id") == _fid]
+check("it appears in the secrets list with its origin",
+      len(_filed) == 1 and _filed[0]["secret"] == PLANTED + "-filed"
+      and _filed[0].get("detector") == "manual",
+      str(_filed)[:120])
+
+# The target must already exist: making a host and filing against it in
+# one breath would hide scope mistakes, which is why the endpoint says
+# so rather than guessing.
+st, r = call("/api/secrets/finding?project=ASSET", "POST",
+             {"host": "no-such-host.example", "title": "Nowhere",
+              "secret": PLANTED + "-nowhere"}, token=admin)
+check("a host the project does not carry is refused", st == 404, f"{st} {str(r)[:80]}")
+
+# No value, no credential: the endpoint exists to keep a value, and an
+# empty one is the difference between "no key" and "the key is blank".
+st, r = call("/api/secrets/finding?project=ASSET", "POST",
+             {"host": "127.0.0.1", "title": "No value", "secret": ""}, token=admin)
+check("an empty secret is refused before anything is written", st == 422, f"{st} {str(r)[:80]}")
+
 print("\n== triage: what a person concluded ==")
 # Separate from `status`, which is what has been DONE. A confirmed
 # issue can be open and a false positive can be closed; one column

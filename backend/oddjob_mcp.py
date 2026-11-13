@@ -703,6 +703,24 @@ async def add_finding(project: str, host: str, title: str,
                             "port": port, "external_id": external_id})
 
 
+@tool(agent_equivalent="add_secret_finding", writes=True)
+async def add_secret_finding(project: str, host: str, title: str, secret: str,
+                             severity: str = "info", description: str | None = None,
+                             detector: str | None = None) -> Any:
+    """Record a credential and its finding in one call. Needs `user`.
+
+    The value goes to the finding's stored credential, not its
+    description: a description is listed, searched, exported and pasted
+    into Slack, and a key in one of those is a live key. `detector` is
+    what found it — "manual" when a person typed it in. The target must
+    already exist; create it with `add_target` first.
+    """
+    return await _req("POST", "/api/secrets/finding", params={"project": project},
+                      json={"host": host, "title": title, "secret": secret,
+                            "severity": severity, "description": description,
+                            "detector": detector})
+
+
 @tool(agent_equivalent="search_web_assets")
 async def search_web_assets(project: str | None = None,
                             query: str | None = None,

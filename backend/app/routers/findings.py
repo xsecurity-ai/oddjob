@@ -9,7 +9,7 @@ import contextlib
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,7 +37,7 @@ from ..models import (
     WebAssetFile,
 )
 from ..query import apply_search, apply_sort, paginate
-from ..schemas import Page, PocCreate, PocOut, VulnCreate, VulnOut
+from ..schemas import Page, PocCreate, PocOut, VulnCreate, VulnOut, norm_sev
 from ..security import (
     assert_role_for_target,
     effective_role,
@@ -1680,6 +1680,115 @@ async def create_vuln(body: VulnCreate, project: str = Query(...),
     # finding is not something a tool gets to resolve.
     return _vuln_out(
         (await session.execute(_base(Vuln).where(Vuln.id == v.id))).first())
+
+
+class SecretFindingCreate(BaseModel):
+    """A credential and its finding, in one call.
+
+    The two halves are the same question an operator asks: "I found a
+    key on this host, keep it." Splitting that into `POST /vulns` plus
+    `POST /vulns/{id}/secret` means the second call needs the id the
+    first one just handed back, and a credential is not useful without
+    its finding. So the endpoint takes both at once.
+
+    The finding's fields are exactly `VulnCreate`'s minus the host,
+    which is here as its own field because it also picks -- or makes --
+    the target. `secret` is the value itself, kept out of
+    `description` for the same reason every other credential is: a
+    description is listed, searched, exported and pasted into Slack,
+    and a key in one of those is a live key.
+    """
+    host: str = Field(min_length=1, max_length=255)
+    title: str
+    severity: str = "info"
+    status: str = "open"
+    triage: str = "needs_investigating"
+    port: int | None = None
+    protocol: str | None = None
+    description: str | None = None
+    remediation: str | None = None
+    external_id: str | None = None
+    file_path: str | None = None
+    line_number: int | None = None
+    secret: str = Field(min_length=1, max_length=8000)
+    detector: str | None = Field(default=None, max_length=128)
+    asset_url: str | None = Field(default=None, max_length=2000)
+    path: str | None = Field(default=None, max_length=2000)
+    line: int | None = None
+
+    @field_validator("severity")
+    @classmethod
+    def _sev(cls, v: str) -> str:
+        return norm_sev(v)
+
+
+class SecretFindingOut(BaseModel):
+    """The finding that was made, with the credential it carries.
+
+    `VulnOut` on purpose rather than a hand-built dict: the listing and
+    the detail pane read this shape, and an endpoint that invents its
+    own is the one that drifts from them. The value comes back because
+    the caller just sent it and needs to know it landed; the guards on
+    `GET /vulns/{id}/secret` still apply to reading it later.
+    """
+    finding: VulnOut
+    secret: SecretOut
+
+
+@router.post("/secrets/finding", response_model=SecretFindingOut, status_code=201)
+async def create_secret_finding(body: SecretFindingCreate,
+                                project: str = Query(...),
+                                pr: Project = Depends(require_project("user")),
+                                user: User = Depends(get_current_user),
+                                session: AsyncSession = Depends(get_session)):
+    """Record a credential and its finding in one call.
+
+    `POST /vulns` files the finding; `POST /vulns/{id}/secret` stores
+    the value on it. This is both, so an API caller -- or an agent --
+    can keep what it found without round-tripping for an id.
+
+    The target must already exist, which is deliberate: making a host
+    and filing a credential against it in the same breath would hide
+    scope mistakes, and `POST /vulns` already answers "no such target"
+    for exactly this reason.
+
+    Everything else follows the two endpoints it replaces: the finding
+    is announced to Slack with no severity floor (a person found this),
+    an audit entry names who stored what on which host, and the value
+    goes to `finding_secrets` rather than the description.
+    """
+    t = await _target_for(session, project, body.host)
+    v = Vuln(target_id=t.id, title=body.title[:1000], severity=body.severity,
+             status=body.status, triage=body.triage, port=body.port,
+             protocol=body.protocol, description=body.description,
+             remediation=body.remediation, external_id=body.external_id,
+             file_path=body.file_path, line_number=body.line_number)
+    sec = FindingSecret(vuln_id=None, secret=body.secret[:8000],
+                        detector=(body.detector or "manual")[:128],
+                        asset_url=body.asset_url[:2000] if body.asset_url else None,
+                        path=body.path[:2000] if body.path else None, line=body.line)
+    session.add(v)
+    await session.flush()                    # the id, so the secret can name it
+    sec.vuln_id = v.id
+    session.add(sec)
+    await audit.record(
+        session, "api", "finding.secret.store", user=user,
+        detail=(f"stored a credential on finding {v.id} "
+                f"({sec.detector}) on {t.host}"))
+    await session.commit()
+    await broker.publish("vulns", action="create", host=t.host, project=project)
+
+    # Same reasoning as `create_vuln`: a person filing one finding has
+    # already decided it is worth recording. The credential itself is
+    # not in the message; only the title and where it is.
+    await slack.announce_finding(
+        session, pr, severity=v.severity, host=t.host, title=v.title,
+        port=v.port, protocol=v.protocol, detail=v.description, vuln_id=v.id)
+
+    row = (await session.execute(_base(Vuln).where(Vuln.id == v.id))).first()
+    return SecretFindingOut(
+        finding=_vuln_out(row),
+        secret=SecretOut(secret=sec.secret, detector=sec.detector))
 
 
 @router.delete("/vulns/{vuln_id}", status_code=204)

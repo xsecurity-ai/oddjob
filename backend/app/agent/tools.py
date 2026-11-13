@@ -1596,6 +1596,32 @@ def build(session: AsyncSession, project: Project | None, user: User,
         await session.commit()
         return {"ok": True, "host": t.host, "title": title}
 
+    async def add_secret_finding(host: str, title: str, secret: str,
+                                 severity: str = "info", description: str = "",
+                                 detector: str = "") -> dict:
+        """A credential and its finding in one call.
+
+        `add_finding` files the finding; this also keeps the VALUE, in
+        `finding_secrets`, where the proof worker and the reveal button
+        read it. The value is not put in the description for the same
+        reason the UI never does: a description is listed, searched,
+        exported and pasted into Slack, and a key in one of those is a
+        live key.
+
+        Routed through the endpoint that does both halves, so the API
+        and the agent cannot answer differently about what a stored
+        credential looks like. The target must already exist; making a
+        host and filing against it in one breath would hide scope
+        mistakes, which is why `add_finding` says the same thing.
+        """
+        from ..routers.findings import SecretFindingCreate, create_secret_finding
+        body = SecretFindingCreate(host=host, title=title, secret=secret,
+                                   severity=severity,
+                                   description=description or None,
+                                   detector=detector or None)
+        return await _via(create_secret_finding, project=project.code,
+                          pr=project, user=user, session=session, body=body)
+
     # ------------------------------------------------------ ghost writes
     async def task_ghost(kind: str, targets: str, agent: str = "",
                         ports: str = "", region: str = "") -> dict:
@@ -2253,6 +2279,16 @@ def build(session: AsyncSession, project: Project | None, user: User,
                                 "enum": ["critical", "high", "medium", "low", "info"]},
                    "description": {"type": "string"}},
                   ["host", "title"]), add_finding, writes=True),
+        Tool("add_secret_finding", "Record a credential and its finding in one "
+             "call: the value is kept beside the finding (never in the "
+             "description) so the proof worker and Reveal can use it.",
+             _obj({"host": {"type": "string"}, "title": {"type": "string"},
+                   "secret": {"type": "string"},
+                   "severity": {"type": "string",
+                                "enum": ["critical", "high", "medium", "low", "info"]},
+                   "description": {"type": "string"},
+                   "detector": {"type": "string"}},
+                  ["host", "title", "secret"]), add_secret_finding, writes=True),
         Tool("apply_lookup_results",
              "Add the lookup results: write every finished DNS lookup whose "
              "answer is not in doubt into the inventory — addresses onto "
