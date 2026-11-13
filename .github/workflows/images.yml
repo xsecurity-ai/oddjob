@@ -502,7 +502,7 @@ jobs:
           # visible in the web UI, but the log is what `gh run view --log`
           # hands me from this laptop.
           bruno_tasks=$(remote 'cd ~/Containers/oddjob && docker exec oddjob-db-1 psql -U oddjob -d oddjob -At -F "|" -c "
-            SELECT t.id, t.kind, t.status, a.name, left(coalesce(t.error, ''), 200)
+            SELECT t.id, t.kind, t.status, a.name, left(coalesce(t.error, chr(45)), 200)
               FROM agent_tasks t LEFT JOIN agents a ON a.id = t.agent_id
              WHERE t.project_id = (SELECT id FROM projects WHERE code = chr(66)||chr(82)||chr(85)||chr(78)||chr(79))
              ORDER BY t.id DESC LIMIT 40;"' 2>&1) || true
