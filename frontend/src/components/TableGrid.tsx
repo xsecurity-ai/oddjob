@@ -70,6 +70,7 @@ export function TableGrid({
   selectable, rowSelection, onRowSelectionChange, empty,
   widths = {}, onWidth, renderDetail, expanded, onExpand,
   filterableFields, filterModel, onFilterChange,
+  onRowClick,
 }: {
   /** One page of rows. `any` for the same reason MUI's own row type was
    *  `any`: a row is whatever the view's query returned. */
@@ -113,6 +114,10 @@ export function TableGrid({
   filterModel?: FilterModel
   /** Write them back. The same model the toolbar's panel edits. */
   onFilterChange?: (next: FilterModel) => void
+  /** Called when a row is clicked. The caller decides what to do with
+   *  it — open a modal, navigate, ... A row with no handler is not
+   *  clickable. */
+  onRowClick?: (row: any) => void
 }) {
   const byField = useMemo(
     () => new Map(columns.map((c) => [c.field, c])), [columns])
@@ -431,7 +436,9 @@ export function TableGrid({
               // that, so putting a div around each pair would detach
               // all of them at once.
               <Fragment key={row.id}>
-              <div role="row" className={ticked ? 'ticked' : undefined}>
+              <div role="row" className={ticked ? 'ticked' : undefined}
+                onClick={onRowClick ? () => onRowClick(row.original) : undefined}
+                style={onRowClick ? { cursor: 'pointer' } : undefined}>
                 {expands && (
                   <div className="chev"
                     onClick={(e) => {

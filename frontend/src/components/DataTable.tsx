@@ -44,7 +44,7 @@ export function DataTable({
   rows, columns, loading, error, initialSort, hiddenColumns, note,
   kind, project, canWrite = false, extraActions, tableId, server, getRowId,
   renderDetail, expanded, onExpand,
-  onSelectionChange,
+  onSelectionChange, onRowClick,
 }: {
   /** `any` because a row is whatever the view's query returned; this is
    *  what `GridRowsProp` defaulted to and the views rely on it. */
@@ -90,6 +90,10 @@ export function DataTable({
   server?: ServerTable
   /** Mirror of the selection, for a view that acts on it. */
   onSelectionChange?: (ids: number[]) => void
+  /** Called when a row is clicked. The caller decides what to do with
+   *  it — open a modal, navigate, ... A row with no handler is not
+   *  clickable. */
+  onRowClick?: (row: any) => void
 }) {
   const qc = useQueryClient()
 
@@ -406,6 +410,7 @@ export function DataTable({
           renderDetail={renderDetail}
           expanded={expanded}
           onExpand={onExpand}
+          onRowClick={onRowClick}
           filterableFields={new Set(shownColumns.filter((c) => c.filterable !== false).map((c) => c.field))}
           filterModel={filterModel}
           onFilterChange={setFilterModel}

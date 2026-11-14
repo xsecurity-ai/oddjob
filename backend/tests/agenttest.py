@@ -849,14 +849,14 @@ st, done = call(f"/api/ghosts/tasks/{TID}/result", "POST",
 check("result accepted", st == 200, f"status={st} {str(done)[:120]}")
 imp = (done or {}).get("imported") or {}
 check("the output was parsed", imp.get("hosts_seen") == 1, str(imp)[:160])
-check("strict mode wrote nothing without an operator",
-      imp.get("needs_decision") is True and imp.get("targets_created") == 0,
+# This project has no scope list, so the unattended import answers every
+# unknown host "add" — there is no boundary to ask about. A scoped
+# project keeps surveying; that is checked below under AGENTSCOPE.
+check("with no scope list, the in-scope host is created at delivery",
+      imp.get("needs_decision") is False and imp.get("targets_created") == 1,
       f"needs_decision={imp.get('needs_decision')} created={imp.get('targets_created')}")
-check("and it says which host it is asking about",
-      any(u.get("host") == "scanme.example.org"
-          for u in imp.get("unknown_hosts") or []), str(imp.get("unknown_hosts"))[:120])
 
-print("== adjudication: the step that makes the scan count ==")
+print("== adjudication: the step that makes a survey count ==")
 st, _ = call(f"/api/ghosts/{AID}/tasks/{TID}/import?project=AGENT", "POST",
              {"decisions": {"scanme.example.org": {"action": "add"}}})
 check("adjudication needs a session, not just an agent key", st == 401,
@@ -866,17 +866,116 @@ st, _ = call(f"/api/ghosts/{AID}/tasks/{TID}/import?project=AGENT", "POST",
              {"decisions": {"scanme.example.org": {"action": "add"}}}, key=KEY)
 check("an agent cannot adjudicate its own result", st == 401, f"status={st}")
 
+# The host was already created on delivery (no scope list), so re-importing
+# with the same answer updates rather than creates.
 st, fin = call(f"/api/ghosts/{AID}/tasks/{TID}/import?project=AGENT", "POST",
                {"decisions": {"scanme.example.org": {"action": "add"}}},
                token=admin)
 check("adjudication accepted", st == 200, f"status={st} {str(fin)[:140]}")
 fin = fin or {}
-check("the host was created", fin.get("targets_created") == 1,
-      str(fin.get("targets_created")))
-check("only the open ports were kept", fin.get("services_created") == 3,
-      f"{fin.get('services_created')} (22, 80, 9929 open; 443 closed)")
+# The host was created on delivery; re-importing the same data must not
+# duplicate it. `targets_updated` is 0 because nothing changed — the
+# importer only counts a target as updated when a field actually differs.
+check("re-importing an already-created host does not duplicate it",
+      fin.get("targets_created") == 0,
+      f"created={fin.get('targets_created')} updated={fin.get('targets_updated')}")
 check("nothing is still pending", fin.get("needs_decision") is False,
       str(fin.get("needs_decision")))
+
+print("== a scoped project keeps surveying what its scope refuses ==")
+# The whole point of the auto-answer: an engagement scoped by CIDR whose
+# scan reports bare addresses must create them without a person clicking
+# "add" for each one — and a host OUTSIDE that scope must still come back
+# as a survey, because for it the scope list said no rather than yes.
+call("/api/projects", "POST", {"code": "AGENTSCOPE", "name": "Scoped agent"}, token=admin)
+st, sc = call("/api/projects/AGENTSCOPE/scope", "POST",
+              {"lines": ["198.51.100.0/24"]}, token=admin)
+check("the in-scope list is accepted", st == 200, f"status={st} {str(sc)[:100]}")
+st, ens = call("/api/ghosts?project=AGENTSCOPE", "POST", {"name": "scoped-agent"},
+               token=admin)
+SKEY = (ens or {}).get("callback_key")
+SAID = ((ens or {}).get("agent") or {}).get("id")
+call("/api/ghosts/register", "POST",
+     {"platform": "linux", "arch": "amd64", "version": "test",
+      "hostname": "scoped", "privileged": True,
+      "tools": {"nmap": "7.94"}}, key=SKEY)
+
+# In scope: the fixture's own address, 198.51.100.7, is in 198.51.100.0/24.
+# The task names the IP because the scope check validates targets against
+# the CIDR list; a bare name would be refused before it ever runs.
+st, stask = call(f"/api/ghosts/{SAID}/tasks?project=AGENTSCOPE", "POST",
+                 {"kind": "nmap", "args": {"targets": ["198.51.100.7"]}},
+                 token=admin)
+STID = (stask or {}).get("id")
+check("the scoped task is queued", st == 201, f"status={st}")
+call(f"/api/ghosts/tasks/{STID}/start", "POST", {}, key=SKEY)
+st, sdone = call(f"/api/ghosts/tasks/{STID}/result", "POST",
+                 {"status": "done", "output": NMAP, "stderr": "",
+                  "summary": "nmap over 1 target(s)", "exit_code": 0}, key=SKEY)
+check("the scoped result is accepted", st == 200, f"status={st}")
+simp = (sdone or {}).get("imported") or {}
+check("an in-scope host is created unattended",
+      simp.get("needs_decision") is False and simp.get("targets_created") == 1,
+      f"needs_decision={simp.get('needs_decision')} created={simp.get('targets_created')}")
+
+# Out of scope: a scan that discovers a host the scope list does not cover.
+# The task targets an in-scope IP, but the output names an out-of-scope
+# address — the importer surveys it rather than creating it, because for
+# that host the scope said no rather than yes.
+OUTMAP = """<?xml version="1.0"?>
+<nmaprun scanner="nmap" args="nmap -oX - -p 22 -T4 -sS 198.51.100.7"
+         start="1760000000" version="7.94">
+<host starttime="1760000001">
+<status state="up" reason="echo-reply"/>
+<address addr="203.0.113.9" addrtype="ipv4"/>
+<hostnames><hostname name="elsewhere.other.example" type="user"/></hostnames>
+<ports>
+<port protocol="tcp" portid="22"><state state="open" reason="syn-ack"/>
+  <service name="ssh" method="table" conf="3"/></port>
+</ports>
+</host>
+</nmaprun>"""
+st, otask = call(f"/api/ghosts/{SAID}/tasks?project=AGENTSCOPE", "POST",
+                 {"kind": "nmap", "args": {"targets": ["198.51.100.7"]}},
+                 token=admin)
+OTID = (otask or {}).get("id")
+check("the out-of-scope task is queued", st == 201, f"status={st}")
+call(f"/api/ghosts/tasks/{OTID}/start", "POST", {}, key=SKEY)
+st, odone = call(f"/api/ghosts/tasks/{OTID}/result", "POST",
+                 {"status": "done", "output": OUTMAP, "stderr": "",
+                  "summary": "nmap over 1 target(s)", "exit_code": 0}, key=SKEY)
+check("the out-of-scope result is accepted", st == 200, f"status={st}")
+oimp = (odone or {}).get("imported") or {}
+# An out-of-scope host is not created and not offered as a survey — the
+# scope list already answered "no" for it. It is named in `barred_hosts`
+# with the reason, which is what the operator reads when they want to know
+# why a host from their scan did not become a target.
+check("an out-of-scope host is not created",
+      oimp.get("targets_created") == 0,
+      f"created={oimp.get('targets_created')}")
+check("and it is named in the barred list with the reason",
+      "elsewhere.other.example" in (oimp.get("barred_hosts") or {}),
+      str(oimp.get("barred_hosts"))[:120])
+
+# The task detail endpoint: what the modal shows, and whether reimport can act.
+st, det = call(f"/api/ghosts/tasks/{STID}?project=AGENTSCOPE", token=admin)
+check("the detail returns the raw output", st == 200
+      and (det or {}).get("has_output") is True
+      and "nmaprun" in ((det or {}).get("output") or ""), f"status={st}")
+check("and the import result that was filed", st == 200
+      and isinstance((det or {}).get("import_result"), dict)
+      and (det["import_result"] or {}).get("targets_created") == 1,
+      str(det)[:160] if det else "no detail")
+# Reimport from the modal: in-scope is auto-added, so a second pass over the
+# same output does not duplicate. The host was created on delivery, so
+# re-importing must not create it again. `targets_updated` is 0 because
+# nothing changed — the importer only counts a target as updated when a
+# field actually differs.
+st, reimp = call(f"/api/ghosts/{SAID}/tasks/{STID}/import?project=AGENTSCOPE",
+                 "POST", {}, token=admin)
+check("reimport with no explicit decisions does not duplicate the host",
+      st == 200 and (reimp or {}).get("targets_created") == 0,
+      f"status={st} created={(reimp or {}).get('targets_created')}")
 
 st, svc = call("/api/services?project=AGENT&page_size=100", token=admin)
 rows = (svc or {}).get("items", svc) if isinstance(svc, (dict, list)) else []
