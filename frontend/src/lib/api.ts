@@ -918,6 +918,27 @@ export interface GhostTaskRow {
    *  that behaved. */
   notes: string | null
   requested_by: string | null
+  /** True when the task has tool output stored. The table shows flags
+   *  only; clicking a completed row opens the detail endpoint for the
+   *  body itself. */
+  has_output: boolean
+  /** What the importer will parse this as, or null when there is no
+   *  importable scan file (a poc, a lookup, ...). */
+  import_as: string | null
+}
+
+/** One task with its raw tool output and import result. The tasks table
+ *  lists flags only; this is what the modal shows when a completed row
+ *  is clicked. */
+export interface GhostTaskDetail extends GhostTaskRow {
+  /** The tool's actual output, as delivered by the agent. Can be several
+   *  megabytes on a large scan. */
+  output: string
+  /** What the importer made of it, or null when the task has not been
+   *  imported yet (still running, failed before delivery, ...). An error
+   *  result — a document that could not be filed at all — parses to
+   *  `{"error": ...}`. */
+  import_result: ImportResult | { error: string } | null
 }
 
 export interface GhostDebugLine {
@@ -1911,11 +1932,26 @@ export const api = {
   ghostTasks: (project: string) =>
     req<GhostTaskRow[]>('/api/ghosts/tasks' + qs({ project })),
 
+  /** One task with its raw tool output and import result. The tasks
+   *  table lists flags only — `has_output`, `import_as` — because the
+   *  body itself can be several megabytes and the table shows hundreds
+   *  of rows at once. Clicking a completed row opens this. */
+  ghostTaskDetail: (project: string, id: number) =>
+    req<GhostTaskDetail>(`/api/ghosts/tasks/${id}` + qs({ project })),
+
   /** Put a failed task back in the queue by hand. The automatic retry
    *  stops after two; this is what happens once a person has looked. */
   retryGhostTask: (project: string, id: number) =>
     req<GhostTaskRow>(`/api/ghosts/tasks/${id}/retry` + qs({ project }),
                   { method: 'POST' }),
+
+  /** Run the importer over a task's stored output again. In-scope hosts
+   *  are auto-added; out-of-scope ones come back as a survey. Explicit
+   *  decisions in the body override the auto-answer for that host. */
+  reimportGhostTask: (project: string, agentId: number, taskId: number,
+                      decisions?: Record<string, HostDecision>) =>
+    req<ImportResult>(`/api/ghosts/${agentId}/tasks/${taskId}/import` + qs({ project }),
+                  { method: 'POST', body: JSON.stringify({ decisions }) }),
 
   /** Everything waiting to run on this project, oldest first — the
    *  pool and work addressed to one agent that has not taken it. */

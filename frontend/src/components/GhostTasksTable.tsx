@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Box, Chip, IconButton, Menu, MenuItem, Tooltip, alpha } from '@mui/material'
+import { Box, Button, Chip, Dialog, DialogContent, DialogTitle, IconButton, Menu, MenuItem, Tooltip, alpha } from '@mui/material'
 import ReplayIcon from '@mui/icons-material/ReplayOutlined'
 import MoreVertIcon from '@mui/icons-material/MoreVertOutlined'
 import ArrowUpwardIcon from '@mui/icons-material/ArrowUpwardOutlined'
@@ -9,7 +9,7 @@ import VerticalAlignBottomIcon from '@mui/icons-material/VerticalAlignBottomOutl
 import PlayArrowIcon from '@mui/icons-material/PlayArrowOutlined'
 import type { ColumnDef } from '../lib/columns'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type GhostTaskRow } from '../lib/api'
+import { api, type GhostTaskRow, type GhostTaskDetail } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { DataTable } from './DataTable'
 import { neon } from '../theme'
@@ -177,8 +177,121 @@ function TaskActions({ id, failed, queued, project }: {
   )
 }
 
+/** The modal that opens when a completed task row is clicked. Shows the
+ *  tool's raw output and offers to re-run the importer over it. */
+function TaskDetailModal({ project, taskId, onClose }: {
+  project: string; taskId: number | null; onClose: () => void
+}) {
+  const qc = useQueryClient()
+  const { canWrite } = useAuth()
+
+  const detail = useQuery({
+    queryKey: ['ghost-task-detail', project, taskId],
+    queryFn: () => api.ghostTaskDetail(project, taskId!),
+    enabled: taskId !== null,
+  })
+
+  const reimport = useMutation({
+    mutationFn: () => {
+      // The agent id is needed for the route; the detail has it.
+      const d = detail.data
+      if (!d) throw new Error('no detail')
+      return api.reimportGhostTask(project, d.agent_id!, d.id)
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['ghost-task-detail', project, taskId] })
+      await qc.invalidateQueries({ queryKey: ['ghost-tasks', project] })
+      await qc.invalidateQueries({ queryKey: ['targets', project] })
+      await qc.invalidateQueries({ queryKey: ['services', project] })
+    },
+  })
+
+  const d = detail.data as GhostTaskDetail | undefined
+  const output = d?.output ?? ''
+  const imp = d?.import_result ?? null
+
+  return (
+    <Dialog open={taskId !== null} onClose={onClose} maxWidth="lg" fullWidth>
+      <DialogTitle sx={{ color: neon.text, fontSize: 15 }}>
+        Task #{taskId} — {d?.kind ?? ''} on {d?.subject ?? ''}
+      </DialogTitle>
+      <DialogContent dividers>
+        {/* The tool's actual output. Monospace, scrollable, because a
+            masscan over a /16 is several megabytes of JSON. */}
+        <Box sx={{ mb: 2 }}>
+          <Box component="div" sx={{ color: neon.muted, fontSize: 11, mb: 0.5, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+            Output
+          </Box>
+          {detail.isLoading && <Box sx={{ color: alpha(neon.muted, 0.5), fontSize: 12 }}>Loading…</Box>}
+          {!detail.isLoading && !output && (
+            <Box sx={{ color: alpha(neon.muted, 0.4), fontSize: 12, fontStyle: 'italic' }}>
+              No output stored on this task.
+            </Box>
+          )}
+          {output && (
+            <Box component="pre" sx={{
+              m: 0, p: 1.5, bgcolor: '#0a0e14', border: `1px solid ${alpha(neon.muted, 0.2)}`,
+              borderRadius: 1, fontFamily: "'Share Tech Mono', monospace", fontSize: 11,
+              color: neon.text, maxHeight: 380, overflow: 'auto', whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}>
+              {output}
+            </Box>
+          )}
+        </Box>
+
+        {/* What the importer made of it. */}
+        <Box sx={{ mb: 2 }}>
+          <Box component="div" sx={{ color: neon.muted, fontSize: 11, mb: 0.5, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+            Import result
+          </Box>
+          {!imp && (
+            <Box sx={{ color: alpha(neon.muted, 0.4), fontSize: 12, fontStyle: 'italic' }}>
+              Not imported yet.
+            </Box>
+          )}
+          {imp && 'error' in imp && (
+            <Box sx={{ color: neon.red, fontSize: 12 }}>{(imp as { error: string }).error}</Box>
+          )}
+          {imp && !('error' in imp) && (
+            <Box component="div" sx={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 11.5, color: neon.text }}>
+              <Box>hosts seen: {(imp as any).hosts_seen}</Box>
+              <Box>targets: +{(imp as any).targets_created} created, {(imp as any).targets_updated} updated</Box>
+              <Box>services: +{(imp as any).services_created} created, {(imp as any).services_updated} updated</Box>
+              {(imp as any).needs_decision && (
+                <Box sx={{ color: neon.yellow }}>needs decision — {(imp as any).unknown_hosts?.length ?? 0} unknown host(s)</Box>
+              )}
+            </Box>
+          )}
+        </Box>
+
+        {/* Reimport button. Only when the task has importable output and
+            the operator can write to the project. */}
+        {canWrite(project) && d?.import_as && (
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<ReplayIcon />}
+            onClick={() => reimport.mutate()}
+            disabled={reimport.isPending || !d?.has_output}
+            sx={{ color: neon.cyan, borderColor: alpha(neon.cyan, 0.4), '&:hover': { borderColor: neon.cyan } }}
+          >
+            {reimport.isPending ? 'Re-importing…' : 'Re-import'}
+          </Button>
+        )}
+        {reimport.isError && (
+          <Box sx={{ color: neon.red, fontSize: 12, mt: 1 }}>
+            {(reimport.error as Error).message}
+          </Box>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 export function GhostTasksTable({ project }: { project: string }) {
   const { canWrite } = useAuth()
+  const [selectedTask, setSelectedTask] = useState<number | null>(null)
 
   const q = useQuery({
     queryKey: ['ghost-tasks', project],
@@ -309,16 +422,32 @@ export function GhostTasksTable({ project }: { project: string }) {
   ], [canWrite, now, project])
 
   return (
-    <DataTable
-      // Its own id, so sort, filters, column visibility and density are
-      // remembered per browser and separately from the fleet table
-      // above it.
-      tableId="ghost-tasks"
-      rows={q.data ?? []}
-      columns={columns as ColumnDef[]}
-      loading={q.isLoading}
-      error={q.error as Error | null}
-      initialSort={{ field: 'id', sort: 'desc' }}
-    />
+    <>
+      <DataTable
+        // Its own id, so sort, filters, column visibility and density are
+        // remembered per browser and separately from the fleet table
+        // above it.
+        tableId="ghost-tasks"
+        rows={q.data ?? []}
+        columns={columns as ColumnDef[]}
+        loading={q.isLoading}
+        error={q.error as Error | null}
+        initialSort={{ field: 'id', sort: 'desc' }}
+        onRowClick={(row) => {
+          // Completed tasks with output open the detail modal. A task
+          // that has not finished has nothing to show yet, and one with
+          // no importable output (a lookup, a poc) has nothing to
+          // re-import.
+          if (row.state === 'complete' && row.has_output) {
+            setSelectedTask(row.id)
+          }
+        }}
+      />
+      <TaskDetailModal
+        project={project}
+        taskId={selectedTask}
+        onClose={() => setSelectedTask(null)}
+      />
+    </>
   )
 }

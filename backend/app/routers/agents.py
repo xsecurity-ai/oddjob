@@ -72,6 +72,7 @@ from ..automation import CRED_TASK_KINDS
 from ..db import get_session
 from ..events import broker
 from ..hosts import validate_host
+from ..importers.policy import Decision
 from ..lookups import LOOKUP_KINDS
 from ..models import (
     Agent,
@@ -2029,7 +2030,9 @@ async def list_agents(project: str | None = Query(None),
     return out
 
 
-@router.patch("/{agent_id}", response_model=AgentOut)
+#: `{int}` so the unconstrained segment cannot swallow the literal word
+#: "tasks" from a later `/tasks/...` route — see `remove_agent`.
+@router.patch("/{agent_id:int}", response_model=AgentOut)
 async def set_agent(agent_id: int, body: AgentPatch | None = None,
                     enabled: bool | None = Query(None),
                     pr: Project = Depends(require_project("admin")),
@@ -2382,7 +2385,12 @@ async def kill_agent(agent_id: int,
     return _agent_out(a, pr.code, ceiling=_project_ceiling(pr))
 
 
-@router.delete("/{agent_id}", status_code=204)
+#: `{int}` rather than a bare parameter: this route is declared before the
+#: `/tasks/...` routes, and an unconstrained segment would swallow the
+#: literal word "tasks" as an agent id, so `GET /ghosts/tasks/resources`
+#: 422'd on parsing. Agent ids are database integers; nothing else ever
+#: reaches this route, so constraining it to digits loses nothing.
+@router.delete("/{agent_id:int}", status_code=204)
 async def remove_agent(agent_id: int,
                        pr: Project = Depends(require_project("admin")),
                        _: User = Depends(get_current_user),
@@ -2920,6 +2928,63 @@ def _task_subject(t: AgentTask) -> str | None:
     return None if s in ("", "—") else s
 
 
+async def _auto_decisions(session: AsyncSession, pr: Project, text: str,
+                          fmt: str, target_host: str | None = None) -> dict[str, Decision]:
+    """Answers to give a strict import so it can finish unattended.
+
+    The unattended path (a Ghost delivering a result, or an operator
+    re-importing one from the task modal) has no person on the other end
+    to answer "add this host?" for every unknown name. The scope list is
+    the operator's explicit boundary, so it stands in: a host the project
+    may add gets answered **add**, and everything else stays undecided
+    and comes back as a survey rather than being written or dropped.
+
+    This is what makes an engagement that started from IP ranges work at
+    all. A masscan over `155.109.0.0/16` reports the hosts it found as
+    bare addresses — `155.109.3.4`, no name — and a project whose scope
+    is that CIDR has never "seen" any of them, so strict mode surveyed
+    every one and wrote nothing. The estate sat in `output` with zero
+    targets. Answering the in-scope ones here creates exactly what the
+    operator scoped and no more; an out-of-scope host still needs a
+    person, because for it the scope list said "no" rather than "yes".
+
+    -> `{host: Decision("add")}` keyed on the name as the importer spells
+    it. The caller merges these UNDER any explicit decisions, so an
+    operator's answer always wins over the auto one.
+    """
+    from .. import importers
+    from ..scopegate import index_for
+    try:
+        _detected, scan = importers.parse(text, fmt, target_host=target_host)
+    except Exception:                              # noqa: BLE001
+        # A document that cannot be parsed raises in `_run` anyway; the
+        # auto-pass must not be the place it dies. No answers is the same
+        # as "nothing to decide", and `_run` reports the real error.
+        return {}
+    idx = await index_for(session, pr.id)
+    out: dict[str, Decision] = {}
+    for ph in scan.hosts:
+        if not ph.host:
+            continue
+        h = ph.host.strip().rstrip(".").lower()
+        if not h or h in out:
+            continue
+        # The same two lists the policy would ask about this host: the name
+        # and every address it was seen at. A CIDR-only scope recognises a
+        # bare address directly, and a name is let in by its recorded
+        # address — so both must be offered, exactly as `Policy.resolve`
+        # does, or the auto-answer disagrees with what a human "add" would
+        # have produced.
+        found = [a for a in (ph.ip_address, ph.ipv6_address) if a]
+        try:
+            ruling = idx.check(h, found)
+        except Exception:                          # noqa: BLE001
+            continue
+        if ruling.allowed:
+            out[h] = Decision(action="add")
+    return out
+
+
 @router.get("/tools", response_model=dict)
 async def required_tools(_: User = Depends(get_current_user)):
     """What a Ghost is expected to have, and what each one is for.
@@ -2996,6 +3061,31 @@ class TaskRow(BaseModel):
     #: that is empty on a task that behaved.
     notes: str | None = None
     requested_by: str | None = None
+    #: Whether the task carries raw tool output worth looking at. Kept as
+    #: a flag rather than the text itself: `output` can be several
+    #: megabytes of nmap XML, and a table lists hundreds of rows. The
+    #: detail endpoint returns the body on demand.
+    has_output: bool = False
+    #: The format the output should be imported as, when it should. None
+    #: for kinds whose result is not an importable scan (install, nslookup),
+    #: and the flag that tells the modal whether "reimport" can do anything.
+    import_as: str | None = None
+
+
+class TaskDetail(TaskRow):
+    """A task with its body, for the detail modal on a completed row.
+
+    `TaskRow` carries flags so the table stays cheap; this is what the
+    modal asks for when a row is clicked — the raw tool output and the
+    import result as parsed objects.
+    """
+    #: The raw tool output, or "" when the task has none. Screenshots are
+    #: stripped of their base64 payload at import time, so even a big
+    #: estate's worth of pictures is not what this returns.
+    output: str = ""
+    #: What the importer made of it: the counts, the surveyed hosts, the
+    #: refusals. None until something has been imported (or tried).
+    import_result: dict | None = None
 
 
 #: Stored status -> what the table says. `claimed` is "in progress":
@@ -3038,8 +3128,107 @@ async def list_project_tasks(limit: int = Query(500, ge=1, le=5000),
             attempts=t.attempts or 0,
             created_at=t.created_at, started_at=t.started_at,
             finished_at=t.finished_at, notes=t.error,
-            requested_by=who.get(t.requested_by)))
+            requested_by=who.get(t.requested_by),
+            has_output=bool((t.output or "").strip()),
+            import_as=t.import_as))
     return out
+
+
+@router.get("/tasks/resources", response_model=list[dict])
+async def list_task_resources(project: str,
+                              user: User = Depends(require_site_admin),
+                              session: AsyncSession = Depends(get_session)):
+    """How much of a ghost each task used.
+
+    Site-admin only, and deliberately NOT on the task serializers: the
+    figures describe this fleet's own machinery — how hard one unit of
+    work hit a host — not the client's estate, so nothing a project
+    member can read should carry them. The question answered is "how
+    much would a scan like this cost on a ghost like that", which is
+    what an operator weighs before pointing heavy work at a small host.
+
+    One row per task (the latest attempt), joined to the task's kind and
+    subject so a reader can group by kind without a second round trip.
+
+    Declared BEFORE `/tasks/{task_id}`: FastAPI matches routes in order,
+    and the parameterised segment would otherwise swallow the literal
+    word "resources".
+    """
+    pr = (await session.execute(
+        select(Project).where(Project.code == project))).scalars().first()
+    if pr is None:
+        raise HTTPException(404, "no such project")
+    rows = (await session.execute(
+        select(TaskResourceSample, AgentTask.kind, AgentTask.args)
+        .join(AgentTask, AgentTask.id == TaskResourceSample.task_id)
+        .where(AgentTask.project_id == pr.id)
+        .order_by(TaskResourceSample.created_at.desc())
+        .limit(500))).all()
+    out = []
+    for s, kind, args in rows:
+        subj = _subject(kind, json.loads(args) if args else {})
+        out.append({
+            "task_id": s.task_id,
+            "agent_id": s.agent_id,
+            "kind": kind,
+            "subject": None if subj in ("", "—") else subj,
+            "cpu_seconds": s.cpu_seconds,
+            "mem_peak_bytes": s.mem_peak_bytes,
+            "net_bytes": s.net_bytes,
+            "duration_seconds": s.duration_seconds,
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+        })
+    return out
+
+
+@router.get("/tasks/{task_id}", response_model=TaskDetail)
+async def task_detail(task_id: int,
+                      pr: Project = Depends(require_project("readonly")),
+                      _: User = Depends(get_current_user),
+                      session: AsyncSession = Depends(get_session)):
+    """One task with its raw tool output and import result.
+
+    The tasks table lists flags only — `has_output`, `import_as` — because
+    the body itself can be several megabytes and the table shows hundreds
+    of rows at once. Clicking a completed row opens this: what the tool
+    actually said, what the importer made of it, and (via the import route)
+    the way to run the importer over it again with different answers.
+
+    `import_result` is returned as the parsed object rather than the stored
+    string so the modal reads one shape; an error result — a document that
+    could not be filed at all — parses to `{"error": ...}` and renders the
+    same way.
+    """
+    t = await session.get(AgentTask, task_id)
+    if t is None or t.project_id != pr.id:
+        raise HTTPException(404, "no such task")
+    args = json.loads(t.args) if t.args else {}
+    import_result = None
+    if t.import_result:
+        try:
+            import_result = json.loads(t.import_result)
+        except (ValueError, TypeError):
+            import_result = {"error": "import result is not valid JSON"}
+    agent_name = None
+    if t.agent_id:
+        a = await session.get(Agent, t.agent_id)
+        agent_name = a.name if a else None
+    requested_by = None
+    if t.requested_by:
+        u = await session.get(User, t.requested_by)
+        requested_by = u.username if u else None
+    return TaskDetail(
+        id=t.id, kind=t.kind, subject=_subject(t.kind, args),
+        state=_STATE.get(t.status, t.status), raw_status=t.status,
+        agent_id=t.agent_id, agent_name=agent_name,
+        attempts=t.attempts or 0,
+        created_at=t.created_at, started_at=t.started_at,
+        finished_at=t.finished_at, notes=t.error,
+        requested_by=requested_by,
+        has_output=bool((t.output or "").strip()),
+        import_as=t.import_as,
+        output=t.output or "",
+        import_result=import_result)
 
 
 @router.post("/tasks/{task_id}/retry", response_model=TaskRow)
@@ -3286,17 +3475,22 @@ async def import_task_result(agent_id: int, task_id: int,
     """Finish the import of a result the agent already delivered.
 
     A result arrives with no operator attached, so it is imported in
-    strict mode with no decisions: anything the project has not seen
-    before is surveyed and nothing is written. Without this route that
-    is where it stopped -- the scan had run against the client's estate
-    and the findings sat in `output` with no way to accept them short of
-    editing the database by hand.
+    strict mode: anything the project has not seen before is surveyed and
+    nothing is written until somebody says otherwise. Without this route
+    that is where it stopped -- the scan had run against the client's
+    estate and the findings sat in `output` with no way to accept them
+    short of editing the database by hand.
 
     The raw tool output is still on the task, so this re-runs the same
     importer over it with the answers. Unlike a held upload there is
     nothing to consume: the output stays put and the operator can try
     different decisions, which matters when the first answer maps a host
     to the wrong target.
+
+    Decisions sent in the body win; for every host they do not name, an
+    in-scope one is answered **add** (see `_auto_decisions`), so a reimport
+    from the task modal creates what the operator scoped without asking
+    about each address. Out-of-scope hosts stay surveyed either way.
     """
     t = await session.get(AgentTask, task_id)
     if t is None or t.project_id != pr.id or t.agent_id != agent_id:
@@ -3309,10 +3503,14 @@ async def import_task_result(agent_id: int, task_id: int,
 
     from .scans import _run
     a = await session.get(Agent, agent_id)
+    explicit = {k: Decision(action=v.action, target=v.target)
+                for k, v in body.decisions.items()}
+    auto = await _auto_decisions(session, pr, t.output, t.import_as,
+                                 target_host=_task_subject(t))
     res = await _run(session, pr, t.output, t.import_as,
                      f"ghost:{a.name if a else agent_id}",
                      mode=body.mode,
-                     decisions=dict(body.decisions),
+                     decisions={**auto, **explicit},
                      target_host=_task_subject(t))
     t.import_result = res.model_dump_json()
     await session.commit()
@@ -4433,49 +4631,6 @@ async def task_secret(task_id: int, a: Agent = Depends(agent_from_key),
     return {"secret": sec.secret}
 
 
-@router.get("/tasks/resources", response_model=list[dict])
-async def list_task_resources(project: str,
-                              user: User = Depends(require_site_admin),
-                              session: AsyncSession = Depends(get_session)):
-    """How much of a ghost each task used.
-
-    Site-admin only, and deliberately NOT on the task serializers: the
-    figures describe this fleet's own machinery — how hard one unit of
-    work hit a host — not the client's estate, so nothing a project
-    member can read should carry them. The question answered is "how
-    much would a scan like this cost on a ghost like that", which is
-    what an operator weighs before pointing heavy work at a small host.
-
-    One row per task (the latest attempt), joined to the task's kind and
-    subject so a reader can group by kind without a second round trip.
-    """
-    pr = (await session.execute(
-        select(Project).where(Project.code == project))).scalars().first()
-    if pr is None:
-        raise HTTPException(404, "no such project")
-    rows = (await session.execute(
-        select(TaskResourceSample, AgentTask.kind, AgentTask.args)
-        .join(AgentTask, AgentTask.id == TaskResourceSample.task_id)
-        .where(AgentTask.project_id == pr.id)
-        .order_by(TaskResourceSample.created_at.desc())
-        .limit(500))).all()
-    out = []
-    for s, kind, args in rows:
-        subj = _subject(kind, json.loads(args) if args else {})
-        out.append({
-            "task_id": s.task_id,
-            "agent_id": s.agent_id,
-            "kind": kind,
-            "subject": None if subj in ("", "—") else subj,
-            "cpu_seconds": s.cpu_seconds,
-            "mem_peak_bytes": s.mem_peak_bytes,
-            "net_bytes": s.net_bytes,
-            "duration_seconds": s.duration_seconds,
-            "created_at": s.created_at.isoformat() if s.created_at else None,
-        })
-    return out
-
-
 @router.post("/tasks/{task_id}/result", response_model=dict)
 async def submit_result(task_id: int, body: ResultIn,
                         a: Agent = Depends(agent_from_key),
@@ -4705,8 +4860,18 @@ async def submit_result(task_id: int, body: ResultIn,
         pr = await session.get(Project, t.project_id)
         from .scans import _run
         try:
+            # Strict mode with no decisions surveys every unknown host and
+            # writes nothing — which is right for a file from the wrong
+            # project, but wrong for an estate scoped by CIDR whose scan
+            # reports bare addresses the project has never "seen". The scope
+            # list answers for the operator here: in-scope hosts are added,
+            # out-of-scope ones still come back as a survey. See
+            # `_auto_decisions` for the argument.
             res = await _run(session, pr, t.output, t.import_as,
-                             f"ghost:{a.name}", mode="strict", decisions={},
+                             f"ghost:{a.name}", mode="strict",
+                             decisions=await _auto_decisions(
+                                 session, pr, t.output, t.import_as,
+                                 target_host=_task_subject(t)),
                              target_host=_task_subject(t))
             imported = json.loads(res.model_dump_json())
             # Said in the log as well as carried in the result. This
